@@ -6290,16 +6290,34 @@ export class RenderSystem {
     // Mirrors server-side rules in structures.c handle_place_structure.
     let cfInOwnClaim = false;
     let cfInEnemyClaim = false;
+    // Closest own/enemy source structures whose claim disc covers the cursor.
+    // Used to draw the slice-preview highlight matching server placement logic.
+    let cfMineSrc: { x: number; y: number; r: number } | null = null;
+    let cfEnemySrc: { x: number; y: number; r: number } | null = null;
+    let cfMineBestD2 = 0, cfEnemyBestD2 = 0;
     if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
       for (const s of this.placedStructures) {
         if (s.claimOrphaned) continue;
+        // Inactive flag forts (not complete) cannot champion a claim — match server.
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
         const co = s.companyId ?? 0;
         const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
         const dx = s.x - mx, dy = s.y - my;
-        if (dx * dx + dy * dy > cr * cr) continue;
-        if (co === myCompany) cfInOwnClaim = true;
-        else if (co !== 0)    cfInEnemyClaim = true;
-        if (cfInOwnClaim && cfInEnemyClaim) break;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > cr * cr) continue;
+        if (co === myCompany) {
+          cfInOwnClaim = true;
+          if (!cfMineSrc || d2 < cfMineBestD2) {
+            cfMineSrc = { x: s.x, y: s.y, r: cr };
+            cfMineBestD2 = d2;
+          }
+        } else if (co !== 0) {
+          cfInEnemyClaim = true;
+          if (!cfEnemySrc || d2 < cfEnemyBestD2) {
+            cfEnemySrc = { x: s.x, y: s.y, r: cr };
+            cfEnemyBestD2 = d2;
+          }
+        }
       }
     }
     const cfNotInMyTerritory   = this.islandBuildKind === 'claim_flag' && !cfInOwnClaim;
@@ -6326,6 +6344,149 @@ export class RenderSystem {
     const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
+
+    // ── Claim-flag slice preview ──────────────────────────────────────────
+    // When hovering with a claim_flag selected and the cursor sits in a
+    // valid contested area, highlight the claimable slice — exactly the
+    // shape that will be hatched after placement = lens(Mi, Ej) ∖ tmp_own,
+    // where tmp_own is own company's visible territory (own discs carved by
+    // their dominators). Pulses slowly. Hidden when the cursor is not on a
+    // claimable slice (already-owned region, or sitting inside own's
+    // visible territory).
+    let cursorInOwnVisible = false;
+    if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
+      // Cursor is "in own visible territory" if it lies inside some own
+      // structure S whose dominators do NOT cover the cursor — i.e. on the
+      // own side of every dominance border at this point.
+      for (const s of this.placedStructures) {
+        if ((s.companyId ?? 0) !== myCompany) continue;
+        if (s.claimOrphaned) continue;
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+        const r = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+        const dx = s.x - mx, dy = s.y - my;
+        if (dx * dx + dy * dy > r * r) continue;
+        let carved = false;
+        for (const did of s.dominators ?? []) {
+          const d = this.placedStructures.find(p => p.id === did);
+          if (!d || d.claimOrphaned) continue;
+          if (d.type === 'flag_fort' && !d.fortressComplete) continue;
+          const dr = (d.type === 'flag_fort' || d.type === 'company_fortress') ? 600 : 400;
+          const ddx = d.x - mx, ddy = d.y - my;
+          if (ddx * ddx + ddy * ddy <= dr * dr) { carved = true; break; }
+        }
+        if (!carved) { cursorInOwnVisible = true; break; }
+      }
+    }
+    const showSlicePreview = this.islandBuildKind === 'claim_flag'
+      && !!cfMineSrc && !!cfEnemySrc
+      && !cfSliceAlreadyOwned
+      && !cfNotInContestedArea
+      && !cfNotInMyTerritory
+      && !cursorInOwnVisible;
+    if (showSlicePreview && cfMineSrc && cfEnemySrc) {
+      const claimRadiusOf = (t: string): number =>
+        (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+      const cvW = ctx.canvas.width, cvH = ctx.canvas.height;
+      const miSp = camera.worldToScreen(Vec2.from(cfMineSrc.x, cfMineSrc.y));
+      const ejSp = camera.worldToScreen(Vec2.from(cfEnemySrc.x, cfEnemySrc.y));
+      const miR  = cfMineSrc.r * zoom;
+      const ejR  = cfEnemySrc.r * zoom;
+      const previewInvalid = false; // preview is hidden when invalid
+      const fillCol   = previewInvalid ? 'rgba(220, 60, 40, 1)' : 'rgba(120, 220, 120, 1)';
+      const strokeCol = previewInvalid ? 'rgba(255, 90, 60, 1)' : 'rgba(140, 255, 140, 1)';
+      // Slow flash: ~2.4s period.
+      const t = performance.now() / 1200;
+      const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI);
+      const fillAlpha   = 0.12 + 0.32 * pulse;
+      const strokeAlpha = 0.45 + 0.50 * pulse;
+
+      // 1) Lens canvas = Mi.disc ∩ Ej.disc (in screen space, full-canvas).
+      const lensCv = this._getScratch('cfPrevLens', cvW, cvH);
+      const lc = lensCv.getContext('2d')!;
+      lc.clearRect(0, 0, cvW, cvH);
+      lc.fillStyle = '#fff';
+      lc.beginPath(); lc.arc(miSp.x, miSp.y, miR, 0, Math.PI * 2); lc.fill();
+      lc.globalCompositeOperation = 'destination-in';
+      lc.beginPath(); lc.arc(ejSp.x, ejSp.y, ejR, 0, Math.PI * 2); lc.fill();
+      lc.globalCompositeOperation = 'source-over';
+
+      // 2) Own-visible territory tmp = ⋃ (own.disc ∖ ⋃ dominators). Built
+      //    per-structure to mirror the dominance carving used by the
+      //    territory overlay's `tmp`.
+      const tmpOwn = this._getScratch('cfPrevTmpOwn', cvW, cvH);
+      const tc = tmpOwn.getContext('2d')!;
+      tc.clearRect(0, 0, cvW, cvH);
+      const blob = this._getScratch('cfPrevBlob', cvW, cvH);
+      const bc = blob.getContext('2d')!;
+      for (const s of this.placedStructures) {
+        if ((s.companyId ?? 0) !== myCompany) continue;
+        if (s.claimOrphaned) continue;
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+        const r = claimRadiusOf(s.type) * zoom;
+        if (r <= 0) continue;
+        const sp = camera.worldToScreen(Vec2.from(s.x, s.y));
+        bc.globalCompositeOperation = 'source-over';
+        bc.clearRect(0, 0, cvW, cvH);
+        bc.fillStyle = '#fff';
+        bc.beginPath(); bc.arc(sp.x, sp.y, r, 0, Math.PI * 2); bc.fill();
+        // Carve out enemies that dominate this own structure.
+        const doms = s.dominators ?? [];
+        if (doms.length > 0) {
+          bc.globalCompositeOperation = 'destination-out';
+          for (const did of doms) {
+            const d = this.placedStructures.find(p => p.id === did);
+            if (!d || d.claimOrphaned) continue;
+            if (d.type === 'flag_fort' && !d.fortressComplete) continue;
+            const dr = claimRadiusOf(d.type) * zoom;
+            const dsp = camera.worldToScreen(Vec2.from(d.x, d.y));
+            bc.beginPath(); bc.arc(dsp.x, dsp.y, dr, 0, Math.PI * 2); bc.fill();
+          }
+        }
+        tc.drawImage(blob, 0, 0);
+      }
+
+      // 3) Slice = lens ∖ tmp_own.
+      lc.globalCompositeOperation = 'destination-out';
+      lc.drawImage(tmpOwn, 0, 0);
+      lc.globalCompositeOperation = 'source-over';
+
+      // 4) Tint the slice with the preview colour (recolour the alpha mask).
+      const tint = this._getScratch('cfPrevTint', cvW, cvH);
+      const tnc = tint.getContext('2d')!;
+      tnc.clearRect(0, 0, cvW, cvH);
+      tnc.fillStyle = fillCol;
+      tnc.fillRect(0, 0, cvW, cvH);
+      tnc.globalCompositeOperation = 'destination-in';
+      tnc.drawImage(lensCv, 0, 0);
+
+      ctx.save();
+      ctx.globalAlpha = fillAlpha;
+      ctx.drawImage(tint, 0, 0);
+      ctx.restore();
+
+      // 5) Outline: stroke the lens arcs but only where they lie within
+      //    the visible slice (i.e. outside tmp_own). Clip to the slice mask.
+      ctx.save();
+      // Use the slice mask as a clip by drawing a path covering the canvas
+      // and using composite operations is awkward — fall back to a second
+      // tinted mask rendered as a stroke. We instead draw thick outline by
+      // recolouring the boundary of the slice mask.
+      const outline = this._getScratch('cfPrevOutline', cvW, cvH);
+      const oc = outline.getContext('2d')!;
+      oc.clearRect(0, 0, cvW, cvH);
+      oc.strokeStyle = strokeCol;
+      oc.lineWidth   = Math.max(1.5, 2 * zoom);
+      oc.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 4 * zoom)]);
+      oc.beginPath(); oc.arc(miSp.x, miSp.y, miR, 0, Math.PI * 2); oc.stroke();
+      oc.beginPath(); oc.arc(ejSp.x, ejSp.y, ejR, 0, Math.PI * 2); oc.stroke();
+      // Clip the strokes to the slice (lens ∖ tmp_own) so only the lens
+      // boundary lying on the enemy side of the dominance border shows.
+      oc.globalCompositeOperation = 'destination-in';
+      oc.drawImage(lensCv, 0, 0);
+      ctx.globalAlpha = strokeAlpha;
+      ctx.drawImage(outline, 0, 0);
+      ctx.restore();
+    }
 
     ctx.save();
     ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
