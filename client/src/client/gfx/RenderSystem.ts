@@ -6456,10 +6456,10 @@ export class RenderSystem {
       ctx.fillText('NOT IN YOUR TERRITORY', msp.x, labelY);
     } else if (cfNotInContestedArea) {
       ctx.fillStyle = '#ff3333';
-      ctx.fillText('NOT IN CONTESTED AREA', msp.x, labelY);
+      ctx.fillText('ALREADY OWNED', msp.x, labelY);
     } else if (cfSliceAlreadyOwned) {
       ctx.fillStyle = '#ff3333';
-      ctx.fillText('SLICE ALREADY OWNED', msp.x, labelY);
+      ctx.fillText('ALREADY OWNED', msp.x, labelY);
     } else {
       ctx.fillStyle = '#aaffaa';
       const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
