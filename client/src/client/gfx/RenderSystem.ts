@@ -9602,56 +9602,37 @@ export class RenderSystem {
             // is dashed; their arc-in-me gets the doubled-border treatment).
             const dominantPts: Array<{ x: number; y: number; r: number }> = [];
 
-            // Pre-compute id sets for THIS island once.
-            const myActiveIds = new Set<number>();
-            for (const ps of this.placedStructures) {
-              if (ps.islandId !== isl.id) continue;
-              if (ps.companyId !== cid) continue;
-              if (ps.claimOrphaned) continue;
-              myActiveIds.add(ps.id);
-            }
+            // The blob is anchored by the fort, so the WHOLE conjoint blob
+            // (fort + BFS-connected structures) shares the fort's dominance
+            // status vs. each enemy company's fort. We deliberately do NOT
+            // look at non-fort structure dominators here — non-fort
+            // structures get placement-time dominator entries against any
+            // overlapping enemy (Render-Rule-X), which would otherwise flip
+            // a dominant blob to subordinate the moment its owner places a
+            // new structure near an enemy.
+            const myFort = (myFortId > 0)
+              ? this.placedStructures.find(p => p.id === myFortId) ?? null
+              : null;
 
             for (const [otherCid, otherClaim] of islandClaimsByCo) {
               if (otherCid === cid) continue;
               if (otherClaim.worldCircles.length === 0) continue;
 
-              // theyDominateMe: any of MY active structures references one
-              // of THEIR struct ids in its dominators list.
-              let theyDominateMe = false;
-              for (const ps of this.placedStructures) {
-                if (theyDominateMe) break;
-                if (ps.islandId !== isl.id) continue;
-                if (ps.companyId !== cid) continue;
-                if (ps.claimOrphaned) continue;
-                if (!ps.dominators || ps.dominators.length === 0) continue;
-                for (const dId of ps.dominators) {
-                  const dStruct = this.placedStructures.find(p => p.id === dId);
-                  if (!dStruct) continue;
-                  if (dStruct.companyId === otherCid && !dStruct.claimOrphaned) {
-                    theyDominateMe = true;
-                    break;
-                  }
-                }
-              }
-              // iDominateThem: any of THEIR active structures references
-              // one of MY struct ids in its dominators list.
-              let iDominateThem = false;
-              if (!theyDominateMe) {
-                for (const ps of this.placedStructures) {
-                  if (iDominateThem) break;
-                  if (ps.islandId !== isl.id) continue;
-                  if (ps.companyId !== otherCid) continue;
-                  if (ps.claimOrphaned) continue;
-                  if (!ps.dominators || ps.dominators.length === 0) continue;
-                  for (const dId of ps.dominators) {
-                    if (myActiveIds.has(dId)) { iDominateThem = true; break; }
-                  }
-                }
-              }
-              // Fallback: fort tier + lower fortId.
+              const otherFortId = otherClaim.fortId;
+              const otherIsCF   = otherClaim.fortIsCompanyFortress;
+              const otherFort = (otherFortId > 0)
+                ? this.placedStructures.find(p => p.id === otherFortId) ?? null
+                : null;
+
+              // Fort-vs-fort dominance from server-populated dominators.
+              const myFortDoms    = myFort?.dominators    ?? [];
+              const otherFortDoms = otherFort?.dominators ?? [];
+              let theyDominateMe = otherFortId > 0 && myFortDoms.includes(otherFortId);
+              let iDominateThem  = myFortId    > 0 && otherFortDoms.includes(myFortId);
+
+              // Fallback when fort-vs-fort has no entry either way:
+              // Company Fortress > Flag Fort, else lower fortId (older) wins.
               if (!theyDominateMe && !iDominateThem) {
-                const otherFortId = otherClaim.fortId;
-                const otherIsCF   = otherClaim.fortIsCompanyFortress;
                 if (myIsCF && !otherIsCF) iDominateThem = true;
                 else if (!myIsCF && otherIsCF) theyDominateMe = true;
                 else if (myFortId > 0 && otherFortId > 0) {
