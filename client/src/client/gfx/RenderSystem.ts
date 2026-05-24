@@ -170,6 +170,30 @@ export class RenderSystem {
   private _claimOverlayCache: Map<string, { connectedIds: Set<number>; inactiveIds: Set<number> }> = new Map();
   private _claimOverlayDirty = true;
   /**
+   * Pool of reusable full-screen OffscreenCanvas scratch buffers, keyed by
+   * a stable slot name. Avoids per-frame allocation of dozens of large RGBA
+   * buffers in the territory overlay rendering pass. Each slot must be used
+   * by at most one logical buffer at any given time within a single overlay
+   * pass; the helper resets transform/composite/alpha/lineDash and clears
+   * the canvas on each fetch so callers always see a fresh buffer.
+   */
+  private _scratchCanvases: Map<string, OffscreenCanvas> = new Map();
+  private _getScratch(name: string, w: number, h: number): OffscreenCanvas {
+    let c = this._scratchCanvases.get(name);
+    if (!c || c.width !== w || c.height !== h) {
+      c = new OffscreenCanvas(w, h);
+      this._scratchCanvases.set(name, c);
+      return c;
+    }
+    const ctx = c.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+    ctx.clearRect(0, 0, w, h);
+    return c;
+  }
+  /**
    * Pre-computed wall segments — rebuilt whenever placedStructures changes.
    * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
    * ceiling-transparency ray tests instead of recomputing each draw call.
@@ -1807,8 +1831,36 @@ export class RenderSystem {
   /** Add (or update) a single placed structure received from the server. */
   addPlacedStructure(s: PlacedStructure): void {
     const idx = this.placedStructures.findIndex(p => p.id === s.id);
+    const isNew = idx < 0;
     if (idx >= 0) this.placedStructures[idx] = s;
     else this.placedStructures.push(s);
+    // Predict newcomer dominators locally to mirror server's
+    // claim_register_placement_dominators. The authoritative
+    // structure_dominators broadcast that follows will overwrite this.
+    // Without this prediction, the just-placed structure is briefly
+    // treated as uncarved "my territory" by pointInMyOwnUncarvedTerritory,
+    // making the build-ghost wrongly green for enemy-overlap placements.
+    if (isNew && s.type !== 'claim_flag' && (s.companyId ?? 0) !== 0 &&
+        !s.claimOrphaned && (!s.dominators || s.dominators.length === 0)) {
+      const radiusOf = (t: PlacedStructure['type']): number =>
+        (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+      const mr = radiusOf(s.type);
+      const predicted: number[] = [];
+      for (const other of this.placedStructures) {
+        if (other === s) continue;
+        if (other.id === s.id) continue;
+        if ((other.companyId ?? 0) === 0) continue;
+        if (other.companyId === s.companyId) continue;
+        if (other.claimOrphaned) continue;
+        if (other.type === 'claim_flag') continue;
+        const pr = radiusOf(other.type);
+        const dx = other.x - s.x, dy = other.y - s.y;
+        const thresh = mr + pr;
+        if (dx * dx + dy * dy > thresh * thresh) continue;
+        predicted.push(other.id);
+      }
+      if (predicted.length > 0) s.dominators = predicted;
+    }
     this._rebuildWallSegs();
     this._claimOverlayDirty = true;
   }
@@ -9331,6 +9383,13 @@ export class RenderSystem {
       this._claimOverlayDirty = false;
     }
 
+    // Per-frame id → PlacedStructure index. Replaces O(N) Array.find calls
+    // inside the hot per-Mi loops below (lookupStruct, Pass 3 dominator
+    // resolution), which previously made overlay rendering O(N²) per
+    // company per island per wrap-offset.
+    const structById: Map<number, PlacedStructure> = new Map();
+    for (const ps of this.placedStructures) structById.set(ps.id, ps);
+
     // Collect all company IDs that have placed structures on any island
     const allCompanyIds = new Set<number>();
     for (const ps of this.placedStructures) {
@@ -9527,14 +9586,14 @@ export class RenderSystem {
             const greyFill   = '#888888';
             const greyBorder = '#666666';
 
-            const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+            const tmp = this._getScratch('ovInacTmp', cvs.width, cvs.height);
             const tc  = tmp.getContext('2d')!;
             tc.fillStyle = greyFill;
             for (const { x, y, r } of inactivePts) {
               tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
             }
 
-            const ring = new OffscreenCanvas(cvs.width, cvs.height);
+            const ring = this._getScratch('ovInacRing', cvs.width, cvs.height);
             const rc   = ring.getContext('2d')!;
             rc.fillStyle = greyBorder;
             for (const { x, y, r } of inactivePts) {
@@ -9543,8 +9602,6 @@ export class RenderSystem {
             rc.globalCompositeOperation = 'destination-out';
             rc.drawImage(tmp, 0, 0);
 
-            ctx.globalAlpha = 0.08;
-            ctx.drawImage(tmp, 0, 0);
             ctx.globalAlpha = 0.55;
             ctx.drawImage(ring, 0, 0);
             ctx.globalAlpha = 1.0;
@@ -9610,7 +9667,7 @@ export class RenderSystem {
               }
             }
             const lookupStruct = (id: number): PlacedStructure | undefined =>
-              id > 0 ? this.placedStructures.find(p => p.id === id) : undefined;
+              id > 0 ? structById.get(id) : undefined;
 
             type MiInfo = {
               mi: { id: number; x: number; y: number; r: number };
@@ -9638,9 +9695,9 @@ export class RenderSystem {
             });
 
             // ── Helper: build a filled-disc union mask in this colour ─────
-            const buildMask = (pts: Array<{ x: number; y: number; r: number }>) => {
+            const buildMask = (pts: Array<{ x: number; y: number; r: number }>, slot: string) => {
               if (pts.length === 0) return null;
-              const m = new OffscreenCanvas(cvs.width, cvs.height);
+              const m = this._getScratch(slot, cvs.width, cvs.height);
               const mc = m.getContext('2d')!;
               mc.fillStyle = color;
               for (const { x, y, r } of pts) {
@@ -9650,19 +9707,19 @@ export class RenderSystem {
               return m;
             };
 
-            const ownInnerCv      = buildMask(screenPts)!;
-            const allEnemyInnerCv = buildMask(allEnemyCircles);
+            const ownInnerCv      = buildMask(screenPts, 'ovOwnInner')!;
+            const allEnemyInnerCv = buildMask(allEnemyCircles, 'ovEnemyInner');
 
             // ── Fill (tmp): per-Mi carve ──────────────────────────────────
             // tmp = ⋃ over Mi of (Mi.disc ∖ ⋃ subord(Mi).discs)
             // A pixel inside Mk that has no subord enemy at that pixel will
             // restore the fill via union, so dominant siblings preserve the
             // overlap they own even when a subordinate sibling is carved.
-            const tmp = new OffscreenCanvas(cvs.width, cvs.height);
+            const tmp = this._getScratch('ovActiveTmp', cvs.width, cvs.height);
             const tc  = tmp.getContext('2d')!;
             for (const info of miInfos) {
               if (info.mi.r <= 0) continue;
-              const m = new OffscreenCanvas(cvs.width, cvs.height);
+              const m = this._getScratch('ovActiveM', cvs.width, cvs.height);
               const mc = m.getContext('2d')!;
               mc.fillStyle = color;
               mc.beginPath(); mc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); mc.fill();
@@ -9676,7 +9733,7 @@ export class RenderSystem {
             }
 
             // ── Ring construction ─────────────────────────────────────────
-            const ring = new OffscreenCanvas(cvs.width, cvs.height);
+            const ring = this._getScratch('ovActiveRing', cvs.width, cvs.height);
             const rc   = ring.getContext('2d')!;
             rc.fillStyle = color;
 
@@ -9697,7 +9754,7 @@ export class RenderSystem {
             // inner-rim band passing through that point is interior to the
             // union and should be erased. Preserves each circle's own
             // band [r-bw/2, r+bw/2] since r-bw/2 > r-(bw/2+1).
-            const ownShrunk = new OffscreenCanvas(cvs.width, cvs.height);
+            const ownShrunk = this._getScratch('ovShrunk', cvs.width, cvs.height);
             {
               const osc = ownShrunk.getContext('2d')!;
               osc.fillStyle = color;
@@ -9718,7 +9775,7 @@ export class RenderSystem {
             // newcomer's disc. The "true claim area" of the established
             // dominant structure must remain visible even when a contestable
             // newcomer overlaps it.
-            const ownShrunkDominant = new OffscreenCanvas(cvs.width, cvs.height);
+            const ownShrunkDominant = this._getScratch('ovShrunkDom', cvs.width, cvs.height);
             {
               const osc = ownShrunkDominant.getContext('2d')!;
               osc.fillStyle = color;
@@ -9742,7 +9799,7 @@ export class RenderSystem {
             for (const info of miInfos) {
               if (info.dominated.length === 0) continue;
               if (info.mi.r <= 0) continue;
-              const p2 = new OffscreenCanvas(cvs.width, cvs.height);
+              const p2 = this._getScratch('ovP2', cvs.width, cvs.height);
               const p2c = p2.getContext('2d')!;
               p2c.fillStyle = color;
               p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p2c.fill();
@@ -9757,7 +9814,7 @@ export class RenderSystem {
               p2c.drawImage(ownShrunkDominant, 0, 0);
               // Clip to union of dominated enemies of THIS Mi.
               p2c.globalCompositeOperation = 'destination-in';
-              const domMask = new OffscreenCanvas(cvs.width, cvs.height);
+              const domMask = this._getScratch('ovP2Dom', cvs.width, cvs.height);
               const dmc2 = domMask.getContext('2d')!;
               dmc2.fillStyle = color;
               for (const e of info.dominated) {
@@ -9775,7 +9832,7 @@ export class RenderSystem {
             for (const info of miInfos) {
               if (info.subord.length === 0) continue;
               if (info.mi.r <= 0) continue;
-              const p3 = new OffscreenCanvas(cvs.width, cvs.height);
+              const p3 = this._getScratch('ovP3', cvs.width, cvs.height);
               const p3c = p3.getContext('2d')!;
               p3c.fillStyle = color;
               // dilated union of subord enemies
@@ -9799,7 +9856,7 @@ export class RenderSystem {
             for (const info of miInfos) {
               if (info.subord.length === 0) continue;
               if (info.mi.r <= 0) continue;
-              const d = new OffscreenCanvas(cvs.width, cvs.height);
+              const d = this._getScratch('ovDashed', cvs.width, cvs.height);
               const dc = d.getContext('2d')!;
               dc.strokeStyle = color;
               dc.lineWidth   = borderWidth;
@@ -9808,7 +9865,7 @@ export class RenderSystem {
               dc.globalCompositeOperation = 'destination-out';
               dc.drawImage(ownShrunk, 0, 0);
               dc.globalCompositeOperation = 'destination-in';
-              const subMask = new OffscreenCanvas(cvs.width, cvs.height);
+              const subMask = this._getScratch('ovDashedSub', cvs.width, cvs.height);
               const sbc = subMask.getContext('2d')!;
               sbc.fillStyle = color;
               for (const e of info.subord) {
@@ -9820,9 +9877,8 @@ export class RenderSystem {
 
             // Own company: full fill + solid border.
             // Other companies: subtle fill + softer border (still readable, less prominent).
-            ctx.globalAlpha = isOwn ? 0.12 : 0.06;
-            ctx.drawImage(tmp, 0, 0);
-            ctx.globalAlpha = 1.0;
+            // (Translucent blob fill removed by user request — only borders
+            // and contested-area hatching remain as visual cues.)
 
             // ── Contested area: solid diagonal hatching ───────────────────
             // Drawn only when THIS company (cid) has an active (non-orphaned)
@@ -9848,7 +9904,7 @@ export class RenderSystem {
             );
             if (hasActiveClaimFlag && allEnemyInnerCv) {
               // Build intersection mask: own ∩ all_enemy
-              const intMask = new OffscreenCanvas(cvs.width, cvs.height);
+              const intMask = this._getScratch('ovIntMask', cvs.width, cvs.height);
               const imc = intMask.getContext('2d')!;
               imc.drawImage(ownInnerCv, 0, 0);
               imc.globalCompositeOperation = 'destination-in';
@@ -9858,7 +9914,7 @@ export class RenderSystem {
               // Stripes are anchored to world space (move with the camera) and
               // slowly translate along their perpendicular axis for a "marching
                // ants" feel without the harsh blink.
-              const hatch = new OffscreenCanvas(cvs.width, cvs.height);
+              const hatch = this._getScratch('ovHatch', cvs.width, cvs.height);
               const hc = hatch.getContext('2d')!;
               // `stripeGap` is the x-axis spacing between consecutive 45°
               // strokes. Their PERPENDICULAR spacing is stripeGap / √2, so
@@ -9939,7 +9995,7 @@ export class RenderSystem {
             // Union of all ACTIVE interiors on this island (every company,
             // own + enemy). Used to carve each non-active fort blob so
             // active territory always wins overlapping pixels.
-            const activeUnion = new OffscreenCanvas(cvs.width, cvs.height);
+            const activeUnion = this._getScratch('ovActiveUnion', cvs.width, cvs.height);
             const auc = activeUnion.getContext('2d')!;
             auc.fillStyle = '#000';
             let activeUnionHasAny = false;
@@ -9967,7 +10023,7 @@ export class RenderSystem {
 
               // Build fill mask, then carve by active union so active
               // territory wins overlapping pixels.
-              const ftmp = new OffscreenCanvas(cvs.width, cvs.height);
+              const ftmp = this._getScratch('ovFTmp', cvs.width, cvs.height);
               const ftc  = ftmp.getContext('2d')!;
               ftc.fillStyle = fillCol;
               ftc.beginPath(); ftc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ftc.fill();
@@ -9979,7 +10035,7 @@ export class RenderSystem {
 
               // Build ring mask (outer dilated − inner circle), then also
               // carve by active union so the ring stops at active edges.
-              const fring = new OffscreenCanvas(cvs.width, cvs.height);
+              const fring = this._getScratch('ovFRing', cvs.width, cvs.height);
               const frc   = fring.getContext('2d')!;
               frc.fillStyle = ringCol;
               frc.beginPath(); frc.arc(sp.x, sp.y, r + borderWidth, 0, Math.PI * 2); frc.fill();
@@ -9990,10 +10046,9 @@ export class RenderSystem {
               }
               frc.globalCompositeOperation = 'source-over';
 
-              // Faint fill, dashed-style border for CLAIMING; flashing solid
-              // border + faint fill for BUILDING.
-              ctx.globalAlpha = isClaiming ? 0.06 : (flashAlpha * 0.18);
-              ctx.drawImage(ftmp, 0, 0);
+              // Translucent fill removed by user request — only borders and
+              // contested hatching remain as visual cues. ftmp is still built
+              // because the hatching pass uses it as its clip mask.
 
               // Contest stripes (CLAIMING phase only): the whole CLAIMING
               // phase is an in-progress capture, so we show the same
@@ -10001,7 +10056,7 @@ export class RenderSystem {
               // capture system uses, with the same sine-flicker when the
               // claim is in the CONTEST state (claimState === 0).
               if (isClaiming) {
-                const hatch = new OffscreenCanvas(cvs.width, cvs.height);
+                const hatch = this._getScratch('ovFHatch', cvs.width, cvs.height);
                 const hc = hatch.getContext('2d')!;
                 const stripeGap = Math.max(16, 28 * zoom);
                 hc.strokeStyle = color;
@@ -10040,7 +10095,7 @@ export class RenderSystem {
               // non-active company's colour. Mirrors the dashed subordinate
               // arc drawn between two active companies in a dominance pair.
               if (activeUnionHasAny) {
-                const dash = new OffscreenCanvas(cvs.width, cvs.height);
+                const dash = this._getScratch('ovFDash', cvs.width, cvs.height);
                 const ddc  = dash.getContext('2d')!;
                 ddc.strokeStyle = ringCol;
                 ddc.lineWidth   = borderWidth;
@@ -10074,65 +10129,12 @@ export class RenderSystem {
       }
     }
 
-    // ── Pass 3: per-structure dominator carveouts ───────────────────────────
-    // For each structure X with a non-empty `dominators` list, repaint the
-    // overlap (X.circle ∩ D.circle) in D's company colour at the SAME fill
-    // alpha that Pass 2 uses for the non-overlapped portion (0.12 for own,
-    // 0.06 for others). The result reads as a single uniform claimed-area
-    // surface — the only thing that distinguishes a captured overlap from
-    // a non-overlapped patch is the multi-colour border already drawn by
-    // Pass 2 (piece 1 outer ring + piece 3 enemy outer rim band) along the
-    // contested arc. Dashed subordinate borders inside the overlap remain
-    // as the "contestable area" visual cue.
-    // Higher-priority dominators (smaller index) win where their overlaps
-    // coincide — achieved by drawing the list back-to-front.
-    {
-      const radiusOf = (s: PlacedStructure): number => {
-        if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
-        return 400;
-      };
-      const cvs2 = ctx.canvas;
-      for (const isl of this.islands) {
-        const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
-        for (const X of this.placedStructures) {
-          if (!X.dominators || X.dominators.length === 0) continue;
-          if (X.islandId !== isl.id) continue;
-          if (X.claimOrphaned) continue;
-          const xr = radiusOf(X);
-          // Back-to-front so index 0 (top) overpaints the rest.
-          for (let k = X.dominators.length - 1; k >= 0; k--) {
-            const D = this.placedStructures.find(p => p.id === X.dominators![k]);
-            if (!D) continue;
-            if (D.companyId === X.companyId) continue;
-            if (D.claimOrphaned) continue;
-            if (D.islandId !== X.islandId) continue;
-            const dr = radiusOf(D);
-            const color = this._companyColor(D.companyId);
-            for (const off of wrapOffsets) {
-              const mask = new OffscreenCanvas(cvs2.width, cvs2.height);
-              const mc = mask.getContext('2d')!;
-              // X circle in dominator colour
-              mc.fillStyle = color;
-              const xs = camera.worldToScreen(Vec2.from(X.x + off.dx, X.y + off.dy));
-              const xsr = xr * zoom;
-              if (xsr <= 0) continue;
-              mc.beginPath(); mc.arc(xs.x, xs.y, xsr, 0, Math.PI * 2); mc.fill();
-              // Intersect with D circle
-              mc.globalCompositeOperation = 'destination-in';
-              const ds = camera.worldToScreen(Vec2.from(D.x + off.dx, D.y + off.dy));
-              const dsr = dr * zoom;
-              if (dsr <= 0) continue;
-              mc.beginPath(); mc.arc(ds.x, ds.y, dsr, 0, Math.PI * 2); mc.fill();
-              // Match Pass 2 fill alpha so the captured overlap reads as
-              // ordinary claimed territory of the dominating company.
-              ctx.globalAlpha = (D.companyId === this._localCompanyId) ? 0.12 : 0.06;
-              ctx.drawImage(mask, 0, 0);
-              ctx.globalAlpha = 1.0;
-            }
-          }
-        }
-      }
-    }
+    // ── Pass 3: removed by user request ─────────────────────────────────
+    // Previously repainted dominator-captured overlaps in the dominator's
+    // colour at the same alpha as Pass 2's fill. With all translucent
+    // fills removed, captured overlaps are now expressed solely through
+    // the doubled solid border (Pass 2 pieces 2+3) along the contested
+    // arc, with no fill colour distinction inside.
 
     // ── Pass 4: inactive Flag Fort indicator ─────────────────────────────
     // Draws a dashed amber outline around the claim radius of any flag fort
