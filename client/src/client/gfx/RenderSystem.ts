@@ -9346,7 +9346,10 @@ export class RenderSystem {
     // first entry of worldCircles is the fort (if present) at its larger radius,
     // followed by every BFS-connected non-fort structure at CLAIM_RADIUS_DEFAULT.
     type CompanyClaim = {
-      worldCircles: Array<{ x: number; y: number; r: number }>;
+      // `id` is the underlying PlacedStructure id (0 when synthesised from
+      // an island_claims fallback — only used by per-structure dominator
+      // lookups, so id=0 just falls back to global behaviour).
+      worldCircles: Array<{ id: number; x: number; y: number; r: number }>;
       inactiveList: PlacedStructure[];
       hasFort: boolean;
       // Dominance metadata: structure id of this company's anchor fort on the
@@ -9379,7 +9382,7 @@ export class RenderSystem {
       // company on this island. ACTIVE forts seed the main territory blob;
       // non-active forts (CLAIMING / BUILDING) are returned separately and
       // drawn as standalone per-fort blobs by the caller.
-      const fortCircles: Array<{ x: number; y: number; r: number }> = [];
+      const fortCircles: Array<{ id: number; x: number; y: number; r: number }> = [];
       const allFortStructs = this.placedStructures.filter(
         ps => ps.islandId === islId
            && ps.companyId === cid
@@ -9389,7 +9392,7 @@ export class RenderSystem {
       const fortStructs    = allFortStructs.filter(isFortActive);
       const nonActiveForts = allFortStructs.filter(ps => ps.type === 'flag_fort' && !isFortActive(ps));
       for (const f of fortStructs) {
-        fortCircles.push({ x: f.x, y: f.y, r: CLAIM_RADIUS_FORT });
+        fortCircles.push({ id: f.id, x: f.x, y: f.y, r: CLAIM_RADIUS_FORT });
       }
       // territory_update fallback: if no flag/company fort was found in
       // placedStructures but the island_claims map has one for this company,
@@ -9398,7 +9401,7 @@ export class RenderSystem {
       if (fortCircles.length === 0
           && claim?.companyId === cid
           && (claim.fortX !== 0 || claim.fortY !== 0)) {
-        fortCircles.push({ x: claim.fortX, y: claim.fortY, r: claim.fortRadius });
+        fortCircles.push({ id: 0, x: claim.fortX, y: claim.fortY, r: claim.fortRadius });
       }
       const hasFort = fortCircles.length > 0;
 
@@ -9479,9 +9482,9 @@ export class RenderSystem {
       const connectedList = companyStructs.filter(ps => bfs.connectedIds.has(ps.id));
       const inactiveList  = companyStructs.filter(ps => bfs.inactiveIds.has(ps.id));
 
-      const worldCircles: Array<{ x: number; y: number; r: number }> = [];
+      const worldCircles: Array<{ id: number; x: number; y: number; r: number }> = [];
       for (const fc of fortCircles) worldCircles.push(fc);
-      for (const ps of connectedList) worldCircles.push({ x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT });
+      for (const ps of connectedList) worldCircles.push({ id: ps.id, x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT });
       return { worldCircles, inactiveList, hasFort, fortId, fortIsCompanyFortress, nonActiveForts };
     };
 
@@ -9569,85 +9572,70 @@ export class RenderSystem {
           }
 
           // ── Active blob: fort + connected structures ───────────────────────
-          const screenPts: Array<{ x: number; y: number; r: number }> = [];
+          const screenPts: Array<{ id: number; x: number; y: number; r: number }> = [];
           for (const wc of worldCircles) {
             const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
-            screenPts.push({ x: sp.x, y: sp.y, r: wc.r * zoom });
+            screenPts.push({ id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom });
           }
 
           if (screenPts.length > 0) {
             const borderWidth = Math.max(8, 10 * zoom);
 
-            // ── Partition enemy circles by dominance ──────────────────────
-            // Source of truth: server-populated `dominators` lists.
-            //   • If any of MY active structures lists one of THEIR struct
-            //     ids as a dominator → THEY dominate me at that overlap.
-            //   • If any of THEIR active structures lists one of MY struct
-            //     ids as a dominator → I dominate them at that overlap.
-            // Fallback when neither side has dominator entries (theoretical
-            // — server's placement-time registration usually populates the
-            // newer side): use fort tier (Company Fortress > Flag Fort),
-            // then lower fortId (older placement) as tiebreak.
-            // The dominant company's contested arc gets the doubled solid
-            // border (its colour on the inside, enemy colour on the outside).
-            // The subordinate company's contested arc gets a single dashed
-            // line in its own colour at 1× width.
-            const myFortId = myClaim.fortId;
-            const myIsCF   = myClaim.fortIsCompanyFortress;
-
-            // Circles belonging to enemies I dominate (their arc-in-me is
-            // dashed; my arc-in-them gets the doubled-border treatment).
-            const dominatedPts: Array<{ x: number; y: number; r: number }> = [];
-            // Circles belonging to enemies that dominate me (my arc-in-them
-            // is dashed; their arc-in-me gets the doubled-border treatment).
-            const dominantPts: Array<{ x: number; y: number; r: number }> = [];
-
-            // The blob is anchored by the fort, so the WHOLE conjoint blob
-            // (fort + BFS-connected structures) shares the fort's dominance
-            // status vs. each enemy company's fort. We deliberately do NOT
-            // look at non-fort structure dominators here — non-fort
-            // structures get placement-time dominator entries against any
-            // overlapping enemy (Render-Rule-X), which would otherwise flip
-            // a dominant blob to subordinate the moment its owner places a
-            // new structure near an enemy.
-            const myFort = (myFortId > 0)
-              ? this.placedStructures.find(p => p.id === myFortId) ?? null
-              : null;
-
+            // ── Per-structure dominance from server `dominators` lists ────
+            // Mirrors the server's Render-Rule-X exactly: each circle (Mi)
+            // is the unit of dominance, NOT the fort or the company. A
+            // newly-placed structure has every overlapping enemy appended
+            // to its own dominators list at placement time, so its overlap
+            // with that enemy must render as the enemy's territory until a
+            // claim flag promotes it. The fort itself, the conjoint blob,
+            // and other dominant structures are unaffected.
+            //
+            // Per-Mi sets:
+            //   subord(Mi)    = enemy circles E where E.id ∈ Mi.dominators
+            //                   (E dominates Mi at the overlap → Mi.disc
+            //                    carved + dashed Mi arc inside E).
+            //   dominated(Mi) = enemy circles E where Mi.id ∈ E.dominators
+            //                   (Mi dominates E at the overlap → solid
+            //                    Mi-inner-rim + E-outer-rim doubled border).
+            type EnemyCircle = { id: number; x: number; y: number; r: number };
+            const allEnemyCircles: EnemyCircle[] = [];
+            const enemyById = new Map<number, EnemyCircle>();
             for (const [otherCid, otherClaim] of islandClaimsByCo) {
               if (otherCid === cid) continue;
-              if (otherClaim.worldCircles.length === 0) continue;
-
-              const otherFortId = otherClaim.fortId;
-              const otherIsCF   = otherClaim.fortIsCompanyFortress;
-              const otherFort = (otherFortId > 0)
-                ? this.placedStructures.find(p => p.id === otherFortId) ?? null
-                : null;
-
-              // Fort-vs-fort dominance from server-populated dominators.
-              const myFortDoms    = myFort?.dominators    ?? [];
-              const otherFortDoms = otherFort?.dominators ?? [];
-              let theyDominateMe = otherFortId > 0 && myFortDoms.includes(otherFortId);
-              let iDominateThem  = myFortId    > 0 && otherFortDoms.includes(myFortId);
-
-              // Fallback when fort-vs-fort has no entry either way:
-              // Company Fortress > Flag Fort, else lower fortId (older) wins.
-              if (!theyDominateMe && !iDominateThem) {
-                if (myIsCF && !otherIsCF) iDominateThem = true;
-                else if (!myIsCF && otherIsCF) theyDominateMe = true;
-                else if (myFortId > 0 && otherFortId > 0) {
-                  if (myFortId < otherFortId) iDominateThem = true;
-                  else theyDominateMe = true;
-                }
-              }
-
-              const bucket = theyDominateMe ? dominantPts : dominatedPts;
               for (const wc of otherClaim.worldCircles) {
                 const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
-                bucket.push({ x: sp.x, y: sp.y, r: wc.r * zoom });
+                const ec: EnemyCircle = { id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom };
+                if (wc.id > 0) enemyById.set(wc.id, ec);
+                allEnemyCircles.push(ec);
               }
             }
-            const enemyPts = [...dominatedPts, ...dominantPts];
+            const lookupStruct = (id: number): PlacedStructure | undefined =>
+              id > 0 ? this.placedStructures.find(p => p.id === id) : undefined;
+
+            type MiInfo = {
+              mi: { id: number; x: number; y: number; r: number };
+              subord:    EnemyCircle[];
+              dominated: EnemyCircle[];
+            };
+            const miInfos: MiInfo[] = screenPts.map(mi => {
+              const myStruct = lookupStruct(mi.id);
+              const subord: EnemyCircle[] = [];
+              const dominated: EnemyCircle[] = [];
+              if (myStruct?.dominators) {
+                for (const eid of myStruct.dominators) {
+                  const ec = enemyById.get(eid);
+                  if (ec) subord.push(ec);
+                }
+              }
+              if (mi.id > 0) {
+                for (const ec of allEnemyCircles) {
+                  if (ec.id <= 0) continue;
+                  const eStruct = lookupStruct(ec.id);
+                  if (eStruct?.dominators?.includes(mi.id)) dominated.push(ec);
+                }
+              }
+              return { mi, subord, dominated };
+            });
 
             // ── Helper: build a filled-disc union mask in this colour ─────
             const buildMask = (pts: Array<{ x: number; y: number; r: number }>) => {
@@ -9663,20 +9651,28 @@ export class RenderSystem {
             };
 
             const ownInnerCv      = buildMask(screenPts)!;
-            const allEnemyInnerCv = buildMask(enemyPts);
-            const dominatedInnCv  = buildMask(dominatedPts);
-            const dominantInnCv   = buildMask(dominantPts);
+            const allEnemyInnerCv = buildMask(allEnemyCircles);
 
-            // ── Fill (tmp): own_inner ∖ dominant_enemy_inner ──────────────
-            // Only enemies that dominate me carve my fill; enemies I dominate
-            // leave my fill intact (I own the overlap with them).
+            // ── Fill (tmp): per-Mi carve ──────────────────────────────────
+            // tmp = ⋃ over Mi of (Mi.disc ∖ ⋃ subord(Mi).discs)
+            // A pixel inside Mk that has no subord enemy at that pixel will
+            // restore the fill via union, so dominant siblings preserve the
+            // overlap they own even when a subordinate sibling is carved.
             const tmp = new OffscreenCanvas(cvs.width, cvs.height);
             const tc  = tmp.getContext('2d')!;
-            tc.drawImage(ownInnerCv, 0, 0);
-            if (dominantInnCv) {
-              tc.globalCompositeOperation = 'destination-out';
-              tc.drawImage(dominantInnCv, 0, 0);
-              tc.globalCompositeOperation = 'source-over';
+            for (const info of miInfos) {
+              if (info.mi.r <= 0) continue;
+              const m = new OffscreenCanvas(cvs.width, cvs.height);
+              const mc = m.getContext('2d')!;
+              mc.fillStyle = color;
+              mc.beginPath(); mc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); mc.fill();
+              if (info.subord.length > 0) {
+                mc.globalCompositeOperation = 'destination-out';
+                for (const e of info.subord) {
+                  mc.beginPath(); mc.arc(e.x, e.y, e.r, 0, Math.PI * 2); mc.fill();
+                }
+              }
+              tc.drawImage(m, 0, 0);
             }
 
             // ── Ring construction ─────────────────────────────────────────
@@ -9694,84 +9690,86 @@ export class RenderSystem {
             if (allEnemyInnerCv) rc.drawImage(allEnemyInnerCv, 0, 0);
             rc.globalCompositeOperation = 'source-over';
 
-            // Piece (2) inner rim of my contested arc — only along arcs
-            // inside enemies I DOMINATE. (Subordinate arcs get the dashed
-            // pass instead.)
-            //   (own_inner ∖ own_eroded) ∩ dominated_enemy_inner
-            if (dominatedInnCv) {
+            // Piece (2) per-Mi inner rim — only along arcs inside enemies
+            // that THIS Mi dominates. Per-Mi ensures a new structure placed
+            // in dominant territory does NOT inherit the fort's doubled
+            // border treatment vs. the same enemy.
+            for (const info of miInfos) {
+              if (info.dominated.length === 0) continue;
+              if (info.mi.r <= 0) continue;
               const p2 = new OffscreenCanvas(cvs.width, cvs.height);
               const p2c = p2.getContext('2d')!;
               p2c.fillStyle = color;
-              for (const { x, y, r } of screenPts) {
-                p2c.beginPath(); p2c.arc(x, y, r, 0, Math.PI * 2); p2c.fill();
-              }
-              p2c.globalCompositeOperation = 'destination-out';
-              for (const { x, y, r } of screenPts) {
-                const rr = r - borderWidth;
-                if (rr <= 0) continue;
-                p2c.beginPath(); p2c.arc(x, y, rr, 0, Math.PI * 2); p2c.fill();
+              p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p2c.fill();
+              const rr = info.mi.r - borderWidth;
+              if (rr > 0) {
+                p2c.globalCompositeOperation = 'destination-out';
+                p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
               }
               p2c.globalCompositeOperation = 'destination-in';
-              p2c.drawImage(dominatedInnCv, 0, 0);
+              const domMask = new OffscreenCanvas(cvs.width, cvs.height);
+              const dmc2 = domMask.getContext('2d')!;
+              dmc2.fillStyle = color;
+              for (const e of info.dominated) {
+                dmc2.beginPath(); dmc2.arc(e.x, e.y, e.r, 0, Math.PI * 2); dmc2.fill();
+              }
+              p2c.drawImage(domMask, 0, 0);
               rc.drawImage(p2, 0, 0);
             }
 
-            // Piece (3) outer rim of the DOMINANT enemy's contested arc that
-            // lies in my territory — this is the "B-outer" half of the
-            // doubled border along their arc-in-me.
-            //   (dominant_dilated ∖ dominant_inner) ∩ own_inner
-            // (For enemies I dominate, their arc-in-me is dashed in their own
-            //  colour, so I contribute nothing on that side.)
-            if (dominantInnCv) {
+            // Piece (3) per-Mi: outer-rim band of each enemy E that
+            // dominates Mi, clipped to Mi.disc — the E-outer half of the
+            // doubled border along Mi's contested arc with that E.
+            for (const info of miInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
               const p3 = new OffscreenCanvas(cvs.width, cvs.height);
               const p3c = p3.getContext('2d')!;
               p3c.fillStyle = color;
-              for (const { x, y, r } of dominantPts) {
-                p3c.beginPath(); p3c.arc(x, y, r + borderWidth, 0, Math.PI * 2); p3c.fill();
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r + borderWidth, 0, Math.PI * 2); p3c.fill();
               }
               p3c.globalCompositeOperation = 'destination-out';
-              p3c.drawImage(dominantInnCv, 0, 0);
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r, 0, Math.PI * 2); p3c.fill();
+              }
               p3c.globalCompositeOperation = 'destination-in';
-              p3c.drawImage(ownInnerCv, 0, 0);
+              p3c.beginPath(); p3c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p3c.fill();
               rc.drawImage(p3, 0, 0);
             }
 
-            // Dashed pass: along MY perimeter where I am SUBORDINATE (arc
-            // sits inside an enemy that dominates me). 1× width, own colour,
-            // clipped to the dominant enemy's interior so only the contested
-            // segment of my circle is drawn.
-            //
-            // To avoid stacking concentric dashed arcs when several of MY
-            // circles overlap inside the same contested region, we also
-            // subtract a slightly-inset union of own interiors. That erases
-            // dashed pixels that lie DEEP inside any other own circle and
-            // keeps only the OUTERMOST contour of my territory through the
-            // overlap — one clean dashed loop per contested region.
-            if (dominantInnCv) {
+            // Dashed pass: per-Mi. Stroke Mi clipped to its subord union.
+            // Inset eraser (ownShrunk) keeps only the OUTERMOST contour
+            // when several of MY circles overlap inside the same contested
+            // region — one clean dashed loop per contested area.
+            const ownShrunk = new OffscreenCanvas(cvs.width, cvs.height);
+            const osc = ownShrunk.getContext('2d')!;
+            osc.fillStyle = color;
+            const inset = borderWidth / 2 + 1;
+            for (const { x, y, r } of screenPts) {
+              const rr = r - inset;
+              if (rr <= 0) continue;
+              osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
+            }
+            for (const info of miInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
               const d = new OffscreenCanvas(cvs.width, cvs.height);
               const dc = d.getContext('2d')!;
               dc.strokeStyle = color;
               dc.lineWidth   = borderWidth;
               dc.setLineDash([borderWidth * 1.5, borderWidth * 1.5]);
-              for (const { x, y, r } of screenPts) {
-                dc.beginPath(); dc.arc(x, y, r, 0, Math.PI * 2); dc.stroke();
-              }
-              // Inset eraser: union of own circles shrunk by (borderWidth/2 + 1)
-              // — preserves each circle's own stroke band [r-bw/2, r+bw/2]
-              // but removes strokes that lie inside any OTHER own circle.
-              const ownShrunk = new OffscreenCanvas(cvs.width, cvs.height);
-              const osc = ownShrunk.getContext('2d')!;
-              osc.fillStyle = color;
-              const inset = borderWidth / 2 + 1;
-              for (const { x, y, r } of screenPts) {
-                const rr = r - inset;
-                if (rr <= 0) continue;
-                osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
-              }
+              dc.beginPath(); dc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); dc.stroke();
               dc.globalCompositeOperation = 'destination-out';
               dc.drawImage(ownShrunk, 0, 0);
               dc.globalCompositeOperation = 'destination-in';
-              dc.drawImage(dominantInnCv, 0, 0);
+              const subMask = new OffscreenCanvas(cvs.width, cvs.height);
+              const sbc = subMask.getContext('2d')!;
+              sbc.fillStyle = color;
+              for (const e of info.subord) {
+                sbc.beginPath(); sbc.arc(e.x, e.y, e.r, 0, Math.PI * 2); sbc.fill();
+              }
+              dc.drawImage(subMask, 0, 0);
               rc.drawImage(d, 0, 0);
             }
 
