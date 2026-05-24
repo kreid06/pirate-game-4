@@ -6304,6 +6304,10 @@ export class RenderSystem {
     }
     const cfNotInMyTerritory   = this.islandBuildKind === 'claim_flag' && !cfInOwnClaim;
     const cfNotInContestedArea = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && !cfInEnemyClaim;
+    // Slice ownership: if the cursor sits in own dominant territory (per the
+    // dominators visibility), the placer already owns this slice and cannot
+    // claim what they hold. Mirrors server's slice_already_owned check.
+    const cfSliceAlreadyOwned  = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && cfInEnemyClaim && inMyDominantArea;
 
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
@@ -6319,7 +6323,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -6453,6 +6457,9 @@ export class RenderSystem {
     } else if (cfNotInContestedArea) {
       ctx.fillStyle = '#ff3333';
       ctx.fillText('NOT IN CONTESTED AREA', msp.x, labelY);
+    } else if (cfSliceAlreadyOwned) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('SLICE ALREADY OWNED', msp.x, labelY);
     } else {
       ctx.fillStyle = '#aaffaa';
       const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
@@ -9932,12 +9939,59 @@ export class RenderSystem {
                 && (s.claimState ?? 0) === 0
             );
             if (hasActiveClaimFlag && allEnemyInnerCv) {
-              // Build intersection mask: own ∩ all_enemy
-              const intMask = this._getScratch('ovIntMask', cvs.width, cvs.height);
-              const imc = intMask.getContext('2d')!;
-              imc.drawImage(ownInnerCv, 0, 0);
-              imc.globalCompositeOperation = 'destination-in';
-              imc.drawImage(allEnemyInnerCv, 0, 0);
+              // Build per-flag slice mask: for each of THIS company's active
+              // claim_flags on this island, the contested slice is the lens
+              // of the flag's two source discs (own anchor ∩ enemy anchor).
+              // Union all such lenses to form the hatching mask. This makes
+              // each flag contest exactly its own slice rather than the
+              // whole own∩enemy intersection.
+              const sliceMask = this._getScratch('ovSliceMask', cvs.width, cvs.height);
+              const smc = sliceMask.getContext('2d')!;
+              smc.clearRect(0, 0, cvs.width, cvs.height);
+              const claimRadiusOf = (t: string): number =>
+                (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+              const lensCv = this._getScratch('ovSliceLens', cvs.width, cvs.height);
+              const lc = lensCv.getContext('2d')!;
+              for (const flag of this.placedStructures) {
+                if (flag.type !== 'claim_flag') continue;
+                if (flag.claimOrphaned) continue;
+                if (flag.islandId !== isl.id) continue;
+                if ((flag.companyId ?? 0) !== cid) continue;
+                const miId = flag.claimLinkedFort;
+                const enId = flag.claimSourceEnemy;
+                if (miId === undefined || enId === undefined) continue;
+                const mi = this.placedStructures.find(s => s.id === miId);
+                const ej = this.placedStructures.find(s => s.id === enId);
+                if (!mi || !ej) continue;
+                if (mi.claimOrphaned || ej.claimOrphaned) continue;
+                const miR = claimRadiusOf(mi.type) * zoom;
+                const ejR = claimRadiusOf(ej.type) * zoom;
+                const miSp = camera.worldToScreen(Vec2.from(mi.x + off.dx, mi.y + off.dy));
+                const ejSp = camera.worldToScreen(Vec2.from(ej.x + off.dx, ej.y + off.dy));
+                lc.save();
+                lc.globalCompositeOperation = 'source-over';
+                lc.clearRect(0, 0, cvs.width, cvs.height);
+                lc.fillStyle = '#ffffff';
+                lc.beginPath();
+                lc.arc(miSp.x, miSp.y, miR, 0, Math.PI * 2);
+                lc.fill();
+                lc.globalCompositeOperation = 'destination-in';
+                lc.beginPath();
+                lc.arc(ejSp.x, ejSp.y, ejR, 0, Math.PI * 2);
+                lc.fill();
+                lc.restore();
+                smc.drawImage(lensCv, 0, 0);
+              }
+              // Hatching belongs on the ENEMY's side of the dominance
+              // border: the slice's visible portion is the lens minus own's
+              // carved territory (tmp). Where own dominates the enemy, the
+              // lens is already painted with own's solid territory, so we
+              // remove it. Where own is subordinate (the claim-flag scenario),
+              // the lens lies in the enemy's visible area — that's exactly
+              // what remains and is what gets hatched.
+              smc.globalCompositeOperation = 'destination-out';
+              smc.drawImage(tmp, 0, 0);
+              smc.globalCompositeOperation = 'source-over';
 
               // Solid diagonal stripe pattern in the claimer's colour.
               // Stripes are anchored to world space (move with the camera) and
@@ -9966,9 +10020,9 @@ export class RenderSystem {
                 hc.lineTo(d + cvs.height, cvs.height);
                 hc.stroke();
               }
-              // Clip stripes to the intersection mask
+              // Clip stripes to the per-flag slice mask
               hc.globalCompositeOperation = 'destination-in';
-              hc.drawImage(intMask, 0, 0);
+              hc.drawImage(sliceMask, 0, 0);
 
               ctx.globalAlpha = 0.30;
               if (isContestFlickering) {

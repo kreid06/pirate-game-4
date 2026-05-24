@@ -512,6 +512,29 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
             goto ps_send;
         }
+        /* Slice ownership: the contested slice is the lens of (cf_src_mine ∩
+         * cf_src_enemy). If the placer's source ALREADY dominates the enemy
+         * source at this slice, the placer already owns it and cannot claim
+         * what they hold. Dominance: cf_src_enemy.dominators[] contains
+         * cf_src_mine → Mi dominates Ej (Mi already won this slice). */
+        {
+            PlacedStructure *mine_ps = NULL, *enemy_ps = NULL;
+            for (uint32_t si = 0; si < placed_structure_count; si++) {
+                PlacedStructure *ex = &placed_structures[si];
+                if (!ex->active) continue;
+                if (ex->id == cf_src_mine)  mine_ps  = ex;
+                if (ex->id == cf_src_enemy) enemy_ps = ex;
+            }
+            if (mine_ps && enemy_ps) {
+                for (uint8_t di = 0; di < enemy_ps->dominator_count; di++) {
+                    if (enemy_ps->dominators[di] == mine_ps->id) {
+                        snprintf(response, sizeof(response),
+                                 "{\"type\":\"place_structure_fail\",\"reason\":\"slice_already_owned\"}");
+                        goto ps_send;
+                    }
+                }
+            }
+        }
         /* Uniqueness: one active claim flag per (my company, enemy company,
          * island). A "contested area" between two companies on the same island
          * is treated as a single region — my company may only contest it with
@@ -1083,18 +1106,27 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     if (stype_enum == STRUCT_FLAG_FORT) {
         snprintf(phase_extra, sizeof(phase_extra), ",\"claim_phase\":%u", (unsigned)bcast_phase);
     }
+    /* Claim flag: include link IDs so client can render per-flag contested slice */
+    char cflag_extra[96] = "";
+    if (stype_enum == STRUCT_CLAIM_FLAG) {
+        snprintf(cflag_extra, sizeof(cflag_extra),
+                 ",\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
+                 (unsigned)placed_structures[placed_structure_count - 1].claim_linked_fort,
+                 (unsigned)placed_structures[placed_structure_count - 1].claim_source_enemy);
+    }
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-             ",\"rotation\":%.2f%s%s%s}",
+             ",\"rotation\":%.2f%s%s%s%s}",
              new_id, stype, target_island_id, px, py,
              (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp,
              (unsigned)bcast_target, player->name,
              bcast_rot,
              new_is_door ? ",\"open\":false" : "",
              cannon_extra,
-             phase_extra);
+             phase_extra,
+             cflag_extra);
     websocket_server_broadcast(bcast);
     /* Render-Rule-X: populate dominators for the newcomer AFTER the
      * `structure_placed` broadcast so clients have the structure in their

@@ -913,18 +913,15 @@ void claim_tick(uint32_t delta_ms) {
 
             /* ── Compute victims & challengers BEFORE orphaning ─────────────
              * victims:    non-orphaned enemy structures on this island whose
-             *             claim radius intersects the claim flag's radius
-             *             (= the structures being challenged).
+             *             claim radius intersects BOTH source claim discs
+             *             (= the contested slice, lens of src_mine ∩ src_enemy).
              * challengers: non-orphaned own-company structures on this island
              *             (other than the claim flag itself) whose claim
-             *             radius intersects the claim flag's radius
-             *             (= the structures championing the capture).
+             *             radius intersects the same slice.
              * On success, prepend each challenger ID to each victim's
              * `dominators` list. This is what makes the visual capture
              * persistent without letting the captor extend it via new
              * placements (new structures aren't in any victim's list). */
-            float flag_x = s->x, flag_y = s->y;
-            float flag_r = struct_claim_radius(s->type);
             uint32_t victim_ids[MAX_PLACED_STRUCTURES];
             uint32_t chall_ids[MAX_PLACED_STRUCTURES];
             int victim_n = 0, chall_n = 0;
@@ -935,9 +932,13 @@ void claim_tick(uint32_t delta_ms) {
                 if (ps->island_id != isl) continue;
                 if (ps->id == s->id) continue;
                 float pr = struct_claim_radius(ps->type);
-                float dx = ps->x - flag_x, dy = ps->y - flag_y;
-                float thresh = flag_r + pr;
-                if (dx * dx + dy * dy > thresh * thresh) continue;
+                /* Inclusion: ps's claim disc must intersect both source discs
+                 * (i.e., overlap the contested slice). */
+                float dxm = ps->x - src_mine->x,  dym = ps->y - src_mine->y;
+                float dxe = ps->x - src_enemy->x, dye = ps->y - src_enemy->y;
+                float thm = pr + ra, the_ = pr + rb;
+                if (dxm * dxm + dym * dym > thm * thm) continue;
+                if (dxe * dxe + dye * dye > the_ * the_) continue;
                 if (ps->company_id == old_co) {
                     if (victim_n < MAX_PLACED_STRUCTURES) victim_ids[victim_n++] = ps->id;
                 } else if (ps->company_id == s->company_id) {
@@ -1020,15 +1021,14 @@ void claim_tick(uint32_t delta_ms) {
                 if (changed) broadcast_structure_dominators(chall);
             }
 
-            /* ── Convert non-territorial structures inside the contested area
-             *    to the challenger's company. Any active non-orphaned victim-
-             *    company structure on this island whose position lies inside
-             *    the claim flag's radius is reassigned. Territorial anchors
-             *    (flag forts, company fortresses, other claim flags) are
-             *    excluded — those are handled by the orphan / dominator
-             *    pipeline above. */
+            /* ── Convert non-territorial structures inside the contested
+             *    slice to the challenger's company. Any active non-orphaned
+             *    victim-company structure on this island whose POSITION lies
+             *    inside both source claim discs (the lens) is reassigned.
+             *    Territorial anchors (flag forts, company fortresses, other
+             *    claim flags) are excluded — those are handled by the orphan
+             *    / dominator pipeline above. */
             {
-                float flag_r2 = flag_r * flag_r;
                 int converted_n = 0;
                 for (uint32_t i = 0; i < placed_structure_count; i++) {
                     PlacedStructure *ps = &placed_structures[i];
@@ -1039,8 +1039,10 @@ void claim_tick(uint32_t delta_ms) {
                     if (ps->type == STRUCT_FLAG_FORT) continue;
                     if (ps->type == STRUCT_COMPANY_FORTRESS) continue;
                     if (ps->type == STRUCT_CLAIM_FLAG) continue;
-                    float dx = ps->x - flag_x, dy = ps->y - flag_y;
-                    if (dx * dx + dy * dy > flag_r2) continue;
+                    float dxm = ps->x - src_mine->x,  dym = ps->y - src_mine->y;
+                    float dxe = ps->x - src_enemy->x, dye = ps->y - src_enemy->y;
+                    if (dxm * dxm + dym * dym > ra * ra) continue;
+                    if (dxe * dxe + dye * dye > rb * rb) continue;
 
                     ps->company_id = (uint8_t)s->company_id;
                     converted_n++;

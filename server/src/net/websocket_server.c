@@ -2367,12 +2367,14 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (hs_is_cflag) {
                                             snprintf(hs_claim_extra, sizeof(hs_claim_extra),
-                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s",
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s,\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
                                                      placed_structures[si].claim_progress_ms,
                                                      placed_structures[si].claim_contested         ? "true" : "false",
                                                      (unsigned)placed_structures[si].claim_state,
                                                      placed_structures[si].claim_grace_ms,
-                                                     placed_structures[si].claim_targets_fortress  ? "true" : "false");
+                                                     placed_structures[si].claim_targets_fortress  ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_linked_fort,
+                                                     (unsigned)placed_structures[si].claim_source_enemy);
                                         } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
                                             float ff_prog = (placed_structures[si].max_hp > 0)
                                                 ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
@@ -6759,12 +6761,14 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (is_cflag_s) {
                                             snprintf(claim_extra_s, sizeof(claim_extra_s),
-                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s",
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s,\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
                                                      placed_structures[si].claim_progress_ms,
                                                      placed_structures[si].claim_contested        ? "true" : "false",
                                                      (unsigned)placed_structures[si].claim_state,
                                                      placed_structures[si].claim_grace_ms,
-                                                     placed_structures[si].claim_targets_fortress ? "true" : "false");
+                                                     placed_structures[si].claim_targets_fortress ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_linked_fort,
+                                                     (unsigned)placed_structures[si].claim_source_enemy);
                                         } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
                                             float ff_prog = (placed_structures[si].max_hp > 0)
                                                 ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
@@ -6892,12 +6896,14 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                     if (gs_is_cflag) {
                                         snprintf(gs_claim_extra, sizeof(gs_claim_extra),
-                                                 ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s",
+                                                 ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s,\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
                                                  placed_structures[si].claim_progress_ms,
                                                  placed_structures[si].claim_contested        ? "true" : "false",
                                                  (unsigned)placed_structures[si].claim_state,
                                                  placed_structures[si].claim_grace_ms,
-                                                 placed_structures[si].claim_targets_fortress ? "true" : "false");
+                                                 placed_structures[si].claim_targets_fortress ? "true" : "false",
+                                                 (unsigned)placed_structures[si].claim_linked_fort,
+                                                 (unsigned)placed_structures[si].claim_source_enemy);
                                     } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
                                         float ff_prog = (placed_structures[si].max_hp > 0)
                                             ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS

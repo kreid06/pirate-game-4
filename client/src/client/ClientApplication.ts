@@ -2184,6 +2184,7 @@ export class ClientApplication {
           not_in_my_territory:     'Not inside your claimed area',
           not_in_contested_area:   'Not in a contested area (need overlapping enemy claim)',
           contested_area_already_claimed: 'Contested area already has your claim flag',
+          slice_already_owned:     'Your company already owns this slice',
           island_already_claimed: 'Island already claimed',
           fort_exists:            'Company fort limit reached (max 3 per island)',
           not_on_island:          'Must be placed on an island',

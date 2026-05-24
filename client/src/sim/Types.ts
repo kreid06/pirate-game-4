@@ -180,6 +180,10 @@ export interface PlacedStructure {
   claimContested?: boolean;
   /** Claiming flag: legacy field, always false in current server protocol */
   claimTargetsFortress?: boolean;
+  /** Claiming flag: id of own source structure (the "mine" anchor) — defines half of the contested slice. */
+  claimLinkedFort?: number;
+  /** Claiming flag: id of enemy source structure — defines the other half of the contested slice. */
+  claimSourceEnemy?: number;
   /** Claiming flag: 0=CONTEST, 1=CLAIMING_GRACE, 2=CLAIMING, 3=REVERSING_GRACE, 4=REVERSING */
   claimState?: number;
   /** Claiming flag: accumulated time (ms) toward leaving the current grace state */
