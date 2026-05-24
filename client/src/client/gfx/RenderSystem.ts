@@ -9579,9 +9579,15 @@ export class RenderSystem {
             const borderWidth = Math.max(8, 10 * zoom);
 
             // ── Partition enemy circles by dominance ──────────────────────
-            // Dominance rule (per company pair on this island):
-            //   • Company Fortress > Flag Fort (always)
-            //   • Same tier → lower fortId (older placement) wins
+            // Source of truth: server-populated `dominators` lists.
+            //   • If any of MY active structures lists one of THEIR struct
+            //     ids as a dominator → THEY dominate me at that overlap.
+            //   • If any of THEIR active structures lists one of MY struct
+            //     ids as a dominator → I dominate them at that overlap.
+            // Fallback when neither side has dominator entries (theoretical
+            // — server's placement-time registration usually populates the
+            // newer side): use fort tier (Company Fortress > Flag Fort),
+            // then lower fortId (older placement) as tiebreak.
             // The dominant company's contested arc gets the doubled solid
             // border (its colour on the inside, enemy colour on the outside).
             // The subordinate company's contested arc gets a single dashed
@@ -9596,19 +9602,65 @@ export class RenderSystem {
             // is dashed; their arc-in-me gets the doubled-border treatment).
             const dominantPts: Array<{ x: number; y: number; r: number }> = [];
 
+            // Pre-compute id sets for THIS island once.
+            const myActiveIds = new Set<number>();
+            for (const ps of this.placedStructures) {
+              if (ps.islandId !== isl.id) continue;
+              if (ps.companyId !== cid) continue;
+              if (ps.claimOrphaned) continue;
+              myActiveIds.add(ps.id);
+            }
+
             for (const [otherCid, otherClaim] of islandClaimsByCo) {
               if (otherCid === cid) continue;
               if (otherClaim.worldCircles.length === 0) continue;
 
-              const otherFortId = otherClaim.fortId;
-              const otherIsCF   = otherClaim.fortIsCompanyFortress;
-              void otherIsCF; void myIsCF; void myFortId; void otherFortId;
-              // Dominators-only law: there is NO per-company-pair dominance
-              // any more. Every enemy circle uniformly carves my base fill,
-              // and Pass 3 then paints (X.circle ∩ D.circle) in D's colour
-              // for each D in X.dominators — that pass is the single source
-              // of truth for who "owns" overlapping pixels.
-              const bucket = dominantPts;
+              // theyDominateMe: any of MY active structures references one
+              // of THEIR struct ids in its dominators list.
+              let theyDominateMe = false;
+              for (const ps of this.placedStructures) {
+                if (theyDominateMe) break;
+                if (ps.islandId !== isl.id) continue;
+                if (ps.companyId !== cid) continue;
+                if (ps.claimOrphaned) continue;
+                if (!ps.dominators || ps.dominators.length === 0) continue;
+                for (const dId of ps.dominators) {
+                  const dStruct = this.placedStructures.find(p => p.id === dId);
+                  if (!dStruct) continue;
+                  if (dStruct.companyId === otherCid && !dStruct.claimOrphaned) {
+                    theyDominateMe = true;
+                    break;
+                  }
+                }
+              }
+              // iDominateThem: any of THEIR active structures references
+              // one of MY struct ids in its dominators list.
+              let iDominateThem = false;
+              if (!theyDominateMe) {
+                for (const ps of this.placedStructures) {
+                  if (iDominateThem) break;
+                  if (ps.islandId !== isl.id) continue;
+                  if (ps.companyId !== otherCid) continue;
+                  if (ps.claimOrphaned) continue;
+                  if (!ps.dominators || ps.dominators.length === 0) continue;
+                  for (const dId of ps.dominators) {
+                    if (myActiveIds.has(dId)) { iDominateThem = true; break; }
+                  }
+                }
+              }
+              // Fallback: fort tier + lower fortId.
+              if (!theyDominateMe && !iDominateThem) {
+                const otherFortId = otherClaim.fortId;
+                const otherIsCF   = otherClaim.fortIsCompanyFortress;
+                if (myIsCF && !otherIsCF) iDominateThem = true;
+                else if (!myIsCF && otherIsCF) theyDominateMe = true;
+                else if (myFortId > 0 && otherFortId > 0) {
+                  if (myFortId < otherFortId) iDominateThem = true;
+                  else theyDominateMe = true;
+                }
+              }
+
+              const bucket = theyDominateMe ? dominantPts : dominatedPts;
               for (const wc of otherClaim.worldCircles) {
                 const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
                 bucket.push({ x: sp.x, y: sp.y, r: wc.r * zoom });
