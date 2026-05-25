@@ -47,6 +47,9 @@ int         island_claim_count = 0;
 
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
+/* Forward declaration — defined later in this file. */
+static PlacedStructure *find_struct_by_id(uint32_t id);
+
 static inline float dist2(float ax, float ay, float bx, float by) {
     float dx = ax - bx, dy = ay - by;
     return dx * dx + dy * dy;
@@ -1298,8 +1301,10 @@ void claim_tick(uint32_t delta_ms) {
              * this island, not just the single (src_mine × src_enemy) pair that
              * was registered at placement time.  Using only the single pair would
              * leave structures that lie in other overlapping lenses uncaptured. */
-            static float mine_anch_x[256], mine_anch_y[256], mine_anch_r[256];
-            static float enmy_anch_x[256], enmy_anch_y[256], enmy_anch_r[256];
+            static float    mine_anch_x[256], mine_anch_y[256], mine_anch_r[256];
+            static uint32_t mine_anch_id[256];
+            static float    enmy_anch_x[256], enmy_anch_y[256], enmy_anch_r[256];
+            static uint32_t enmy_anch_id[256];
             int mine_an = 0, enmy_an = 0;
             for (uint32_t ai = 0; ai < placed_structure_count; ai++) {
                 PlacedStructure *an = &placed_structures[ai];
@@ -1310,10 +1315,10 @@ void claim_tick(uint32_t delta_ms) {
                 if (an->type == STRUCT_FLAG_FORT && !an->fortress_complete) continue;
                 if (an->company_id == (uint8_t)s->company_id && mine_an < 256) {
                     mine_anch_x[mine_an] = an->x; mine_anch_y[mine_an] = an->y;
-                    mine_anch_r[mine_an] = ar; mine_an++;
+                    mine_anch_r[mine_an] = ar; mine_anch_id[mine_an] = an->id; mine_an++;
                 } else if (an->company_id == old_co && enmy_an < 256) {
                     enmy_anch_x[enmy_an] = an->x; enmy_anch_y[enmy_an] = an->y;
-                    enmy_anch_r[enmy_an] = ar; enmy_an++;
+                    enmy_anch_r[enmy_an] = ar; enmy_anch_id[enmy_an] = an->id; enmy_an++;
                 }
             }
 
@@ -1641,6 +1646,52 @@ void claim_tick(uint32_t delta_ms) {
                     }
                 }
             }
+
+            /* ── Full-section pair sweep ─────────────────────────────────────
+             * Iterate every (mine_i, enemy_j) pair whose claim discs overlap.
+             * For each overlapping pair:
+             *   - Prepend mine_i.id to enemy_j.dominators[] (challenger asserts
+             *     dominance over this section of enemy territory).
+             *   - Remove enemy_j.id from mine_i.dominators[] (challenger
+             *     structures no longer subordinate to this victim).
+             * This covers pairs where a structure's centre lies outside the
+             * intersection but whose disc still contributes to the section. */
+            for (int _mi = 0; _mi < mine_an; _mi++) {
+                PlacedStructure *_mp = find_struct_by_id(mine_anch_id[_mi]);
+                if (!_mp || !_mp->active || _mp->claim_orphaned) continue;
+                for (int _ei = 0; _ei < enmy_an; _ei++) {
+                    float _sum = mine_anch_r[_mi] + enmy_anch_r[_ei];
+                    float _dx  = mine_anch_x[_mi] - enmy_anch_x[_ei];
+                    float _dy  = mine_anch_y[_mi] - enmy_anch_y[_ei];
+                    if (_dx*_dx + _dy*_dy >= _sum * _sum) continue;
+                    PlacedStructure *_ep = find_struct_by_id(enmy_anch_id[_ei]);
+                    if (!_ep || !_ep->active) continue;
+                    /* challenger id → enemy DOM list */
+                    if (dominators_prepend(_ep, _mp->id))
+                        broadcast_structure_dominators(_ep);
+                    /* victim id → removed from challenger DOM list */
+                    if (dominators_remove(_mp, _ep->id))
+                        broadcast_structure_dominators(_mp);
+                }
+            }
+
+            /* ── Section area recompute ──────────────────────────────────────
+             * Rebuild BFS graphs for every flag fort / company fortress on
+             * this island belonging to either company.  Ensures that orphaned
+             * vs. connected status is recalculated to reflect the new DOM
+             * boundaries produced by the capture. */
+            for (uint32_t _fi = 0; _fi < placed_structure_count; _fi++) {
+                PlacedStructure *_ff = &placed_structures[_fi];
+                if (!_ff->active) continue;
+                if (_ff->island_id != isl) continue;
+                if (_ff->type != STRUCT_FLAG_FORT &&
+                    _ff->type != STRUCT_COMPANY_FORTRESS) continue;
+                if (_ff->company_id != (uint8_t)s->company_id &&
+                    _ff->company_id != (uint8_t)old_co) continue;
+                claim_rebuild_graph((uint16_t)_ff->id, (uint32_t)_ff->company_id);
+            }
+            log_info("🏴 Claim Flag #%u: pair sweep done (%d mine × %d enemy anchors), graphs rebuilt",
+                     s->id, mine_an, enmy_an);
 
             /* Consume the claim flag */
             s->active = false;

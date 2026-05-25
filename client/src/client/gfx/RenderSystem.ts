@@ -5642,6 +5642,36 @@ export class RenderSystem {
           }
         }
 
+        // ── Section badge: "Solo→Pirates" ─────────────────────────────────
+        // Identifies which contest section this flag targets by resolving
+        // claimLinkedFort (own anchor) and claimSourceEnemy (enemy anchor)
+        // to their company IDs, then formatting as "Mine→Enemy".
+        if (s.claimSourceEnemy !== undefined && s.claimSourceEnemy !== 0) {
+          const mineS  = this.placedStructures.find(p => p.id === s.claimLinkedFort);
+          const enemyS = this.placedStructures.find(p => p.id === s.claimSourceEnemy);
+          const mineC  = mineS?.companyId ?? s.companyId ?? 0;
+          const enemyC = enemyS?.companyId ?? 0;
+          if (enemyC !== 0) {
+            const cname = (cid: number): string => {
+              const co = this._cachedCompanies.find(c => c.id === cid);
+              if (co) return co.name;
+              return cid === 1 ? 'Solo' : cid === 2 ? 'Pirates' : cid === 3 ? 'Navy' : cid === 99 ? 'Ghost' : `#${cid}`;
+            };
+            const sectLabel = `${cname(mineC)}→${cname(enemyC)}`;
+            const sf = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${sf}px sans-serif`;
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'top';
+            const timerH = (state >= 0 && state <= 4) ? Math.max(9, Math.round(11 * zoom)) + 4 : 0;
+            const baseY  = ringR + Math.max(3, 4 * zoom) + timerH;
+            const tw = ctx.measureText(sectLabel).width;
+            ctx.fillStyle = 'rgba(10,10,10,0.78)';
+            ctx.fillRect(-tw / 2 - 3, baseY, tw + 6, sf + 2);
+            ctx.fillStyle = 'rgba(255,215,60,0.95)';
+            ctx.fillText(sectLabel, 0, baseY + 1);
+          }
+        }
+
         ctx.restore();
       }
     } // end for sorted
@@ -10422,6 +10452,61 @@ export class RenderSystem {
               }
               ctx.drawImage(hatch, 0, 0);
               ctx.globalAlpha = 1.0;
+
+              // ── Contest section labels ────────────────────────────────────
+              // For each enemy company this company is actively contesting,
+              // draw a "CompanyA↔CompanyB" badge at the centroid of their
+              // overlapping disc pairs so it sits inside the hatched zone.
+              if (zoom >= 0.5) {
+                for (const [enemyCid, enemyClaim] of islandClaimsByCo) {
+                  if (enemyCid === cid) continue;
+                  if (enemyClaim.worldCircles.length === 0) continue;
+                  // Only show label when there's an active flag for this section
+                  const sectHasFlag = this.placedStructures.some(f =>
+                    f.type === 'claim_flag'
+                    && !f.claimOrphaned
+                    && f.islandId === isl.id
+                    && (f.companyId ?? 0) === cid
+                    && (() => { const es = structById.get(f.claimSourceEnemy ?? 0); return es !== undefined && es.companyId === enemyCid; })()
+                  );
+                  if (!sectHasFlag) continue;
+                  const enemySP = enemyClaim.worldCircles.map(wc => {
+                    const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                    return { x: sp.x, y: sp.y, r: wc.r * zoom };
+                  });
+                  let scx = 0, scy = 0, sn = 0;
+                  for (const mi of screenPts) {
+                    for (const ej of enemySP) {
+                      const dx = mi.x - ej.x, dy = mi.y - ej.y;
+                      const sum = mi.r + ej.r;
+                      if (dx * dx + dy * dy < sum * sum) {
+                        scx += (mi.x + ej.x) * 0.5;
+                        scy += (mi.y + ej.y) * 0.5;
+                        sn++;
+                      }
+                    }
+                  }
+                  if (sn === 0) continue;
+                  scx /= sn; scy /= sn;
+                  const enemyName = this._cachedCompanies.find(c => c.id === enemyCid)?.name
+                    ?? (enemyCid === 1 ? 'Solo' : enemyCid === 2 ? 'Pirates' : enemyCid === 3 ? 'Navy' : `#${enemyCid}`);
+                  const sectLabel = `${companyName}↔${enemyName}`;
+                  const sf = Math.max(10, Math.round(12 * zoom));
+                  ctx.save();
+                  ctx.font = `bold ${sf}px Georgia, serif`;
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'middle';
+                  const tw = ctx.measureText(sectLabel).width;
+                  ctx.fillStyle = 'rgba(10,10,10,0.80)';
+                  ctx.fillRect(scx - tw / 2 - 4, scy - sf / 2 - 3, tw + 8, sf + 6);
+                  ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+                  ctx.lineWidth = Math.max(2, 2.5 * zoom);
+                  ctx.fillStyle = 'rgba(255,220,80,0.95)';
+                  ctx.strokeText(sectLabel, scx, scy);
+                  ctx.fillText(sectLabel, scx, scy);
+                  ctx.restore();
+                }
+              }
             }
 
             // Borders (including the dashed subordinate "inner" border) are

@@ -543,12 +543,49 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
          * enemy source is inactive (orphaned) — claim_section_build only
          * considers non-orphaned structures, so it would always return NULL
          * for orphaned territory.  The radius test from the source search
-         * above is sufficient in that case. */
+         * above is sufficient in that case.
+         *
+         * After the existence check, enumerate all mine and enemy structures
+         * whose discs overlap the section to determine the full valid section
+         * and validate that the registered (mine, enemy) source pair are
+         * legitimate participants. */
         if (!cf_enemy_inactive) {
             ClaimSectionGrid *sec = claim_section_build((uint8_t)target_island_id,
                                                         (uint8_t)player->company_id,
                                                         px, py);
             if (!sec) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
+                goto ps_send;
+            }
+            /* Enumerate all mine/enemy participants whose discs touch the section. */
+            int sec_mine_n = 0, sec_enmy_n = 0;
+            bool cf_mine_valid = false, cf_enmy_valid = false;
+            for (uint32_t _si = 0; _si < placed_structure_count; _si++) {
+                PlacedStructure *_p = &placed_structures[_si];
+                if (!_p->active || _p->claim_orphaned) continue;
+                if (_p->island_id != (uint8_t)target_island_id) continue;
+                if (_p->type == STRUCT_CLAIM_FLAG) continue;
+                if (_p->type == STRUCT_FLAG_FORT && !_p->fortress_complete) continue;
+                float _r = (_p->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                         : (_p->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                                  : CLAIM_RADIUS_DEFAULT;
+                if (!claim_section_disc_overlaps(sec, _p->x, _p->y, _r)) continue;
+                if (_p->company_id == (uint8_t)player->company_id) {
+                    sec_mine_n++;
+                    if (_p->id == cf_src_mine) cf_mine_valid = true;
+                } else if (_p->company_id != (uint8_t)COMPANY_UNCLAIMED) {
+                    sec_enmy_n++;
+                    if (_p->id == cf_src_enemy) cf_enmy_valid = true;
+                }
+            }
+            log_info("📐 Claim flag section: %d mine, %d enemy participants (mine_id=%u valid=%d, enemy_id=%u valid=%d)",
+                     sec_mine_n, sec_enmy_n,
+                     cf_src_mine, (int)cf_mine_valid,
+                     cf_src_enemy, (int)cf_enmy_valid);
+            /* Reject if the registered sources are not part of the section. */
+            if (!cf_mine_valid || !cf_enmy_valid) {
+                claim_section_free(sec);
                 snprintf(response, sizeof(response),
                          "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
                 goto ps_send;

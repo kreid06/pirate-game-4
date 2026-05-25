@@ -460,7 +460,7 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "}");
     }
 
-    /* Placed structures (shipyards etc.) */
+    /* Placed structures (shipyards, claim structures, etc.) */
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
         "\n  ],\n  \"structures\": [\n");
     {
@@ -468,19 +468,59 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         uint32_t ps_count = 0;
         bool ps_first = true;
         if (websocket_server_get_placed_structures(&ps, &ps_count) == 0) {
-            for (uint32_t si = 0; si < ps_count && offset < (int)sizeof(json_buffer) - 256; si++) {
+            for (uint32_t si = 0; si < ps_count && offset < (int)sizeof(json_buffer) - 512; si++) {
                 if (!ps[si].active) continue;
                 const char *stype =
-                    ps[si].type == STRUCT_WOODEN_FLOOR ? "wooden_floor" :
-                    ps[si].type == STRUCT_WORKBENCH    ? "workbench" :
-                    ps[si].type == STRUCT_WALL         ? "wall" :
-                    ps[si].type == STRUCT_DOOR_FRAME   ? "door_frame" :
-                    ps[si].type == STRUCT_DOOR         ? "door" :
-                    ps[si].type == STRUCT_SHIPYARD     ? "shipyard" : "unknown";
+                    ps[si].type == STRUCT_WOODEN_FLOOR    ? "wooden_floor" :
+                    ps[si].type == STRUCT_WORKBENCH       ? "workbench" :
+                    ps[si].type == STRUCT_WALL            ? "wall" :
+                    ps[si].type == STRUCT_DOOR_FRAME      ? "door_frame" :
+                    ps[si].type == STRUCT_DOOR            ? "door" :
+                    ps[si].type == STRUCT_SHIPYARD        ? "shipyard" :
+                    ps[si].type == STRUCT_FLAG_FORT       ? "flag_fort" :
+                    ps[si].type == STRUCT_CLAIM_FLAG      ? "claim_flag" :
+                    ps[si].type == STRUCT_COMPANY_FORTRESS? "company_fortress" : "unknown";
+                /* Base fields for all structures — claim_orphaned included for all
+                 * because the BFS graph sweep sets it on any disconnected structure */
                 offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
-                    "%s    {\"id\":%u,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"rotation\":%.2f}",
+                    "%s    {\"id\":%u,\"type\":\"%s\",\"x\":%.2f,\"y\":%.2f"
+                    ",\"rotation\":%.2f,\"company_id\":%u,\"hp\":%u,\"max_hp\":%u"
+                    ",\"claim_orphaned\":%s",
                     ps_first ? "" : ",\n",
-                    ps[si].id, stype, ps[si].x, ps[si].y, ps[si].rotation);
+                    ps[si].id, stype, ps[si].x, ps[si].y,
+                    ps[si].rotation, ps[si].company_id, ps[si].hp, ps[si].max_hp,
+                    ps[si].claim_orphaned ? "true" : "false");
+                /* Extra fields for claim / territory structures */
+                if (ps[si].type == STRUCT_FLAG_FORT ||
+                    ps[si].type == STRUCT_CLAIM_FLAG ||
+                    ps[si].type == STRUCT_COMPANY_FORTRESS) {
+                    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                        ",\"fortress_complete\":%s"
+                        ",\"claim_phase\":%u,\"claim_state\":%u",
+                        ps[si].fortress_complete ? "true" : "false",
+                        ps[si].claim_phase, ps[si].claim_state);
+                }
+                /* Claim flag targeting: expose source structure IDs so the
+                 * admin panel can map the flag to its contest section */
+                if (ps[si].type == STRUCT_CLAIM_FLAG) {
+                    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                        ",\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
+                        ps[si].claim_linked_fort, ps[si].claim_source_enemy);
+                }
+                /* dominators array — emitted for all DOM-eligible types:
+                 * wooden_floor, flag_fort, company_fortress */
+                if (ps[si].type == STRUCT_WOODEN_FLOOR ||
+                    ps[si].type == STRUCT_FLAG_FORT ||
+                    ps[si].type == STRUCT_COMPANY_FORTRESS) {
+                    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                        ",\"dominators\":[");
+                    for (uint8_t di = 0; di < ps[si].dominator_count && offset < (int)sizeof(json_buffer) - 64; di++) {
+                        offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
+                            "%s%u", di ? "," : "", ps[si].dominators[di]);
+                    }
+                    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "]");
+                }
+                offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "}");
                 ps_first = false;
             }
         }
