@@ -1073,9 +1073,6 @@ void claim_tick(uint32_t delta_ms) {
         for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
             WebSocketPlayer *p = &players[pi];
             if (!p->active || p->player_id == 0) continue;
-            /* Player must be inside the section (full connected contest area).
-             * Fall back to simple two-disc intersection if the section grid
-             * could not be built (e.g. anchor structures vanished mid-tick). */
             bool in_area;
             if (sec) {
                 in_area = claim_section_contains(sec, p->x, p->y);
@@ -1086,31 +1083,43 @@ void claim_tick(uint32_t delta_ms) {
                        && (dxb*dxb + dyb*dyb <= rb*rb);
             }
             if (!in_area) continue;
-            /* Player is inside the contested area. Ally = same company; non-ally =
-             * different company (incl. unaffiliated). TODO: factor in alliances. */
             if ((uint8_t)p->company_id == s->company_id) ally_present  = true;
             else                                          enemy_present = true;
         }
 
         /* Desired state from presence:
-         *  - enemy in area → CONTEST (stall), regardless of whether allies are present
-         *  - enemy absent, ally present → CLAIMING
-         *  - nobody present → CONTEST (stall — unclaimed area, no one pushing) */
+         *  - enemy + ally both present → CONTEST (stall — neither side advances)
+         *  - enemy only (no ally)       → REVERSING (unclaim countdown)
+         *  - no enemy (ally or nobody)  → CLAIMING (timer runs freely) */
         uint8_t desired;
-        if (enemy_present)                       desired = CLAIM_FLAG_STATE_CONTEST;
-        else if (ally_present)                   desired = CLAIM_FLAG_STATE_CLAIMING;
-        else                                     desired = CLAIM_FLAG_STATE_CONTEST;
+        if (enemy_present && ally_present) desired = CLAIM_FLAG_STATE_CONTEST;
+        else if (enemy_present)            desired = CLAIM_FLAG_STATE_REVERSING;
+        else                               desired = CLAIM_FLAG_STATE_CLAIMING;
 
-        /* Apply state transitions:
-         *  - going TO contest is immediate
-         *  - going TO claiming requires a 5 s grace accumulator
-         *  - REVERSING state is not used (enemy presence just stalls, not reverses) */
+        /* Apply state transitions with grace periods in each direction */
         if (desired == CLAIM_FLAG_STATE_CONTEST) {
+            /* Both sides present — freeze timer, reset any grace accumulator */
             s->claim_state    = CLAIM_FLAG_STATE_CONTEST;
             s->claim_grace_ms = 0.0f;
-        } else if (desired == CLAIM_FLAG_STATE_CLAIMING) {
+        } else if (desired == CLAIM_FLAG_STATE_REVERSING) {
+            /* Enemy only — interrupt claim and start the unclaim countdown */
+            if (s->claim_state == CLAIM_FLAG_STATE_REVERSING) {
+                /* already reversing */
+            } else if (s->claim_state == CLAIM_FLAG_STATE_REVERSING_GRACE) {
+                s->claim_grace_ms += dt;
+                if (s->claim_grace_ms >= (float)CLAIM_FLAG_GRACE_MS) {
+                    s->claim_state    = CLAIM_FLAG_STATE_REVERSING;
+                    s->claim_grace_ms = 0.0f;
+                }
+            } else {
+                /* Enemy just entered — brief grace before reversal begins */
+                s->claim_state    = CLAIM_FLAG_STATE_REVERSING_GRACE;
+                s->claim_grace_ms = 0.0f;
+            }
+        } else {
+            /* No enemy — keep (or start) the claim countdown */
             if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING) {
-                /* already counting down */
+                /* already counting down — continue */
             } else if (s->claim_state == CLAIM_FLAG_STATE_CLAIMING_GRACE) {
                 s->claim_grace_ms += dt;
                 if (s->claim_grace_ms >= (float)CLAIM_FLAG_GRACE_MS) {
@@ -1118,13 +1127,17 @@ void claim_tick(uint32_t delta_ms) {
                     s->claim_grace_ms = 0.0f;
                 }
             } else {
+                /* First tick, or recovering after contest/reversal ended */
                 s->claim_state    = CLAIM_FLAG_STATE_CLAIMING_GRACE;
                 s->claim_grace_ms = 0.0f;
             }
         }
 
-        /* Convenience flag for legacy clients */
-        s->claim_contested = (s->claim_state == CLAIM_FLAG_STATE_CONTEST);
+        /* Convenience flag for legacy clients: true while an enemy is present
+         * (contesting or actively reversing). */
+        s->claim_contested = (s->claim_state == CLAIM_FLAG_STATE_CONTEST
+                           || s->claim_state == CLAIM_FLAG_STATE_REVERSING
+                           || s->claim_state == CLAIM_FLAG_STATE_REVERSING_GRACE);
 
         /* Apply progress based on state */
         bool do_capture = false, do_destroy = false;

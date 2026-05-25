@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1779734599,
+    "timestamp": 1779735269,
     "ship_count": 3,
     "npc_count": 28,
-    "structure_count": 24
+    "structure_count": 31
   },
   "ships": [
     {
@@ -886,7 +886,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [381,380,379,376,325,304,303,298,317,334,342,347]
+      "dominators": [381,380,379,376,325,304,303,298]
     },
     {
       "id": 307,
@@ -906,7 +906,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [380,379,376,325,304,303,298,317,334,342,347]
+      "dominators": [380,379,376,325,304,303,298]
     },
     {
       "id": 317,
@@ -915,7 +915,7 @@
       "y": 14724.300,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -926,7 +926,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [379,304,298]
+      "dominators": [379,332,323,321,319,307,306,304,298]
     },
     {
       "id": 319,
@@ -946,7 +946,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [380,379,376,325,304,303,298,317,334,342,347]
+      "dominators": [380,379,376,325,304,303,298]
     },
     {
       "id": 321,
@@ -966,7 +966,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [381,380,379,376,325,304,303,298,317,334,342,347]
+      "dominators": [381,380,379,376,325,304,303,298]
     },
     {
       "id": 323,
@@ -986,7 +986,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [381,380,379,376,374,325,304,303,298,317,334,342]
+      "dominators": [381,380,379,376,374,325,304,303,298]
     },
     {
       "id": 325,
@@ -1026,7 +1026,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [381,380,379,376,325,304,303,298,317,334,342,347]
+      "dominators": [381,380,379,376,325,304,303,298]
     },
     {
       "id": 334,
@@ -1035,7 +1035,7 @@
       "y": 14661.600,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1046,7 +1046,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [298]
+      "dominators": [332,323,321,319,307,306,298]
     },
     {
       "id": 337,
@@ -1065,7 +1065,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [387,386,385,384,347,334,317]
     },
     {
       "id": 338,
@@ -1084,7 +1085,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [387,386,385,347]
     },
     {
       "id": 342,
@@ -1093,26 +1095,7 @@
       "y": 15081.600,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
-    },
-    {
-      "id": 344,
-      "type": 0,
-      "x": 17922.199,
-      "y": 14230.200,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1131,7 +1114,7 @@
       "y": 14551.800,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1142,7 +1125,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [298]
+      "dominators": [384,334,332,321,319,317,307,306,298]
     },
     {
       "id": 361,
@@ -1265,6 +1248,120 @@
       "x": 18226.801,
       "y": 15841.600,
       "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 384,
+      "type": 1,
+      "x": 18085.199,
+      "y": 14737.100,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 385,
+      "type": 8,
+      "x": 18043.801,
+      "y": 14571.300,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 386,
+      "type": 0,
+      "x": 17776.400,
+      "y": 14591.700,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 387,
+      "type": 8,
+      "x": 17790.301,
+      "y": 14594.500,
+      "rot": 270.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 388,
+      "type": 0,
+      "x": 17720.600,
+      "y": 15150.800,
+      "rot": 270.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 390,
+      "type": 0,
+      "x": 17559.900,
+      "y": 14956.800,
+      "rot": 270.000,
       "island_id": 4,
       "company": 100,
       "hp": 100,
@@ -7958,7 +8055,7 @@
         {"idx":581,"health":70,"alive":true,"respawn_at":0},
         {"idx":582,"health":70,"alive":true,"respawn_at":0},
         {"idx":583,"health":40,"alive":true,"respawn_at":0},
-        {"idx":584,"health":10,"alive":true,"respawn_at":0},
+        {"idx":584,"health":100,"alive":true,"respawn_at":0},
         {"idx":585,"health":100,"alive":true,"respawn_at":0},
         {"idx":586,"health":100,"alive":true,"respawn_at":0},
         {"idx":587,"health":100,"alive":true,"respawn_at":0},
@@ -7980,7 +8077,7 @@
         {"idx":603,"health":70,"alive":true,"respawn_at":0},
         {"idx":604,"health":70,"alive":true,"respawn_at":0},
         {"idx":605,"health":100,"alive":true,"respawn_at":0},
-        {"idx":606,"health":100,"alive":true,"respawn_at":0},
+        {"idx":606,"health":70,"alive":true,"respawn_at":0},
         {"idx":607,"health":80,"alive":true,"respawn_at":0},
         {"idx":608,"health":100,"alive":true,"respawn_at":0},
         {"idx":609,"health":10,"alive":true,"respawn_at":0},
@@ -8020,7 +8117,7 @@
         {"idx":643,"health":40,"alive":true,"respawn_at":0},
         {"idx":644,"health":10,"alive":true,"respawn_at":0},
         {"idx":645,"health":40,"alive":true,"respawn_at":0},
-        {"idx":646,"health":70,"alive":true,"respawn_at":0},
+        {"idx":646,"health":10,"alive":true,"respawn_at":0},
         {"idx":647,"health":100,"alive":true,"respawn_at":0},
         {"idx":648,"health":40,"alive":true,"respawn_at":0},
         {"idx":649,"health":100,"alive":true,"respawn_at":0},
@@ -8063,7 +8160,7 @@
         {"idx":686,"health":40,"alive":true,"respawn_at":0},
         {"idx":687,"health":70,"alive":true,"respawn_at":0},
         {"idx":688,"health":10,"alive":true,"respawn_at":0},
-        {"idx":689,"health":100,"alive":true,"respawn_at":0},
+        {"idx":689,"health":40,"alive":true,"respawn_at":0},
         {"idx":690,"health":100,"alive":true,"respawn_at":0},
         {"idx":691,"health":100,"alive":true,"respawn_at":0},
         {"idx":692,"health":70,"alive":true,"respawn_at":0},

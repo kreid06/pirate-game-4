@@ -5957,6 +5957,106 @@ export class RenderSystem {
       }
       ctx.restore();
     }
+
+    // ── Contest flash borders ─────────────────────────────────────────────────
+    // When a claim flag is active, every structure whose centre falls inside the
+    // contested lens area (intersection of both anchor claim radii) gets a pulsing
+    // dashed border so players can see what territory is at stake.
+    {
+      const claimRadiusOf = (type: string): number =>
+        (type === 'flag_fort' || type === 'company_fortress') ? 600 : 400;
+
+      // Map structureId → flash hex color, driven by the most urgent claim flag
+      // state that covers this structure (4=REVERSING is most urgent).
+      const flashMap = new Map<number, { color: string; urgency: number }>();
+
+      for (const cf of this.placedStructures) {
+        if (cf.type !== 'claim_flag') continue;
+        const state = cf.claimState ?? (cf.claimContested ? 0 : 2);
+        let flashColor: string;
+        if      (state === 0) flashColor = '#ffcc44'; // CONTEST        — amber
+        else if (state === 1) flashColor = '#ffd24a'; // CLAIMING_GRACE — yellow
+        else if (state === 2) flashColor = this._companyColor(cf.companyId); // CLAIMING — company colour
+        else if (state === 3) flashColor = '#ff9966'; // REVERSING_GRACE— orange
+        else                  flashColor = '#ff3030'; // REVERSING      — red
+
+        const mineS  = cf.claimLinkedFort  != null ? this.placedStructures.find(p => p.id === cf.claimLinkedFort)  : null;
+        const enemyS = cf.claimSourceEnemy != null ? this.placedStructures.find(p => p.id === cf.claimSourceEnemy) : null;
+        if (!mineS || !enemyS) continue;
+        const mineR  = claimRadiusOf(mineS.type);
+        const enemyR = claimRadiusOf(enemyS.type);
+
+        for (const s of this.placedStructures) {
+          if (s.type === 'claim_flag') continue;
+          const dx1 = s.x - mineS.x, dy1 = s.y - mineS.y;
+          const dx2 = s.x - enemyS.x, dy2 = s.y - enemyS.y;
+          if (dx1*dx1 + dy1*dy1 <= mineR*mineR && dx2*dx2 + dy2*dy2 <= enemyR*enemyR) {
+            const existing = flashMap.get(s.id);
+            if (!existing || state > existing.urgency) {
+              flashMap.set(s.id, { color: flashColor, urgency: state });
+            }
+          }
+        }
+      }
+
+      // Also flash structures inside a demolishing fort's claim radius.
+      // A fort is demolishing when: claimPhase===0 and hp===0.
+      const FORT_DEMOLISH_URGENCY = 5; // higher than any claim-flag state (0–4)
+      for (const fort of this.placedStructures) {
+        if (fort.type !== 'flag_fort' && fort.type !== 'company_fortress') continue;
+        if ((fort.claimPhase ?? 2) !== 0 || fort.hp !== 0) continue; // not demolishing
+        const fortR = 600;
+        for (const s of this.placedStructures) {
+          if (s.id === fort.id) continue;          // skip the fort itself
+          if (s.type === 'claim_flag') continue;
+          const dx = s.x - fort.x, dy = s.y - fort.y;
+          if (dx*dx + dy*dy <= fortR*fortR) {
+            const existing = flashMap.get(s.id);
+            if (!existing || FORT_DEMOLISH_URGENCY > existing.urgency) {
+              flashMap.set(s.id, { color: '#cc3333', urgency: FORT_DEMOLISH_URGENCY });
+            }
+          }
+        }
+      }
+
+      if (flashMap.size > 0) {
+        const flashAlpha = 0.35 + 0.35 * Math.abs(Math.sin(performance.now() * Math.PI / 600));
+        const THICK = 0.18; // wall thickness ratio (matches draw code)
+        ctx.save();
+        ctx.setLineDash([Math.max(4, 8 * zoom), Math.max(3, 5 * zoom)]);
+        ctx.lineWidth = Math.max(2, 3 * zoom);
+
+        for (const s of sorted) {
+          const entry = flashMap.get(s.id);
+          if (!entry) continue;
+          const ssp2 = camera.worldToScreen(Vec2.from(s.x, s.y));
+          const sz2  = Math.max(4, 50 * zoom);
+
+          // Rotation — mirrors the hover-highlight derivation
+          let rotRad2 = 0;
+          if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard' || s.type === 'wood_ceiling' || s.type === 'cannon') {
+            rotRad2 = (s.rotation ?? 0) * Math.PI / 180;
+          } else if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
+            const nf = this.placedStructures.find(f => f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30);
+            if (nf) rotRad2 = Math.atan2(s.y - nf.y, s.x - nf.x) + Math.PI / 2;
+          }
+
+          const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+
+          ctx.save();
+          ctx.globalAlpha = flashAlpha;
+          ctx.strokeStyle = entry.color;
+          ctx.translate(ssp2.x, ssp2.y);
+          ctx.rotate(rotRad2);
+          ctx.strokeRect(-rawW2 / 2, -rawH2 / 2, rawW2, rawH2);
+          ctx.restore();
+        }
+
+        ctx.restore(); // reset lineDash / lineWidth
+      }
+    }
   }
 
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
