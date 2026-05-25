@@ -1,6 +1,7 @@
 #include "admin/admin_server.h"
 #include "sim/types.h"
 #include "net/network.h"
+#include "net/claim.h"
 #include "util/log.h"
 #include "util/time.h"
 #include "sim/world_save.h"
@@ -882,6 +883,7 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     } else if (strcmp(post_start, "/api/world/load") == 0) {
                         int lr = world_load(WORLD_SAVE_DEFAULT_PATH);
                         if (lr == 0) {
+                            claim_dominators_sanity_sweep();
                             resp.status_code = 200;
                             resp.content_type = "application/json";
                             resp.body = "{\"ok\":true}";

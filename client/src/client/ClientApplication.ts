@@ -2819,6 +2819,9 @@ export class ClientApplication {
           this.canvas.height,
         );
       }
+
+      // Hover debug HUD — rendered last so it always appears above all UI layers
+      this.renderSystem.renderHoverDebugHUD();
     }
   }
   
@@ -4260,6 +4263,11 @@ export class ClientApplication {
         }
         case ']':
           this.renderSystem.toggleHoverBoundaries();
+          e.preventDefault();
+          break;
+
+        case '[':
+          this.renderSystem.toggleHoverDebugHUD();
           e.preventDefault();
           break;
 

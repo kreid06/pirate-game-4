@@ -915,6 +915,7 @@ export class RenderSystem {
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
+  private _showHoverDebugHUD: boolean = false;
   
   constructor(canvas: HTMLCanvasElement, config: GraphicsConfig) {
     this.canvas = canvas;
@@ -2123,7 +2124,11 @@ export class RenderSystem {
   /** Update a structure's company ownership (one-way promotion from server). */
   updateStructureCompany(id: number, companyId: number): void {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s) s.companyId = companyId;
+    if (s) {
+      s.companyId = companyId;
+      s.claimOrphaned = false; // company change = captured from inactive territory; always de-orphan
+      this._claimOverlayDirty = true;
+    }
   }
 
   updateStructureHp(id: number, hp: number, maxHp: number, targetHp?: number): { prevHp: number; prevTargetHp: number } | null {
@@ -2898,6 +2903,14 @@ export class RenderSystem {
     this.showHoverBoundaries = !this.showHoverBoundaries;
     console.log(`🔍 Hover boundaries debug: ${this.showHoverBoundaries ? 'ON' : 'OFF'}`);
   }
+
+  /**
+   * Toggle the hover debug HUD panel (bottom-right corner, shows raw fields for hovered entity).
+   */
+  toggleHoverDebugHUD(): void {
+    this._showHoverDebugHUD = !this._showHoverDebugHUD;
+    console.log(`🔬 Hover debug HUD: ${this._showHoverDebugHUD ? 'ON' : 'OFF'}`);
+  }
   
   /**
    * Get the currently hovered module (if any)
@@ -3263,13 +3276,6 @@ export class RenderSystem {
       this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha, e.wx, e.wy);
     }
 
-    // ── Territory claim overlay (drawn when Alt is held) ─────────────────────
-    // Rendered after resource nodes (bushes, tree leaves, rocks, boulders) so
-    // the claim borders/hatching sit above them rather than being occluded.
-    if (this._showTerritoryOverlay) {
-      this.drawTerritoryOverlay(camera);
-    }
-
     // ── Hover prompts + health bars (always on top) ───────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type === 'wood' && e.isHovered) {
@@ -3287,6 +3293,14 @@ export class RenderSystem {
         else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 64);
       }
+    }
+
+    // ── Territory claim overlay (drawn when Alt is held) ─────────────────────
+    // Rendered above the resource layer (nodes, hover prompts, and health bars)
+    // so the dominance borders/hatching aren't occluded by trees, bushes, or
+    // gather UI when inspecting territory.
+    if (this._showTerritoryOverlay) {
+      this.drawTerritoryOverlay(camera);
     }
 
     // Restore scaffolded ship positions so game logic is unaffected
@@ -5252,17 +5266,20 @@ export class RenderSystem {
           ctx.restore();
 
           // Claim-phase countdown bar above the merlons.
+          const isPostDemolish = s.hp === 0;
           const totalMs = (typeof s.claimPhaseTotalMs === 'number' && s.claimPhaseTotalMs > 0)
                         ? s.claimPhaseTotalMs : 60000;
           const remMs   = (typeof s.claimPhaseProgressMs === 'number') ? s.claimPhaseProgressMs : totalMs;
-          // Bar fills LEFT→RIGHT as the countdown progresses (1 - rem/total).
-          const claimFillFrac = Math.min(1, Math.max(0, 1 - (remMs / totalMs)));
+          // Post-demolish: bar drains 99%→0% (rem/total). Normal claiming: fills 0%→100% (1 - rem/total).
+          const claimFillFrac = isPostDemolish
+            ? Math.min(1, Math.max(0, remMs / totalMs))
+            : Math.min(1, Math.max(0, 1 - (remMs / totalMs)));
           const barW = ts * 1.1;
           const barH = Math.max(3, 5 * zoom);
           const barY = -ts * 0.45 - ts * 0.95;
           ctx.fillStyle = 'rgba(0,0,0,0.65)';
           ctx.fillRect(-barW / 2, barY, barW, barH);
-          ctx.fillStyle = (s.claimContested || s.fortressContested) ? '#e04848' : '#cccccc';
+          ctx.fillStyle = isPostDemolish ? '#cc3333' : ((s.claimContested || s.fortressContested) ? '#e04848' : '#cccccc');
           ctx.fillRect(-barW / 2, barY, barW * claimFillFrac, barH);
           ctx.strokeStyle = '#ffffff';
           ctx.lineWidth = Math.max(1, 1 * zoom);
@@ -5274,10 +5291,12 @@ export class RenderSystem {
             ctx.font = `bold ${fontPx}px sans-serif`;
             ctx.textAlign = 'center';
             ctx.textBaseline = 'bottom';
-            const label = (s.claimContested || s.fortressContested) ? 'CONTESTED' : 'CLAIMING';
+            const label = isPostDemolish
+              ? 'UNCLAIMING'
+              : ((s.claimContested || s.fortressContested) ? 'CONTESTED' : 'CLAIMING');
             ctx.fillStyle = '#000';
             ctx.fillText(label, 1, barY - 1);
-            ctx.fillStyle = (s.claimContested || s.fortressContested) ? '#ff8080' : '#dddddd';
+            ctx.fillStyle = isPostDemolish ? '#ff8080' : ((s.claimContested || s.fortressContested) ? '#ff8080' : '#dddddd');
             ctx.fillText(label, 0, barY - 2);
           }
         } else if (flagFortPhase === 1) {
@@ -5369,6 +5388,47 @@ export class RenderSystem {
               ctx.fillStyle = s.fortressContested ? '#ff8080' : '#9fd6ff';
               ctx.fillText(label, 0, barY - 2);
             }
+          }
+        } else if (flagFortPhase === 3) {
+          // ── DEMOLISHING phase — fort was captured; HP draining 10%/s to 0.
+          //    Red pulsing diagonal hatch + HP drain bar.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+          ctx.clip();
+          const unclaimPulse = 0.4 + 0.4 * Math.sin(Date.now() / 250);
+          ctx.strokeStyle = `rgba(220,40,40,${unclaimPulse})`;
+          ctx.lineWidth = Math.max(1, 1.4 * zoom);
+          const hatchStep = Math.max(4, 6 * zoom);
+          for (let h = -ts; h < ts; h += hatchStep) {
+            ctx.beginPath();
+            ctx.moveTo(h - ts * 0.45, -ts * 0.45);
+            ctx.lineTo(h + ts * 0.45, ts * 0.45);
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // HP drain bar (hpFrac 100% → 0%)
+          const barW = ts * 1.1;
+          const barH = Math.max(3, 5 * zoom);
+          const barY = -ts * 0.45 - ts * 0.95;
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(-barW / 2, barY, barW, barH);
+          ctx.fillStyle = `rgba(220,40,40,${0.6 + 0.35 * Math.sin(Date.now() / 250)})`;
+          ctx.fillRect(-barW / 2, barY, barW * hpFrac, barH);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(1, 1 * zoom);
+          ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+          if (zoom >= 0.5) {
+            const fontPx = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${fontPx}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = '#000';
+            ctx.fillText('DEMOLISHING', 1, barY - 1);
+            ctx.fillStyle = '#ff8080';
+            ctx.fillText('DEMOLISHING', 0, barY - 2);
           }
         }
 
@@ -5749,6 +5809,93 @@ export class RenderSystem {
       } else {
         ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
         ctx.fillText('(walk closer)', ssp.x, tipY - lineH * 2);
+      }
+
+      // Debug overlay (toggle with `]`): structure id + dominator list.
+      // Helps diagnose dominance/border issues by surfacing the raw server
+      // data that drives the territory rendering.
+      if (this.showHoverBoundaries) {
+        ctx.fillStyle = 'rgba(255, 220, 120, 0.95)';
+        ctx.font = `${Math.max(9, Math.round(10 * zoom))}px monospace`;
+        const doms = (s.dominators ?? []).join(',') || '(none)';
+        ctx.fillText(`id=${s.id}`,       ssp.x, tipY - lineH * 3);
+        ctx.fillText(`dom=[${doms}]`,    ssp.x, tipY - lineH * 4);
+
+        // Claim flag: enumerate hypothetical (target, new-dom) pairs that
+        // a successful capture would write. target = enemy victim,
+        // new-dom = friendly challenger. We compute pairs from overlapping
+        // discs (same-island, non-orphaned, non-flag); this mirrors the
+        // pair-wise lens that anchors the section flood-fill server-side.
+        if (s.type === 'claim_flag') {
+          const claimRadiusOf = (t: string): number =>
+            (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+          const flagCo = s.companyId ?? 0;
+          const isl    = s.islandId;
+          const eligible = (ps: PlacedStructure): boolean =>
+                 ps.islandId === isl
+              && !ps.claimOrphaned
+              && ps.type !== 'claim_flag'
+              && !(ps.type === 'flag_fort' && !ps.fortressComplete && (ps.claimPhase ?? 0) < 2);
+          const mineList: PlacedStructure[] = [];
+          const enemyList: PlacedStructure[] = [];
+          for (const ps of this.placedStructures) {
+            if (!eligible(ps)) continue;
+            if ((ps.companyId ?? 0) === 0) continue;
+            if ((ps.companyId ?? 0) === flagCo) mineList.push(ps);
+            else                                 enemyList.push(ps);
+          }
+          let line = 5;
+          ctx.fillText(`src=(${s.claimSourceEnemy ?? '?'},${s.claimLinkedFort ?? '?'})`,
+                       ssp.x, tipY - lineH * line); line++;
+          // Emit (target=E, new-dom=M) for every overlapping (E, M) pair,
+          // and shade each pair's lens(E.disc ∩ M.disc) in world space so
+          // the targeted area is visually highlighted alongside the IDs.
+          for (const e of enemyList) {
+            const erW = claimRadiusOf(e.type);
+            const erS = erW * zoom;
+            const eSp = camera.worldToScreen(Vec2.from(e.x, e.y));
+            for (const m of mineList) {
+              const mrW = claimRadiusOf(m.type);
+              const dx = e.x - m.x, dy = e.y - m.y;
+              const th = erW + mrW;
+              if (dx * dx + dy * dy > th * th) continue;
+              const mrS = mrW * zoom;
+              const mSp = camera.worldToScreen(Vec2.from(m.x, m.y));
+              // Lens fill + outline (clipped circle ∩ circle)
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(eSp.x, eSp.y, erS, 0, Math.PI * 2);
+              ctx.clip();
+              ctx.fillStyle = 'rgba(255, 180, 60, 0.18)';
+              ctx.beginPath();
+              ctx.arc(mSp.x, mSp.y, mrS, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(255, 210, 90, 0.85)';
+              ctx.lineWidth = Math.max(1, 1.5 * zoom);
+              ctx.stroke();
+              ctx.restore();
+              // Midpoint pair label
+              ctx.save();
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.font = `bold ${Math.max(10, Math.round(11 * zoom))}px monospace`;
+              ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+              ctx.lineWidth = 3;
+              ctx.fillStyle = 'rgba(255, 230, 150, 0.95)';
+              const lx = (eSp.x + mSp.x) * 0.5;
+              const ly = (eSp.y + mSp.y) * 0.5;
+              const txt = `(${e.id},${m.id})`;
+              ctx.strokeText(txt, lx, ly);
+              ctx.fillText(txt, lx, ly);
+              ctx.restore();
+              // Tooltip line
+              ctx.fillText(`(${e.id},${m.id})`, ssp.x, tipY - lineH * line);
+              line++;
+              if (line > 24) break;
+            }
+            if (line > 24) break;
+          }
+        }
       }
       ctx.restore();
     }
@@ -6292,8 +6439,8 @@ export class RenderSystem {
     let cfInEnemyClaim = false;
     // Closest own/enemy source structures whose claim disc covers the cursor.
     // Used to draw the slice-preview highlight matching server placement logic.
-    let cfMineSrc: { x: number; y: number; r: number } | null = null;
-    let cfEnemySrc: { x: number; y: number; r: number } | null = null;
+    let cfMineSrc: { x: number; y: number; r: number; islandId: number } | null = null;
+    let cfEnemySrc: { x: number; y: number; r: number; islandId: number } | null = null;
     let cfMineBestD2 = 0, cfEnemyBestD2 = 0;
     if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
       for (const s of this.placedStructures) {
@@ -6308,13 +6455,13 @@ export class RenderSystem {
         if (co === myCompany) {
           cfInOwnClaim = true;
           if (!cfMineSrc || d2 < cfMineBestD2) {
-            cfMineSrc = { x: s.x, y: s.y, r: cr };
+            cfMineSrc = { x: s.x, y: s.y, r: cr, islandId: s.islandId };
             cfMineBestD2 = d2;
           }
         } else if (co !== 0) {
           cfInEnemyClaim = true;
           if (!cfEnemySrc || d2 < cfEnemyBestD2) {
-            cfEnemySrc = { x: s.x, y: s.y, r: cr };
+            cfEnemySrc = { x: s.x, y: s.y, r: cr, islandId: s.islandId };
             cfEnemyBestD2 = d2;
           }
         }
@@ -6387,41 +6534,68 @@ export class RenderSystem {
       const claimRadiusOf = (t: string): number =>
         (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
       const cvW = ctx.canvas.width, cvH = ctx.canvas.height;
-      const miSp = camera.worldToScreen(Vec2.from(cfMineSrc.x, cfMineSrc.y));
-      const ejSp = camera.worldToScreen(Vec2.from(cfEnemySrc.x, cfEnemySrc.y));
-      const miR  = cfMineSrc.r * zoom;
-      const ejR  = cfEnemySrc.r * zoom;
-      const previewInvalid = false; // preview is hidden when invalid
+      const islandId = cfMineSrc.islandId;
+      const msp = camera.worldToScreen(Vec2.from(mx, my));
+      const previewInvalid = false; // hidden when invalid
       const fillCol   = previewInvalid ? 'rgba(220, 60, 40, 1)' : 'rgba(120, 220, 120, 1)';
-      const strokeCol = previewInvalid ? 'rgba(255, 90, 60, 1)' : 'rgba(140, 255, 140, 1)';
       // Slow flash: ~2.4s period.
       const t = performance.now() / 1200;
       const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI);
       const fillAlpha   = 0.12 + 0.32 * pulse;
-      const strokeAlpha = 0.45 + 0.50 * pulse;
 
-      // 1) Lens canvas = Mi.disc ∩ Ej.disc (in screen space, full-canvas).
-      const lensCv = this._getScratch('cfPrevLens', cvW, cvH);
-      const lc = lensCv.getContext('2d')!;
-      lc.clearRect(0, 0, cvW, cvH);
-      lc.fillStyle = '#fff';
-      lc.beginPath(); lc.arc(miSp.x, miSp.y, miR, 0, Math.PI * 2); lc.fill();
-      lc.globalCompositeOperation = 'destination-in';
-      lc.beginPath(); lc.arc(ejSp.x, ejSp.y, ejR, 0, Math.PI * 2); lc.fill();
-      lc.globalCompositeOperation = 'source-over';
+      // ── Build section mask ─────────────────────────────────────────────
+      // 1) lensUnion = ⋃ over all (Mi, Ej) pairs on this island whose discs
+      //    overlap: lens(Mi, Ej) = Mi.disc ∩ Ej.disc.
+      // 2) tmp_own  = ⋃ over own structures of (S.disc ∖ ⋃ dominators).
+      // 3) sliceAll = lensUnion ∖ tmp_own  (all claimable slice pieces).
+      // 4) section   = connected component of sliceAll containing the cursor
+      //    pixel, found via JS flood-fill on the alpha channel.
 
-      // 2) Own-visible territory tmp = ⋃ (own.disc ∖ ⋃ dominators). Built
-      //    per-structure to mirror the dominance carving used by the
-      //    territory overlay's `tmp`.
-      const tmpOwn = this._getScratch('cfPrevTmpOwn', cvW, cvH);
+      const ownStructs:   typeof this.placedStructures = [];
+      const enemyStructs: typeof this.placedStructures = [];
+      for (const s of this.placedStructures) {
+        if (s.claimOrphaned) continue;
+        if (s.islandId !== islandId) continue;
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+        const co = s.companyId ?? 0;
+        if (co === 0) continue;
+        if (co === myCompany) ownStructs.push(s);
+        else enemyStructs.push(s);
+      }
+
+      // (a) Lens union
+      const lensUnion = this._getScratch('cfSecLensU', cvW, cvH);
+      const lu = lensUnion.getContext('2d')!;
+      lu.clearRect(0, 0, cvW, cvH);
+      const lensTmp = this._getScratch('cfSecLensT', cvW, cvH);
+      const lt = lensTmp.getContext('2d')!;
+      for (const mi of ownStructs) {
+        const miR = claimRadiusOf(mi.type);
+        const miSp = camera.worldToScreen(Vec2.from(mi.x, mi.y));
+        const miRz = miR * zoom;
+        for (const ej of enemyStructs) {
+          const ejR = claimRadiusOf(ej.type);
+          const sum = miR + ejR;
+          const dx = mi.x - ej.x, dy = mi.y - ej.y;
+          if (dx * dx + dy * dy >= sum * sum) continue; // discs disjoint
+          const ejSp = camera.worldToScreen(Vec2.from(ej.x, ej.y));
+          lt.globalCompositeOperation = 'source-over';
+          lt.clearRect(0, 0, cvW, cvH);
+          lt.fillStyle = '#fff';
+          lt.beginPath(); lt.arc(miSp.x, miSp.y, miRz, 0, Math.PI * 2); lt.fill();
+          lt.globalCompositeOperation = 'destination-in';
+          lt.beginPath(); lt.arc(ejSp.x, ejSp.y, ejR * zoom, 0, Math.PI * 2); lt.fill();
+          lu.drawImage(lensTmp, 0, 0);
+        }
+      }
+
+      // (b) tmp_own (own visible territory)
+      const tmpOwn = this._getScratch('cfSecTmpOwn', cvW, cvH);
       const tc = tmpOwn.getContext('2d')!;
       tc.clearRect(0, 0, cvW, cvH);
-      const blob = this._getScratch('cfPrevBlob', cvW, cvH);
+      const blob = this._getScratch('cfSecBlob', cvW, cvH);
       const bc = blob.getContext('2d')!;
-      for (const s of this.placedStructures) {
-        if ((s.companyId ?? 0) !== myCompany) continue;
-        if (s.claimOrphaned) continue;
-        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+      for (const s of ownStructs) {
         const r = claimRadiusOf(s.type) * zoom;
         if (r <= 0) continue;
         const sp = camera.worldToScreen(Vec2.from(s.x, s.y));
@@ -6429,7 +6603,6 @@ export class RenderSystem {
         bc.clearRect(0, 0, cvW, cvH);
         bc.fillStyle = '#fff';
         bc.beginPath(); bc.arc(sp.x, sp.y, r, 0, Math.PI * 2); bc.fill();
-        // Carve out enemies that dominate this own structure.
         const doms = s.dominators ?? [];
         if (doms.length > 0) {
           bc.globalCompositeOperation = 'destination-out';
@@ -6445,46 +6618,98 @@ export class RenderSystem {
         tc.drawImage(blob, 0, 0);
       }
 
-      // 3) Slice = lens ∖ tmp_own.
-      lc.globalCompositeOperation = 'destination-out';
-      lc.drawImage(tmpOwn, 0, 0);
-      lc.globalCompositeOperation = 'source-over';
+      // (c) sliceAll = lensUnion ∖ tmp_own
+      lu.globalCompositeOperation = 'destination-out';
+      lu.drawImage(tmpOwn, 0, 0);
+      lu.globalCompositeOperation = 'source-over';
 
-      // 4) Tint the slice with the preview colour (recolour the alpha mask).
-      const tint = this._getScratch('cfPrevTint', cvW, cvH);
+      // (d) Flood-fill section from cursor pixel at downsampled resolution
+      // (~4 world units per cell). We operate on the canvas-space mask so
+      // we sample at zoom-dependent stride.
+      const cellWorld = 4;
+      const cellPx = Math.max(1, Math.round(cellWorld * zoom));
+      const gw = Math.max(1, Math.floor(cvW / cellPx));
+      const gh = Math.max(1, Math.floor(cvH / cellPx));
+      // Read alpha at grid cell centres
+      const img = lu.getImageData(0, 0, cvW, cvH).data;
+      const inSlice = new Uint8Array(gw * gh);
+      for (let gy = 0; gy < gh; gy++) {
+        const py = Math.min(cvH - 1, (gy + 0.5) * cellPx | 0);
+        for (let gx = 0; gx < gw; gx++) {
+          const px = Math.min(cvW - 1, (gx + 0.5) * cellPx | 0);
+          const idx = (py * cvW + px) * 4 + 3;
+          if (img[idx] > 8) inSlice[gy * gw + gx] = 1;
+        }
+      }
+      const cgx = Math.max(0, Math.min(gw - 1, Math.floor(msp.x / cellPx)));
+      const cgy = Math.max(0, Math.min(gh - 1, Math.floor(msp.y / cellPx)));
+      const section = new Uint8Array(gw * gh);
+      if (inSlice[cgy * gw + cgx]) {
+        const stack: number[] = [cgy * gw + cgx];
+        section[cgy * gw + cgx] = 1;
+        while (stack.length) {
+          const k = stack.pop()!;
+          const x = k % gw, y = (k / gw) | 0;
+          if (x > 0) {
+            const n = k - 1;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+          if (x < gw - 1) {
+            const n = k + 1;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+          if (y > 0) {
+            const n = k - gw;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+          if (y < gh - 1) {
+            const n = k + gw;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+        }
+      }
+
+      // (e) Build a section mask canvas by drawing each cell of `section`
+      //     as a filled rect at cell resolution, then intersecting with the
+      //     true sliceAll mask so the boundary stays smooth.
+      const sectionGrid = this._getScratch('cfSecGrid', cvW, cvH);
+      const sg = sectionGrid.getContext('2d')!;
+      sg.clearRect(0, 0, cvW, cvH);
+      sg.fillStyle = '#fff';
+      // Group runs along x to reduce fillRect count
+      for (let gy = 0; gy < gh; gy++) {
+        let runStart = -1;
+        for (let gx = 0; gx <= gw; gx++) {
+          const on = gx < gw && !!section[gy * gw + gx];
+          if (on && runStart < 0) runStart = gx;
+          else if (!on && runStart >= 0) {
+            sg.fillRect(runStart * cellPx, gy * cellPx, (gx - runStart) * cellPx, cellPx);
+            runStart = -1;
+          }
+        }
+      }
+      // Dilate grid by 1 cell to make sure the smooth slice mask is fully
+      // covered where the section is on. Done implicitly by intersecting:
+      const sectionMask = this._getScratch('cfSecMask', cvW, cvH);
+      const smc = sectionMask.getContext('2d')!;
+      smc.clearRect(0, 0, cvW, cvH);
+      smc.drawImage(lu.canvas, 0, 0);
+      smc.globalCompositeOperation = 'destination-in';
+      smc.drawImage(sectionGrid, 0, 0);
+      smc.globalCompositeOperation = 'source-over';
+
+      // (f) Tint and draw with pulse.
+      const tint = this._getScratch('cfSecTint', cvW, cvH);
       const tnc = tint.getContext('2d')!;
       tnc.clearRect(0, 0, cvW, cvH);
       tnc.fillStyle = fillCol;
       tnc.fillRect(0, 0, cvW, cvH);
       tnc.globalCompositeOperation = 'destination-in';
-      tnc.drawImage(lensCv, 0, 0);
+      tnc.drawImage(sectionMask, 0, 0);
 
       ctx.save();
       ctx.globalAlpha = fillAlpha;
       ctx.drawImage(tint, 0, 0);
-      ctx.restore();
-
-      // 5) Outline: stroke the lens arcs but only where they lie within
-      //    the visible slice (i.e. outside tmp_own). Clip to the slice mask.
-      ctx.save();
-      // Use the slice mask as a clip by drawing a path covering the canvas
-      // and using composite operations is awkward — fall back to a second
-      // tinted mask rendered as a stroke. We instead draw thick outline by
-      // recolouring the boundary of the slice mask.
-      const outline = this._getScratch('cfPrevOutline', cvW, cvH);
-      const oc = outline.getContext('2d')!;
-      oc.clearRect(0, 0, cvW, cvH);
-      oc.strokeStyle = strokeCol;
-      oc.lineWidth   = Math.max(1.5, 2 * zoom);
-      oc.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 4 * zoom)]);
-      oc.beginPath(); oc.arc(miSp.x, miSp.y, miR, 0, Math.PI * 2); oc.stroke();
-      oc.beginPath(); oc.arc(ejSp.x, ejSp.y, ejR, 0, Math.PI * 2); oc.stroke();
-      // Clip the strokes to the slice (lens ∖ tmp_own) so only the lens
-      // boundary lying on the enemy side of the dominance border shows.
-      oc.globalCompositeOperation = 'destination-in';
-      oc.drawImage(lensCv, 0, 0);
-      ctx.globalAlpha = strokeAlpha;
-      ctx.drawImage(outline, 0, 0);
       ctx.restore();
     }
 
@@ -9627,7 +9852,7 @@ export class RenderSystem {
       const allFortStructs = this.placedStructures.filter(
         ps => ps.islandId === islId
            && ps.companyId === cid
-           && !ps.claimOrphaned
+           && (!ps.claimOrphaned || ps.claimPhase === 3 || (ps.claimPhase === 0 && ps.hp === 0)) // DEMOLISHING (phase 3) and post-demolish countdown still render a flashing ring
            && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
       );
       const fortStructs    = allFortStructs.filter(isFortActive);
@@ -9755,60 +9980,6 @@ export class RenderSystem {
           const companyName = this._cachedCompanies.find(c => c.id === cid)?.name
             ?? (cid === 1 ? 'Solo' : cid === 2 ? 'Pirates' : cid === 3 ? 'Navy' : `Company #${cid}`);
           ctx.save();
-
-          // ── Inactive structures (own company only) ─────────────────────────
-          if (isOwn && inactiveList.length > 0) {
-            const inactivePts: Array<{ x: number; y: number; r: number }> = [];
-            for (const ps of inactiveList) {
-              const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
-              inactivePts.push({ x: sp.x, y: sp.y, r: psR });
-            }
-
-            const borderWidth = Math.max(8, 10 * zoom);
-            const greyFill   = '#888888';
-            const greyBorder = '#666666';
-
-            const tmp = this._getScratch('ovInacTmp', cvs.width, cvs.height);
-            const tc  = tmp.getContext('2d')!;
-            tc.fillStyle = greyFill;
-            for (const { x, y, r } of inactivePts) {
-              tc.beginPath(); tc.arc(x, y, r, 0, Math.PI * 2); tc.fill();
-            }
-
-            const ring = this._getScratch('ovInacRing', cvs.width, cvs.height);
-            const rc   = ring.getContext('2d')!;
-            rc.fillStyle = greyBorder;
-            for (const { x, y, r } of inactivePts) {
-              rc.beginPath(); rc.arc(x, y, r + borderWidth, 0, Math.PI * 2); rc.fill();
-            }
-            rc.globalCompositeOperation = 'destination-out';
-            rc.drawImage(tmp, 0, 0);
-
-            ctx.globalAlpha = 0.55;
-            ctx.drawImage(ring, 0, 0);
-            ctx.globalAlpha = 1.0;
-
-            // Label: company name + "(inactive)" at blob centroid
-            let cx = 0, cy = 0;
-            for (const p of inactivePts) { cx += p.x; cy += p.y; }
-            cx /= inactivePts.length; cy /= inactivePts.length;
-
-            const fontSize = Math.max(11, Math.round(13 * zoom));
-            ctx.font = `bold ${fontSize}px Georgia, serif`;
-            ctx.textAlign = 'center';
-            ctx.textBaseline = 'middle';
-            ctx.lineWidth = Math.max(2, 3 * zoom);
-            ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-
-            const lineGap = fontSize * 1.2;
-            ctx.fillStyle = '#ffffff';
-            ctx.strokeText(companyName, cx, cy - lineGap / 2);
-            ctx.fillText(companyName, cx, cy - lineGap / 2);
-
-            ctx.fillStyle = '#ff5555';
-            ctx.strokeText('(inactive)', cx, cy + lineGap / 2);
-            ctx.fillText('(inactive)', cx, cy + lineGap / 2);
-          }
 
           // ── Active blob: fort + connected structures ───────────────────────
           const screenPts: Array<{ id: number; x: number; y: number; r: number }> = [];
@@ -10100,48 +10271,106 @@ export class RenderSystem {
                 && (s.claimState ?? 0) === 0
             );
             if (hasActiveClaimFlag && allEnemyInnerCv) {
-              // Build per-flag slice mask: for each of THIS company's active
-              // claim_flags on this island, the contested slice is the lens
-              // of the flag's two source discs (own anchor ∩ enemy anchor).
-              // Union all such lenses to form the hatching mask. This makes
-              // each flag contest exactly its own slice rather than the
-              // whole own∩enemy intersection.
+              // Build per-flag SECTION mask: for each of this company's
+              // active claim_flags on this island, the contested section is
+              // the connected component (under disc-overlap adjacency) of
+              //   sliceAll = ⋃ lens(Mi, Ej) ∖ tmp_own
+              // that contains the flag's position. This matches the server
+              // section flood-fill, so the hatching covers EVERY targeted
+              // structure pair, not just the flag's bound source pair.
               const sliceMask = this._getScratch('ovSliceMask', cvs.width, cvs.height);
               const smc = sliceMask.getContext('2d')!;
               smc.clearRect(0, 0, cvs.width, cvs.height);
-              const claimRadiusOf = (t: string): number =>
-                (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
-              const lensCv = this._getScratch('ovSliceLens', cvs.width, cvs.height);
-              const lc = lensCv.getContext('2d')!;
+
+              // (1) Build lensUnion in screen space once for this island/cid.
+              const lensUnion = this._getScratch('ovSliceLensU', cvs.width, cvs.height);
+              const lu = lensUnion.getContext('2d')!;
+              lu.clearRect(0, 0, cvs.width, cvs.height);
+              const lensTmp = this._getScratch('ovSliceLensT', cvs.width, cvs.height);
+              const lt = lensTmp.getContext('2d')!;
+              for (const mi of screenPts) {
+                for (const ej of allEnemyCircles) {
+                  const dx = mi.x - ej.x, dy = mi.y - ej.y;
+                  const sum = mi.r + ej.r;
+                  if (dx * dx + dy * dy >= sum * sum) continue;
+                  lt.globalCompositeOperation = 'source-over';
+                  lt.clearRect(0, 0, cvs.width, cvs.height);
+                  lt.fillStyle = '#fff';
+                  lt.beginPath(); lt.arc(mi.x, mi.y, mi.r, 0, Math.PI * 2); lt.fill();
+                  lt.globalCompositeOperation = 'destination-in';
+                  lt.beginPath(); lt.arc(ej.x, ej.y, ej.r, 0, Math.PI * 2); lt.fill();
+                  lu.drawImage(lensTmp, 0, 0);
+                }
+              }
+
+              // (2) sliceAll = lensUnion ∖ tmp_own (tmp already carved per Mi).
+              lu.globalCompositeOperation = 'destination-out';
+              lu.drawImage(tmp, 0, 0);
+              lu.globalCompositeOperation = 'source-over';
+
+              // (3) Downsample alpha into grid for flood-fill.
+              const cellWorld = 4;
+              const cellPx = Math.max(1, Math.round(cellWorld * zoom));
+              const gw = Math.max(1, Math.floor(cvs.width / cellPx));
+              const gh = Math.max(1, Math.floor(cvs.height / cellPx));
+              const sliceData = lu.getImageData(0, 0, cvs.width, cvs.height).data;
+              const inSlice = new Uint8Array(gw * gh);
+              for (let gy = 0; gy < gh; gy++) {
+                const py = Math.min(cvs.height - 1, (gy + 0.5) * cellPx | 0);
+                for (let gx = 0; gx < gw; gx++) {
+                  const px = Math.min(cvs.width - 1, (gx + 0.5) * cellPx | 0);
+                  if (sliceData[(py * cvs.width + px) * 4 + 3] > 8) inSlice[gy * gw + gx] = 1;
+                }
+              }
+
+              // (4) For each flag, flood-fill from its grid cell and OR the
+              //     resulting section into sliceMask (intersected with the
+              //     smooth sliceAll mask).
+              const sectionGrid = this._getScratch('ovSliceGrid', cvs.width, cvs.height);
+              const sg = sectionGrid.getContext('2d')!;
+              const perFlagMask = this._getScratch('ovSliceFlag', cvs.width, cvs.height);
+              const pfc = perFlagMask.getContext('2d')!;
               for (const flag of this.placedStructures) {
                 if (flag.type !== 'claim_flag') continue;
                 if (flag.claimOrphaned) continue;
                 if (flag.islandId !== isl.id) continue;
                 if ((flag.companyId ?? 0) !== cid) continue;
-                const miId = flag.claimLinkedFort;
-                const enId = flag.claimSourceEnemy;
-                if (miId === undefined || enId === undefined) continue;
-                const mi = this.placedStructures.find(s => s.id === miId);
-                const ej = this.placedStructures.find(s => s.id === enId);
-                if (!mi || !ej) continue;
-                if (mi.claimOrphaned || ej.claimOrphaned) continue;
-                const miR = claimRadiusOf(mi.type) * zoom;
-                const ejR = claimRadiusOf(ej.type) * zoom;
-                const miSp = camera.worldToScreen(Vec2.from(mi.x + off.dx, mi.y + off.dy));
-                const ejSp = camera.worldToScreen(Vec2.from(ej.x + off.dx, ej.y + off.dy));
-                lc.save();
-                lc.globalCompositeOperation = 'source-over';
-                lc.clearRect(0, 0, cvs.width, cvs.height);
-                lc.fillStyle = '#ffffff';
-                lc.beginPath();
-                lc.arc(miSp.x, miSp.y, miR, 0, Math.PI * 2);
-                lc.fill();
-                lc.globalCompositeOperation = 'destination-in';
-                lc.beginPath();
-                lc.arc(ejSp.x, ejSp.y, ejR, 0, Math.PI * 2);
-                lc.fill();
-                lc.restore();
-                smc.drawImage(lensCv, 0, 0);
+                const fsp = camera.worldToScreen(Vec2.from(flag.x + off.dx, flag.y + off.dy));
+                const cgx = Math.max(0, Math.min(gw - 1, Math.floor(fsp.x / cellPx)));
+                const cgy = Math.max(0, Math.min(gh - 1, Math.floor(fsp.y / cellPx)));
+                if (!inSlice[cgy * gw + cgx]) continue;
+                const section = new Uint8Array(gw * gh);
+                const stack: number[] = [cgy * gw + cgx];
+                section[cgy * gw + cgx] = 1;
+                while (stack.length) {
+                  const k = stack.pop()!;
+                  const x = k % gw, y = (k / gw) | 0;
+                  if (x > 0)        { const n = k - 1;  if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                  if (x < gw - 1)   { const n = k + 1;  if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                  if (y > 0)        { const n = k - gw; if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                  if (y < gh - 1)   { const n = k + gw; if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                }
+                // Rasterize section cells into sectionGrid (run-length).
+                sg.clearRect(0, 0, cvs.width, cvs.height);
+                sg.fillStyle = '#fff';
+                for (let gy = 0; gy < gh; gy++) {
+                  let runStart = -1;
+                  for (let gx = 0; gx <= gw; gx++) {
+                    const on = gx < gw && !!section[gy * gw + gx];
+                    if (on && runStart < 0) runStart = gx;
+                    else if (!on && runStart >= 0) {
+                      sg.fillRect(runStart * cellPx, gy * cellPx, (gx - runStart) * cellPx, cellPx);
+                      runStart = -1;
+                    }
+                  }
+                }
+                // Intersect grid with smooth sliceAll for clean edges.
+                pfc.clearRect(0, 0, cvs.width, cvs.height);
+                pfc.drawImage(lu.canvas, 0, 0);
+                pfc.globalCompositeOperation = 'destination-in';
+                pfc.drawImage(sectionGrid, 0, 0);
+                pfc.globalCompositeOperation = 'source-over';
+                smc.drawImage(perFlagMask, 0, 0);
               }
               // Hatching belongs on the ENEMY's side of the dominance
               // border: the slice's visible portion is the lens minus own's
@@ -10217,6 +10446,192 @@ export class RenderSystem {
             ctx.fillText(companyName, cx, cy);
           }
 
+          // ── Inactive territory: same multi-pass border system, dimmed ─────
+          // inactiveList circles (BFS-disconnected from own fort) are rendered
+          // with the same piece 1/2/3/dashed ring system as active territory so
+          // borders between inactive and enemy circles look identical to active
+          // vs. active borders. The only differences are:
+          //   • iOwnShrunkAll includes ALL own circles (active + inactive), so
+          //     no double-border appears at the active/inactive company boundary.
+          //   • The ring is drawn at a reduced alpha to visually distinguish
+          //     disconnected territory from fully-connected territory.
+          if (inactiveList.length > 0) {
+            const iBW = Math.max(8, 10 * zoom);
+
+            // Convert inactive structures to screen-space points.
+            const iPts: Array<{ id: number; x: number; y: number; r: number }> = [];
+            for (const ps of inactiveList) {
+              const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+              iPts.push({ id: ps.id, x: sp.x, y: sp.y, r: psR });
+            }
+
+            // Enemy circles: active territory circles of other companies.
+            const iEnemyCircles: Array<{ id: number; x: number; y: number; r: number }> = [];
+            const iEnemyById = new Map<number, { id: number; x: number; y: number; r: number }>();
+            for (const [otherCid, otherClaim] of islandClaimsByCo) {
+              if (otherCid === cid) continue;
+              for (const wc of otherClaim.worldCircles) {
+                const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                const ec = { id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom };
+                if (wc.id > 0) iEnemyById.set(wc.id, ec);
+                iEnemyCircles.push(ec);
+              }
+            }
+
+            // Shrunk union of ALL own circles (active + inactive). Prevents a
+            // double-border from appearing where active and inactive own territory
+            // share a boundary.
+            const iOwnShrunkAll = this._getScratch('ovInaOwnShrunk', cvs.width, cvs.height);
+            {
+              const osc = iOwnShrunkAll.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = iBW / 2 + 1;
+              for (const { x, y, r } of [...screenPts, ...iPts]) {
+                const rr = r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
+              }
+            }
+
+            // Filled enemy inner discs for carving piece 1.
+            let iAllEnemyInner: OffscreenCanvas | null = null;
+            if (iEnemyCircles.length > 0) {
+              const m = this._getScratch('ovInaEnemyInner', cvs.width, cvs.height);
+              const mc = m.getContext('2d')!;
+              mc.fillStyle = color;
+              for (const { x, y, r } of iEnemyCircles) {
+                if (r <= 0) continue;
+                mc.beginPath(); mc.arc(x, y, r, 0, Math.PI * 2); mc.fill();
+              }
+              iAllEnemyInner = m;
+            }
+
+            // Per-inactive-circle dominance info (mirrors active miInfos logic).
+            const iMiInfos = iPts.map(mi => {
+              const myStruct = mi.id > 0 ? structById.get(mi.id) : undefined;
+              const subord:    typeof iEnemyCircles = [];
+              const dominated: typeof iEnemyCircles = [];
+              if (myStruct?.dominators) {
+                for (const eid of myStruct.dominators) {
+                  const ec = iEnemyById.get(eid);
+                  if (ec) subord.push(ec);
+                }
+              }
+              if (mi.id > 0) {
+                for (const ec of iEnemyCircles) {
+                  if (ec.id <= 0) continue;
+                  const eStruct = structById.get(ec.id);
+                  if (eStruct?.dominators?.includes(mi.id)) dominated.push(ec);
+                }
+              }
+              return { mi, subord, dominated };
+            });
+
+            const iRing = this._getScratch('ovInaRing', cvs.width, cvs.height);
+            const irc   = iRing.getContext('2d')!;
+            irc.fillStyle = color;
+
+            // Piece 1: standard outer rim, carved by enemy interiors and iOwnShrunkAll.
+            for (const { x, y, r } of iPts) {
+              irc.beginPath(); irc.arc(x, y, r + iBW / 2, 0, Math.PI * 2); irc.fill();
+            }
+            irc.globalCompositeOperation = 'destination-out';
+            irc.drawImage(iOwnShrunkAll, 0, 0);
+            if (iAllEnemyInner) irc.drawImage(iAllEnemyInner, 0, 0);
+            irc.globalCompositeOperation = 'source-over';
+
+            // Piece 2: inner rim where an inactive circle dominates an enemy.
+            for (const info of iMiInfos) {
+              if (info.dominated.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const p2  = this._getScratch('ovInaP2', cvs.width, cvs.height);
+              const p2c = p2.getContext('2d')!;
+              p2c.fillStyle = color;
+              p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p2c.fill();
+              const rr = info.mi.r - iBW / 2;
+              if (rr > 0) {
+                p2c.globalCompositeOperation = 'destination-out';
+                p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
+              }
+              p2c.globalCompositeOperation = 'destination-out';
+              p2c.drawImage(iOwnShrunkAll, 0, 0);
+              p2c.globalCompositeOperation = 'destination-in';
+              const domMask = this._getScratch('ovInaP2Dom', cvs.width, cvs.height);
+              const dmc    = domMask.getContext('2d')!;
+              dmc.fillStyle = color;
+              for (const e of info.dominated) {
+                dmc.beginPath(); dmc.arc(e.x, e.y, e.r, 0, Math.PI * 2); dmc.fill();
+              }
+              p2c.drawImage(domMask, 0, 0);
+              irc.drawImage(p2, 0, 0);
+            }
+
+            // Piece 3: outer rim of dominating enemies clipped to the inactive circle.
+            for (const info of iMiInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const p3  = this._getScratch('ovInaP3', cvs.width, cvs.height);
+              const p3c = p3.getContext('2d')!;
+              p3c.fillStyle = color;
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r + iBW / 2, 0, Math.PI * 2); p3c.fill();
+              }
+              p3c.globalCompositeOperation = 'destination-out';
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r, 0, Math.PI * 2); p3c.fill();
+              }
+              p3c.globalCompositeOperation = 'destination-in';
+              p3c.beginPath(); p3c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p3c.fill();
+              irc.drawImage(p3, 0, 0);
+            }
+
+            // Dashed pass: dashed arc inside each subord enemy, per inactive circle.
+            for (const info of iMiInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const d  = this._getScratch('ovInaDashed', cvs.width, cvs.height);
+              const dc = d.getContext('2d')!;
+              dc.strokeStyle = color;
+              dc.lineWidth   = iBW;
+              dc.setLineDash([iBW * 1.5, iBW * 1.5]);
+              dc.beginPath(); dc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); dc.stroke();
+              dc.globalCompositeOperation = 'destination-out';
+              dc.drawImage(iOwnShrunkAll, 0, 0);
+              dc.globalCompositeOperation = 'destination-in';
+              const subMask = this._getScratch('ovInaDashedSub', cvs.width, cvs.height);
+              const sbc     = subMask.getContext('2d')!;
+              sbc.fillStyle = color;
+              for (const e of info.subord) {
+                sbc.beginPath(); sbc.arc(e.x, e.y, e.r, 0, Math.PI * 2); sbc.fill();
+              }
+              dc.drawImage(subMask, 0, 0);
+              irc.drawImage(d, 0, 0);
+            }
+
+            // Draw at dimmed alpha (≈60 % of the active territory alpha).
+            ctx.globalAlpha = isOwn ? 0.55 : 0.30;
+            ctx.drawImage(iRing, 0, 0);
+            ctx.globalAlpha = 1.0;
+
+            // Label: company name + "(inactive)" at centroid.
+            let icx = 0, icy = 0;
+            for (const p of iPts) { icx += p.x; icy += p.y; }
+            icx /= iPts.length; icy /= iPts.length;
+            const iFontSize = Math.max(11, Math.round(13 * zoom));
+            ctx.font = `bold ${iFontSize}px Georgia, serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = Math.max(2, 3 * zoom);
+            ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+            const iLineGap = iFontSize * 1.2;
+            ctx.fillStyle = '#ffffff';
+            ctx.strokeText(companyName, icx, icy - iLineGap / 2);
+            ctx.fillText(companyName, icx, icy - iLineGap / 2);
+            ctx.fillStyle = '#ff5555';
+            ctx.strokeText('(inactive)', icx, icy + iLineGap / 2);
+            ctx.fillText('(inactive)', icx, icy + iLineGap / 2);
+          }
+
           // ── Per-fort claim-phase blobs (CLAIMING / BUILDING) ─────────────
           // Each non-active flag fort renders its own standalone circle so
           // pending territory is visually distinct from established blobs.
@@ -10261,9 +10676,13 @@ export class RenderSystem {
               // Colour scheme: CLAIMING is grey (territory not yet claimed),
               // BUILDING uses the company colour but flashes (territory
               // claimed but fortifications not yet established).
-              const isClaiming = phase === 0;
-              const fillCol = isClaiming ? '#888888' : color;
-              const ringCol = isClaiming ? '#666666' : color;
+              // DEMOLISHING (phase 3) = captured; red flashing ring.
+              const isClaiming    = phase === 0;
+              const isDemolishing = phase === 3;
+              // Post-demolish: fort is in CLAIMING with hp==0 (counting down to destruction)
+              const isPostDemolish = isClaiming && (fort.hp ?? 1) === 0;
+              const fillCol = (isDemolishing || isPostDemolish) ? '#882222' : (isClaiming ? '#888888' : color);
+              const ringCol = (isDemolishing || isPostDemolish) ? '#cc3333' : (isClaiming ? '#666666' : color);
 
               // Build fill mask, then carve by active union so active
               // territory wins overlapping pixels.
@@ -10277,14 +10696,20 @@ export class RenderSystem {
                 ftc.globalCompositeOperation = 'source-over';
               }
 
-              // Build ring mask (outer dilated − inner circle), then also
-              // carve by active union so the ring stops at active edges.
+              // Build ring mask. For BUILDING (phase 1) the ring is centred on
+              // the circle boundary to match the active-fort border design:
+              //   inner = r - bw/2, outer = r + bw/2
+              // All other non-active phases keep the ring fully outside:
+              //   inner = r, outer = r + bw
+              const isBuilding = !isClaiming && !isDemolishing && !isPostDemolish;
+              const ringOuter = isBuilding ? r + borderWidth / 2 : r + borderWidth;
+              const ringInner = isBuilding ? Math.max(0, r - borderWidth / 2) : r;
               const fring = this._getScratch('ovFRing', cvs.width, cvs.height);
               const frc   = fring.getContext('2d')!;
               frc.fillStyle = ringCol;
-              frc.beginPath(); frc.arc(sp.x, sp.y, r + borderWidth, 0, Math.PI * 2); frc.fill();
+              frc.beginPath(); frc.arc(sp.x, sp.y, ringOuter, 0, Math.PI * 2); frc.fill();
               frc.globalCompositeOperation = 'destination-out';
-              frc.beginPath(); frc.arc(sp.x, sp.y, r, 0, Math.PI * 2); frc.fill();
+              frc.beginPath(); frc.arc(sp.x, sp.y, ringInner, 0, Math.PI * 2); frc.fill();
               if (activeUnionHasAny) {
                 frc.drawImage(activeUnion, 0, 0);
               }
@@ -10329,7 +10754,13 @@ export class RenderSystem {
                 ctx.drawImage(hatch, 0, 0);
               }
 
-              ctx.globalAlpha = isClaiming ? 0.55 : flashAlpha;
+              // BUILDING uses active-fort base alphas (own 0.90, enemy 0.50)
+              // modulated by flashAlpha so the ring pulses but at the same
+              // peak brightness as a fully-active fort border.
+              const ringAlpha = isClaiming ? 0.55
+                : (isDemolishing || isPostDemolish) ? flashAlpha
+                : flashAlpha * (isOwn ? 0.90 : 0.50);
+              ctx.globalAlpha = ringAlpha;
               ctx.drawImage(fring, 0, 0);
               ctx.globalAlpha = 1.0;
 
@@ -10347,7 +10778,7 @@ export class RenderSystem {
                 ddc.beginPath(); ddc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ddc.stroke();
                 ddc.globalCompositeOperation = 'destination-in';
                 ddc.drawImage(activeUnion, 0, 0);
-                ctx.globalAlpha = isClaiming ? 0.55 : flashAlpha;
+                ctx.globalAlpha = ringAlpha;
                 ctx.drawImage(dash, 0, 0);
                 ctx.globalAlpha = 1.0;
               }
@@ -10359,10 +10790,18 @@ export class RenderSystem {
               ctx.textBaseline = 'middle';
               ctx.lineWidth = Math.max(2, 3 * zoom);
               ctx.strokeStyle = 'rgba(0,0,0,0.75)';
-              const label = isClaiming
-                ? (contested ? `${companyName} — CLAIMING (contested)` : `${companyName} — CLAIMING`)
-                : (contested ? `${companyName} — BUILDING (contested)` : `${companyName} — BUILDING`);
-              ctx.fillStyle = isClaiming ? '#dddddd' : '#ffffff';
+              const remSec = typeof fort.claimPhaseProgressMs === 'number'
+                ? Math.ceil(fort.claimPhaseProgressMs / 1000) : null;
+              const label = isDemolishing
+                ? (contested ? `${companyName} — DEMOLISHING (defended)` : `${companyName} — DEMOLISHING`)
+                : isPostDemolish
+                ? (contested
+                  ? `${companyName} — UNCLAIMING (defended)${remSec !== null ? ` ${remSec}s` : ''}`
+                  : `${companyName} — UNCLAIMING${remSec !== null ? ` ${remSec}s` : ''}`)
+                : (isClaiming
+                  ? (contested ? `${companyName} — CLAIMING (contested)` : `${companyName} — CLAIMING`)
+                  : (contested ? `${companyName} — BUILDING (contested)` : `${companyName} — BUILDING`));
+              ctx.fillStyle = (isDemolishing || isPostDemolish) ? '#ff8888' : (isClaiming ? '#dddddd' : '#ffffff');
               ctx.strokeText(label, sp.x, sp.y);
               ctx.fillText(label, sp.x, sp.y);
             }
@@ -12565,6 +13004,250 @@ export class RenderSystem {
         this.ctx.fillText(debugLabel, screenPos.x, debugY);
       }
     }
+  }
+
+  /**
+   * Draws a fixed debug HUD panel in the bottom-right corner showing raw field data
+   * for the currently hovered entity (module > npc > ship > structure priority).
+   * Toggle with [ key via toggleHoverDebugHUD().
+   */
+  /** Called from ClientApplication after all UI layers so it always renders on top. */
+  renderHoverDebugHUD(): void {
+    if (!this._showHoverDebugHUD) return;
+    this.drawHoverDebugHUD();
+  }
+
+  private drawHoverDebugHUD(): void {
+    if (!this._showHoverDebugHUD) return;
+
+    interface Row {
+      label: string;
+      value: string;
+      color?: string;
+      bar?: number;
+      barColor?: string;
+    }
+
+    let title = '';
+    let accentColor = '#ffcc44';
+    const rows: Row[] = [];
+
+    const COMPANY_COLORS: Record<number, string> = { 0: '#888888', 1: '#ffcc44', 2: '#ff6644', 3: '#4488ff', 4: '#00eeff' };
+    const coColor = (id: number): string => COMPANY_COLORS[id] ?? '#cccccc';
+    const coName = (id: number): string => ({ 0: 'Unclaimed', 1: 'Solo', 2: 'Pirates', 3: 'Navy', 4: 'Ghost' } as Record<number, string>)[id] ?? `Co#${id}`;
+    const hpColor = (pct: number): string => pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa44' : '#ff5544';
+    const fmtRad = (r: number): string => `${(r * 180 / Math.PI).toFixed(1)}°`;
+
+    if (this.hoveredModule) {
+      const { ship, module } = this.hoveredModule;
+      const md = module.moduleData as Record<string, unknown> | undefined;
+      const kind = (md?.kind as string) ?? module.kind ?? '?';
+      title = `⚙ MODULE · ${kind.toUpperCase()}`;
+      accentColor = '#66ee99';
+      rows.push({ label: 'Mod ID',    value: String(module.id) });
+      rows.push({ label: 'Ship ID',   value: String(ship.id) });
+      rows.push({ label: 'Kind',      value: kind });
+      rows.push({ label: 'Deck',      value: String(module.deckId) });
+      rows.push({ label: 'LocalPos',  value: `(${module.localPos.x.toFixed(0)}, ${module.localPos.y.toFixed(0)})` });
+      if (module.occupiedBy !== null) rows.push({ label: 'OccupiedBy', value: String(module.occupiedBy), color: '#ffee88' });
+      if (md) {
+        const hp = Number(md.health ?? 0);
+        const maxHp = Number(md.maxHealth ?? 1);
+        const pct = maxHp > 0 ? hp / maxHp : 1;
+        rows.push({ label: 'HP', value: `${hp} / ${maxHp}`, bar: pct, barColor: hpColor(pct) });
+        if ('targetHealth' in md) rows.push({ label: 'TargetHP', value: String(md.targetHealth) });
+        if (kind === 'mast') {
+          rows.push({ label: 'Sail',    value: `${String(md.sailState).toUpperCase()}  open:${Number(md.openness ?? 0).toFixed(0)}%` });
+          const fp = Number(md.fiberHealth ?? 0);
+          const fmax = Number(md.fiberMaxHealth ?? 1);
+          rows.push({ label: 'Fiber', value: `${fp} / ${fmax}`, bar: fmax > 0 ? fp / fmax : 1, barColor: hpColor(fmax > 0 ? fp / fmax : 1) });
+          rows.push({ label: 'WindEff', value: `${(Number(md.windEfficiency ?? 0) * 100).toFixed(1)}%` });
+          rows.push({ label: 'Fire',    value: `${Number(md.sailFireIntensity ?? 0).toFixed(0)}%` });
+        } else if (kind === 'cannon') {
+          rows.push({ label: 'Reload',  value: `${Number(md.reloadTime ?? 3).toFixed(2)}s` });
+          rows.push({ label: 'Ammo',    value: `${md.ammunition} / ${md.maxAmmunition}` });
+          rows.push({ label: 'Range',   value: String(md.fireRange ?? '-') });
+        } else if (kind === 'helm' || kind === 'steering-wheel') {
+          rows.push({ label: 'TurnRate', value: `${Number(md.maxTurnRate ?? 0).toFixed(3)} r/s` });
+          rows.push({ label: 'Resp',     value: `${(Number(md.responsiveness ?? 0) * 100).toFixed(0)}%` });
+        } else if (kind === 'plank') {
+          if (md.sectionName) rows.push({ label: 'Section', value: String(md.sectionName) });
+          rows.push({ label: 'Material', value: String(md.material ?? '-') });
+          rows.push({ label: 'Segment', value: String(md.segmentIndex ?? '-') });
+        }
+      }
+
+    } else if (this.hoveredNpc) {
+      const npc = this.hoveredNpc;
+      title = `👤 NPC · ${npc.name}`;
+      accentColor = '#66ccff';
+      rows.push({ label: 'ID',       value: String(npc.id) });
+      rows.push({ label: 'Level',    value: String(npc.npcLevel) });
+      rows.push({ label: 'Company',  value: coName(npc.companyId), color: coColor(npc.companyId) });
+      if (npc.ownerId) rows.push({ label: 'OwnerID', value: String(npc.ownerId) });
+      const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
+      rows.push({ label: 'HP', value: `${npc.health} / ${npc.maxHealth}`, bar: hpPct, barColor: hpColor(hpPct) });
+      const NPC_STATES: Record<number, string> = { 0: 'Idle', 1: 'Moving', 2: 'AtStation', 3: 'Repairing', 4: 'Fighting' };
+      const NPC_ROLES: Record<number, string>  = { 0: 'Sailor', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer' };
+      rows.push({ label: 'State',    value: NPC_STATES[npc.state] ?? String(npc.state) });
+      rows.push({ label: 'Role',     value: NPC_ROLES[npc.role] ?? String(npc.role) });
+      rows.push({ label: 'XP',       value: String(npc.xp) });
+      rows.push({ label: 'StatPts',  value: String(npc.statPoints) });
+      if (npc.shipId) rows.push({ label: 'ShipID', value: String(npc.shipId) });
+      if (npc.assignedWeaponId) rows.push({ label: 'Weapon', value: String(npc.assignedWeaponId) });
+      rows.push({ label: 'World',    value: `(${npc.position.x.toFixed(0)}, ${npc.position.y.toFixed(0)})` });
+
+    } else if (this.hoveredShip) {
+      const ship = this.hoveredShip;
+      title = `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
+      accentColor = '#ff8844';
+      rows.push({ label: 'ID',       value: String(ship.id) });
+      rows.push({ label: 'Company',  value: coName(ship.companyId), color: coColor(ship.companyId) });
+      const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
+      rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });
+      rows.push({ label: 'Rotation', value: fmtRad(ship.rotation) });
+      rows.push({ label: 'AngVel',   value: `${ship.angularVelocity.toFixed(3)} r/s` });
+      rows.push({ label: 'Velocity', value: `(${ship.velocity.x.toFixed(1)}, ${ship.velocity.y.toFixed(1)})` });
+      rows.push({ label: 'Position', value: `(${ship.position.x.toFixed(0)}, ${ship.position.y.toFixed(0)})` });
+      rows.push({ label: 'Modules',  value: String(ship.modules.length) });
+      rows.push({ label: 'Type',     value: String(ship.shipType) });
+      rows.push({ label: 'Ammo',     value: ship.infiniteAmmo ? '∞' : String(ship.cannonAmmo) });
+      if (ship.claimFlag) {
+        const cf = ship.claimFlag;
+        const prog = Math.round((1 - cf.progressMs / cf.totalMs) * 100);
+        rows.push({ label: 'Claimed!', value: `${prog}% Co#${cf.planterCompany}`, color: '#ff4444' });
+      }
+
+    } else if (this._hoveredStructure) {
+      const st = this._hoveredStructure;
+      const STRUCT_NAMES: Record<string, string> = {
+        wooden_floor: 'Floor', workbench: 'Workbench', wall: 'Wall',
+        door_frame: 'DoorFrame', door: 'Door', shipyard: 'Shipyard',
+        wood_ceiling: 'Ceiling', cannon: 'Cannon', flag_fort: 'Flag Fort',
+        claim_flag: 'Claim Flag', company_fortress: 'C.Fortress', wreck: 'Wreck',
+      };
+      title = `🏗 STRUCT · ${STRUCT_NAMES[st.type] ?? st.type}`;
+      accentColor = '#ffcc44';
+      rows.push({ label: 'ID',       value: String(st.id) });
+      rows.push({ label: 'Island',   value: String(st.islandId) });
+      rows.push({ label: 'Company',  value: coName(st.companyId), color: coColor(st.companyId) });
+      rows.push({ label: 'Placer',   value: st.placerName || '—' });
+      const tgtHp = st.targetHp ?? st.maxHp;
+      const hpPct = tgtHp > 0 ? st.hp / tgtHp : 1;
+      rows.push({ label: 'HP',       value: `${st.hp} / ${tgtHp} / ${st.maxHp}`, bar: hpPct, barColor: hpColor(hpPct) });
+      rows.push({ label: 'Position', value: `(${st.x.toFixed(0)}, ${st.y.toFixed(0)})` });
+      if (st.rotation !== undefined) rows.push({ label: 'Rotation', value: `${st.rotation}°` });
+      if (st.claimOrphaned) rows.push({ label: 'Orphaned', value: 'YES', color: '#ff4444' });
+      if (st.claimPhase !== undefined) {
+        const PHASES: Record<number, string> = { 0: 'CLAIMING', 1: 'BUILDING', 2: 'ACTIVE', 3: 'DEMOLISHING' };
+        rows.push({ label: 'Phase',  value: PHASES[st.claimPhase] ?? String(st.claimPhase), color: '#aaddff' });
+        if (st.claimPhaseProgressMs !== undefined && st.claimPhaseTotalMs) {
+          const pp = Math.max(0, 1 - st.claimPhaseProgressMs / st.claimPhaseTotalMs);
+          rows.push({ label: 'PhaseProgress', value: `${(pp * 100).toFixed(1)}%`, bar: pp, barColor: '#44aaff' });
+        }
+      }
+      if (st.claimState !== undefined) {
+        const STATES: Record<number, string> = { 0: 'CONTEST', 1: 'CLAIM_GRACE', 2: 'CLAIMING', 3: 'REV_GRACE', 4: 'REVERSING' };
+        rows.push({ label: 'ClaimState', value: STATES[st.claimState] ?? String(st.claimState), color: '#ffee44' });
+      }
+      if (st.claimProgress !== undefined) rows.push({ label: 'ClaimProg', value: `${(st.claimProgress / 1000).toFixed(1)}s` });
+      if (st.claimLinkedFort !== undefined) rows.push({ label: 'LinkFort',  value: String(st.claimLinkedFort) });
+      if (st.claimSourceEnemy !== undefined) rows.push({ label: 'SrcEnemy', value: String(st.claimSourceEnemy) });
+      if (st.dominators && st.dominators.length > 0) {
+        rows.push({ label: 'Dominators', value: st.dominators.slice(0, 5).join(', ') + (st.dominators.length > 5 ? '…' : ''), color: '#ff8866' });
+      }
+      if (st.fortressComplete !== undefined) rows.push({ label: 'FortComplete', value: st.fortressComplete ? 'YES' : 'NO' });
+      if (st.fortressContested) rows.push({ label: 'Contested', value: 'YES', color: '#ff4444' });
+    } else {
+      return; // nothing hovered
+    }
+
+    const ctx = this.ctx;
+    const cw = this.canvas.width;
+    const ch = this.canvas.height;
+
+    const PAD = 10;
+    const ROW_H = 16;
+    const BAR_H = 4;
+    const W = 290;
+
+    let panelH = PAD + 20; // header
+    panelH += 6;           // separator gap
+    for (const row of rows) {
+      panelH += ROW_H;
+      if (row.bar !== undefined) panelH += BAR_H + 4;
+    }
+    panelH += PAD;
+
+    const px = 12;
+    const py = ch - panelH - 12;
+
+    ctx.save();
+    ctx.globalAlpha = 1;
+
+    // Background panel
+    ctx.fillStyle = 'rgba(0,4,16,0.94)';
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, panelH, 5);
+    ctx.fill();
+    ctx.stroke();
+
+    // Left accent bar
+    ctx.fillStyle = accentColor;
+    ctx.globalAlpha = 0.65;
+    ctx.beginPath();
+    ctx.roundRect(px, py, 3, panelH, [5, 0, 0, 5]);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    let curY = py + PAD;
+
+    // Title
+    ctx.font = 'bold 12px "Courier New", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = accentColor;
+    ctx.fillText(title, px + PAD + 6, curY);
+    curY += 20;
+
+    // Separator
+    ctx.strokeStyle = accentColor + '44';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px + PAD, curY);
+    ctx.lineTo(px + W - PAD, curY);
+    ctx.stroke();
+    curY += 6;
+
+    // Data rows
+    ctx.font = '11px "Courier New", monospace';
+    for (const row of rows) {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = 'rgba(160,180,200,0.72)';
+      ctx.fillText(row.label, px + PAD + 6, curY);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = row.color ?? '#ddeeff';
+      ctx.fillText(row.value, px + W - PAD, curY);
+      curY += ROW_H;
+
+      if (row.bar !== undefined) {
+        const bx = px + PAD + 6;
+        const bw = W - PAD * 2 - 6;
+        ctx.fillStyle = 'rgba(255,255,255,0.07)';
+        ctx.fillRect(bx, curY, bw, BAR_H);
+        ctx.fillStyle = row.barColor ?? '#44cc66';
+        ctx.fillRect(bx, curY, Math.round(bw * Math.max(0, Math.min(1, row.bar))), BAR_H);
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(bx, curY, bw, BAR_H);
+        curY += BAR_H + 4;
+      }
+    }
+
+    ctx.restore();
   }
 
   /**

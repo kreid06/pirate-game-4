@@ -487,13 +487,15 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                      "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_my_territory\"}");
             goto ps_send;
         }
-        /* Find best "enemy" source: closest active non-orphaned structure of a
-         * DIFFERENT company whose claim radius covers (px,py). */
-        float best_enemy_d2 = 0.0f;
+        /* Find best "enemy" source: closest active structure of a DIFFERENT
+         * company whose claim radius covers (px,py).  Orphaned (inactive)
+         * structures are also eligible — a challenger can drop a claim flag
+         * on inactive enemy territory to sweep the whole connected cluster. */
+        float best_enemy_d2  = 0.0f;
+        bool  cf_enemy_inactive = false; /* true when best enemy source is orphaned */
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
-            if (ex->claim_orphaned) continue;
             if (ex->company_id == COMPANY_UNCLAIMED) continue;
             if (ex->company_id == (uint8_t)player->company_id) continue;
             float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
@@ -503,8 +505,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             float d2 = dx*dx + dy*dy;
             if (d2 > cr * cr) continue;
             if (cf_src_enemy == 0 || d2 < best_enemy_d2) {
-                cf_src_enemy  = ex->id;
-                best_enemy_d2 = d2;
+                cf_src_enemy      = ex->id;
+                best_enemy_d2     = d2;
+                cf_enemy_inactive = ex->claim_orphaned;
             }
         }
         if (cf_src_enemy == 0) {
@@ -534,6 +537,23 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                     }
                 }
             }
+        }
+        /* Section: placement point must lie inside an actual slice piece
+         * (lens minus tmp_own) on this island.  Skip this check when the
+         * enemy source is inactive (orphaned) — claim_section_build only
+         * considers non-orphaned structures, so it would always return NULL
+         * for orphaned territory.  The radius test from the source search
+         * above is sufficient in that case. */
+        if (!cf_enemy_inactive) {
+            ClaimSectionGrid *sec = claim_section_build((uint8_t)target_island_id,
+                                                        (uint8_t)player->company_id,
+                                                        px, py);
+            if (!sec) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
+                goto ps_send;
+            }
+            claim_section_free(sec);
         }
         /* Uniqueness: one active claim flag per (my company, enemy company,
          * island). A "contested area" between two companies on the same island
@@ -1561,6 +1581,11 @@ void destroy_placed_structure(uint32_t structure_id) {
              "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
     websocket_server_broadcast(msg);
     log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
+
+    /* Remove this id from every other structure's dominators[] list so it
+     * stops carving territory it previously dominated. Broadcasts updated
+     * `structure_dominators` for each affected structure. */
+    claim_remove_id_from_all_dominators(structure_id);
 
     /* ── Territory claim: fort/company-fortress destroyed → drop island claim ─ */
     if (dtype == STRUCT_FLAG_FORT) {

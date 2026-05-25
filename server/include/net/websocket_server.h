@@ -325,9 +325,10 @@ extern int       claim_flag_count;
 #define FLAG_FORT_CLAIM_MS         60000u /* 1 min ground-claim phase (skipped if placed in friendly active territory) */
 #define FLAG_FORT_CLAIM_GRACE_MS    5000u /* 5 s grace before CLAIMING starts (mirrors claim_flag) */
 /* claim_phase values for STRUCT_FLAG_FORT */
-#define FLAG_FORT_PHASE_CLAIMING 0u  /* 1-min ground claim; semi-transparent, non-damageable, no HP bar */
-#define FLAG_FORT_PHASE_BUILDING 1u  /* heal 10%→30% HP; damageable; flashing claim border on client    */
-#define FLAG_FORT_PHASE_ACTIVE   2u  /* hp ≥ 30%; full territory participation; mirrors fortress_complete */
+#define FLAG_FORT_PHASE_CLAIMING   0u  /* 1-min ground claim; semi-transparent, non-damageable, no HP bar */
+#define FLAG_FORT_PHASE_BUILDING   1u  /* heal 10%→30% HP; damageable; flashing claim border on client    */
+#define FLAG_FORT_PHASE_ACTIVE     2u  /* hp ≥ 30%; full territory participation; mirrors fortress_complete */
+#define FLAG_FORT_PHASE_DEMOLISHING 3u  /* captured: HP draining 10%/s to 0; then CLAIMING countdown destroys it */
 
 /* Structure repair (any damaged structure with target_hp < max_hp).
  * Full-restore (target_hp == 0 → max_hp) takes STRUCTURE_REPAIR_FULL_MS;

@@ -9,6 +9,7 @@
 #include "util/log.h"
 #include "core/rng.h"
 #include "sim/world_save.h"
+#include "net/claim.h"
 
 volatile int g_server_shutdown_requested = 0;
 volatile int g_server_restart_requested  = 0;
@@ -139,6 +140,9 @@ int server_init(struct ServerContext** out_ctx) {
             log_info("💾 Found save file — loading world state from '%s'",
                      WORLD_SAVE_DEFAULT_PATH);
             world_load(WORLD_SAVE_DEFAULT_PATH);
+            /* Scrub stale dominator ids that don't resolve to active loaded
+             * structures (older save files, half-completed captures, etc.). */
+            claim_dominators_sanity_sweep();
         } else {
             log_info("💾 No save file found at '%s' — starting fresh world",
                      WORLD_SAVE_DEFAULT_PATH);
