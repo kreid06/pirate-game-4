@@ -3734,7 +3734,21 @@ export class ClientApplication {
       // Feed radial menu mouse position (screen space)
       this._radialMenu.updateMouse(screenX, screenY);
     });
-    
+
+    // Close the radial menu immediately on any mouse click (left or right) so
+    // it can never remain accidentally open after the player clicks away.
+    this.canvas.addEventListener('mousedown', (event) => {
+      if (this._radialMenu.isOpen && (event.button === 0 || event.button === 2)) {
+        this._radialMenu.close();
+        // Cancel the hold timer too if still counting down
+        if (this._ladderHoldTimer !== null) {
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+        }
+      }
+    });
+
     console.log('🖱️ Mouse tracking initialized for directional movement');
   }
   
