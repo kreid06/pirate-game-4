@@ -109,6 +109,11 @@ export class ClientApplication {
    *  given structure id. Used to grey out the Repair option during the 30s
    *  post-damage cooldown enforced by the server. */
   private _structureLastDamagedAt = new Map<number, number>();
+  // Player join/leave notification tracking
+  private _knownPlayerIds = new Map<number, string>(); // playerId → name
+  private _playerTrackingReady = false;
+  // Claim flag state tracking for island proximity notifications
+  private _claimFlagStates = new Map<number, number>(); // structId → last state
   // Optimistic mount state — held from module_interact_success until the server's
   // world-state echo confirms isMounted=true for the same module.
   private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2; mountWorldPos?: Vec2 } | null = null;
@@ -2145,6 +2150,22 @@ export class ClientApplication {
       };
       this.networkManager.onClaimFlagProgress = (structId, progressMs, contested, targetsFortress, state, graceMs) => {
         this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested, targetsFortress, state, graceMs);
+        // Notify on claim-state transitions if the player is near the affected island
+        const prevState = this._claimFlagStates.get(structId);
+        if (state !== undefined) this._claimFlagStates.set(structId, state);
+        if (prevState !== undefined && prevState !== state) {
+          const struct = this.renderSystem.getPlacedStructureById?.(structId);
+          const islandId = struct?.islandId ?? 0;
+          if (islandId && this._isPlayerNearIsland(islandId)) {
+            if (state === 2) {
+              this.renderSystem.showAnnouncement(`🚩 Claim advancing on island ${islandId}`, 'info', 3.0);
+            } else if (state === 0) {
+              this.renderSystem.showAnnouncement(`⚔️ Claim contested on island ${islandId}`, 'info', 3.0);
+            } else if (state === 4) {
+              this.renderSystem.showAnnouncement(`↺ Claim reversing on island ${islandId}`, 'info', 3.0);
+            }
+          }
+        }
       };
       this.networkManager.onTerritoryFlipped = (_flagId, orphanedId, oldCompanyId, newCompanyId, islandId) => {
         // Immediate visual flip: mark the captured source structure as orphaned so its
@@ -2218,6 +2239,9 @@ export class ClientApplication {
       };
       this.networkManager.onDoorToggled = (id, open) => {
         this.renderSystem.updateStructureDoorOpen(id, open);
+      };
+      this.networkManager.onDoorLockToggled = (id, locked, open) => {
+        this.renderSystem.updateStructureDoorLocked(id, locked, open);
       };
       this.networkManager.onCraftingOpen = (structureId, structureType) => {
         if (structureType === 'shipyard') {
@@ -3056,7 +3080,30 @@ export class ClientApplication {
 
     // Re-evaluate build mode whenever world state arrives (inventory may have changed)
     this.checkBuildMode();
-    
+
+    // Player join/leave notifications — compare current player list to previous snapshot
+    {
+      const myId = this.networkManager.getAssignedPlayerId();
+      const currentPlayers = new Map(worldState.players.map(p => [p.id, p.name || `Player_${p.id}`]));
+      if (this._playerTrackingReady) {
+        for (const [id, name] of currentPlayers) {
+          if (id !== myId && !this._knownPlayerIds.has(id)) {
+            this.renderSystem.showAnnouncement(`👤 ${name} joined`, 'info', 3.0);
+          }
+        }
+        for (const [id, name] of this._knownPlayerIds) {
+          if (id !== myId && !currentPlayers.has(id)) {
+            this.renderSystem.showAnnouncement(`👤 ${name} left`, 'info', 3.0);
+          }
+        }
+      }
+      this._knownPlayerIds = currentPlayers;
+      // Only start tracking after we have confirmed our own identity in the player list
+      if (!this._playerTrackingReady && myId !== null && currentPlayers.has(myId)) {
+        this._playerTrackingReady = true;
+      }
+    }
+
     // Fallback: if ack never arrived but 10s passed since connect, force-advance.
     if (this.state === ClientState.CONNECTED && !this._playerAckReceived) {
       const timedOut = this._loadingConnectedAt > 0
@@ -3110,6 +3157,23 @@ export class ClientApplication {
       if (PolygonUtils.pointInPolygon(Vec2.from(localX, localY), ship.hull)) return ship;
     }
     return null;
+  }
+
+  /**
+   * Returns true if the local player is within notification range of the given island.
+   * Used to filter island-specific claim notifications to only the player's current area.
+   */
+  private _isPlayerNearIsland(islandId: number): boolean {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState;
+    const myId = this.networkManager.getAssignedPlayerId();
+    if (!ws || myId === null) return false;
+    const player = ws.players.find(p => p.id === myId);
+    if (!player) return false;
+    const island = this.renderSystem.getIslands().find(i => i.id === islandId);
+    if (!island) return false;
+    const dx = island.x - player.position.x;
+    const dy = island.y - player.position.y;
+    return (dx * dx + dy * dy) < 3000 * 3000; // 3000-unit proximity threshold
   }
 
   private exitAllBuildModes(): void {
@@ -4077,7 +4141,7 @@ export class ClientApplication {
                   this._radialMenu.open(mp2.x, mp2.y, dfOpts);
                 }, 600);
               } else if (struct.type === 'door') {
-                // Door: tap E = toggle open/closed; hold E = radial with Demolish
+                // Door: tap E = toggle open/closed; hold E = radial with Demolish + Lock/Unlock
                 this._ladderHoldTimer = setTimeout(() => {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
@@ -4085,8 +4149,11 @@ export class ClientApplication {
                   const doorOpts: RadialOption[] = [
                     { id: 'use', label: struct.doorOpen ? 'Close Door' : 'Open Door' },
                   ];
-                  if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
-                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) doorOpts.push(r); }
+                  if (isOwnCompany) {
+                    doorOpts.push({ id: struct.doorLocked ? 'unlock_door' : 'lock_door', label: struct.doorLocked ? '🔓 Unlock Door' : '🔒 Lock Door' });
+                    doorOpts.push({ id: 'demolish', label: 'Demolish' });
+                    const r = _buildRepairOption(struct); if (r) doorOpts.push(r);
+                  }
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
               } else if (struct.type === 'shipyard') {
@@ -4469,8 +4536,24 @@ export class ClientApplication {
             // Also request latest state from server to keep in sync
             doUse();
           } else if (structType === 'door') {
-            // Tap E on door panel = toggle open/closed
-            doUse();
+            // Tap E on door: if locked by another company, flash cancel with feedback
+            if (structId !== null) {
+              const doorStruct = this.renderSystem.getHoveredStructure(500);
+              const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+              const myId = this.networkManager.getAssignedPlayerId();
+              const myPlayer = ws && myId !== null ? ws.players.find(p => p.id === myId) ?? null : null;
+              const myComp = myPlayer?.companyId ?? 0;
+              const doorOwnComp = doorStruct?.companyId ?? 0;
+              const isOwnDoor = doorOwnComp !== 0 && doorOwnComp === myComp;
+              if (doorStruct?.doorLocked && !isOwnDoor) {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                this.renderSystem.showAnnouncement('🔒 This door is locked.', 'info', 1.5);
+              } else {
+                doUse();
+              }
+            } else {
+              doUse();
+            }
           } else if (structType === 'wreck' && structId !== null) {
             // Tap E on wreck = open salvage menu (loot count from render system)
             const wreckStruct = this.renderSystem.getHoveredStructure(500);
@@ -4485,6 +4568,13 @@ export class ClientApplication {
           if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
           else if (selected === 'repair')   doRepair();
+          else if (selected === 'lock_door' || selected === 'unlock_door') {
+            if (structId !== null) {
+              const locked = selected === 'lock_door';
+              this.networkManager.sendStructureLock(structId, locked);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            }
+          }
           else if (selected === 'release' && structId !== null) {
             this.networkManager.sendShipyardAction(structId, 'release_ship');
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());

@@ -2401,7 +2401,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                           "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s%s%s%s%s}",
+                                                          ",\"rotation\":%.2f%s%s%s%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -2413,6 +2413,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           placed_structures[si].placer_name,
                                                           placed_structures[si].rotation,
                                                           hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
+                                                          hs_is_door ? (placed_structures[si].door_locked ? ",\"locked\":true" : ",\"locked\":false") : "",
                                                           hs_sy_extra,
                                                           hs_cannon_extra,
                                                           hs_claim_extra,
@@ -2767,6 +2768,14 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_repair_structure(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "structure_lock") == 0) {
+                            // Radial lock/unlock: toggle door locked state (own company only)
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_door_lock(player, client, payload);
                             }
                             handled = true;
 

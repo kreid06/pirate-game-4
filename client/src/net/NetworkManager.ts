@@ -683,6 +683,8 @@ export class NetworkManager {
   public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
   public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
+  /** Fired when a door's lock state is changed. Also includes updated open state. */
+  public onDoorLockToggled: ((id: number, locked: boolean, open: boolean) => void) | null = null;
 
   /** Fired when the server responds to a player command. */
   public onCommandResponse: ((text: string, success: boolean) => void) | null = null;
@@ -1424,6 +1426,12 @@ export class NetworkManager {
   sendStructureInteract(structureId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.STRUCTURE_INTERACT, timestamp: Date.now(), structure_id: structureId });
+  }
+
+  /** Ask the server to lock or unlock a door (own company only). */
+  sendStructureLock(structureId: number, locked: boolean): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'structure_lock', timestamp: Date.now(), structure_id: structureId, locked }));
   }
 
   sendDemolishStructure(structureId: number): void {
@@ -2638,6 +2646,7 @@ export class NetworkManager {
           maxHp:     s.max_hp ?? 100,
           placerName: s.placer_name ?? '',
           doorOpen:  s.open ?? false,
+          doorLocked: s.locked === true,
           rotation:  s.rotation ?? 0,
           cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
           claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
@@ -2689,6 +2698,7 @@ export class NetworkManager {
           maxHp:     message.max_hp ?? 100,
           placerName: message.placer_name ?? '',
           doorOpen:  message.open ?? false,
+          doorLocked: message.locked === true,
           rotation:  message.rotation ?? 0,
           cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
           claimProgress:        typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
@@ -2845,6 +2855,10 @@ export class NetworkManager {
 
       case 'door_toggled':
         this.onDoorToggled?.(message.id ?? 0, message.open === true);
+        break;
+
+      case 'door_lock_toggled':
+        this.onDoorLockToggled?.(message.id ?? 0, message.locked === true, message.open === true);
         break;
 
       case 'structure_demolished':

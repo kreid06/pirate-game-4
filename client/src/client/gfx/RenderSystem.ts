@@ -2179,6 +2179,15 @@ export class RenderSystem {
     }
   }
 
+  updateStructureDoorLocked(id: number, locked: boolean, open: boolean): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s && s.type === 'door') {
+      s.doorLocked = locked;
+      s.doorOpen   = open;
+      this._rebuildWallSegs();
+    }
+  }
+
   /** Update ship construction state after a shipyard_state broadcast. */
   updateShipyardConstruction(id: number, phase: ConstructionPhase, modulesPlaced: string[], scaffoldedShipId?: number): void {
     const s = this.placedStructures.find(p => p.id === id);

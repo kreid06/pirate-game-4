@@ -35,6 +35,12 @@ bool apply_structure_damage(PlacedStructure *s, uint16_t dmg);
 void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
 
 /**
+ * handle_door_lock: player locks or unlocks a door they own.
+ * Only the owning company can lock/unlock. Broadcasts door_lock_toggled on success.
+ */
+void handle_door_lock(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
+
+/**
  * Per-tick advance of any in-progress structure repairs. Raises hp and
  * target_hp at a constant rate (STRUCTURE_REPAIR_FULL_MS for one max_hp of
  * damage) and broadcasts structure_hp_changed when integer values change.
