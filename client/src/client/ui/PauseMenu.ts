@@ -73,6 +73,12 @@ export class PauseMenu {
     if (!guest) this.hideConvertForm();
   }
 
+  /** Update the connected players counter shown at the bottom of the menu. */
+  setPlayerCount(count: number): void {
+    const el = this.container.querySelector<HTMLElement>('#pm-players-count');
+    if (el) el.textContent = `${count} player${count === 1 ? '' : 's'} online`;
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────────────────────
 
   open(): void {
@@ -116,6 +122,11 @@ export class PauseMenu {
           <button class="pm-btn" id="pm-settings">Settings</button>
           <button class="pm-btn pm-guest-only" id="pm-create-account" style="display:none">Create Account</button>
           <button class="pm-btn" id="pm-logout">Logout</button>
+
+          <div class="pm-players-row" id="pm-players-row">
+            <span class="pm-players-dot"></span>
+            <span id="pm-players-count">— players online</span>
+          </div>
 
           <div id="pm-convert-form" class="pm-convert-form" style="display:none">
             <div class="pm-convert-title">Save your progress</div>
@@ -634,6 +645,23 @@ export class PauseMenu {
         font-size: 12px;
         padding: 8px 14px;
         min-width: 80px;
+      }
+      #pause-menu .pm-players-row {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12px;
+        color: rgba(255,255,255,0.38);
+        letter-spacing: 0.3px;
+        margin-top: -4px;
+      }
+      #pause-menu .pm-players-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: #4cbb6a;
+        box-shadow: 0 0 5px rgba(76,187,106,0.7);
+        flex-shrink: 0;
       }
     `;
     return style;

@@ -239,7 +239,7 @@ export class CompanyMenu {
     cursor = this._drawHeader(ctx, px, cursor, playerCompany);
     cursor = this._drawFactionBadge(ctx, px, cursor, playerCompany, player?.id ?? null, worldState.companies ?? []);
     cursor = this._drawCrewSection(ctx, px, cursor, worldState.npcs, playerShipId);
-    cursor = this._drawFleetSection(ctx, px, cursor, worldState.ships, playerCompany, playerShipId);
+    cursor = this._drawFleetSection(ctx, px, cursor, worldState.ships, playerCompany, playerShipId, worldState.companies ?? []);
     this._drawFooter(ctx, px, py, worldState.npcs, worldState.ships, playerCompany);
 
     ctx.restore();
@@ -563,6 +563,7 @@ export class CompanyMenu {
     ships: Ship[],
     playerCompany: number,
     playerShipId: number,
+    companies: Company[] = [],
   ): number {
     // Partition ships into ally (friendly to player) and enemy/neutral
     const ally    = ships.filter(s => s.companyId === playerCompany);
@@ -601,7 +602,8 @@ export class CompanyMenu {
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isYours ? GOLD : TEXT_HEAD;
         ctx.fillText(
-          `Ship #${ship.id}   ${(COMPANY_NAMES[ship.companyId] ?? 'Unknown').padEnd(9)}${isYours ? '  ◀ yours' : ''}`,
+          `Ship #${ship.id}   ${(COMPANY_NAMES[ship.companyId] ?? companies.find(c => c.id === ship.companyId)?.name ?? 'Unknown').padEnd(9)}${isYours ? '  ◀ yours' : ''}`,
+
           px + PAD + 20, py + 4
         );
 

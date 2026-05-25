@@ -2934,6 +2934,9 @@ export class ClientApplication {
     }
     this.authoritativeWorldState = worldState;
 
+    // Keep pause menu player count up to date
+    this.pauseMenu.setPlayerCount(worldState.players.length);
+
     // Detect respawn: local player health transitions from ≤0 to >0 → flash white again
     const _pid = this.networkManager.getAssignedPlayerId();
     if (_pid !== null) {
@@ -4117,6 +4120,11 @@ export class ClientApplication {
                 this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
                 break;
               }
+              // Non-owners have nothing to interact with on these demolish-only types
+              if (!isOwnCompany && (struct.type === 'wall' || struct.type === 'door_frame' || struct.type === 'wood_ceiling')) {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                break;
+              }
 
               this._interactKind = 'structure';
               this._hoveredStructureId = struct.id;
@@ -4210,24 +4218,26 @@ export class ClientApplication {
                   this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
                 }, 300);
               } else {
-                this._ladderHoldTimer = setTimeout(() => {
-                  this._ladderHoldTimer = null;
-                  this.renderSystem.stopLadderHoldRing();
-                  const mp2 = this.inputManager.getMouseScreenPosition();
-                  const _demolishLabel =
-                    struct.type === 'wood_ceiling' ? 'Demolish Ceiling'
-                    : struct.type === 'wall'        ? 'Demolish Wall'
-                    : struct.type === 'door_frame'  ? 'Demolish Door Frame'
-                    : struct.type === 'door'        ? 'Demolish Door'
-                    : struct.type === 'workbench'   ? 'Demolish Workbench'
-                    : struct.type === 'shipyard'    ? 'Demolish Shipyard'
-                    : 'Demolish Floor';
-                  const defOpts: RadialOption[] = [
-                    { id: 'demolish', label: _demolishLabel },
-                  ];
-                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) defOpts.push(r); }
-                  this._radialMenu.open(mp2.x, mp2.y, defOpts);
-                }, 600);
+                if (isOwnCompany) {
+                  this._ladderHoldTimer = setTimeout(() => {
+                    this._ladderHoldTimer = null;
+                    this.renderSystem.stopLadderHoldRing();
+                    const mp2 = this.inputManager.getMouseScreenPosition();
+                    const _demolishLabel =
+                      struct.type === 'wood_ceiling' ? 'Demolish Ceiling'
+                      : struct.type === 'wall'        ? 'Demolish Wall'
+                      : struct.type === 'door_frame'  ? 'Demolish Door Frame'
+                      : struct.type === 'door'        ? 'Demolish Door'
+                      : struct.type === 'workbench'   ? 'Demolish Workbench'
+                      : struct.type === 'shipyard'    ? 'Demolish Shipyard'
+                      : 'Demolish Floor';
+                    const defOpts: RadialOption[] = [
+                      { id: 'demolish', label: _demolishLabel },
+                    ];
+                    const r = _buildRepairOption(struct); if (r) defOpts.push(r);
+                    this._radialMenu.open(mp2.x, mp2.y, defOpts);
+                  }, 600);
+                }
               }
               break;
             }
