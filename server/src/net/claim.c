@@ -45,6 +45,32 @@
 IslandClaim island_claims[MAX_ISLAND_CLAIMS];
 int         island_claim_count = 0;
 
+/* ── Claim-flag section cache ────────────────────────────────────────────────
+ * One ClaimSectionGrid per claim flag (indexed by structure ID).  Built lazily
+ * on first use; invalidated (freed) on any structural change that could alter
+ * the section geometry (placement, destruction, or a capture that rewrites
+ * dominator lists).  Player-presence detection uses `claim_section_contains`
+ * instead of the simpler two-disc intersection so the contest area matches the
+ * full connected section the flag was placed into.
+ */
+static ClaimSectionGrid *cf_section_cache[MAX_PLACED_STRUCTURES]; /* indexed by s->id */
+
+void claim_invalidate_cf_sections(void) {
+    for (int i = 0; i < MAX_PLACED_STRUCTURES; i++) {
+        if (cf_section_cache[i]) {
+            claim_section_free(cf_section_cache[i]);
+            cf_section_cache[i] = NULL;
+        }
+    }
+}
+
+static void cf_section_release(uint16_t struct_id) {
+    if (struct_id < MAX_PLACED_STRUCTURES && cf_section_cache[struct_id]) {
+        claim_section_free(cf_section_cache[struct_id]);
+        cf_section_cache[struct_id] = NULL;
+    }
+}
+
 /* ── Helpers ─────────────────────────────────────────────────────────────── */
 
 /* Forward declaration — defined later in this file. */
@@ -1012,6 +1038,7 @@ void claim_tick(uint32_t delta_ms) {
             src_mine->claim_orphaned ||
             src_mine->company_id  != s->company_id ||
             src_enemy->company_id == s->company_id) {
+            cf_section_release(s->id);
             s->active = false;
             char dmsg[128];
             snprintf(dmsg, sizeof(dmsg),
@@ -1028,15 +1055,37 @@ void claim_tick(uint32_t delta_ms) {
         float rb = (src_enemy->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
                  : (src_enemy->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
                                                                  : CLAIM_RADIUS_DEFAULT;
+        /* ── Resolve (or build) the section grid for this flag ──────────── */
+        /* The section is the connected component of (lens_union ∖ tmp_own)
+         * containing the flag's position.  It is the canonical "contest area"
+         * and is larger than the single src_mine∩src_enemy lens when multiple
+         * overlapping pairs exist on the island.  Built lazily; invalidated by
+         * claim_invalidate_cf_sections() whenever structures change. */
+        if (s->id < MAX_PLACED_STRUCTURES && !cf_section_cache[s->id]) {
+            cf_section_cache[s->id] = claim_section_build(
+                s->island_id, s->company_id, s->x, s->y);
+        }
+        const ClaimSectionGrid *sec = (s->id < MAX_PLACED_STRUCTURES)
+                                      ? cf_section_cache[s->id] : NULL;
+
         bool ally_present  = false;
         bool enemy_present = false;
         for (uint32_t pi = 0; pi < MAX_PLAYERS; pi++) {
             WebSocketPlayer *p = &players[pi];
             if (!p->active || p->player_id == 0) continue;
-            float dxa = p->x - src_mine->x,  dya = p->y - src_mine->y;
-            float dxb = p->x - src_enemy->x, dyb = p->y - src_enemy->y;
-            if (dxa*dxa + dya*dya > ra*ra) continue;
-            if (dxb*dxb + dyb*dyb > rb*rb) continue;
+            /* Player must be inside the section (full connected contest area).
+             * Fall back to simple two-disc intersection if the section grid
+             * could not be built (e.g. anchor structures vanished mid-tick). */
+            bool in_area;
+            if (sec) {
+                in_area = claim_section_contains(sec, p->x, p->y);
+            } else {
+                float dxa = p->x - src_mine->x,  dya = p->y - src_mine->y;
+                float dxb = p->x - src_enemy->x, dyb = p->y - src_enemy->y;
+                in_area = (dxa*dxa + dya*dya <= ra*ra)
+                       && (dxb*dxb + dyb*dyb <= rb*rb);
+            }
+            if (!in_area) continue;
             /* Player is inside the contested area. Ally = same company; non-ally =
              * different company (incl. unaffiliated). TODO: factor in alliances. */
             if ((uint8_t)p->company_id == s->company_id) ally_present  = true;
@@ -1284,6 +1333,8 @@ void claim_tick(uint32_t delta_ms) {
 
                 log_info("🏴 Claim Flag #%u: inactive sweep → %d structure(s) transferred (co %u→%u, island %u)",
                          s->id, converted_n, old_co, s->company_id, isl);
+                claim_invalidate_cf_sections();
+                cf_section_release(s->id);
                 s->active = false;
                 char dmsg_ict[128];
                 snprintf(dmsg_ict, sizeof(dmsg_ict),
@@ -1693,6 +1744,11 @@ void claim_tick(uint32_t delta_ms) {
             log_info("🏴 Claim Flag #%u: pair sweep done (%d mine × %d enemy anchors), graphs rebuilt",
                      s->id, mine_an, enmy_an);
 
+            /* Invalidate all section caches — the capture rewrote dominator
+             * lists and graph state, so every other claim flag's section may
+             * have changed. */
+            claim_invalidate_cf_sections();
+
             /* Consume the claim flag */
             s->active = false;
             char dmsg2[128];
@@ -1703,6 +1759,7 @@ void claim_tick(uint32_t delta_ms) {
         } else if (do_destroy) {
             /* Reverse timer maxed — flag defeated. */
             log_info("🏴 Claim Flag #%u destroyed (timer reversed to full)", s->id);
+            cf_section_release(s->id);
             s->active = false;
             char dmsg[128];
             snprintf(dmsg, sizeof(dmsg),

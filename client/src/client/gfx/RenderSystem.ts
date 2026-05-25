@@ -168,7 +168,35 @@ export class RenderSystem {
    * null entries mean the bitmap needs to be redrawn.
    */
   private _claimOverlayCache: Map<string, { connectedIds: Set<number>; inactiveIds: Set<number> }> = new Map();
-  private _claimOverlayDirty = true;
+  // Backing state for _claimOverlayDirty getter/setter
+  private _claimOverlayDirtyState = true;
+  /** Offscreen canvas cache for the territory overlay rasterisation. */
+  private _claimOverlayBitmapValid = false;
+  private _claimOverlayCachedCanvas: OffscreenCanvas | null = null;
+  private _claimOverlayCachedCamX = 0;
+  private _claimOverlayCachedCamY = 0;
+  private _claimOverlayCachedZoom = 0;
+  /** Extra pixels on each side of the viewport that the cached overlay canvas
+   * covers, so camera pan can be handled by a pixel-offset drawImage instead
+   * of a full re-rasterisation.  Re-render triggers when drift > 60% of this. */
+  private readonly _claimOverlayMargin = 700;
+  private get _claimOverlayDirty(): boolean { return this._claimOverlayDirtyState; }
+  private set _claimOverlayDirty(v: boolean) {
+    this._claimOverlayDirtyState = v;
+    if (v) this._claimOverlayBitmapValid = false;
+  }
+  /**
+   * Cache of world-space (camera-independent) subord/dominated structure ID
+   * sets per (islandId, companyId).  Computed once on structural change and
+   * reused every frame while Alt is held, avoiding the O(N²) filter loops.
+   * Keyed by `${islId}_${cid}`.  Cleared alongside _claimOverlayCache.
+   */
+  private _miInfosCache: Map<string, {
+    activeSubordIds:    Map<number, number[]>;
+    activeDomIds:       Map<number, number[]>;
+    inactiveSubordIds:  Map<number, number[]>;
+    inactiveDomIds:     Map<number, number[]>;
+  }> = new Map();
   /**
    * Pool of reusable full-screen OffscreenCanvas scratch buffers, keyed by
    * a stable slot name. Avoids per-frame allocation of dozens of large RGBA
@@ -9744,11 +9772,44 @@ export class RenderSystem {
    * Called each frame when Alt is held.
    */
   private drawTerritoryOverlay(camera: Camera): void {
-    const ctx = this.ctx;
-    const zoom = camera.getState().zoom;
-    const CLAIM_RADIUS_DEFAULT = 400;  // server CLAIM_RADIUS_DEFAULT
-    const CLAIM_RADIUS_FORT    = 600;  // server CLAIM_RADIUS_FLAG_FORT / COMPANY_FORT
-    const myCompany = this._localCompanyId;
+    const camState = camera.getState();
+    const zoom = camState.zoom;
+    const camX = camState.position.x;
+    const camY = camState.position.y;
+    const margin = this._claimOverlayMargin;
+
+    // ── Invalidate BFS/miInfos caches on structural change ────────────────
+    if (this._claimOverlayDirty) {
+      this._claimOverlayCache.clear();
+      this._miInfosCache.clear();
+      this._claimOverlayDirty = false;
+      // _claimOverlayBitmapValid already false (set by the dirty setter)
+    }
+    if (zoom !== this._claimOverlayCachedZoom) this._claimOverlayBitmapValid = false;
+
+    // ── Render overlay into an oversized offscreen canvas once per change ─
+    // Camera pan is handled each frame by a single offset drawImage; only
+    // zoom changes or structural events trigger a full re-rasterisation.
+    if (!this._claimOverlayBitmapValid) {
+      const vpW = this.ctx.canvas.width;
+      const vpH = this.ctx.canvas.height;
+      const cw = vpW + 2 * margin;
+      const ch = vpH + 2 * margin;
+      if (!this._claimOverlayCachedCanvas
+          || this._claimOverlayCachedCanvas.width !== cw
+          || this._claimOverlayCachedCanvas.height !== ch) {
+        this._claimOverlayCachedCanvas = new OffscreenCanvas(cw, ch);
+      }
+      const offCtx = this._claimOverlayCachedCanvas.getContext('2d')!;
+      offCtx.clearRect(0, 0, cw, ch);
+      offCtx.save();
+      // Shift so worldToScreen coords (centred on vpW/2, vpH/2) land at
+      // the centre of the oversized canvas (vpW/2+margin, vpH/2+margin).
+      offCtx.translate(margin, margin);
+      const ctx = offCtx as unknown as CanvasRenderingContext2D;
+      const CLAIM_RADIUS_DEFAULT = 400;  // server CLAIM_RADIUS_DEFAULT
+      const CLAIM_RADIUS_FORT    = 600;  // server CLAIM_RADIUS_FLAG_FORT / COMPANY_FORT
+      const myCompany = this._localCompanyId;
 
     // ── Pass 1: claimed-island territory fill + fort rings + labels ──────────
     for (const isl of this.islands) {
@@ -9815,15 +9876,8 @@ export class RenderSystem {
     // Other companies get a ring-only treatment at reduced opacity so players
     // can read the full territorial picture after leaving or when spectating.
 
-    if (this._claimOverlayDirty) {
-      this._claimOverlayCache.clear();
-      this._claimOverlayDirty = false;
-    }
-
-    // Per-frame id → PlacedStructure index. Replaces O(N) Array.find calls
-    // inside the hot per-Mi loops below (lookupStruct, Pass 3 dominator
-    // resolution), which previously made overlay rendering O(N²) per
-    // company per island per wrap-offset.
+    // Per-overlay-render id → PlacedStructure lookup. Built once per re-rasterisation
+    // (not per frame) inside the !_claimOverlayBitmapValid block above.
     const structById: Map<number, PlacedStructure> = new Map();
     for (const ps of this.placedStructures) structById.set(ps.id, ps);
 
@@ -9833,7 +9887,16 @@ export class RenderSystem {
       if (ps.companyId && ps.companyId !== 0) allCompanyIds.add(ps.companyId);
     }
     if (myCompany !== 0) allCompanyIds.add(myCompany);
-    if (allCompanyIds.size === 0) return;
+    if (allCompanyIds.size === 0) {
+      // Nothing to draw — restore, mark valid, and blit the empty canvas.
+      offCtx.restore();
+      this._claimOverlayCachedCamX = camX;
+      this._claimOverlayCachedCamY = camY;
+      this._claimOverlayCachedZoom = zoom;
+      this._claimOverlayBitmapValid = true;
+      this.ctx.drawImage(this._claimOverlayCachedCanvas!, -margin, -margin);
+      return;
+    }
 
     const cvs = ctx.canvas;
 
@@ -9995,6 +10058,89 @@ export class RenderSystem {
         islandClaimsByCo.set(cid, resolveCompanyClaim(isl.id, cid, islClaim));
       }
 
+      // ── miInfos cache: world-space subord/dominated ID sets ─────────────
+      // Computed once per structural change (same lifecycle as BFS cache).
+      // The subord/dominated filter ("owner area" check) is camera-independent
+      // — it only depends on structure positions/radii and dominator lists —
+      // so results are valid across all zoom levels and pan positions.
+      for (const cid of allCompanyIds) {
+        const miKey = `${isl.id}_${cid}`;
+        if (this._miInfosCache.has(miKey)) continue;
+
+        const myClaim = islandClaimsByCo.get(cid)!;
+        const ownWorld     = myClaim.worldCircles; // [{id,x,y,r}] — active
+        const ownInactive  = myClaim.inactiveList.map(
+          ps => ({ id: ps.id, x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT as number })
+        );
+        const allOwn = [...ownWorld, ...ownInactive];
+
+        // All enemy world circles for this company on this island.
+        const enemyWorldById = new Map<number, { id: number; x: number; y: number; r: number }>();
+        for (const [otherCid, otherClaim] of islandClaimsByCo) {
+          if (otherCid === cid) continue;
+          for (const wc of otherClaim.worldCircles) enemyWorldById.set(wc.id, wc);
+        }
+
+        const activeSubordIds:   Map<number, number[]> = new Map();
+        const activeDomIds:      Map<number, number[]> = new Map();
+        const inactiveSubordIds: Map<number, number[]> = new Map();
+        const inactiveDomIds:    Map<number, number[]> = new Map();
+
+        const computeSets = (
+          circles: Array<{ id: number; x: number; y: number; r: number }>,
+          subordOut: Map<number, number[]>,
+          domOut:    Map<number, number[]>
+        ): void => {
+          for (const mi of circles) {
+            const myStruct = mi.id > 0 ? structById.get(mi.id) : undefined;
+            const subord: number[] = [];
+            const dominated: number[] = [];
+
+            if (myStruct?.dominators) {
+              for (const eid of myStruct.dominators) {
+                const ec = enemyWorldById.get(eid);
+                if (!ec) continue;
+                const eStruct = structById.get(ec.id);
+                // Drop Ej when Mi.centre lies inside an allied M2 that also
+                // dominates Ej (M2 is the "owner" of this area w.r.t. Ej).
+                const ownedByAlly = !!eStruct?.dominators && allOwn.some(m2 => {
+                  if (m2.id === mi.id || m2.r <= 0) return false;
+                  if (!eStruct.dominators!.includes(m2.id)) return false;
+                  const dx = mi.x - m2.x, dy = mi.y - m2.y;
+                  return dx * dx + dy * dy <= m2.r * m2.r;
+                });
+                if (!ownedByAlly) subord.push(eid);
+              }
+            }
+
+            if (mi.id > 0) {
+              for (const ec of enemyWorldById.values()) {
+                if (ec.id <= 0) continue;
+                const eStruct = structById.get(ec.id);
+                if (!eStruct?.dominators?.includes(mi.id)) continue;
+                const coveredByAlly = allOwn.some(m2 => {
+                  if (m2.id === mi.id || m2.r <= 0) return false;
+                  if (!eStruct.dominators!.includes(m2.id)) return false;
+                  const dx = mi.x - m2.x, dy = mi.y - m2.y;
+                  return dx * dx + dy * dy <= m2.r * m2.r;
+                });
+                if (!coveredByAlly) dominated.push(ec.id);
+              }
+            }
+
+            subordOut.set(mi.id, subord);
+            domOut.set(mi.id, dominated);
+          }
+        };
+
+        computeSets(ownWorld,    activeSubordIds,   activeDomIds);
+        computeSets(ownInactive, inactiveSubordIds, inactiveDomIds);
+
+        this._miInfosCache.set(miKey, {
+          activeSubordIds, activeDomIds, inactiveSubordIds, inactiveDomIds,
+        });
+      }
+
       for (const cid of allCompanyIds) {
         const isOwn = cid === myCompany;
         const myClaim = islandClaimsByCo.get(cid)!;
@@ -10017,6 +10163,9 @@ export class RenderSystem {
             const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
             screenPts.push({ id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom });
           }
+
+          // Cache is guaranteed to be populated above for every cid on this island.
+          const _cachedMi = this._miInfosCache.get(`${isl.id}_${cid}`)!;
 
           if (screenPts.length > 0) {
             const borderWidth = Math.max(8, 10 * zoom);
@@ -10052,30 +10201,23 @@ export class RenderSystem {
             const lookupStruct = (id: number): PlacedStructure | undefined =>
               id > 0 ? structById.get(id) : undefined;
 
+            // ── miInfos: resolve subord/dominated from world-space cache ──
+            // The filter sets (which enemies are in subord/dominated for each
+            // Mi) are camera-independent and were computed once on structural
+            // change. Here we just map the cached IDs to live screen-space
+            // enemy circles.
             type MiInfo = {
               mi: { id: number; x: number; y: number; r: number };
               subord:    EnemyCircle[];
               dominated: EnemyCircle[];
             };
-            const miInfos: MiInfo[] = screenPts.map(mi => {
-              const myStruct = lookupStruct(mi.id);
-              const subord: EnemyCircle[] = [];
-              const dominated: EnemyCircle[] = [];
-              if (myStruct?.dominators) {
-                for (const eid of myStruct.dominators) {
-                  const ec = enemyById.get(eid);
-                  if (ec) subord.push(ec);
-                }
-              }
-              if (mi.id > 0) {
-                for (const ec of allEnemyCircles) {
-                  if (ec.id <= 0) continue;
-                  const eStruct = lookupStruct(ec.id);
-                  if (eStruct?.dominators?.includes(mi.id)) dominated.push(ec);
-                }
-              }
-              return { mi, subord, dominated };
-            });
+            const miInfos: MiInfo[] = screenPts.map(mi => ({
+              mi,
+              subord:    (_cachedMi.activeSubordIds.get(mi.id) ?? [])
+                           .map(id => enemyById.get(id)).filter(Boolean) as EnemyCircle[],
+              dominated: (_cachedMi.activeDomIds.get(mi.id) ?? [])
+                           .map(id => enemyById.get(id)).filter(Boolean) as EnemyCircle[],
+            }));
 
             // ── Helper: build a filled-disc union mask in this colour ─────
             const buildMask = (pts: Array<{ x: number; y: number; r: number }>, slot: string) => {
@@ -10206,6 +10348,27 @@ export class RenderSystem {
               // of own-dominant-union shows inside the contested area.
               p2c.globalCompositeOperation = 'destination-out';
               p2c.drawImage(ownShrunkDominant, 0, 0);
+              // Erase arc segments that fall inside another allied circle M2
+              // which also dominates the same enemy (co-dominant). Mi's ring
+              // inside M2's disc lies within M2's established territory — it
+              // would render as a redundant second border line on top of M2's
+              // existing contested border. Remove it regardless of whether Mi
+              // is fully or only partially enclosed in M2.
+              {
+                const allyErase = this._getScratch('ovP2AllyErase', cvs.width, cvs.height);
+                const aec = allyErase.getContext('2d')!;
+                aec.fillStyle = color;
+                for (const e of info.dominated) {
+                  const eStruct = lookupStruct(e.id);
+                  if (!eStruct?.dominators) continue;
+                  for (const m2 of screenPts) {
+                    if (m2.id === info.mi.id || m2.r <= 0) continue;
+                    if (!eStruct.dominators.includes(m2.id)) continue;
+                    aec.beginPath(); aec.arc(m2.x, m2.y, m2.r, 0, Math.PI * 2); aec.fill();
+                  }
+                }
+                p2c.drawImage(allyErase, 0, 0);
+              }
               // Clip to union of dominated enemies of THIS Mi.
               p2c.globalCompositeOperation = 'destination-in';
               const domMask = this._getScratch('ovP2Dom', cvs.width, cvs.height);
@@ -10591,26 +10754,14 @@ export class RenderSystem {
               iAllEnemyInner = m;
             }
 
-            // Per-inactive-circle dominance info (mirrors active miInfos logic).
-            const iMiInfos = iPts.map(mi => {
-              const myStruct = mi.id > 0 ? structById.get(mi.id) : undefined;
-              const subord:    typeof iEnemyCircles = [];
-              const dominated: typeof iEnemyCircles = [];
-              if (myStruct?.dominators) {
-                for (const eid of myStruct.dominators) {
-                  const ec = iEnemyById.get(eid);
-                  if (ec) subord.push(ec);
-                }
-              }
-              if (mi.id > 0) {
-                for (const ec of iEnemyCircles) {
-                  if (ec.id <= 0) continue;
-                  const eStruct = structById.get(ec.id);
-                  if (eStruct?.dominators?.includes(mi.id)) dominated.push(ec);
-                }
-              }
-              return { mi, subord, dominated };
-            });
+            // Per-inactive-circle dominance info — resolved from world-space cache.
+            const iMiInfos = iPts.map(mi => ({
+              mi,
+              subord:    (_cachedMi.inactiveSubordIds.get(mi.id) ?? [])
+                           .map(id => iEnemyById.get(id)).filter(Boolean) as typeof iEnemyCircles,
+              dominated: (_cachedMi.inactiveDomIds.get(mi.id) ?? [])
+                           .map(id => iEnemyById.get(id)).filter(Boolean) as typeof iEnemyCircles,
+            }));
 
             const iRing = this._getScratch('ovInaRing', cvs.width, cvs.height);
             const irc   = iRing.getContext('2d')!;
@@ -10640,6 +10791,25 @@ export class RenderSystem {
               }
               p2c.globalCompositeOperation = 'destination-out';
               p2c.drawImage(iOwnShrunkAll, 0, 0);
+              // Same allied co-dominant erase as active territory: remove
+              // ring pixels inside any allied circle M2 (active or inactive)
+              // that also dominates the same enemy.
+              {
+                const allyErase = this._getScratch('ovInaP2AllyErase', cvs.width, cvs.height);
+                const aec = allyErase.getContext('2d')!;
+                aec.fillStyle = color;
+                const allOwnPts = [...screenPts, ...iPts];
+                for (const e of info.dominated) {
+                  const eStruct = structById.get(e.id);
+                  if (!eStruct?.dominators) continue;
+                  for (const m2 of allOwnPts) {
+                    if (m2.id === info.mi.id || m2.r <= 0) continue;
+                    if (!eStruct.dominators.includes(m2.id)) continue;
+                    aec.beginPath(); aec.arc(m2.x, m2.y, m2.r, 0, Math.PI * 2); aec.fill();
+                  }
+                }
+                p2c.drawImage(allyErase, 0, 0);
+              }
               p2c.globalCompositeOperation = 'destination-in';
               const domMask = this._getScratch('ovInaP2Dom', cvs.width, cvs.height);
               const dmc    = domMask.getContext('2d')!;
@@ -10930,6 +11100,22 @@ export class RenderSystem {
         ctx.stroke();
         ctx.restore();
       }
+    }
+
+      offCtx.restore();
+      this._claimOverlayCachedCamX = camX;
+      this._claimOverlayCachedCamY = camY;
+      this._claimOverlayCachedZoom = zoom;
+      this._claimOverlayBitmapValid = true;
+    } // close if (!this._claimOverlayBitmapValid)
+
+    // ── Blit cached overlay canvas, offset by camera pan delta ───────────
+    const ddx = (this._claimOverlayCachedCamX - camX) * zoom;
+    const ddy = (this._claimOverlayCachedCamY - camY) * zoom;
+    this.ctx.drawImage(this._claimOverlayCachedCanvas!, -margin + ddx, -margin + ddy);
+    // Trigger re-render next frame if pan has drifted past 60% of the margin
+    if (Math.abs(ddx) > margin * 0.6 || Math.abs(ddy) > margin * 0.6) {
+      this._claimOverlayBitmapValid = false;
     }
   }
 

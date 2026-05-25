@@ -1052,6 +1052,12 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
     placed_structure_count++;
 
+    /* New territorial anchor — invalidate claim-flag section caches so
+     * claim flags re-evaluate their contest area next tick. */
+    if (stype_enum != STRUCT_CLAIM_FLAG) {
+        claim_invalidate_cf_sections();
+    }
+
     /* ── Post-placement: register claims ─────────────────────────────────── */
 
     /* Flag Fort: override HP and register the island claim */
@@ -1623,6 +1629,9 @@ void destroy_placed_structure(uint32_t structure_id) {
      * stops carving territory it previously dominated. Broadcasts updated
      * `structure_dominators` for each affected structure. */
     claim_remove_id_from_all_dominators(structure_id);
+    /* Structural change — invalidate claim-flag section caches so the
+     * contest areas for all active claim flags are recomputed next tick. */
+    claim_invalidate_cf_sections();
 
     /* ── Territory claim: fort/company-fortress destroyed → drop island claim ─ */
     if (dtype == STRUCT_FLAG_FORT) {

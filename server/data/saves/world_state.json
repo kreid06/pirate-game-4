@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1779728256,
+    "timestamp": 1779734599,
     "ship_count": 3,
     "npc_count": 28,
-    "structure_count": 25
+    "structure_count": 24
   },
   "ships": [
     {
@@ -809,32 +809,13 @@
   ],
   "placed_structures": [
     {
-      "id": 285,
+      "id": 298,
       "type": 0,
-      "x": 18567.600,
-      "y": 15491.300,
+      "x": 18313.600,
+      "y": 15196.000,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
-    },
-    {
-      "id": 286,
-      "type": 1,
-      "x": 18562.900,
-      "y": 15507.900,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -845,45 +826,7 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [332,321,319,307,306,298]
-    },
-    {
-      "id": 297,
-      "type": 0,
-      "x": 18600.199,
-      "y": 15363.100,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
-    },
-    {
-      "id": 298,
-      "type": 0,
-      "x": 18313.600,
-      "y": 15196.000,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "dominators": [376,374]
     },
     {
       "id": 303,
@@ -892,7 +835,7 @@
       "y": 15622.800,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -902,7 +845,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [376,374,368]
     },
     {
       "id": 304,
@@ -911,7 +855,7 @@
       "y": 15454.500,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -921,7 +865,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [376,374,368]
     },
     {
       "id": 306,
@@ -930,7 +875,7 @@
       "y": 15345.300,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -940,7 +885,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [381,380,379,376,325,304,303,298,317,334,342,347]
     },
     {
       "id": 307,
@@ -949,7 +895,7 @@
       "y": 15017.200,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -959,7 +905,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [380,379,376,325,304,303,298,317,334,342,347]
     },
     {
       "id": 317,
@@ -978,7 +925,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [379,304,298]
     },
     {
       "id": 319,
@@ -987,7 +935,7 @@
       "y": 15038.200,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -997,7 +945,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [380,379,376,325,304,303,298,317,334,342,347]
     },
     {
       "id": 321,
@@ -1006,7 +955,7 @@
       "y": 15133.200,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1016,7 +965,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [381,380,379,376,325,304,303,298,317,334,342,347]
     },
     {
       "id": 323,
@@ -1025,7 +975,7 @@
       "y": 15431.900,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1035,7 +985,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [381,380,379,376,374,325,304,303,298,317,334,342]
     },
     {
       "id": 325,
@@ -1044,7 +995,7 @@
       "y": 15695.800,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1054,45 +1005,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
-    },
-    {
-      "id": 327,
-      "type": 0,
-      "x": 18461.199,
-      "y": 15628.500,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
-    },
-    {
-      "id": 329,
-      "type": 0,
-      "x": 18728.500,
-      "y": 15678.400,
-      "rot": 0.000,
-      "island_id": 4,
-      "company": 3,
-      "hp": 100,
-      "max_hp": 100,
-      "target_hp": 100,
-      "placer_id": 1000,
-      "placer_name": "test",
-      "open": false,
-      "construction_phase": 0,
-      "construction_company": 0,
-      "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [376,374,368]
     },
     {
       "id": 332,
@@ -1101,7 +1015,7 @@
       "y": 15247.400,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1111,7 +1025,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [381,380,379,376,325,304,303,298,317,334,342,347]
     },
     {
       "id": 334,
@@ -1130,7 +1045,8 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0
+      "scaffolded_ship_id": 0,
+      "dominators": [298]
     },
     {
       "id": 337,
@@ -1225,16 +1141,36 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
+      "scaffolded_ship_id": 0,
+      "dominators": [298]
+    },
+    {
+      "id": 361,
+      "type": 9,
+      "x": 19219.699,
+      "y": 16215.300,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 500,
+      "max_hp": 500,
+      "target_hp": 500,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
       "scaffolded_ship_id": 0
     },
     {
-      "id": 353,
+      "id": 368,
       "type": 0,
-      "x": 18560.100,
-      "y": 15875.900,
+      "x": 18901.000,
+      "y": 15860.500,
       "rot": 0.000,
       "island_id": 4,
-      "company": 3,
+      "company": 100,
       "hp": 100,
       "max_hp": 100,
       "target_hp": 100,
@@ -1247,10 +1183,48 @@
       "scaffolded_ship_id": 0
     },
     {
-      "id": 357,
+      "id": 374,
       "type": 0,
-      "x": 18959.301,
-      "y": 16076.800,
+      "x": 18829.000,
+      "y": 15706.600,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 376,
+      "type": 0,
+      "x": 18543.199,
+      "y": 15501.600,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 379,
+      "type": 0,
+      "x": 18283.400,
+      "y": 15454.500,
       "rot": 0.000,
       "island_id": 4,
       "company": 100,
@@ -1264,13 +1238,13 @@
       "construction_company": 0,
       "modules_placed": 0,
       "scaffolded_ship_id": 0,
-      "dominators": [285,297,325,327,329,353]
+      "dominators": [298,303,304,325]
     },
     {
-      "id": 358,
+      "id": 380,
       "type": 0,
-      "x": 19132.900,
-      "y": 15956.900,
+      "x": 18229.400,
+      "y": 15536.500,
       "rot": 0.000,
       "island_id": 4,
       "company": 100,
@@ -1283,8 +1257,26 @@
       "construction_phase": 0,
       "construction_company": 0,
       "modules_placed": 0,
-      "scaffolded_ship_id": 0,
-      "dominators": [285,297,327,329,353]
+      "scaffolded_ship_id": 0
+    },
+    {
+      "id": 381,
+      "type": 0,
+      "x": 18226.801,
+      "y": 15841.600,
+      "rot": 0.000,
+      "island_id": 4,
+      "company": 100,
+      "hp": 100,
+      "max_hp": 100,
+      "target_hp": 100,
+      "placer_id": 1000,
+      "placer_name": "test",
+      "open": false,
+      "construction_phase": 0,
+      "construction_company": 0,
+      "modules_placed": 0,
+      "scaffolded_ship_id": 0
     }
   ],
   "island_resources": [
@@ -8216,7 +8208,7 @@
         {"idx":831,"health":100,"alive":true,"respawn_at":0},
         {"idx":832,"health":100,"alive":true,"respawn_at":0},
         {"idx":833,"health":100,"alive":true,"respawn_at":0},
-        {"idx":834,"health":0,"alive":false,"respawn_at":697032},
+        {"idx":834,"health":100,"alive":true,"respawn_at":0},
         {"idx":835,"health":100,"alive":true,"respawn_at":0},
         {"idx":836,"health":100,"alive":true,"respawn_at":0},
         {"idx":837,"health":100,"alive":true,"respawn_at":0},
@@ -10863,7 +10855,7 @@
         {"idx":3478,"health":400,"alive":true,"respawn_at":0},
         {"idx":3479,"health":400,"alive":true,"respawn_at":0},
         {"idx":3480,"health":400,"alive":true,"respawn_at":0},
-        {"idx":3481,"health":400,"alive":true,"respawn_at":0},
+        {"idx":3481,"health":100,"alive":true,"respawn_at":0},
         {"idx":3482,"health":400,"alive":true,"respawn_at":0},
         {"idx":3483,"health":400,"alive":true,"respawn_at":0},
         {"idx":3484,"health":400,"alive":true,"respawn_at":0},

@@ -100,3 +100,7 @@ bool              claim_section_contains(const ClaimSectionGrid *g,
 bool              claim_section_disc_overlaps(const ClaimSectionGrid *g,
                                               float cx, float cy, float r);
 
+/* Invalidates all cached claim-flag section grids (e.g. after a structural
+ * change that could alter section geometry).  Safe to call at any time. */
+void              claim_invalidate_cf_sections(void);
+
