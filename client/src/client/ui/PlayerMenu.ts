@@ -143,6 +143,12 @@ export class PlayerMenu {
   /** Set by UIManager; called when the player clicks an affordable upgrade button. */
   public onUpgradeRequest: ((stat: string) => void) | null = null;
 
+  /** Set by UIManager; called when the player clicks the LEVEL UP button (enough XP). */
+  public onPlayerLevelUp: (() => void) | null = null;
+
+  // Hit area for the LEVEL UP button — null when not visible
+  private _levelUpBtnHit: { x: number; y: number; w: number; h: number } | null = null;
+
   // Cached panel origin — set each render frame, used by handleClick
   private _panelX = 0;
   private _panelY = 0;
@@ -207,6 +213,13 @@ export class PlayerMenu {
     if (y >= tabBarY && y < tabBarY + TAB_H) {
       const tabW = PANEL_W / 2;
       this.activeTab = x < px + tabW ? 'character' : 'skills';
+      return true;
+    }
+
+    // Level-up button
+    const lub = this._levelUpBtnHit;
+    if (lub && x >= lub.x && x <= lub.x + lub.w && y >= lub.y && y <= lub.y + lub.h) {
+      this.onPlayerLevelUp?.();
       return true;
     }
 
@@ -668,6 +681,33 @@ export class PlayerMenu {
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText(xpLabel, statusX + statusW, sty);
     sty += 14;
+
+    // LEVEL UP button — shown when the player has enough XP to advance
+    const canLevelUp = !isMax && xp >= xpToNext;
+    this._levelUpBtnHit = null;
+    if (canLevelUp) {
+      const LU_W = 80, LU_H = 18;
+      const luX = statusX + statusW - LU_W;
+      const luY = sty - 1;
+      const luHover = mouseX >= luX && mouseX <= luX + LU_W && mouseY >= luY && mouseY <= luY + LU_H;
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 300);
+      const r = Math.round(80  + pulse * 60).toString(16).padStart(2, '0');
+      const g = Math.round(200 + pulse * 55).toString(16).padStart(2, '0');
+      ctx.fillStyle   = luHover ? `#44aa44` : `#${r}${g}00`;
+      ctx.strokeStyle = luHover ? '#88ff88' : '#88dd44';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.roundRect(luX, luY, LU_W, LU_H, 3);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font         = 'bold 10px Georgia, serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = '#ffffff';
+      ctx.fillText('▲ LEVEL UP', luX + LU_W / 2, luY + LU_H / 2);
+      this._levelUpBtnHit = { x: luX, y: luY, w: LU_W, h: LU_H };
+      sty += LU_H + 3;
+    }
 
     // Compact stat rows with small + button
     const STAT_ROW_H = 28;

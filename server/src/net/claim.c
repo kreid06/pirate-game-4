@@ -1180,6 +1180,63 @@ void claim_tick(uint32_t delta_ms) {
         }
 
         if (do_capture) {
+            /* ── Rescue path: src_mine is our OWN fort currently being demolished.
+             * Instead of the normal capture (orphan src_enemy), we rescue the fort:
+             *  1. Un-orphan it and restart it in the BUILDING phase so it heals.
+             *  2. Remove src_enemy from our fort's DOM list (they no longer dominate).
+             *  3. Prepend our fort to src_enemy's DOM list (we now assert dominance). */
+            bool src_mine_demolishing = (src_mine->type == STRUCT_FLAG_FORT
+                && src_mine->claim_orphaned
+                && (src_mine->claim_phase == FLAG_FORT_PHASE_DEMOLISHING
+                    || (src_mine->claim_phase == FLAG_FORT_PHASE_CLAIMING && src_mine->hp == 0)));
+
+            if (src_mine_demolishing) {
+                uint8_t isl = src_mine->island_id;
+                uint8_t co  = src_mine->company_id;
+
+                /* Restore fort: un-orphan, restart in BUILDING phase at 1 HP. */
+                src_mine->claim_orphaned    = false;
+                src_mine->claim_phase       = FLAG_FORT_PHASE_BUILDING;
+                src_mine->fortress_complete = false; /* will flip to ACTIVE once HP reaches threshold */
+                src_mine->hp                = 1;
+                src_mine->target_hp         = src_mine->max_hp;
+                src_mine->claim_progress_ms = 1.0f;
+
+                /* Flip DOM relationship. */
+                if (dominators_remove(src_mine, src_enemy->id))
+                    broadcast_structure_dominators(src_mine);
+                if (dominators_prepend(src_enemy, src_mine->id))
+                    broadcast_structure_dominators(src_enemy);
+
+                /* Rebuild graphs so the rescued fort re-enters the BFS topology. */
+                claim_rebuild_graph((uint16_t)src_mine->id, (uint32_t)co);
+                claim_invalidate_cf_sections();
+
+                /* Broadcast the fort state change. */
+                char rmsg[384];
+                snprintf(rmsg, sizeof(rmsg),
+                         "{\"type\":\"flag_fort_build_progress\",\"structure_id\":%u"
+                         ",\"company_id\":%u,\"island_id\":%u"
+                         ",\"hp\":1,\"max_hp\":%u,\"fortress_complete\":false"
+                         ",\"contested\":false,\"claim_phase\":%u"
+                         ",\"claim_progress_ms\":1,\"claim_total_ms\":0}",
+                         src_mine->id, co, isl, src_mine->max_hp,
+                         (unsigned)FLAG_FORT_PHASE_BUILDING);
+                websocket_server_broadcast(rmsg);
+
+                log_info("🏴 Claim Flag #%u RESCUED fort #%u (company %u, island %u) from demolishing",
+                         s->id, src_mine->id, co, isl);
+
+                /* Consume the claim flag. */
+                cf_section_release(s->id);
+                s->active = false;
+                char dmsg[128];
+                snprintf(dmsg, sizeof(dmsg),
+                         "{\"type\":\"structure_demolished\",\"structure_id\":%u}", s->id);
+                websocket_server_broadcast(dmsg);
+                continue; /* skip normal capture flow */
+            }
+
             uint32_t orphaned_id = src_enemy->id;
             uint32_t old_co      = src_enemy->company_id;
             uint8_t  isl         = src_enemy->island_id;

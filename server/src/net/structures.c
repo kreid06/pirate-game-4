@@ -462,15 +462,22 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     if (stype_enum == STRUCT_CLAIM_FLAG) {
         /* Find best "mine" source: closest active non-orphaned structure of the
          * placer's company whose claim radius covers (px,py).
-         * INACTIVE flag forts (HP below 30%) are excluded — a fresh or
-         * heavily-damaged flag fort cannot champion a claim flag. */
+         * INACTIVE flag forts (HP below 30%) are excluded, UNLESS the fort is
+         * currently demolishing — in that case the owner may use it as mine
+         * source to fight back and rescue it with a counter-claim flag. */
         float best_mine_d2 = 0.0f;
+        bool  cf_mine_is_demolishing = false;
         for (uint32_t si = 0; si < placed_structure_count; si++) {
             PlacedStructure *ex = &placed_structures[si];
             if (!ex->active) continue;
-            if (ex->claim_orphaned) continue;
             if (ex->company_id != (uint8_t)player->company_id) continue;
-            if (ex->type == STRUCT_FLAG_FORT && !ex->fortress_complete) continue;
+            /* Exception: a demolishing flag fort of our company may act as the
+             * mine source so the owner can counter-claim and stop the demolish. */
+            bool ex_demolishing = (ex->type == STRUCT_FLAG_FORT
+                && (ex->claim_phase == FLAG_FORT_PHASE_DEMOLISHING
+                    || (ex->claim_phase == FLAG_FORT_PHASE_CLAIMING && ex->hp == 0)));
+            if (ex->claim_orphaned && !ex_demolishing) continue;
+            if (ex->type == STRUCT_FLAG_FORT && !ex->fortress_complete && !ex_demolishing) continue;
             float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
                      : (ex->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
                                                               : CLAIM_RADIUS_DEFAULT;
@@ -478,8 +485,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             float d2 = dx*dx + dy*dy;
             if (d2 > cr * cr) continue;
             if (cf_src_mine == 0 || d2 < best_mine_d2) {
-                cf_src_mine  = ex->id;
-                best_mine_d2 = d2;
+                cf_src_mine            = ex->id;
+                best_mine_d2           = d2;
+                cf_mine_is_demolishing = ex_demolishing;
             }
         }
         if (cf_src_mine == 0) {
@@ -549,7 +557,10 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
          * whose discs overlap the section to determine the full valid section
          * and validate that the registered (mine, enemy) source pair are
          * legitimate participants. */
-        if (!cf_enemy_inactive) {
+        /* Skip section check when mine source is demolishing: claim_section_build
+         * uses only non-orphaned structures, so an orphaned demolishing fort as
+         * mine won't produce a valid section.  The disc intersection above is enough. */
+        if (!cf_enemy_inactive && !cf_mine_is_demolishing) {
             ClaimSectionGrid *sec = claim_section_build((uint8_t)target_island_id,
                                                         (uint8_t)player->company_id,
                                                         px, py);

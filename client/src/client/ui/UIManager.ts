@@ -1127,6 +1127,15 @@ export class UIManager {
   }
 
   /**
+   * Wire the level-up callback from the player menu to the UIManager handler.
+   * Called once during setup so the LEVEL UP button in the player menu fires
+   * the same action as clicking the XP bar above the hotbar.
+   */
+  syncPlayerLevelUpCallback(): void {
+    this.playerMenu.onPlayerLevelUp = () => this.onPlayerLevelUp?.();
+  }
+
+  /**
    * Open the crew level menu for a specific NPC (e.g. from a world click).
    */
   openCrewMenuForNpc(npc: Npc): void {

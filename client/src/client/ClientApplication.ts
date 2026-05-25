@@ -1775,6 +1775,9 @@ export class ClientApplication {
         this.networkManager.sendPlayerLevelUp();
       };
 
+      // Sync the level-up callback so the LEVEL UP button in the player menu works
+      this.uiManager.syncPlayerLevelUpCallback();
+
       // Wire respawn confirmation: flash white, snap camera, send network request immediately
       this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
         // 1. Hold screen at full white
