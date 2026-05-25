@@ -165,6 +165,12 @@ export class InputManager {
   // HYBRID PROTOCOL: State tracking for change detection
   private previousMovementState: Vec2 = Vec2.zero();
   private previousSprintState: boolean = false;
+  /**
+   * True after the player has run out of stamina while sprinting. Sprint is
+   * suppressed until Shift is released and re-pressed, so the stamina bar can
+   * refill without instantly draining again.
+   */
+  private sprintLocked: boolean = false;
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
@@ -215,6 +221,19 @@ export class InputManager {
   /** ID of the cannon module the player is currently mounted to, or null. */
   public mountedCannonModuleId: number | null = null;
   private lastCannonAimAngle: number = 0;
+  private lastSentCannonAimAngle: number = 0;
+  /** Returns true when mounted to an island (non-ship) cannon. */
+  public get isOnIslandCannon(): boolean { return this.mountKind === 'cannon' && this.currentShipId === null; }
+  /** Returns the last computed cannon aim angle (world radians). */
+  public getLastCannonAimAngle(): number { return this.lastCannonAimAngle; }
+  /** Apply authoritative island-cannon aim from server for mounted cannon visuals. */
+  public syncIslandCannonAim(structureId: number, aimAngle: number): void {
+    if (!this.isOnIslandCannon) return;
+    if (this.mountedCannonModuleId !== structureId) return;
+    if (!Number.isFinite(aimAngle)) return;
+    this.lastCannonAimAngle = aimAngle;
+    this.islandCannonDesiredAimAngle = aimAngle;
+  }
   /** Selected ammo type: 0 = cannonball, 1 = bar shot. Toggle with X key. */
   public selectedAmmoType: number = 0;    // Pending ammo (to load after next fire)
   public loadedAmmoType: number = 0;      // What's physically in the barrel right now
@@ -304,7 +323,8 @@ export class InputManager {
     this.updateGamepad();
     
     // Handle cannon aiming (works whether on ship or not)
-    this.handleCannonAiming();
+    // deltaTime is already in seconds (see ClientApplication.updateClient)
+    this.handleCannonAiming(deltaTime);
     
     // If mounted to helm, handle ship controls instead of player movement
     if (this.mountKind === 'helm') {
@@ -328,7 +348,11 @@ export class InputManager {
     
     // HYBRID PROTOCOL: Detect movement state changes
     const currentMovement = this.currentInputFrame.movement;
-    const isSprinting = this.isShiftHeld() && this.isActionActive('move_forward');
+    const shiftHeld = this.isShiftHeld();
+    // Auto-clear the sprint lock as soon as Shift is released, so the next
+    // Shift press can sprint again (assuming there is stamina available).
+    if (!shiftHeld && this.sprintLocked) this.sprintLocked = false;
+    const isSprinting = shiftHeld && this.isActionActive('move_forward') && !this.sprintLocked;
     const movementChanged = !currentMovement.equals(this.previousMovementState);
     const sprintChanged = isSprinting !== this.previousSprintState;
     if (movementChanged || sprintChanged) {
@@ -412,6 +436,17 @@ export class InputManager {
   setPlayerVelocity(velocity: Vec2): void {
     this.playerVelocity = velocity.clone();
   }
+
+  /**
+   * Notify the input manager of the player's current stamina. When stamina
+   * reaches zero, sprint is locked out until Shift is released and re-pressed
+   * so the bar can refill without instantly draining again.
+   */
+  setPlayerStamina(stamina: number): void {
+    if (stamina <= 0 && this.isShiftHeld()) {
+      this.sprintLocked = true;
+    }
+  }
   
   /**
    * Set current ship ID (for cannon aiming calculations)
@@ -480,13 +515,29 @@ export class InputManager {
   /**
    * Set mount state (called when player mounts/dismounts a module)
    */
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number): void {
+  /** Facing direction of the currently mounted island cannon barrel (world radians). Used for aim clamping. */
+  private islandCannonFacingAngle: number = 0;
+  private islandCannonDesiredAimAngle: number = 0;
+
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
     this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
 
     if (mounted) {
       console.log(`⚓ [INPUT] Player mounted to ${moduleKind} on ship ${shipId}`);
+      if (this.mountKind === 'cannon' && initialAimAngle !== undefined) {
+        // Seed lastCannonAimAngle so barrel visually starts at the server's current angle.
+        // Server sends world-space radians; barrelRot = aimAngle + π/2 in RenderSystem.
+        this.lastCannonAimAngle = initialAimAngle;
+        this.lastSentCannonAimAngle = initialAimAngle;
+        this.islandCannonDesiredAimAngle = initialAimAngle;
+      }
+      if (this.mountKind === 'cannon' && islandCannonFacingAngle !== undefined) {
+        // Server sends placement rotation in radians.
+        // Barrel faces at (rotation_rad − π/2) — subtract it to align with the server constraint.
+        this.islandCannonFacingAngle = islandCannonFacingAngle - Math.PI / 2;
+      }
       if (this.mountKind === 'helm') {
         // Seed from the server's current sail openness so W/S work immediately
         const seeded = initialSailOpenness ?? 100;
@@ -508,6 +559,8 @@ export class InputManager {
       console.log(`⚓ [INPUT] Player dismounted - player controls active`);
       this.activeWeaponGroup = -1;
       this.activeWeaponGroups.clear();
+      this.lastSentCannonAimAngle = 0;
+      this.islandCannonDesiredAimAngle = 0;
       // Stop any active flame stream on dismount
       if (this.flameStreamTimer !== null) {
         clearInterval(this.flameStreamTimer);
@@ -610,11 +663,26 @@ export class InputManager {
   
   /**
    * Handle cannon aiming (right-click + mouse movement)
-   * Calculates aim angle relative to ship rotation
+   * Calculates aim angle relative to ship rotation (or world angle for island cannons)
    */
-  private handleCannonAiming(): void {
+  private handleCannonAiming(dt: number): void {
+    const isIslandCannon = this.currentShipId === null && this.mountKind === 'cannon';
+
     // Only send aiming updates when right mouse is held
     if (!this.inputState.rightMouseDown) {
+      if (isIslandCannon) {
+        const TURN_RATE = 60 * Math.PI / 180;
+        const TWO_PI = 2 * Math.PI;
+        const maxStep = TURN_RATE * Math.max(0, dt);
+        let renderDiff = this.islandCannonDesiredAimAngle - this.lastCannonAimAngle;
+        renderDiff -= TWO_PI * Math.floor((renderDiff + Math.PI) / TWO_PI);
+        if (Math.abs(renderDiff) <= maxStep) {
+          this.lastCannonAimAngle = this.islandCannonDesiredAimAngle;
+        } else {
+          this.lastCannonAimAngle += renderDiff > 0 ? maxStep : -maxStep;
+          this.lastCannonAimAngle -= TWO_PI * Math.floor((this.lastCannonAimAngle + Math.PI) / TWO_PI);
+        }
+      }
       return;
     }
 
@@ -623,42 +691,72 @@ export class InputManager {
       return;
     }
 
-    // Need to be on a ship to aim cannons
-    if (this.currentShipId === null) {
+    // Ship-mounted cannons/helm/swivel still require a ship
+    if (!isIslandCannon && this.currentShipId === null) {
       return;
     }
-    
+
     // Calculate aim angle from player position to mouse position (world coordinates)
     const dx = this.inputState.mouseWorldPosition.x - this.playerPosition.x;
     const dy = this.inputState.mouseWorldPosition.y - this.playerPosition.y;
 
     // Always aim toward mouse — no range limit (server enforces fire range separately)
     const aimAngleWorld = Math.atan2(dy, dx);
-    
-    // Convert to ship-relative angle
-    // Ship rotation is the direction the ship is facing
-    // We want the angle relative to the ship's forward direction
-    let aimAngleRelative = aimAngleWorld - this.currentShipRotation;
+
+    // Island cannon: send raw world angle (server stores in cannon_aim_angle directly)
+    // Ship cannon: convert to ship-relative angle
+    let aimAngle: number;
+    if (isIslandCannon) {
+      aimAngle = aimAngleWorld;
+      // Apply ±30° arc limit around the cannon's facing direction (same as ship cannons)
+      const AIM_RANGE   = 30 * Math.PI / 180;
+      const RESET_RANGE = 45 * Math.PI / 180;
+      let offset = aimAngle - this.islandCannonFacingAngle;
+      // Normalize offset to [-π, π]
+      const TWO_PI2 = 2 * Math.PI;
+      offset -= TWO_PI2 * Math.floor((offset + Math.PI) / TWO_PI2);
+      if (Math.abs(offset) > RESET_RANGE) {
+        offset = 0;
+      } else if (Math.abs(offset) > AIM_RANGE) {
+        offset = offset > 0 ? AIM_RANGE : -AIM_RANGE;
+      }
+      aimAngle = this.islandCannonFacingAngle + offset;
+      this.islandCannonDesiredAimAngle = aimAngle;
+
+      const TURN_RATE = 60 * Math.PI / 180;
+      const maxStep = TURN_RATE * Math.max(0, dt);
+      let renderDiff = aimAngle - this.lastCannonAimAngle;
+      renderDiff -= TWO_PI2 * Math.floor((renderDiff + Math.PI) / TWO_PI2);
+      if (Math.abs(renderDiff) <= maxStep) {
+        this.lastCannonAimAngle = aimAngle;
+      } else {
+        this.lastCannonAimAngle += renderDiff > 0 ? maxStep : -maxStep;
+        this.lastCannonAimAngle -= TWO_PI2 * Math.floor((this.lastCannonAimAngle + Math.PI) / TWO_PI2);
+      }
+    } else {
+      aimAngle = aimAngleWorld - this.currentShipRotation;
+      this.lastCannonAimAngle = aimAngle;
+    }
 
     // Normalize to [-π, π] — O(1), immune to ±Infinity / NaN
-    if (!Number.isFinite(aimAngleRelative)) return;
+    if (!Number.isFinite(aimAngle)) return;
     const TWO_PI = 2 * Math.PI;
-    aimAngleRelative -= TWO_PI * Math.floor((aimAngleRelative + Math.PI) / TWO_PI);
-    
+    aimAngle -= TWO_PI * Math.floor((aimAngle + Math.PI) / TWO_PI);
+
     // Only send if aim changed significantly (>1 degree)
     const ANGLE_THRESHOLD = 0.017; // ~1 degree in radians
-    const angleDelta = Math.abs(aimAngleRelative - this.lastCannonAimAngle);
-    
+    const angleDelta = Math.abs(aimAngle - this.lastSentCannonAimAngle);
+
     if (angleDelta > ANGLE_THRESHOLD) {
       if (this.mountKind === 'swivel') {
         // Swivel: use dedicated swivel_aim message (server applies ±45° limit)
         if (this.onSwivelAim) {
-          this.onSwivelAim(aimAngleRelative);
+          this.onSwivelAim(aimAngle);
         }
       } else if (this.onCannonAim) {
-        this.onCannonAim(aimAngleRelative, [...this.activeWeaponGroups]);
+        this.onCannonAim(aimAngle, [...this.activeWeaponGroups]);
       }
-      this.lastCannonAimAngle = aimAngleRelative;
+      this.lastSentCannonAimAngle = aimAngle;
     }
   }
   
@@ -967,8 +1065,9 @@ export class InputManager {
       actions |= PlayerActions.DESTROY_PLANK;
     }
     
-    // Sprint action (Shift + forward key)
-    if (this.isShiftHeld() && this.isActionActive('move_forward')) {
+    // Sprint action (Shift + forward key) — suppressed when out of stamina
+    // until Shift is released and re-pressed.
+    if (this.isShiftHeld() && this.isActionActive('move_forward') && !this.sprintLocked) {
       actions |= PlayerActions.SPRINT;
     }
     
@@ -1179,7 +1278,7 @@ export class InputManager {
             }
             // Force next handleCannonAiming() to re-send aim with updated group list
             // even if the mouse hasn't moved, so the server learns about the new selection.
-            this.lastCannonAimAngle = Infinity;
+            this.lastSentCannonAimAngle = Infinity;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();
@@ -1204,7 +1303,7 @@ export class InputManager {
               this.activeWeaponGroups.add(groupIdx);
               this.activeWeaponGroup = groupIdx;
             }
-            this.lastCannonAimAngle = Infinity;
+            this.lastSentCannonAimAngle = Infinity;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();

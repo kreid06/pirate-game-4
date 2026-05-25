@@ -104,6 +104,7 @@ export enum MessageType {
   NPC_GOTO_MODULE = 'npc_goto_module',
   NPC_MOVE_TO_POS = 'npc_move_to_pos',
   UPGRADE_PLAYER_STAT = 'upgrade_player_stat',
+  PLAYER_LEVEL_UP = 'player_level_up',
   COMMAND = 'command',
   RESPAWN_REQUEST = 'respawn_request',
   RENAME_SHIP = 'rename_ship',
@@ -127,6 +128,7 @@ export enum MessageType {
   STRUCTURE_DEMOLISHED = 'structure_demolished',
   DEMOLISH_STRUCTURE = 'demolish_structure',
   DEMOLISH_MODULE = 'demolish_module',
+  REPAIR_STRUCTURE = 'repair_structure',
   CRAFTING_OPEN  = 'crafting_open',
   STRUCTURES_LIST = 'STRUCTURES',
 
@@ -231,6 +233,8 @@ interface WorldStateMessage extends NetworkMessage {
 interface AckMessage extends NetworkMessage {
   type: MessageType.MESSAGE_ACK;
   status: string;
+  structure_id?: number;
+  cannon_aim_angle?: number;
 }
 
 /**
@@ -569,7 +573,11 @@ export class NetworkManager {
 
   /** Fired when the server confirms the player has mounted an island cannon structure.
    *  `mountX`/`mountY` are the world-space coordinates the player should snap to. */
-  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number) => void) | null = null;
+  public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number, facingAngle: number) => void) | null = null;
+  /** Fired when server returns authoritative current island-cannon aim in message_ack. */
+  public onIslandCannonAimSync: ((structureId: number, aimAngle: number) => void) | null = null;
+  /** Fired when the player tries to fire an island cannon but has no cannonballs. */
+  public onNoAmmo: (() => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
@@ -598,7 +606,7 @@ export class NetworkManager {
   /** Fired when the server responds to a harvest_stone request. */
   public onStoneHarvestResult: ((success: boolean, stone: number, reason: string) => void) | null = null;
   /** Fired when the server responds to a harvest_boulder request. */
-  public onBoulderHarvestResult: ((success: boolean, metal: number, reason: string) => void) | null = null;
+  public onBoulderHarvestResult: ((success: boolean, metal: number, stone: number, reason: string) => void) | null = null;
   /** Fired when any action is rejected by the server due to insufficient stamina. */
   public onNoStamina: (() => void) | null = null;
   /**
@@ -627,7 +635,7 @@ export class NetworkManager {
   /** Fired when a structure's company ownership is promoted (one-way, neutral → non-neutral). */
   public onStructureCompanyUpdated: ((id: number, companyId: number) => void) | null = null;
   /** Fired when a structure takes damage from a cannonball hit. Includes world position for FX. */
-  public onStructureHpChanged: ((id: number, hp: number, maxHp: number, x: number, y: number) => void) | null = null;
+  public onStructureHpChanged: ((id: number, hp: number, maxHp: number, x: number, y: number, targetHp?: number) => void) | null = null;
   /** Fired when a cannonball hits a tree (trees are indestructible). */
   public onTreeHit: ((x: number, y: number) => void) | null = null;
   /** Fired when the server sends the full list of existing placed structures on join. */
@@ -640,6 +648,35 @@ export class NetworkManager {
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server confirms a craft_item request. */
   public onCraftResult: ((success: boolean, recipeId: string, reason?: string) => void) | null = null;
+  /** Fired when a player-funded structure repair starts. */
+  public onRepairStarted: ((structureId: number, playerId: number, hp: number, maxHp: number, targetHp: number) => void) | null = null;
+  /** Fired when an in-progress repair is cancelled (by the same player re-interacting). */
+  public onRepairCancelled: ((structureId: number, playerId: number) => void) | null = null;
+  /** Fired when a repair finishes (target_hp == max_hp). */
+  public onRepairComplete: ((structureId: number, playerId: number) => void) | null = null;
+  /** Fired when the server rejects a repair_structure request. */
+  public onRepairFail: ((structureId: number, reason: string) => void) | null = null;
+  /** Fired when an island territory changes ownership (flag fort placed or destroyed). */
+  public onTerritoryUpdate: ((islandId: number, companyId: number, claimed: boolean, fortX: number, fortY: number, fortRadius: number, isCompanyFortress: boolean) => void) | null = null;
+  /** Fired when a claiming flag's progress changes. */
+  public onClaimFlagProgress: ((structId: number, progressMs: number, contested: boolean, targetsFortress: boolean, state?: number, graceMs?: number, graceTotal?: number, total?: number) => void) | null = null;
+  public onTerritoryFlipped: ((flagId: number, orphanedStructureId: number, oldCompanyId: number, newCompanyId: number, islandId: number) => void) | null = null;
+  /** Fired when the server updates a structure's per-structure dominance list
+   * (after a successful claim flag capture). Replaces the previous dominators
+   * array for the named structure id. */
+  public onStructureDominators: ((structureId: number, dominators: number[]) => void) | null = null;
+  /** Fired when a claiming flag finishes capturing territory. */
+  public onTerritoryCaptured: ((islandId: number, newCompanyId: number) => void) | null = null;
+  /** Fired when a Company Fortress build timer updates (≈1/s). */
+  public onFortressBuildProgress: ((structId: number, companyId: number, islandId: number, progressMs: number, totalMs: number, contested: boolean) => void) | null = null;
+  /** Fired when a Company Fortress finishes building (15 min complete). */
+  public onFortressComplete: ((structId: number, companyId: number, islandId: number) => void) | null = null;
+  /** Fired when a Company Fortress is captured by an enemy claim flag. */
+  public onFortressCaptured: ((structId: number, newCompanyId: number, oldCompanyId: number, islandId: number) => void) | null = null;
+  /** Fired when a Flag Fort crosses (in either direction) the 30%-HP active gate. */
+  public onFlagFortActive: ((structId: number, companyId: number, islandId: number, active: boolean, claimPhase: number) => void) | null = null;
+  /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
+  public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -1250,6 +1287,25 @@ export class NetworkManager {
   }
 
   /**
+   * Equip an armour item from the given inventory slot index.
+   * The server determines which equipment slot based on the item type.
+   */
+  sendEquipArmor(slotIdx: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'equip_armor', slot_idx: slotIdx, timestamp: Date.now() }));
+  }
+
+  /**
+   * Unequip an armour piece from the given equipment slot name
+   * (helm | torso | legs | feet | hands | shield).
+   * The item is returned to the player's inventory.
+   */
+  sendUnequipArmor(slot: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'unequip_armor', slot, timestamp: Date.now() }));
+  }
+
+  /**
    * Give an item directly to the local player (admin/test helper).
    * Sends a give_item message to the server.
    */
@@ -1349,7 +1405,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', x: number, y: number, rotationDeg = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
   }
@@ -1373,6 +1429,12 @@ export class NetworkManager {
   sendDemolishStructure(structureId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
+  }
+
+  /** Initiate (or, if already in progress by this player, cancel) a structure repair. */
+  sendRepairStructure(structureId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'repair_structure', timestamp: Date.now(), structure_id: structureId }));
   }
 
   /** Send a raw crafting request to the server for the given recipe ID. */
@@ -1606,6 +1668,11 @@ export class NetworkManager {
   sendPlayerStatUpgrade(stat: string): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: MessageType.UPGRADE_PLAYER_STAT, stat }));
+  }
+
+  sendPlayerLevelUp(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.PLAYER_LEVEL_UP }));
   }
 
   /** Send a respawn request to the server.
@@ -2249,11 +2316,11 @@ export class NetworkManager {
         break;
 
       case MessageType.HARVEST_BOULDER_SUCCESS:
-        this.onBoulderHarvestResult?.(true, message.metal ?? 0, '');
+        this.onBoulderHarvestResult?.(true, message.metal ?? 0, message.stone ?? 0, '');
         break;
 
       case MessageType.HARVEST_BOULDER_FAILURE:
-        this.onBoulderHarvestResult?.(false, 0, message.reason ?? 'unknown');
+        this.onBoulderHarvestResult?.(false, 0, 0, message.reason ?? 'unknown');
         break;
 
       case 'npc_dialogue':
@@ -2277,6 +2344,18 @@ export class NetworkManager {
           message.maxHealth, message.maxStamina ?? 100,
           message.playerLevel,
           message.statHealth, message.statDamage, message.statStamina, message.statWeight,
+          message.statPoints ?? 0,
+        );
+        break;
+      }
+
+      case 'PLAYER_LEVEL_UP': {
+        // Server confirmed a player level-up; refresh xp and playerLevel
+        this.onPlayerStatUp?.(
+          'level', 0, message.xp ?? 0,
+          0, 0,
+          message.playerLevel ?? 1,
+          0, 0, 0, 0,
           message.statPoints ?? 0,
         );
         break;
@@ -2545,6 +2624,9 @@ export class NetworkManager {
                    : s.structure_type === 'wreck'        ? 'wreck'
                    : s.structure_type === 'wood_ceiling' ? 'wood_ceiling'
                    : s.structure_type === 'cannon'       ? 'cannon'
+                   : s.structure_type === 'flag_fort'    ? 'flag_fort'
+                   : s.structure_type === 'claim_flag'   ? 'claim_flag'
+                   : s.structure_type === 'company_fortress' ? 'company_fortress'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2555,9 +2637,27 @@ export class NetworkManager {
           placerName: s.placer_name ?? '',
           doorOpen:  s.open ?? false,
           rotation:  s.rotation ?? 0,
+          cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
+          claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
+          claimContested:        s.claim_contested        === true,
+          claimTargetsFortress:  s.claim_targets_fortress  === true,
+          claimLinkedFort:       typeof s.claim_linked_fort  === 'number' ? s.claim_linked_fort  : undefined,
+          claimSourceEnemy:      typeof s.claim_source_enemy === 'number' ? s.claim_source_enemy : undefined,
+          claimState:            typeof s.claim_state === 'number' ? s.claim_state : undefined,
+          claimGraceMs:          typeof s.claim_grace_ms === 'number' ? s.claim_grace_ms : undefined,
+          claimOrphaned:         s.claim_orphaned        === true,
+          dominators:            Array.isArray(s.dominators) ? (s.dominators as number[]) : [],
+          fortressBuildProgress: typeof s.fortress_build_progress === 'number' ? s.fortress_build_progress : undefined,
+          fortressComplete:      s.fortress_complete       === true,
+          fortressContested:     s.fortress_contested      === true,
+          claimPhase:            typeof s.claim_phase === 'number' ? s.claim_phase : undefined,
+          claimPhaseProgressMs:  typeof s.claim_progress_ms === 'number' && s.claim_phase === 0 ? s.claim_progress_ms : undefined,
+          claimPhaseTotalMs:     typeof s.claim_total_ms === 'number' ? s.claim_total_ms : undefined,
+          targetHp:              typeof s.target_hp === 'number' ? s.target_hp : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
+            scaffoldedShipId: s.scaffolded_ship_id ?? 0,
           } : undefined,
         }));
         this.onStructuresList?.(structs);
@@ -2575,6 +2675,9 @@ export class NetworkManager {
                    : message.structure_type === 'wreck'        ? 'wreck'
                    : message.structure_type === 'wood_ceiling' ? 'wood_ceiling'
                    : message.structure_type === 'cannon'       ? 'cannon'
+                   : message.structure_type === 'flag_fort'    ? 'flag_fort'
+                   : message.structure_type === 'claim_flag'   ? 'claim_flag'
+                   : message.structure_type === 'company_fortress' ? 'company_fortress'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2585,6 +2688,22 @@ export class NetworkManager {
           placerName: message.placer_name ?? '',
           doorOpen:  message.open ?? false,
           rotation:  message.rotation ?? 0,
+          cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
+          claimProgress:        typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
+          claimContested:       message.claim_contested        === true,
+          claimTargetsFortress: message.claim_targets_fortress  === true,
+          claimLinkedFort:      typeof message.claim_linked_fort  === 'number' ? message.claim_linked_fort  : undefined,
+          claimSourceEnemy:     typeof message.claim_source_enemy === 'number' ? message.claim_source_enemy : undefined,
+          claimState:           typeof message.claim_state === 'number' ? message.claim_state : undefined,
+          claimGraceMs:         typeof message.claim_grace_ms === 'number' ? message.claim_grace_ms : undefined,
+          claimOrphaned:        message.claim_orphaned        === true,
+          fortressBuildProgress: typeof message.fortress_build_progress === 'number' ? message.fortress_build_progress : undefined,
+          fortressComplete:     message.fortress_complete       === true,
+          fortressContested:    message.fortress_contested      === true,
+          claimPhase:           typeof message.claim_phase === 'number' ? message.claim_phase : undefined,
+          claimPhaseProgressMs: typeof message.claim_progress_ms === 'number' && message.claim_phase === 0 ? message.claim_progress_ms : undefined,
+          claimPhaseTotalMs:    typeof message.claim_total_ms === 'number' ? message.claim_total_ms : undefined,
+          targetHp:             typeof message.target_hp === 'number' ? message.target_hp : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2610,6 +2729,116 @@ export class NetworkManager {
       case 'wreck_removed':
         this.onWreckRemoved?.(message.id ?? 0);
         this.onStructureDemolished?.(message.id ?? 0);
+        break;
+
+      case 'territory_update':
+        this.onTerritoryUpdate?.(
+          message.island_id          ?? 0,
+          message.company_id         ?? 0,
+          message.claimed === true,
+          message.fort_x             ?? 0,
+          message.fort_y             ?? 0,
+          message.fort_radius        ?? 600,
+          message.is_company_fortress === true,
+        );
+        break;
+
+      case 'claim_flag_progress':
+        this.onClaimFlagProgress?.(
+          message.structure_id       ?? message.id ?? 0,
+          message.progress_ms        ?? message.progress ?? 0,
+          message.contested          === true,
+          message.targets_fortress   === true,
+          typeof message.state === 'number' ? message.state : undefined,
+          typeof message.grace_ms === 'number' ? message.grace_ms : undefined,
+          typeof message.grace_total === 'number' ? message.grace_total : undefined,
+          typeof message.total === 'number' ? message.total : undefined,
+        );
+        break;
+
+      case 'territory_flipped':
+        this.onTerritoryFlipped?.(
+          message.flag_id ?? 0,
+          message.orphaned_structure_id ?? 0,
+          message.old_company_id ?? 0,
+          message.new_company_id ?? 0,
+          message.island_id ?? 0,
+        );
+        break;
+
+      case 'structure_dominators': {
+        const sid = (message.structure_id ?? 0) as number;
+        const list = (message.dominators ?? []) as number[];
+        this.onStructureDominators?.(sid, list);
+        break;
+      }
+
+      case 'fortress_build_progress':
+        this.onFortressBuildProgress?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+          message.progress_ms   ?? 0,
+          message.total_ms      ?? 900000,
+          message.contested     === true,
+        );
+        break;
+
+      case 'fortress_complete':
+        this.onFortressComplete?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+        );
+        break;
+
+      case 'flag_fort_build_progress':
+        // Periodic flag-fort heal resync. We deliberately do NOT route this
+        // through the Company-Fortress callbacks — the active gate is at 30%
+        // HP (not 100%), and the announcement copy is different. The render
+        // system has a dedicated handler that updates hp/contested only.
+        this.onFlagFortBuildProgress?.(
+          message.structure_id  ?? 0,
+          typeof message.hp     === 'number' ? message.hp     : 0,
+          typeof message.max_hp === 'number' ? message.max_hp : 500,
+          message.contested     === true,
+          message.fortress_complete === true,
+          typeof message.claim_phase === 'number' ? message.claim_phase : 2,
+          typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : 0,
+          typeof message.claim_total_ms === 'number' ? message.claim_total_ms : 60000,
+          typeof message.claim_state === 'number' ? message.claim_state : 0,
+          typeof message.claim_grace_ms === 'number' ? message.claim_grace_ms : 0,
+          typeof message.target_hp === 'number' ? message.target_hp : undefined,
+        );
+        break;
+
+      case 'flag_fort_active':
+        // Activation/deactivation transition for a flag fort. We pipe both
+        // directions through the existing fortress_complete callback by
+        // toggling fortressComplete on the cached structure.
+        this.onFlagFortActive?.(
+          message.structure_id  ?? 0,
+          message.company_id    ?? 0,
+          message.island_id     ?? 0,
+          message.active        === true,
+          typeof message.claim_phase === 'number' ? message.claim_phase : (message.active ? 2 : 1),
+        );
+        break;
+
+      case 'fortress_captured':
+        this.onFortressCaptured?.(
+          message.structure_id   ?? 0,
+          message.new_company_id ?? 0,
+          message.old_company_id ?? 0,
+          message.island_id      ?? 0,
+        );
+        break;
+
+      case 'territory_captured':
+        this.onTerritoryCaptured?.(
+          message.island_id      ?? 0,
+          message.new_company_id ?? message.company_id ?? 0,
+        );
         break;
 
       case 'door_toggled':
@@ -2639,6 +2868,7 @@ export class NetworkManager {
           message.max_hp ?? 100,
           message.x ?? 0,
           message.y ?? 0,
+          typeof message.target_hp === 'number' ? message.target_hp : undefined,
         );
         break;
 
@@ -2652,6 +2882,28 @@ export class NetworkManager {
           message.recipe_id ?? '',
           message.reason,
         );
+        break;
+
+      case 'repair_started':
+        this.onRepairStarted?.(
+          message.structure_id ?? 0,
+          message.player_id ?? 0,
+          message.hp ?? 0,
+          message.max_hp ?? 0,
+          message.target_hp ?? 0,
+        );
+        break;
+
+      case 'repair_cancelled':
+        this.onRepairCancelled?.(message.structure_id ?? 0, message.player_id ?? 0);
+        break;
+
+      case 'repair_complete':
+        this.onRepairComplete?.(message.structure_id ?? 0, message.player_id ?? 0);
+        break;
+
+      case 'repair_fail':
+        this.onRepairFail?.(message.structure_id ?? 0, message.reason ?? 'unknown');
         break;
 
       case MessageType.COMMAND_RESPONSE:
@@ -2708,6 +2960,7 @@ export class NetworkManager {
           message.reload_ms    ?? 0,
           message.mount_x      ?? 0,
           message.mount_y      ?? 0,
+          message.rotation     ?? 0,
         );
         break;
       }
@@ -2860,6 +3113,17 @@ export class NetworkManager {
 
       case 'tombstone_collect_fail':
         // silently ignore — server already sent reason
+        break;
+
+      case 'message_ack':
+        if (message.status === 'aim_updated' &&
+            typeof message.structure_id === 'number' &&
+            typeof message.cannon_aim_angle === 'number') {
+          this.onIslandCannonAimSync?.(message.structure_id, message.cannon_aim_angle);
+        }
+        if (message.status === 'no_ammo') {
+          this.onNoAmmo?.();
+        }
         break;
 
       default:

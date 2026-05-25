@@ -148,12 +148,92 @@ export class RenderSystem {
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
   public activeWeaponGroups: Set<number> = new Set();
+  /** Structure ID of the island cannon the local player is currently mounted to (for barrel rendering). */
+  public islandCannonId: number | null = null;
+  /** Live aim angle (world radians) for the mounted island cannon barrel. Null when not mounted. */
+  public islandCannonAimAngle: number | null = null;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
   private _cachedLocalPlayer: Player | null = null;
   /** Placed island structures — updated via addPlacedStructure / setPlacedStructures. */
   private placedStructures: PlacedStructure[] = [];
+  /** islandId → companyId: active island territory claims. */
+  private _islandClaims: Map<number, { companyId: number; fortX: number; fortY: number; fortRadius: number; isCompanyFortress: boolean }> = new Map();
+  /** When true, draws the territory overlay (Alt held). */
+  private _showTerritoryOverlay = false;
+  /**
+   * Cached offscreen bitmaps for the territory claim overlay.
+   * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
+   * null entries mean the bitmap needs to be redrawn.
+   */
+  private _claimOverlayCache: Map<string, { connectedIds: Set<number>; inactiveIds: Set<number> }> = new Map();
+  // Backing state for _claimOverlayDirty getter/setter
+  private _claimOverlayDirtyState = true;
+  /** Offscreen canvas cache for the territory overlay rasterisation. */
+  private _claimOverlayBitmapValid = false;
+  private _claimOverlayCachedCanvas: OffscreenCanvas | null = null;
+  private _claimOverlayCachedCamX = 0;
+  private _claimOverlayCachedCamY = 0;
+  private _claimOverlayCachedZoom = 0;
+  /** Extra pixels on each side of the viewport that the cached overlay canvas
+   * covers, so camera pan can be handled by a pixel-offset drawImage instead
+   * of a full re-rasterisation.  Re-render triggers when drift > 60% of this. */
+  private readonly _claimOverlayMargin = 700;
+  private get _claimOverlayDirty(): boolean { return this._claimOverlayDirtyState; }
+  private set _claimOverlayDirty(v: boolean) {
+    this._claimOverlayDirtyState = v;
+    if (v) this._claimOverlayBitmapValid = false;
+  }
+  /**
+   * Cache of world-space (camera-independent) subord/dominated structure ID
+   * sets per (islandId, companyId).  Computed once on structural change and
+   * reused every frame while Alt is held, avoiding the O(N²) filter loops.
+   * Keyed by `${islId}_${cid}`.  Cleared alongside _claimOverlayCache.
+   */
+  private _miInfosCache: Map<string, {
+    activeSubordIds:    Map<number, number[]>;
+    activeDomIds:       Map<number, number[]>;
+    inactiveSubordIds:  Map<number, number[]>;
+    inactiveDomIds:     Map<number, number[]>;
+  }> = new Map();
+  /**
+   * Pool of reusable full-screen OffscreenCanvas scratch buffers, keyed by
+   * a stable slot name. Avoids per-frame allocation of dozens of large RGBA
+   * buffers in the territory overlay rendering pass. Each slot must be used
+   * by at most one logical buffer at any given time within a single overlay
+   * pass; the helper resets transform/composite/alpha/lineDash and clears
+   * the canvas on each fetch so callers always see a fresh buffer.
+   */
+  private _scratchCanvases: Map<string, OffscreenCanvas> = new Map();
+  private _getScratch(name: string, w: number, h: number): OffscreenCanvas {
+    let c = this._scratchCanvases.get(name);
+    if (!c || c.width !== w || c.height !== h) {
+      c = new OffscreenCanvas(w, h);
+      this._scratchCanvases.set(name, c);
+      return c;
+    }
+    const ctx = c.getContext('2d')!;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.setLineDash([]);
+    ctx.clearRect(0, 0, w, h);
+    return c;
+  }
+  /**
+   * Pre-computed wall segments — rebuilt whenever placedStructures changes.
+   * Each entry: [x1, y1, x2, y2] in world space.  Used for O(1)-per-frame
+   * ceiling-transparency ray tests instead of recomputing each draw call.
+   */
+  private _wallSegs: Float32Array = new Float32Array(0);
+  private _wallSegsFloorCount = 0; // floor count at last rebuild (tracks floor changes too)
+  /** Cached visibility polygon (world-space points) for the building shadow overlay. */
+  private _visPolyPts: Float32Array = new Float32Array(0);
+  private _visPolyPx = NaN;
+  private _visPolyPy = NaN;
+  private _visPolyWallRev = 0;  // incremented on every _rebuildWallSegs
+  private _visPolyLastRev = -1; // last rev seen when poly was built — rebuild when different
   /** Active tombstone item caches in the world. */
   private _tombstones: import('../../sim/Types').Tombstone[] = [];
   /** Ship-local attachment data for tombstones that spawned on a ship. */
@@ -208,7 +288,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -863,6 +943,7 @@ export class RenderSystem {
   
   // Debug flags
   private showHoverBoundaries: boolean = false;
+  private _showHoverDebugHUD: boolean = false;
   
   constructor(canvas: HTMLCanvasElement, config: GraphicsConfig) {
     this.canvas = canvas;
@@ -1779,35 +1860,323 @@ export class RenderSystem {
   /** Add (or update) a single placed structure received from the server. */
   addPlacedStructure(s: PlacedStructure): void {
     const idx = this.placedStructures.findIndex(p => p.id === s.id);
+    const isNew = idx < 0;
     if (idx >= 0) this.placedStructures[idx] = s;
     else this.placedStructures.push(s);
+    // Predict newcomer dominators locally to mirror server's
+    // claim_register_placement_dominators. The authoritative
+    // structure_dominators broadcast that follows will overwrite this.
+    // Without this prediction, the just-placed structure is briefly
+    // treated as uncarved "my territory" by pointInMyOwnUncarvedTerritory,
+    // making the build-ghost wrongly green for enemy-overlap placements.
+    if (isNew && s.type !== 'claim_flag' && (s.companyId ?? 0) !== 0 &&
+        !s.claimOrphaned && (!s.dominators || s.dominators.length === 0)) {
+      const radiusOf = (t: PlacedStructure['type']): number =>
+        (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+      const mr = radiusOf(s.type);
+      const predicted: number[] = [];
+      for (const other of this.placedStructures) {
+        if (other === s) continue;
+        if (other.id === s.id) continue;
+        if ((other.companyId ?? 0) === 0) continue;
+        if (other.companyId === s.companyId) continue;
+        if (other.claimOrphaned) continue;
+        if (other.type === 'claim_flag') continue;
+        const pr = radiusOf(other.type);
+        const dx = other.x - s.x, dy = other.y - s.y;
+        const thresh = mr + pr;
+        if (dx * dx + dy * dy > thresh * thresh) continue;
+        predicted.push(other.id);
+      }
+      if (predicted.length > 0) s.dominators = predicted;
+    }
+    this._rebuildWallSegs();
+    this._claimOverlayDirty = true;
+  }
+
+  // ── Territory claim API ────────────────────────────────────────────────────
+
+  setTerritoryOverlay(on: boolean): void {
+    if (on && !this._showTerritoryOverlay) this._claimOverlayDirty = true; // invalidate on show
+    this._showTerritoryOverlay = on;
+  }
+
+  setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600, isCompanyFortress = false): void {
+    this._islandClaims.set(islandId, { companyId, fortX, fortY, fortRadius, isCompanyFortress });
+    this._claimOverlayDirty = true;
+  }
+
+  clearIslandClaim(islandId: number): void {
+    this._islandClaims.delete(islandId);
+    this._claimOverlayDirty = true;
+  }
+
+  updateClaimFlagProgress(structId: number, progressMs: number, contested: boolean, targetsFortress = false,
+                          state?: number, graceMs?: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.claimProgress = progressMs;
+      s.claimContested = contested;
+      s.claimTargetsFortress = targetsFortress;
+      if (state !== undefined) s.claimState = state;
+      if (graceMs !== undefined) s.claimGraceMs = graceMs;
+    }
+  }
+
+  /** Mark a structure as orphaned (or not) for territory-overlay purposes. */
+  setStructureClaimOrphaned(structId: number, orphaned: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.claimOrphaned = orphaned;
+      this._claimOverlayDirty = true;
+    }
+  }
+
+  /** Update a structure's dominators list after a successful claim flag capture. */
+  setStructureDominators(structureId: number, dominators: number[]): void {
+    const s = this.placedStructures.find(p => p.id === structureId);
+    if (!s) return;
+    s.dominators = dominators.slice();
+    this._claimOverlayDirty = true;
+  }
+
+  /** True if the point (px, py) lies inside the overlap of one of my own
+   * structures' claim radii with a structure that has me as a dominator
+   * (i.e. my company has carved that overlap out of an enemy structure). */
+  private pointInMyDominatedArea(islandId: number, myCompany: number, px: number, py: number): boolean {
+    if (!myCompany) return false;
+    const radiusOf = (s: PlacedStructure): number => {
+      if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
+      return 400;
+    };
+    for (const victim of this.placedStructures) {
+      if (!victim.dominators || victim.dominators.length === 0) continue;
+      if (victim.islandId !== islandId) continue;
+      if (victim.companyId === myCompany) continue;
+      if (victim.claimOrphaned) continue;
+      const vr = radiusOf(victim);
+      const dvx = px - victim.x, dvy = py - victim.y;
+      if (dvx * dvx + dvy * dvy > vr * vr) continue;
+      for (const dId of victim.dominators) {
+        const d = this.placedStructures.find(p => p.id === dId);
+        if (!d) continue;
+        if (d.companyId !== myCompany) continue;
+        if (d.claimOrphaned) continue;
+        if (d.islandId !== islandId) continue;
+        const dr = radiusOf(d);
+        const ddx = px - d.x, ddy = py - d.y;
+        if (ddx * ddx + ddy * ddy <= dr * dr) return true;
+      }
+    }
+    return false;
+  }
+
+  /** True if (px,py) lies inside one of my own structures' claim radii AND
+   * none of that structure's enemy dominators also covers the point. This is
+   * the per-pixel "I own this point under Render Rule X" check for my own
+   * (non-captured) territory. */
+  private pointInMyOwnUncarvedTerritory(islandId: number, myCompany: number, px: number, py: number): boolean {
+    if (!myCompany) return false;
+    const radiusOf = (s: PlacedStructure): number => {
+      if (s.type === 'flag_fort' || s.type === 'company_fortress') return 600;
+      return 400;
+    };
+    for (const s of this.placedStructures) {
+      if (s.companyId !== myCompany) continue;
+      if (s.islandId !== islandId) continue;
+      if (s.claimOrphaned) continue;
+      // Only structures that project a claim radius count.
+      if (s.type !== 'flag_fort' && s.type !== 'company_fortress' && s.type !== 'claim_flag') {
+        // Non-fort claim sources still project the default radius via the
+        // BFS overlay; include them so cursor logic mirrors the overlay.
+      }
+      const sr = radiusOf(s);
+      const dx = px - s.x, dy = py - s.y;
+      if (dx * dx + dy * dy > sr * sr) continue;
+      // Check no enemy dominator of S also covers the point.
+      let carved = false;
+      if (s.dominators && s.dominators.length > 0) {
+        for (const dId of s.dominators) {
+          const d = this.placedStructures.find(p => p.id === dId);
+          if (!d) continue;
+          if (d.companyId === myCompany) continue; // same-company never carves
+          if (d.claimOrphaned) continue;
+          const dr = radiusOf(d);
+          const ddx = px - d.x, ddy = py - d.y;
+          if (ddx * ddx + ddy * ddy <= dr * dr) { carved = true; break; }
+        }
+      }
+      if (!carved) return true;
+    }
+    return false;
+  }
+
+  /** Dominators-only effective territory test: I own (px,py) iff either
+   * (a) one of my own structures covers it and no enemy dominator carves
+   *     it, or
+   * (b) an enemy structure covers it and one of my structures sits in that
+   *     enemy's dominators list (captured area). */
+  private pointInMyEffectiveTerritory(islandId: number, myCompany: number, px: number, py: number): boolean {
+    if (this.pointInMyOwnUncarvedTerritory(islandId, myCompany, px, py)) return true;
+    if (this.pointInMyDominatedArea(islandId, myCompany, px, py)) return true;
+    return false;
+  }
+
+  updateFortressBuildProgress(structId: number, _companyId: number, _islandId: number, progressMs: number, totalMs: number, contested: boolean): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.fortressBuildProgress = progressMs;
+      s.fortressContested = contested;
+      s.fortressComplete = progressMs >= totalMs;
+    }
+  }
+
+  onFortressComplete(structId: number, _companyId: number, _islandId: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) { s.fortressComplete = true; s.fortressContested = false; }
+  }
+
+  onFortressCaptured(structId: number, newCompanyId: number, _islandId: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.companyId = newCompanyId;
+      s.fortressBuildProgress = 0;
+      s.fortressComplete = false;
+      s.fortressContested = false;
+    }
+  }
+
+  /** Flip a Flag Fort's active state (crosses 30%-HP gate) or transition from CLAIMING→BUILDING. */
+  onFlagFortActive(structId: number, active: boolean, claimPhase?: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (s) {
+      s.fortressComplete = active;
+      if (typeof claimPhase === 'number') s.claimPhase = claimPhase;
+      this._claimOverlayDirty = true;
+    }
+  }
+
+  /** Periodic flag-fort heal / claim-phase progress resync (does NOT toggle
+   *  active gate — that arrives via the dedicated flag_fort_active event). */
+  updateFlagFortBuildProgress(structId: number, hp: number, maxHp: number, contested: boolean, active: boolean,
+                              claimPhase?: number, claimProgressMs?: number, claimTotalMs?: number,
+                              claimState?: number, claimGraceMs?: number, targetHp?: number): void {
+    const s = this.placedStructures.find(p => p.id === structId);
+    if (!s) return;
+    s.hp = hp;
+    s.maxHp = maxHp;
+    if (typeof targetHp === 'number') s.targetHp = targetHp;
+    s.fortressContested = contested;
+    // Build progress mapped onto a 0..max=FLAG_FORT_BUILD_MS scale so the
+    // existing progress-bar reuses it (renderer divides by max_hp anyway).
+    s.fortressBuildProgress = maxHp > 0 ? (hp / maxHp) * 300000 : 0;
+    if (typeof claimPhase === 'number') {
+      const prevPhase = s.claimPhase;
+      s.claimPhase = claimPhase;
+      if (prevPhase !== claimPhase) this._claimOverlayDirty = true;
+      if (claimPhase === 0) {
+        // CLAIMING phase — store the ground-claim countdown + contest state.
+        s.claimPhaseProgressMs = claimProgressMs;
+        s.claimPhaseTotalMs    = claimTotalMs;
+        s.claimState           = claimState;
+        s.claimGraceMs         = claimGraceMs;
+        s.claimContested       = contested;
+      } else {
+        s.claimPhaseProgressMs = undefined;
+      }
+    }
+    if (s.fortressComplete !== active) {
+      s.fortressComplete = active;
+      this._claimOverlayDirty = true;
+    }
+  }
+
+  /** Look up a placed structure by id (read-only). */
+  getPlacedStructureById(structId: number): PlacedStructure | undefined {
+    return this.placedStructures.find(p => p.id === structId);
   }
 
   /** Replace the full placed-structure list (e.g. on join). */
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
+    this._rebuildWallSegs();
+    this._claimOverlayDirty = true;
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
   removePlacedStructure(id: number): void {
-    this.placedStructures = this.placedStructures.filter(s => s.id !== id);
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) {
+      // Spawn destruction smoke + debris for solid structures (not cannons/shipyards)
+      const smokeTypes: PlacedStructure['type'][] = ['wooden_floor', 'wood_ceiling', 'wall', 'door', 'door_frame', 'workbench'];
+      if (smokeTypes.includes(s.type)) {
+        this.particleSystem.createStructureDestroy(Vec2.from(s.x, s.y));
+      }
+    }
+    this.placedStructures = this.placedStructures.filter(p => p.id !== id);
+    this._rebuildWallSegs();
+    this._claimOverlayDirty = true;
+  }
+
+  /**
+   * Rebuild the cached wall-segment flat array from the current placedStructures.
+   * Called only when the structure list mutates — not every frame.
+   * Layout: [x1, y1, x2, y2,  x1, y1, x2, y2, ...]
+   */
+  private _rebuildWallSegs(): void {
+    const WALL_HALF = 26;
+    const floors = this.placedStructures.filter(f => f.type === 'wooden_floor');
+    const solids  = this.placedStructures.filter(
+      w => w.type === 'wall' || (w.type === 'door' && !w.doorOpen)
+    );
+    const buf = new Float32Array(solids.length * 4);
+    let i = 0;
+    for (const w of solids) {
+      let nearFloor: PlacedStructure | null = null;
+      let nearDist2 = Infinity;
+      for (const f of floors) {
+        const d2 = (f.x - w.x) ** 2 + (f.y - w.y) ** 2;
+        if (d2 < nearDist2) { nearDist2 = d2; nearFloor = f; }
+      }
+      const ang = nearFloor
+        ? Math.atan2(w.y - nearFloor.y, w.x - nearFloor.x) + Math.PI / 2
+        : 0;
+      const ca = Math.cos(ang) * WALL_HALF, sa = Math.sin(ang) * WALL_HALF;
+      buf[i++] = w.x + ca; buf[i++] = w.y + sa;
+      buf[i++] = w.x - ca; buf[i++] = w.y - sa;
+    }
+    this._wallSegs = buf;
+    this._visPolyWallRev++; // invalidate cached visibility polygon
   }
 
   /** Update a structure's company ownership (one-way promotion from server). */
   updateStructureCompany(id: number, companyId: number): void {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s) s.companyId = companyId;
+    if (s) {
+      s.companyId = companyId;
+      s.claimOrphaned = false; // company change = captured from inactive territory; always de-orphan
+      this._claimOverlayDirty = true;
+    }
   }
 
-  updateStructureHp(id: number, hp: number, maxHp: number): void {
+  updateStructureHp(id: number, hp: number, maxHp: number, targetHp?: number): { prevHp: number; prevTargetHp: number } | null {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s) { s.hp = hp; s.maxHp = maxHp; }
+    if (!s) return null;
+    const prevHp = s.hp ?? 0;
+    const prevTargetHp = s.targetHp ?? prevHp;
+    s.hp = hp;
+    s.maxHp = maxHp;
+    if (typeof targetHp === 'number') s.targetHp = targetHp;
+    return { prevHp, prevTargetHp };
   }
 
   /** Update door open/closed state after a door_toggled broadcast. */
   updateStructureDoorOpen(id: number, open: boolean): void {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s && s.type === 'door') s.doorOpen = open;
+    if (s && s.type === 'door') {
+      s.doorOpen = open;
+      this._rebuildWallSegs(); // open/closed changes which segments block LOS
+    }
   }
 
   /** Update ship construction state after a shipyard_state broadcast. */
@@ -1831,7 +2200,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -2036,7 +2405,7 @@ export class RenderSystem {
    * Return the nearest workbench within `range` world-px of the local player,
    * or null if none found. Used to decide whether E-key triggers interact.
    */
-  getHoveredWorkbench(range: number = 110): PlacedStructure | null {
+  getHoveredWorkbench(range: number = 50): PlacedStructure | null {
     const player = this._cachedLocalPlayer;
     if (!player) return null;
     const px = player.position.x;
@@ -2062,7 +2431,7 @@ export class RenderSystem {
    * of it (so E-key only fires when actually reachable). Returns null if no
    * structure is moused-over or the player is too far / on a ship.
    */
-  getHoveredStructure(range: number = 110): PlacedStructure | null {
+  getHoveredStructure(range: number = 50): PlacedStructure | null {
     if (!this._hoveredStructure) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2084,7 +2453,7 @@ export class RenderSystem {
   }
 
   /** Return hovered tree world pos if player is in range and off-ship, else null. */
-  getHoveredTree(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredTree(range: number = 50): { wx: number; wy: number } | null {
     if (!this._hoveredTree) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2094,7 +2463,7 @@ export class RenderSystem {
   }
 
   /** Return hovered fiber plant world pos if player is in range and off-ship, else null. */
-  getHoveredFiberPlant(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredFiberPlant(range: number = 50): { wx: number; wy: number } | null {
     if (!this._hoveredFiberPlant) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2104,7 +2473,7 @@ export class RenderSystem {
   }
 
   /** Return hovered rock world pos if player is in range and off-ship, else null. */
-  getHoveredRock(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredRock(range: number = 50): { wx: number; wy: number } | null {
     if (!this._hoveredRock) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2113,7 +2482,7 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
   }
 
-  getHoveredBoulder(range: number = 110): { wx: number; wy: number } | null {
+  getHoveredBoulder(range: number = 50): { wx: number; wy: number } | null {
     if (!this._hoveredBoulder) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
@@ -2501,10 +2870,11 @@ export class RenderSystem {
     const template = this.getPlankTemplate();
 
     for (const ship of worldState.ships) {
-      // Collect all present plank slots
+      // Collect all present (placed, health > 0) plank slots.
+      // Slots with health = 0 are absent and should be hoverable for placement.
       const presentKeys = new Set<string>();
       for (const mod of ship.modules) {
-        if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank') {
+        if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank' && mod.moduleData.health > 0) {
           presentKeys.add(`${mod.moduleData.sectionName}_${mod.moduleData.segmentIndex}`);
         }
       }
@@ -2560,6 +2930,14 @@ export class RenderSystem {
   toggleHoverBoundaries(): void {
     this.showHoverBoundaries = !this.showHoverBoundaries;
     console.log(`🔍 Hover boundaries debug: ${this.showHoverBoundaries ? 'ON' : 'OFF'}`);
+  }
+
+  /**
+   * Toggle the hover debug HUD panel (bottom-right corner, shows raw fields for hovered entity).
+   */
+  toggleHoverDebugHUD(): void {
+    this._showHoverDebugHUD = !this._showHoverDebugHUD;
+    console.log(`🔬 Hover debug HUD: ${this._showHoverDebugHUD ? 'ON' : 'OFF'}`);
   }
   
   /**
@@ -2740,9 +3118,11 @@ export class RenderSystem {
     const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
     const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
 
-    // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late)
-    const zeroThreshold = ship.shipType === SHIP_TYPE_GHOST ? 1 : 0;
-    if (ship.hullHealth <= zeroThreshold && !this.sinkTimestamps.has(ship.id)) {
+    // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late).
+    // Ghost ships rely exclusively on the explicit markShipSinking() call from the SHIP_SINKING server
+    // message — do NOT auto-trigger here.  Their hullHealth field may be 0 or unset even while alive,
+    // because the server tracks their HP on a different scale (0–60000) and may not populate the field.
+    if (ship.shipType !== SHIP_TYPE_GHOST && ship.hullHealth <= 0 && !this.sinkTimestamps.has(ship.id)) {
       this.sinkTimestamps.set(ship.id, performance.now());
     }
 
@@ -2941,6 +3321,14 @@ export class RenderSystem {
         else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 64);
       }
+    }
+
+    // ── Territory claim overlay (drawn when Alt is held) ─────────────────────
+    // Rendered above the resource layer (nodes, hover prompts, and health bars)
+    // so the dominance borders/hatching aren't occluded by trees, bushes, or
+    // gather UI when inspecting territory.
+    if (this._showTerritoryOverlay) {
+      this.drawTerritoryOverlay(camera);
     }
 
     // Restore scaffolded ship positions so game logic is unaffected
@@ -3365,7 +3753,8 @@ export class RenderSystem {
     })();
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
-    const HARVEST_RANGE_SQ = 110 * 110;
+    const HARVEST_RANGE = 50; // base range (px) — matches server HARVEST_RANGE
+    // Effective range per node = HARVEST_RANGE * Math.max(1.0, size) — larger nodes extend reach
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
     const LEAF_FADE_OUTER = 420;
@@ -3374,7 +3763,6 @@ export class RenderSystem {
     const BUSH_FADE_OUTER = 320;
     const BUSH_FADE_INNER = 90;
     const MIN_BUSH_ALPHA  = 0.30;
-    const BOULDER_HOVER_SQ = (44 * zoom) * (44 * zoom);
     const DEATH_FADE_MS   = 2000;
     const now = performance.now();
     const cw = this.canvas.width;
@@ -3657,8 +4045,12 @@ export class RenderSystem {
         let isHovered = false;
         let inRange   = false;
         let playerNear = false;
-        const pdx = localPlayer ? localPlayer.position.x - wx : 0;
-        const pdy = localPlayer ? localPlayer.position.y - wy : 0;
+        // Use canonical (non-wrap-offset) world coords for player distance so
+        // the range check is correct even during wrap-render passes (off.dx ≠ 0).
+        const wxCanon = wx - off.dx;
+        const wyCanon = wy - off.dy;
+        const pdx = localPlayer ? localPlayer.position.x - wxCanon : 0;
+        const pdy = localPlayer ? localPlayer.position.y - wyCanon : 0;
         const pdSq = localPlayer ? (pdx * pdx + pdy * pdy) : Infinity;
         const playerDist = localPlayer ? Math.sqrt(pdSq) : Infinity;
         const mayHover = !!(hoverCandidateSet && hoverCandidateSet.has(ri));
@@ -3666,21 +4058,26 @@ export class RenderSystem {
         if (res.type === 'wood') {
           const treeHoverR = 18 * (res.size ?? 1.0) * zoom;
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= treeHoverR * treeHoverR; }
-          inRange    = !!(axeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange    = !!(axeEquipped && localPlayer && pdSq <= effR * effR);
           playerNear = !!(localPlayer && playerDist < LEAF_FADE_OUTER);
-          if (isHovered) this._hoveredTree = { wx, wy };
+          if (isHovered) this._hoveredTree = { wx: wxCanon, wy: wyCanon };
         } else if (res.type === 'fiber') {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
-          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= HARVEST_RANGE_SQ);
-          if (isHovered) this._hoveredFiberPlant = { wx, wy };
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
+          if (isHovered) this._hoveredFiberPlant = { wx: wxCanon, wy: wyCanon };
         } else if (res.type === 'rock') {
-          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ; }
-          inRange = !!(localPlayer && pdSq <= HARVEST_RANGE_SQ);
-          if (isHovered) this._hoveredRock = { wx, wy };
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ * (res.size ?? 1.0); }
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
+          if (isHovered) this._hoveredRock = { wx: wxCanon, wy: wyCanon };
         } else if (res.type === 'boulder') {
-          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= BOULDER_HOVER_SQ; }
-          inRange = !!(pickaxeEquipped && localPlayer && pdSq <= HARVEST_RANGE_SQ);
-          if (isHovered) this._hoveredBoulder = { wx, wy };
+          const bHoverR = 44 * (res.size ?? 1.0) * zoom;
+          if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
+          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          inRange = !!(pickaxeEquipped && localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
+          if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
         const leafAlpha = res.type === 'wood' && localPlayer
@@ -3890,7 +4287,9 @@ export class RenderSystem {
     const ctx      = this.ctx;
     const R        = RenderSystem.BOULDER_SPRITE_R;
     const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
-    const r        = 40 * zoom * size;
+    // Radius matches server BOULDER_BASE_R = 38 so the visual boundary aligns
+    // with the server-side ellipse collision pushout.
+    const r        = 38 * zoom * size;
     const drawSize = SIZE * (r / R);
     const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const toneCount = 3; // 3 variants within stone or metal range
@@ -3943,82 +4342,45 @@ export class RenderSystem {
     const ctx  = this.ctx;
     const zoom = camera.getState().zoom;
 
-    // ── Faded ceiling IDs (player's current building) ────────────────────────
-    // Computed first so hover detection can use it for ceiling occlusion.
-    const _fadedCeilingIds = new Set<number>();
-    {
-      const lp = this._cachedLocalPlayer;
-      if (lp && lp.carrierId === 0) {
-        const px = lp.position.x, py = lp.position.y;
-        const HALF_T = 25;
-        const ADJ   = 55;
-        const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
-        let startFloor: PlacedStructure | null = null;
-        for (const f of allFloors) {
-          const fr = (f.rotation ?? 0) * Math.PI / 180;
-          const fc = Math.cos(-fr), fs = Math.sin(-fr);
-          const lx = (px - f.x) * fc - (py - f.y) * fs;
-          const ly = (px - f.x) * fs + (py - f.y) * fc;
-          if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startFloor = f; break; }
-        }
-        if (startFloor !== null) {
-          const connectedFloorIds = new Set<number>([startFloor.id]);
-          const floorQueue: PlacedStructure[] = [startFloor];
-          while (floorQueue.length > 0) {
-            const cur = floorQueue.shift()!;
-            for (const f of allFloors) {
-              if (connectedFloorIds.has(f.id)) continue;
-              const dx = f.x - cur.x, dy = f.y - cur.y;
-              if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
-                connectedFloorIds.add(f.id);
-                floorQueue.push(f);
-              }
-            }
-          }
-          const connectedFloors = allFloors.filter(f => connectedFloorIds.has(f.id));
-          const ceilings = this.placedStructures.filter(c => c.type === 'wood_ceiling');
-          let startCeil: PlacedStructure | null = null;
-          outer:
-          for (const c of ceilings) {
-            const cr = (c.rotation ?? 0) * Math.PI / 180;
-            const cc = Math.cos(-cr), cs = Math.sin(-cr);
-            for (const f of connectedFloors) {
-              const lx = (f.x - c.x) * cc - (f.y - c.y) * cs;
-              const ly = (f.x - c.x) * cs + (f.y - c.y) * cc;
-              if (Math.abs(lx) <= HALF_T && Math.abs(ly) <= HALF_T) { startCeil = c; break outer; }
-            }
-          }
-          if (startCeil !== null) {
-            const ceilQueue: PlacedStructure[] = [startCeil];
-            _fadedCeilingIds.add(startCeil.id);
-            while (ceilQueue.length > 0) {
-              const cur = ceilQueue.shift()!;
-              for (const c of ceilings) {
-                if (_fadedCeilingIds.has(c.id)) continue;
-                const dx = c.x - cur.x, dy = c.y - cur.y;
-                if (Math.sqrt(dx * dx + dy * dy) <= ADJ) {
-                  _fadedCeilingIds.add(c.id);
-                  ceilQueue.push(c);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
+    // ── Update hovered structure ──────────────────────────────────────────────
 
+        // Strict segment-segment intersection (cross-product sign method).
+        // Returns false for collinear / touching endpoints — we don't need those cases.
+        const cross2d = (ox: number, oy: number, ax: number, ay: number, bx: number, by: number) =>
+          (ax - ox) * (by - oy) - (ay - oy) * (bx - ox);
+        const segsCross = (ax: number, ay: number, bx: number, by: number,
+                           cx: number, cy: number, dx: number, dy: number): boolean => {
+          const d1 = cross2d(cx, cy, dx, dy, ax, ay);
+          const d2 = cross2d(cx, cy, dx, dy, bx, by);
+          const d3 = cross2d(ax, ay, bx, by, cx, cy);
+          const d4 = cross2d(ax, ay, bx, by, dx, dy);
+          return (d1 * d2 < 0) && (d3 * d4 < 0);
+        };
+
+        const rayBlocked = (ax: number, ay: number, bx: number, by: number): boolean => {
+          const n = this._wallSegs.length;
+          for (let i = 0; i < n; i += 4) {
+            if (segsCross(ax, ay, bx, by, this._wallSegs[i], this._wallSegs[i+1], this._wallSegs[i+2], this._wallSegs[i+3])) return true;
+          }
+          return false;
+        };
+
+        // ── Seed: ceiling tiles the player can reach without crossing a wall ──
+        // No floor tile required — also works outside, on bare ground, through
+        // open doorways (door_frame without a door panel).
     // ── Update hovered structure ──────────────────────────────────────────────
     // Highlight whichever structure the mouse cursor is over (AABB for floor,
     // landscape rect for workbench).  Interaction hints additionally require
     // the player to be off-ship and within range.
     const player = this._cachedLocalPlayer;
-    const INTERACT_R = 110; // world px — must match getHoveredStructure range
+    const INTERACT_R = 50; // world px — one full floor-tile; must match getHoveredStructure range and server STRUCT_INTERACT_R
     this._hoveredStructure = null;
     if (this.mouseWorldPos && !this.islandBuildKind) {
       const mx = this.mouseWorldPos.x;
       const my = this.mouseWorldPos.y;
       const half = 25; // half of 50px tile
-      let floorHit: PlacedStructure | null = null;
+      let wallHit:  PlacedStructure | null = null; // wall / door_frame / door
+      let floorHit: PlacedStructure | null = null; // wooden_floor / wood_ceiling
       for (const s of this.placedStructures) {
         if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
           // Derive wall orientation from nearest floor tile, then rotate mouse into local space
@@ -4037,7 +4399,7 @@ export class RenderSystem {
           const lx = ddx * wc - ddy * ws;
           const ly = ddx * ws + ddy * wc;
           if (Math.abs(lx) <= 25 && Math.abs(ly) <= 8) {
-            floorHit = s; // walls/door frames/panels treated like floors — workbench still wins
+            wallHit = s; // walls/door frames/panels beat floors/ceilings
           }
           continue;
         }
@@ -4055,41 +4417,109 @@ export class RenderSystem {
         const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
         const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 445 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
-          if (s.type === 'workbench' || s.type === 'shipyard') {
-            // Workbench/shipyard always wins — stop searching
+          if (s.type === 'shipyard') {
+            // For empty shipyard: only highlight the physical U-shaped dock arms,
+            // not the hollow interior water area. ARM_T = 50 world units (sz=50).
+            const SY_ARM_T = 50;
+            const isInHollow = s.construction?.phase !== 'building'
+              && Math.abs(lx) <= hw - SY_ARM_T
+              && ly > -hh + SY_ARM_T;
+            if (!isInHollow) {
+              this._hoveredStructure = s;
+              wallHit = null;
+              floorHit = null;
+              break;
+            }
+          } else if (s.type === 'workbench') {
+            // Workbench always wins — stop searching
             this._hoveredStructure = s;
+            wallHit = null;
             floorHit = null;
             break;
           } else {
-            // Floor match — keep looking in case a workbench overlaps
+            // Floor/ceiling match — keep looking in case a wall or workbench overlaps
             floorHit = s;
           }
         }
       }
-      if (this._hoveredStructure === null) this._hoveredStructure = floorHit;
+      // Priority: workbench/shipyard (set directly) > wall/door_frame/door > floor/ceiling
+      if (this._hoveredStructure === null) this._hoveredStructure = wallHit ?? floorHit;
+    }
 
-      // ── Ceiling occlusion: suppress hover if mouse is under an opaque ceiling ──
-      // If the mouse world position is inside a ceiling tile that is NOT faded
-      // (i.e. the player is outside that building), don't highlight anything below.
-      if (this._hoveredStructure !== null) {
-        const HALF_T = 25;
-        for (const c of this.placedStructures) {
-          if (c.type !== 'wood_ceiling') continue;
-          if (_fadedCeilingIds.has(c.id)) continue; // faded = player is inside, hover allowed
-          if (c.id === this._hoveredStructure!.id) continue; // ceiling IS what's hovered — allow it
-          const cr = (c.rotation ?? 0) * Math.PI / 180;
-          let clx: number, cly: number;
-          if (cr === 0) {
-            clx = mx - c.x; cly = my - c.y;
-          } else {
-            const cc2 = Math.cos(-cr), cs2 = Math.sin(-cr);
-            clx = (mx - c.x) * cc2 - (my - c.y) * cs2;
-            cly = (mx - c.x) * cs2 + (my - c.y) * cc2;
-          }
-          if (Math.abs(clx) <= HALF_T && Math.abs(cly) <= HALF_T) {
-            this._hoveredStructure = null;
-            break;
-          }
+    // Pre-compute the player's visibility polygon. This polygon (in world space)
+    // bounds the area the player has line-of-sight to. Each ceiling tile is rendered
+    // fully opaque, then the lit area (vis poly) is punched to a lower alpha — producing
+    // a clean shadow edge along the true LOS line.
+    const MIN_CEIL_ALPHA = 0.25;
+    const ceilingAlpha = new Map<number, number>(); // tile-average alpha — used for hover blocking
+    let visPolyValid = false;
+    if (player && this._wallSegs.length > 0) {
+      const ppx = player.position.x, ppy = player.position.y;
+      // Rebuild vis poly each frame the player moves > 1 unit OR walls change.
+      const moved = Math.abs(ppx - this._visPolyPx) > 1 || Math.abs(ppy - this._visPolyPy) > 1;
+      const wallsChanged = this._visPolyWallRev !== this._visPolyLastRev;
+      if (wallsChanged) this._visPolyLastRev = this._visPolyWallRev;
+      if (moved || wallsChanged || this._visPolyPts.length === 0) this._buildVisibilityPoly(ppx, ppy);
+      visPolyValid = this._visPolyPts.length >= 6;
+
+      // Approximate per-tile alpha for hover-blocking by sampling 5 points (center + corners).
+      const wseg = this._wallSegs;
+      const losBlocked = (tx: number, ty: number): boolean => {
+        const d1x = tx - ppx, d1y = ty - ppy;
+        for (let i = 0; i < wseg.length; i += 4) {
+          const d2x = wseg[i+2] - wseg[i], d2y = wseg[i+3] - wseg[i+1];
+          const denom = d1x * d2y - d1y * d2x;
+          if (Math.abs(denom) < 1e-9) continue;
+          const sx = ppx - wseg[i], sy = ppy - wseg[i+1];
+          const t = (d2x * sy - d2y * sx) / denom;
+          const u = (d1x * sy - d1y * sx) / denom;
+          if (t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6) return true;
+        }
+        return false;
+      };
+      const SAMPLE_INSET = 22;
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wood_ceiling') continue;
+        const cRot = (s.rotation ?? 0) * Math.PI / 180;
+        const cosC = Math.cos(cRot), sinC = Math.sin(cRot);
+        const samples: [number, number][] = [
+          [s.x, s.y],
+          [s.x + (-SAMPLE_INSET) * cosC - (-SAMPLE_INSET) * sinC, s.y + (-SAMPLE_INSET) * sinC + (-SAMPLE_INSET) * cosC],
+          [s.x + ( SAMPLE_INSET) * cosC - (-SAMPLE_INSET) * sinC, s.y + ( SAMPLE_INSET) * sinC + (-SAMPLE_INSET) * cosC],
+          [s.x + ( SAMPLE_INSET) * cosC - ( SAMPLE_INSET) * sinC, s.y + ( SAMPLE_INSET) * sinC + ( SAMPLE_INSET) * cosC],
+          [s.x + (-SAMPLE_INSET) * cosC - ( SAMPLE_INSET) * sinC, s.y + (-SAMPLE_INSET) * sinC + ( SAMPLE_INSET) * cosC],
+        ];
+        let unblocked = 0;
+        for (const [sx, sy] of samples) if (!losBlocked(sx, sy)) unblocked++;
+        const visFrac = unblocked / samples.length;
+        ceilingAlpha.set(s.id, 1 - visFrac * (1 - MIN_CEIL_ALPHA));
+      }
+    }
+    const visPolyPts = this._visPolyPts;
+
+    // Override hover: a ceiling tile blocks interaction with what's beneath it only if
+    // it's mostly opaque. Mostly-transparent ceilings (player has good LOS) don't occlude.
+    if (this.mouseWorldPos && !this.islandBuildKind) {
+      const mx = this.mouseWorldPos.x, my = this.mouseWorldPos.y;
+      const half = 25;
+      const HOVER_BLOCK_ALPHA = 0.7; // ceilings denser than this block clicks/hover
+      for (const s of this.placedStructures) {
+        if (s.type !== 'wood_ceiling') continue;
+        const a = ceilingAlpha.get(s.id) ?? 1;
+        if (a < HOVER_BLOCK_ALPHA) continue; // see-through enough — doesn't block
+        const rot = (s.rotation ?? 0) * Math.PI / 180;
+        let lx: number, ly: number;
+        if (rot === 0) {
+          lx = mx - s.x; ly = my - s.y;
+        } else {
+          const c = Math.cos(-rot), sn = Math.sin(-rot);
+          const dx = mx - s.x, dy = my - s.y;
+          lx = dx * c - dy * sn;
+          ly = dx * sn + dy * c;
+        }
+        if (Math.abs(lx) <= half && Math.abs(ly) <= half) {
+          this._hoveredStructure = s; // opaque ceiling wins over anything beneath it
+          break;
         }
       }
     }
@@ -4439,8 +4869,8 @@ export class RenderSystem {
         // ── Dark seafloor inside the bay ──────────────────────────────────────
         ctx.fillStyle = 'rgba(10, 40, 65, 0.72)';
         ctx.fillRect(cx - hw + ARM_T, cy - hh + BACK_T, INT_W, ARM_L);
-        // ── Brigantine hull silhouette (empty dock — ghost/placeholder) ────────
-        {
+        // ── Brigantine hull silhouette (only shown while a ship is under construction) ─
+        if (s.construction?.phase === 'building') {
           const shpHW  = INT_W * 0.36;
           const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
           const shpBot = cy + hh          - ARM_L * 0.05;
@@ -4520,7 +4950,8 @@ export class RenderSystem {
           ctx.fillText('▲', cx - hw + ARM_T * 0.5, bayY1 - ARM_T * 0.5);
           ctx.fillText('▲', cx + hw - ARM_T * 0.5, bayY1 - ARM_T * 0.5);
         }
-        // Mast yard-arm crosses (fore + main)
+        // Mast yard-arm crosses and interior scaffolding (only while building)
+        if (s.construction?.phase === 'building') {
         ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';
         ctx.lineWidth   = Math.max(1, 2 * zoom);
         for (const mf of [0.28, 0.60]) {
@@ -4550,6 +4981,7 @@ export class RenderSystem {
           ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, y0); ctx.lineTo(cx + hw,         y1); ctx.stroke();
           ctx.beginPath(); ctx.moveTo(cx + hw,         y0); ctx.lineTo(cx + hw - ARM_T, y1); ctx.stroke();
         }
+        } // end if building
         // ── Mooring bollards at the mouth ──────────────────────────────────────
         ctx.fillStyle = 'rgba(190, 150, 85, 0.95)';
         const bollardR = Math.max(2, 3.5 * zoom);
@@ -4625,58 +5057,101 @@ export class RenderSystem {
           ctx.restore();
         }
       } else if (s.type === 'wood_ceiling') {
-        // ── Wooden ceiling tile ──
-        // Fade this tile if it belongs to the same connected building the player is under.
-        const ceilAlpha = _fadedCeilingIds.has(s.id) ? 0.25 : 1.0;
+        // ── Wooden ceiling tile with true-LOS shadow edge ──
+        // Strategy: clip-and-draw twice. The lit region (inside the visibility
+        // polygon) draws ceiling content at MIN_CEIL_ALPHA so the floor beneath
+        // shows through. The shadow region (outside the vis poly) draws the
+        // ceiling fully opaque. NO destination-out — we never punch holes in
+        // the canvas, so layers behind us (e.g. ocean) stay covered.
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = (1 - hpFrac) * 0.5;
+        const half = sz / 2;
+        const fillCol  = isHovered ? '#c8924a' : '#96642a';
+        const stripCol = RenderSystem.structureCompanyColor(s.companyId);
+        const stripH   = Math.max(1, 2 * zoom);
+
+        // Inline draw of the full ceiling content at the current globalAlpha factor.
+        const drawCeilContent = (alphaFactor: number): void => {
+          ctx.globalAlpha = alphaFactor;
+          ctx.fillStyle = fillCol;
+          ctx.fillRect(-half, -half, sz, sz);
+
+          ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
+          ctx.lineWidth = Math.max(0.5, 0.9 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(-half, -half); ctx.lineTo(half, half);
+          ctx.moveTo(half, -half);  ctx.lineTo(-half, half);
+          ctx.moveTo(-half, 0);     ctx.lineTo(half, 0);
+          ctx.stroke();
+
+          ctx.globalAlpha = 0.8 * alphaFactor;
+          ctx.fillStyle = stripCol;
+          ctx.fillRect(-half, -half, sz, stripH);
+
+          if (dmgDarken > 0.01) {
+            ctx.globalAlpha = dmgDarken * alphaFactor;
+            ctx.fillStyle = 'rgba(0,0,0,1)';
+            ctx.fillRect(-half, -half, sz, sz);
+          }
+        };
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(rotRad);
-        ctx.translate(-ssp.x, -ssp.y);
 
-        // Main ceiling panel
-        ctx.globalAlpha = ceilAlpha;
-        ctx.fillStyle   = isHovered ? '#c8924a' : '#96642a';
-        ctx.strokeStyle = '#5a3a12';
-        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-        ctx.strokeRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+        if (visPolyValid) {
+          // Pre-compute vis poly in this tile's local space (post-rotate frame),
+          // SCALED to screen pixels (multiply by zoom) so it matches the screen-pixel
+          // clip rect (-half, -half, sz, sz) where sz = 50 * zoom.
+          const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
+          const vp = new Float32Array(visPolyPts.length);
+          for (let i = 0; i < visPolyPts.length; i += 2) {
+            const dx = (visPolyPts[i]   - s.x) * zoom;
+            const dy = (visPolyPts[i+1] - s.y) * zoom;
+            vp[i]   = dx * cosR - dy * sinR;
+            vp[i+1] = dx * sinR + dy * cosR;
+          }
 
-        // Cross-brace lines
-        ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
-        ctx.lineWidth   = Math.max(0.5, 0.9 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2);
-        ctx.lineTo(ssp.x + sz / 2, ssp.y + sz / 2);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.moveTo(ssp.x + sz / 2, ssp.y - sz / 2);
-        ctx.lineTo(ssp.x - sz / 2, ssp.y + sz / 2);
-        ctx.stroke();
+          // 1. SHADOW region = tile rect MINUS vis poly (even-odd fill rule).
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-half, -half, sz, sz);
+          ctx.moveTo(vp[0], vp[1]);
+          for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
+          ctx.closePath();
+          ctx.clip('evenodd');
+          drawCeilContent(1);
+          ctx.restore();
 
-        // Centre beam (horizontal plank line)
-        ctx.beginPath();
-        ctx.moveTo(ssp.x - sz / 2, ssp.y);
-        ctx.lineTo(ssp.x + sz / 2, ssp.y);
-        ctx.stroke();
-
-        // Company color strip
-        const ceilCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const ceilStripH = Math.max(1, 2 * zoom);
-        ctx.globalAlpha = Math.min(ceilAlpha, 0.8);
-        ctx.fillStyle = ceilCompanyColor;
-        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, ceilStripH);
-
-        // Damage darkening
-        if (dmgDarken > 0.01) {
-          ctx.globalAlpha = dmgDarken * ceilAlpha;
-          ctx.fillStyle = 'rgba(0,0,0,1)';
-          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+          // 2. LIT region = tile rect ∩ vis poly, drawn semi-transparent.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-half, -half, sz, sz);
+          ctx.clip();
+          ctx.beginPath();
+          ctx.moveTo(vp[0], vp[1]);
+          for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
+          ctx.closePath();
+          ctx.clip();
+          drawCeilContent(MIN_CEIL_ALPHA);
+          ctx.restore();
+        } else {
+          // No vis poly → draw fully opaque (clipped to tile rect for clean edges).
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-half, -half, sz, sz);
+          ctx.clip();
+          drawCeilContent(1);
+          ctx.restore();
         }
+
+        // Outer border (always at full alpha — single clean rect over the whole tile).
         ctx.globalAlpha = 1;
+        ctx.strokeStyle = '#5a3a12';
+        ctx.lineWidth = Math.max(0.5, 1.5 * zoom);
+        ctx.strokeRect(-half, -half, sz, sz);
+
         ctx.restore();
       } else if (s.type === 'cannon') {
         // ── Placed island cannon — same visual as ship cannon ──
@@ -4685,18 +5160,40 @@ export class RenderSystem {
         const dmgDarken = (1 - hpFrac) * 0.5;
         const lw = Math.max(0.5, 1.5 * zoom);
 
+        // If locally mounted, use the live aim angle for the barrel; otherwise match base rotation.
+        // barrelRot: canvas ctx.rotate angle so barrel (pointing local −y) faces world aim direction.
+        // aimAngle = atan2(dy_screen, dx_screen) → barrelRot = aimAngle + π/2
+        const hasLiveAim = this.islandCannonId === s.id && this.islandCannonAimAngle !== null;
+        const hasServerAim = typeof s.cannonAimAngle === 'number';
+        const barrelRot  = hasLiveAim
+          ? (this.islandCannonAimAngle! + Math.PI / 2)
+          : hasServerAim
+            ? (s.cannonAimAngle! + Math.PI / 2)
+            : rotRad;
+
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(rotRad);
 
-        // Base (brown rectangle) — same proportions as ship cannon (30×20 world units)
+        // Base (brown rectangle) at placement rotation — stays fixed
+        ctx.save();
+        ctx.rotate(rotRad);
         ctx.fillStyle   = isHovered ? '#b06030' : '#8B4513';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth   = lw;
         ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
         ctx.strokeRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+        // Company color strip (on base)
+        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
+        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
+        }
+        ctx.restore();
 
-        // Barrel — same proportions as ship cannon (16×40 world units), pointing up (−y)
+        // Barrel — rotates to live aim angle when mounted
+        ctx.save();
+        ctx.rotate(barrelRot);
         ctx.fillStyle   = isHovered ? '#aaaaaa' : '#333333';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth   = lw;
@@ -4708,16 +5205,501 @@ export class RenderSystem {
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
-
-        // Company color strip
-        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
-        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
-
-        // Damage darkening overlay
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(-15 * zoom, -40 * zoom, 30 * zoom, 50 * zoom);
+          ctx.fillRect(-8 * zoom, -40 * zoom, 16 * zoom, 40 * zoom);
         }
+        ctx.restore();
+
+        ctx.restore();
+      } else if (s.type === 'flag_fort') {
+        // ── Flag Fort — stone tower (claim radius is drawn by drawTerritoryOverlay) ──
+        const companyColor = this._companyColor(s.companyId);
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const ts = Math.max(10, 44 * zoom);
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+
+        // Tower base (stone)
+        const stoneR = Math.round(hpFrac * 120 + 60);
+        const stoneG = Math.round(hpFrac * 100 + 50);
+        const stoneB = Math.round(hpFrac * 80 + 40);
+        ctx.fillStyle = isHovered ? '#c8a860' : `rgb(${stoneR},${stoneG},${stoneB})`;
+        ctx.strokeStyle = '#2a1a0a';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.fillRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+        ctx.strokeRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+
+        // Battlements — 3 merlons along top edge
+        ctx.fillStyle = isHovered ? '#ddb870' : `rgb(${Math.min(255, stoneR+15)},${Math.min(255, stoneG+10)},${Math.min(255, stoneB+8)})`;
+        const mw = ts * 0.22, mh = ts * 0.2;
+        for (let m = -1; m <= 1; m++) {
+          ctx.fillRect(m * ts * 0.3 - mw / 2, -ts * 0.45 - mh, mw, mh);
+          ctx.strokeRect(m * ts * 0.3 - mw / 2, -ts * 0.45 - mh, mw, mh);
+        }
+
+        // Flag pole
+        ctx.strokeStyle = '#555';
+        ctx.lineWidth = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(ts * 0.08, -ts * 0.45);
+        ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.75);
+        ctx.stroke();
+
+        // Flag (triangular pennant)
+        ctx.fillStyle = companyColor;
+        ctx.beginPath();
+        ctx.moveTo(ts * 0.08, -ts * 0.45 - ts * 0.75);
+        ctx.lineTo(ts * 0.08 + ts * 0.4, -ts * 0.45 - ts * 0.55);
+        ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.35);
+        ctx.closePath();
+        ctx.fill();
+
+        // ── Contested tint (any state) ───────────────────────────────
+        const flagFortActive = s.fortressComplete !== false; // default-active for legacy data
+        const flagFortPhase = (typeof s.claimPhase === 'number') ? s.claimPhase
+                            : (flagFortActive ? 2 : 1); // legacy: derive from active flag
+        if (s.fortressContested && flagFortPhase !== 0) {
+          ctx.save();
+          ctx.fillStyle = 'rgba(255,60,60,0.25)';
+          ctx.fillRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+          ctx.restore();
+        }
+
+        if (flagFortPhase === 0) {
+          // ── CLAIMING phase — semi-transparent "ghost" tower, claim-flag-style
+          //    contest stripes when an enemy is in radius, claim-countdown bar.
+          //    HP bar deliberately hidden — fort is non-damageable here.
+          ctx.save();
+          // Translucent white wash over the whole sprite to convey "not yet built".
+          ctx.fillStyle = 'rgba(255,255,255,0.45)';
+          ctx.fillRect(-ts * 0.55, -ts * 1.4, ts * 1.1, ts * 1.9);
+
+          // Contested stripes (red diagonal hatch) when an enemy is in the radius.
+          if (s.claimContested || s.fortressContested) {
+            ctx.beginPath();
+            ctx.rect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+            ctx.clip();
+            ctx.strokeStyle = 'rgba(255,60,60,0.65)';
+            ctx.lineWidth = Math.max(1, 1.4 * zoom);
+            const stripeStep = Math.max(4, 7 * zoom);
+            for (let h = -ts; h < ts; h += stripeStep) {
+              ctx.beginPath();
+              ctx.moveTo(h - ts * 0.45, -ts * 0.45);
+              ctx.lineTo(h + ts * 0.45, ts * 0.45);
+              ctx.stroke();
+            }
+          }
+          ctx.restore();
+
+          // Claim-phase countdown bar above the merlons.
+          const isPostDemolish = s.hp === 0;
+          const totalMs = (typeof s.claimPhaseTotalMs === 'number' && s.claimPhaseTotalMs > 0)
+                        ? s.claimPhaseTotalMs : 60000;
+          const remMs   = (typeof s.claimPhaseProgressMs === 'number') ? s.claimPhaseProgressMs : totalMs;
+          // Post-demolish: bar drains 99%→0% (rem/total). Normal claiming: fills 0%→100% (1 - rem/total).
+          const claimFillFrac = isPostDemolish
+            ? Math.min(1, Math.max(0, remMs / totalMs))
+            : Math.min(1, Math.max(0, 1 - (remMs / totalMs)));
+          const barW = ts * 1.1;
+          const barH = Math.max(3, 5 * zoom);
+          const barY = -ts * 0.45 - ts * 0.95;
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(-barW / 2, barY, barW, barH);
+          ctx.fillStyle = isPostDemolish ? '#cc3333' : ((s.claimContested || s.fortressContested) ? '#e04848' : '#cccccc');
+          ctx.fillRect(-barW / 2, barY, barW * claimFillFrac, barH);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(1, 1 * zoom);
+          ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+          // Label
+          if (zoom >= 0.5) {
+            const fontPx = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${fontPx}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const label = isPostDemolish
+              ? 'UNCLAIMING'
+              : ((s.claimContested || s.fortressContested) ? 'CONTESTED' : 'CLAIMING');
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, 1, barY - 1);
+            ctx.fillStyle = isPostDemolish ? '#ff8080' : ((s.claimContested || s.fortressContested) ? '#ff8080' : '#dddddd');
+            ctx.fillText(label, 0, barY - 2);
+          }
+        } else if (flagFortPhase === 1) {
+          // ── BUILDING phase (existing visual) — hatch + 0%→30% progress bar.
+          // Diagonal-hatch "under construction" overlay on the tower face
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+          ctx.clip();
+          ctx.strokeStyle = 'rgba(255,200,80,0.55)';
+          ctx.lineWidth = Math.max(1, 1.2 * zoom);
+          const hatchStep = Math.max(4, 6 * zoom);
+          for (let h = -ts; h < ts; h += hatchStep) {
+            ctx.beginPath();
+            ctx.moveTo(h - ts * 0.45, -ts * 0.45);
+            ctx.lineTo(h + ts * 0.45, ts * 0.45);
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // Build/heal progress bar above the merlons
+          const barW = ts * 1.1;
+          const barH = Math.max(3, 5 * zoom);
+          const barY = -ts * 0.45 - ts * 0.95;
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(-barW / 2, barY, barW, barH);
+          // Fill represents HP fraction (0→0.30 = inactive band)
+          const fillFrac = Math.min(1, Math.max(0, hpFrac / 0.30));
+          ctx.fillStyle = s.fortressContested ? '#e04848' : '#ffc848';
+          ctx.fillRect(-barW / 2, barY, barW * fillFrac, barH);
+          // 30% threshold tick (always at right edge since bar maps 0..0.30)
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(1, 1 * zoom);
+          ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+          // "BUILDING" label (only when zoomed in enough to read)
+          if (zoom >= 0.5) {
+            const fontPx = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${fontPx}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            const label = s.fortressContested ? 'CONTESTED' : 'BUILDING';
+            ctx.fillStyle = '#000';
+            ctx.fillText(label, 1, barY - 1);
+            ctx.fillStyle = s.fortressContested ? '#ff8080' : '#ffe080';
+            ctx.fillText(label, 0, barY - 2);
+          }
+        } else if (flagFortPhase === 2) {
+          // ── ACTIVE phase — fort is built. While hp < target_hp it is auto-
+          //    repairing toward target_hp (combat damage permanently lowers
+          //    target_hp so the fort can never repair to full again). Show a
+          //    "REPAIRING" label + a slim repair-progress bar in that gap.
+          const targetHp = (typeof s.targetHp === 'number') ? s.targetHp : s.maxHp;
+          const isRepairing = s.hp < targetHp && targetHp > 0;
+          if (isRepairing) {
+            const barW = ts * 1.1;
+            const barH = Math.max(2, 3 * zoom);
+            const barY = -ts * 0.45 - ts * 0.95;
+            // Background = full max-hp scale; ceiling tick at targetHp/maxHp,
+            // fill grows from 0 → hp/maxHp.
+            const ceilingFrac = Math.min(1, Math.max(0, targetHp / s.maxHp));
+            const fillFrac    = Math.min(1, Math.max(0, s.hp / s.maxHp));
+            ctx.fillStyle = 'rgba(0,0,0,0.65)';
+            ctx.fillRect(-barW / 2, barY, barW, barH);
+            // "Lost ceiling" zone (target_hp → max_hp) drawn dim red.
+            if (ceilingFrac < 1) {
+              ctx.fillStyle = 'rgba(120,40,40,0.5)';
+              ctx.fillRect(-barW / 2 + barW * ceilingFrac, barY,
+                           barW * (1 - ceilingFrac), barH);
+            }
+            // Current HP — pulses softly while repairing.
+            const pulse = 0.7 + 0.3 * Math.sin(Date.now() / 220);
+            ctx.fillStyle = s.fortressContested
+              ? `rgba(224,72,72,${pulse})`
+              : `rgba(120,200,255,${pulse})`;
+            ctx.fillRect(-barW / 2, barY, barW * fillFrac, barH);
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = Math.max(1, 1 * zoom);
+            ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+            if (zoom >= 0.5) {
+              const fontPx = Math.max(8, Math.round(9 * zoom));
+              ctx.font = `bold ${fontPx}px sans-serif`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'bottom';
+              const label = s.fortressContested ? 'CONTESTED' : 'REPAIRING';
+              ctx.fillStyle = '#000';
+              ctx.fillText(label, 1, barY - 1);
+              ctx.fillStyle = s.fortressContested ? '#ff8080' : '#9fd6ff';
+              ctx.fillText(label, 0, barY - 2);
+            }
+          }
+        } else if (flagFortPhase === 3) {
+          // ── DEMOLISHING phase — fort was captured; HP draining 10%/s to 0.
+          //    Red pulsing diagonal hatch + HP drain bar.
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
+          ctx.clip();
+          const unclaimPulse = 0.4 + 0.4 * Math.sin(Date.now() / 250);
+          ctx.strokeStyle = `rgba(220,40,40,${unclaimPulse})`;
+          ctx.lineWidth = Math.max(1, 1.4 * zoom);
+          const hatchStep = Math.max(4, 6 * zoom);
+          for (let h = -ts; h < ts; h += hatchStep) {
+            ctx.beginPath();
+            ctx.moveTo(h - ts * 0.45, -ts * 0.45);
+            ctx.lineTo(h + ts * 0.45, ts * 0.45);
+            ctx.stroke();
+          }
+          ctx.restore();
+
+          // HP drain bar (hpFrac 100% → 0%)
+          const barW = ts * 1.1;
+          const barH = Math.max(3, 5 * zoom);
+          const barY = -ts * 0.45 - ts * 0.95;
+          ctx.fillStyle = 'rgba(0,0,0,0.65)';
+          ctx.fillRect(-barW / 2, barY, barW, barH);
+          ctx.fillStyle = `rgba(220,40,40,${0.6 + 0.35 * Math.sin(Date.now() / 250)})`;
+          ctx.fillRect(-barW / 2, barY, barW * hpFrac, barH);
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = Math.max(1, 1 * zoom);
+          ctx.strokeRect(-barW / 2, barY, barW, barH);
+
+          if (zoom >= 0.5) {
+            const fontPx = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${fontPx}px sans-serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillStyle = '#000';
+            ctx.fillText('DEMOLISHING', 1, barY - 1);
+            ctx.fillStyle = '#ff8080';
+            ctx.fillText('DEMOLISHING', 0, barY - 2);
+          }
+        }
+
+        ctx.restore();
+      } else if (s.type === 'company_fortress') {
+        // ── Company Fortress — grand fortification (claim radius drawn by drawTerritoryOverlay) ──
+        const companyColor = this._companyColor(s.companyId);
+        const complete = s.fortressComplete ?? false;
+        const progress = (s.fortressBuildProgress ?? 0) / 900000; // 0→1
+        const contested = s.fortressContested ?? false;
+        const FORT_RADIUS_PX = 600;
+        const fortRadiusScreen = FORT_RADIUS_PX * zoom;
+        const ts = Math.max(14, 60 * zoom);
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+
+        // Stone walls (larger than flag_fort)
+        const stoneR = Math.round(hpFrac * 110 + 60);
+        const stoneG = Math.round(hpFrac * 90  + 45);
+        const stoneB = Math.round(hpFrac * 70  + 35);
+        const wallColor = complete
+          ? (isHovered ? '#c8a860' : `rgb(${stoneR},${stoneG},${stoneB})`)
+          : '#887766';
+        ctx.fillStyle = wallColor;
+        ctx.strokeStyle = '#2a1a0a';
+        ctx.lineWidth = Math.max(1.5, 2 * zoom);
+        ctx.fillRect(-ts * 0.5, -ts * 0.5, ts, ts);
+        ctx.strokeRect(-ts * 0.5, -ts * 0.5, ts, ts);
+
+        // Corner towers (4 small squares)
+        const ctw = ts * 0.22;
+        for (const [cx2, cy2] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as [number,number][]) {
+          ctx.fillRect(cx2 * ts * 0.5 - ctw * (cx2 > 0 ? 0 : 1),
+                       cy2 * ts * 0.5 - ctw * (cy2 > 0 ? 0 : 1),
+                       ctw, ctw);
+          ctx.strokeRect(cx2 * ts * 0.5 - ctw * (cx2 > 0 ? 0 : 1),
+                         cy2 * ts * 0.5 - ctw * (cy2 > 0 ? 0 : 1),
+                         ctw, ctw);
+        }
+
+        if (complete) {
+          // Flag pole + large pennant
+          ctx.strokeStyle = '#555';
+          ctx.lineWidth = Math.max(1, 2 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(0, -ts * 0.5);
+          ctx.lineTo(0, -ts * 0.5 - ts * 1.0);
+          ctx.stroke();
+          ctx.fillStyle = companyColor;
+          ctx.beginPath();
+          ctx.moveTo(0,           -ts * 0.5 - ts * 1.0);
+          ctx.lineTo(ts * 0.55,  -ts * 0.5 - ts * 0.7);
+          ctx.lineTo(0,           -ts * 0.5 - ts * 0.4);
+          ctx.closePath();
+          ctx.fill();
+        } else {
+          // Scaffold overlay
+          ctx.strokeStyle = '#b8a060cc';
+          ctx.lineWidth = Math.max(0.5, 1 * zoom);
+          ctx.beginPath();
+          ctx.moveTo(-ts * 0.5, -ts * 0.5); ctx.lineTo(ts * 0.5, ts * 0.5);
+          ctx.moveTo(ts * 0.5, -ts * 0.5);  ctx.lineTo(-ts * 0.5, ts * 0.5);
+          ctx.stroke();
+
+          // Build progress bar below the structure
+          const barW = ts * 1.2, barH = Math.max(3, 6 * zoom);
+          const barX = -barW * 0.5, barY = ts * 0.55;
+          ctx.fillStyle = '#333333cc';
+          ctx.fillRect(barX, barY, barW, barH);
+          const fillColor = contested ? '#e04040' : companyColor;
+          ctx.fillStyle = fillColor;
+          ctx.fillRect(barX, barY, barW * progress, barH);
+          ctx.strokeStyle = '#000';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+
+          // Contested pulse
+          if (contested) {
+            const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 300);
+            ctx.beginPath();
+            ctx.arc(0, 0, fortRadiusScreen, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(220,40,40,${0.3 * pulse})`;
+            ctx.lineWidth = Math.max(2, 4 * zoom);
+            ctx.stroke();
+          }
+        }
+
+        ctx.restore();
+      } else if (s.type === 'claim_flag') {
+        // ── Claiming Flag — progress ring + pole ──
+        // Server protocol: claimProgress counts DOWN from FLAG_CLAIM_DURATION_MS (300000) to 0.
+        // claimState: 0=CONTEST, 1=CLAIMING_GRACE, 2=CLAIMING, 3=REVERSING_GRACE, 4=REVERSING.
+        const TOTAL_MS = 300000;
+        const progress = 1 - Math.max(0, Math.min(1, (s.claimProgress ?? TOTAL_MS) / TOTAL_MS)); // 0→1 toward capture
+        const state = s.claimState ?? (s.claimContested ? 0 : 2);
+        const ringR = Math.max(10, 18 * zoom);
+        const companyColor = this._companyColor(s.companyId);
+
+        // Colour by state
+        let arcColor = companyColor;
+        if (state === 0)      arcColor = '#888888';            // CONTEST   = grey (stalled)
+        else if (state === 1) arcColor = '#ffd24a';            // CLAIMING_GRACE  = warm yellow
+        else if (state === 2) arcColor = companyColor;         // CLAIMING        = company colour
+        else if (state === 3) arcColor = '#ff9966';            // REVERSING_GRACE = orange
+        else if (state === 4) arcColor = '#ff3030';            // REVERSING       = red
+
+        ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+
+        // Background ring
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.lineWidth   = Math.max(2, 3 * zoom);
+        ctx.beginPath();
+        ctx.arc(0, 0, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        // Progress arc (clockwise from top). Pulse during reversing.
+        if (progress > 0) {
+          const pulse = (state === 4) ? (0.6 + 0.4 * Math.sin(Date.now() / 180)) : 1;
+          ctx.strokeStyle = arcColor;
+          ctx.globalAlpha = pulse;
+          ctx.lineWidth   = Math.max(2, 3.5 * zoom);
+          ctx.beginPath();
+          ctx.arc(0, 0, ringR, -Math.PI / 2, -Math.PI / 2 + progress * Math.PI * 2);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+
+        // Grace tick — small inner arc filling 0→1 during CLAIMING_GRACE / REVERSING_GRACE
+        if (state === 1 || state === 3) {
+          const GRACE_TOTAL = 5000;
+          const g = Math.max(0, Math.min(1, (s.claimGraceMs ?? 0) / GRACE_TOTAL));
+          if (g > 0) {
+            ctx.strokeStyle = state === 1 ? '#ffd24a' : '#ff9966';
+            ctx.lineWidth   = Math.max(1, 2 * zoom);
+            ctx.beginPath();
+            ctx.arc(0, 0, ringR * 0.55, -Math.PI / 2, -Math.PI / 2 + g * Math.PI * 2);
+            ctx.stroke();
+          }
+        }
+
+        // Flag pole
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(0, ringR * 0.6);
+        ctx.lineTo(0, -ringR - 14 * zoom);
+        ctx.stroke();
+
+        // Flag pennant
+        ctx.fillStyle = companyColor;
+        ctx.beginPath();
+        ctx.moveTo(0,           -ringR - 14 * zoom);
+        ctx.lineTo(13 * zoom,   -ringR - 5 * zoom);
+        ctx.lineTo(0,           -ringR + 4 * zoom);
+        ctx.closePath();
+        ctx.fill();
+
+        // Timer text — show time remaining / reversing / stalled
+        {
+          const fontSize = Math.max(9, Math.round(11 * zoom));
+          ctx.font = `bold ${fontSize}px Georgia, serif`;
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'top';
+
+          let timerLabel = '';
+          let timerColor = '#ffffff';
+
+          if (state === 0) {
+            // CONTEST — stalled
+            const secsLeft = Math.ceil((s.claimProgress ?? TOTAL_MS) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `⏸ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#cccccc';
+          } else if (state === 1) {
+            // CLAIMING_GRACE — warming up
+            const secsLeft = Math.ceil((s.claimProgress ?? TOTAL_MS) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `▶ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#ffd24a';
+          } else if (state === 2) {
+            // CLAIMING — counting down to capture
+            const secsLeft = Math.ceil((s.claimProgress ?? TOTAL_MS) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = arcColor;
+          } else if (state === 3) {
+            // REVERSING_GRACE — enemy warming up to reverse
+            const secsLeft = Math.ceil((s.claimProgress ?? 0) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `◀ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#ff9966';
+          } else if (state === 4) {
+            // REVERSING — enemy pushing progress back
+            const secsLeft = Math.ceil((s.claimProgress ?? 0) / 1000);
+            const m = Math.floor(secsLeft / 60), sc = secsLeft % 60;
+            timerLabel = `↺ ${m}:${sc.toString().padStart(2, '0')}`;
+            timerColor = '#ff3030';
+          }
+
+          if (timerLabel) {
+            const textY = ringR + Math.max(3, 4 * zoom);
+            // Shadow
+            ctx.fillStyle = 'rgba(0,0,0,0.7)';
+            ctx.fillText(timerLabel, 1, textY + 1);
+            // Label
+            ctx.fillStyle = timerColor;
+            ctx.fillText(timerLabel, 0, textY);
+          }
+        }
+
+        // ── Section badge: "Solo→Pirates" ─────────────────────────────────
+        // Identifies which contest section this flag targets by resolving
+        // claimLinkedFort (own anchor) and claimSourceEnemy (enemy anchor)
+        // to their company IDs, then formatting as "Mine→Enemy".
+        if (s.claimSourceEnemy !== undefined && s.claimSourceEnemy !== 0) {
+          const mineS  = this.placedStructures.find(p => p.id === s.claimLinkedFort);
+          const enemyS = this.placedStructures.find(p => p.id === s.claimSourceEnemy);
+          const mineC  = mineS?.companyId ?? s.companyId ?? 0;
+          const enemyC = enemyS?.companyId ?? 0;
+          if (enemyC !== 0) {
+            const cname = (cid: number): string => {
+              const co = this._cachedCompanies.find(c => c.id === cid);
+              if (co) return co.name;
+              return cid === 1 ? 'Solo' : cid === 2 ? 'Pirates' : cid === 3 ? 'Navy' : cid === 99 ? 'Ghost' : `#${cid}`;
+            };
+            const sectLabel = `${cname(mineC)}→${cname(enemyC)}`;
+            const sf = Math.max(8, Math.round(9 * zoom));
+            ctx.font = `bold ${sf}px sans-serif`;
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'top';
+            const timerH = (state >= 0 && state <= 4) ? Math.max(9, Math.round(11 * zoom)) + 4 : 0;
+            const baseY  = ringR + Math.max(3, 4 * zoom) + timerH;
+            const tw = ctx.measureText(sectLabel).width;
+            ctx.fillStyle = 'rgba(10,10,10,0.78)';
+            ctx.fillRect(-tw / 2 - 3, baseY, tw + 6, sf + 2);
+            ctx.fillStyle = 'rgba(255,215,60,0.95)';
+            ctx.fillText(sectLabel, 0, baseY + 1);
+          }
+        }
+
         ctx.restore();
       }
     } // end for sorted
@@ -4772,9 +5754,23 @@ export class RenderSystem {
       ctx.rotate(rotRad);
       if (s.type === 'cannon') {
         // Draw highlight matching cannon shape: base rect + barrel rect
+        // Base inherits rotRad from ctx.rotate(rotRad) above — correct.
         const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
         ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
+        // Barrel: must match the actual draw code's barrelRot exactly.
+        // Draw code: barrelRot = aimAngle + π/2, applied at translate(ssp) level (no rotRad stacked).
+        // Our ctx already has rotRad stacked, so we apply (barrelRot - rotRad) as the delta.
+        const hasLiveAim  = this.islandCannonId === s.id && this.islandCannonAimAngle !== null;
+        const hasServerAim = typeof s.cannonAimAngle === 'number';
+        const barrelRot = hasLiveAim
+          ? (this.islandCannonAimAngle! + Math.PI / 2)
+          : hasServerAim
+            ? (s.cannonAimAngle! + Math.PI / 2)
+            : rotRad; // no aim data → barrel aligned with base
+        ctx.save();
+        ctx.rotate(barrelRot - rotRad); // net absolute = rotRad + (barrelRot - rotRad) = barrelRot ✓
         ctx.strokeRect(-barW / 2, -barH, barW, barH);
+        ctx.restore();
       } else {
         ctx.strokeRect(-rawW / 2, -rawH / 2, rawW, rawH);
       }
@@ -4811,7 +5807,7 @@ export class RenderSystem {
         }
         const dx = s.x - player.position.x;
         const dy = s.y - player.position.y;
-        return dx * dx + dy * dy <= 110 * 110;
+        return dx * dx + dy * dy <= 50 * 50;
       })();
 
       const label = s.type === 'wooden_floor' ? 'Wooden Floor'
@@ -4822,17 +5818,24 @@ export class RenderSystem {
                  : s.type === 'wreck' ? 'Shipwreck'
                  : s.type === 'wood_ceiling' ? 'Wood Ceiling'
                  : s.type === 'cannon' ? 'Cannon'
+                 : s.type === 'flag_fort' ? 'Flag Fort'
+                 : s.type === 'company_fortress' ? 'Company Fortress'
+                 : s.type === 'claim_flag' ? 'Claiming Flag'
                  : 'Workbench';
 
       // Determine ownership line text + color
-      const COMPANY_NAMES: Record<number, string> = { 1: 'Pirates', 2: 'Navy', 99: 'Ghosts' };
+      // Company IDs match server constants: SOLO=1, PIRATES=2, NAVY=3, GHOST=99, dynamic≥100
+      const COMPANY_NAMES: Record<number, string> = { 1: 'Solo', 2: 'Pirates', 3: 'Navy', 99: 'Ghosts' };
       let ownerText: string;
       if (s.companyId !== 0 && COMPANY_NAMES[s.companyId]) {
         ownerText = COMPANY_NAMES[s.companyId];
       } else if (s.companyId !== 0 && s.companyId >= 100) {
         ownerText = this._cachedCompanies.find(c => c.id === s.companyId)?.name ?? `Company #${s.companyId}`;
-      } else if (s.placerName) {
+      } else if (s.companyId === 1 && s.placerName) {
+        // COMPANY_SOLO: show "Player: name" since solo means individual ownership
         ownerText = `Player: ${s.placerName}`;
+      } else if (s.placerName) {
+        ownerText = s.placerName;
       } else {
         ownerText = 'Unclaimed';
       }
@@ -4865,7 +5868,194 @@ export class RenderSystem {
         ctx.fillStyle = 'rgba(180, 180, 160, 0.75)';
         ctx.fillText('(walk closer)', ssp.x, tipY - lineH * 2);
       }
+
+      // Debug overlay (toggle with `]`): structure id + dominator list.
+      // Helps diagnose dominance/border issues by surfacing the raw server
+      // data that drives the territory rendering.
+      if (this.showHoverBoundaries) {
+        ctx.fillStyle = 'rgba(255, 220, 120, 0.95)';
+        ctx.font = `${Math.max(9, Math.round(10 * zoom))}px monospace`;
+        const doms = (s.dominators ?? []).join(',') || '(none)';
+        ctx.fillText(`id=${s.id}`,       ssp.x, tipY - lineH * 3);
+        ctx.fillText(`dom=[${doms}]`,    ssp.x, tipY - lineH * 4);
+
+        // Claim flag: enumerate hypothetical (target, new-dom) pairs that
+        // a successful capture would write. target = enemy victim,
+        // new-dom = friendly challenger. We compute pairs from overlapping
+        // discs (same-island, non-orphaned, non-flag); this mirrors the
+        // pair-wise lens that anchors the section flood-fill server-side.
+        if (s.type === 'claim_flag') {
+          const claimRadiusOf = (t: string): number =>
+            (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+          const flagCo = s.companyId ?? 0;
+          const isl    = s.islandId;
+          const eligible = (ps: PlacedStructure): boolean =>
+                 ps.islandId === isl
+              && !ps.claimOrphaned
+              && ps.type !== 'claim_flag'
+              && !(ps.type === 'flag_fort' && !ps.fortressComplete && (ps.claimPhase ?? 0) < 2);
+          const mineList: PlacedStructure[] = [];
+          const enemyList: PlacedStructure[] = [];
+          for (const ps of this.placedStructures) {
+            if (!eligible(ps)) continue;
+            if ((ps.companyId ?? 0) === 0) continue;
+            if ((ps.companyId ?? 0) === flagCo) mineList.push(ps);
+            else                                 enemyList.push(ps);
+          }
+          let line = 5;
+          ctx.fillText(`src=(${s.claimSourceEnemy ?? '?'},${s.claimLinkedFort ?? '?'})`,
+                       ssp.x, tipY - lineH * line); line++;
+          // Emit (target=E, new-dom=M) for every overlapping (E, M) pair,
+          // and shade each pair's lens(E.disc ∩ M.disc) in world space so
+          // the targeted area is visually highlighted alongside the IDs.
+          for (const e of enemyList) {
+            const erW = claimRadiusOf(e.type);
+            const erS = erW * zoom;
+            const eSp = camera.worldToScreen(Vec2.from(e.x, e.y));
+            for (const m of mineList) {
+              const mrW = claimRadiusOf(m.type);
+              const dx = e.x - m.x, dy = e.y - m.y;
+              const th = erW + mrW;
+              if (dx * dx + dy * dy > th * th) continue;
+              const mrS = mrW * zoom;
+              const mSp = camera.worldToScreen(Vec2.from(m.x, m.y));
+              // Lens fill + outline (clipped circle ∩ circle)
+              ctx.save();
+              ctx.beginPath();
+              ctx.arc(eSp.x, eSp.y, erS, 0, Math.PI * 2);
+              ctx.clip();
+              ctx.fillStyle = 'rgba(255, 180, 60, 0.18)';
+              ctx.beginPath();
+              ctx.arc(mSp.x, mSp.y, mrS, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.strokeStyle = 'rgba(255, 210, 90, 0.85)';
+              ctx.lineWidth = Math.max(1, 1.5 * zoom);
+              ctx.stroke();
+              ctx.restore();
+              // Midpoint pair label
+              ctx.save();
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.font = `bold ${Math.max(10, Math.round(11 * zoom))}px monospace`;
+              ctx.strokeStyle = 'rgba(0,0,0,0.85)';
+              ctx.lineWidth = 3;
+              ctx.fillStyle = 'rgba(255, 230, 150, 0.95)';
+              const lx = (eSp.x + mSp.x) * 0.5;
+              const ly = (eSp.y + mSp.y) * 0.5;
+              const txt = `(${e.id},${m.id})`;
+              ctx.strokeText(txt, lx, ly);
+              ctx.fillText(txt, lx, ly);
+              ctx.restore();
+              // Tooltip line
+              ctx.fillText(`(${e.id},${m.id})`, ssp.x, tipY - lineH * line);
+              line++;
+              if (line > 24) break;
+            }
+            if (line > 24) break;
+          }
+        }
+      }
       ctx.restore();
+    }
+
+    // ── Contest flash borders ─────────────────────────────────────────────────
+    // When a claim flag is active, every structure whose centre falls inside the
+    // contested lens area (intersection of both anchor claim radii) gets a pulsing
+    // dashed border so players can see what territory is at stake.
+    {
+      const claimRadiusOf = (type: string): number =>
+        (type === 'flag_fort' || type === 'company_fortress') ? 600 : 400;
+
+      // Map structureId → flash hex color, driven by the most urgent claim flag
+      // state that covers this structure (4=REVERSING is most urgent).
+      const flashMap = new Map<number, { color: string; urgency: number }>();
+
+      for (const cf of this.placedStructures) {
+        if (cf.type !== 'claim_flag') continue;
+        const state = cf.claimState ?? (cf.claimContested ? 0 : 2);
+        let flashColor: string;
+        if      (state === 0) flashColor = '#ffcc44'; // CONTEST        — amber
+        else if (state === 1) flashColor = '#ffd24a'; // CLAIMING_GRACE — yellow
+        else if (state === 2) flashColor = this._companyColor(cf.companyId); // CLAIMING — company colour
+        else if (state === 3) flashColor = '#ff9966'; // REVERSING_GRACE— orange
+        else                  flashColor = '#ff3030'; // REVERSING      — red
+
+        const mineS  = cf.claimLinkedFort  != null ? this.placedStructures.find(p => p.id === cf.claimLinkedFort)  : null;
+        const enemyS = cf.claimSourceEnemy != null ? this.placedStructures.find(p => p.id === cf.claimSourceEnemy) : null;
+        if (!mineS || !enemyS) continue;
+        const mineR  = claimRadiusOf(mineS.type);
+        const enemyR = claimRadiusOf(enemyS.type);
+
+        for (const s of this.placedStructures) {
+          if (s.type === 'claim_flag') continue;
+          const dx1 = s.x - mineS.x, dy1 = s.y - mineS.y;
+          const dx2 = s.x - enemyS.x, dy2 = s.y - enemyS.y;
+          if (dx1*dx1 + dy1*dy1 <= mineR*mineR && dx2*dx2 + dy2*dy2 <= enemyR*enemyR) {
+            const existing = flashMap.get(s.id);
+            if (!existing || state > existing.urgency) {
+              flashMap.set(s.id, { color: flashColor, urgency: state });
+            }
+          }
+        }
+      }
+
+      // Also flash structures inside a demolishing fort's claim radius.
+      // A fort is demolishing when: claimPhase===0 and hp===0.
+      const FORT_DEMOLISH_URGENCY = 5; // higher than any claim-flag state (0–4)
+      for (const fort of this.placedStructures) {
+        if (fort.type !== 'flag_fort' && fort.type !== 'company_fortress') continue;
+        if ((fort.claimPhase ?? 2) !== 0 || fort.hp !== 0) continue; // not demolishing
+        const fortR = 600;
+        for (const s of this.placedStructures) {
+          if (s.id === fort.id) continue;          // skip the fort itself
+          if (s.type === 'claim_flag') continue;
+          const dx = s.x - fort.x, dy = s.y - fort.y;
+          if (dx*dx + dy*dy <= fortR*fortR) {
+            const existing = flashMap.get(s.id);
+            if (!existing || FORT_DEMOLISH_URGENCY > existing.urgency) {
+              flashMap.set(s.id, { color: '#cc3333', urgency: FORT_DEMOLISH_URGENCY });
+            }
+          }
+        }
+      }
+
+      if (flashMap.size > 0) {
+        const flashAlpha = 0.35 + 0.35 * Math.abs(Math.sin(performance.now() * Math.PI / 600));
+        const THICK = 0.18; // wall thickness ratio (matches draw code)
+        ctx.save();
+        ctx.setLineDash([Math.max(4, 8 * zoom), Math.max(3, 5 * zoom)]);
+        ctx.lineWidth = Math.max(2, 3 * zoom);
+
+        for (const s of sorted) {
+          const entry = flashMap.get(s.id);
+          if (!entry) continue;
+          const ssp2 = camera.worldToScreen(Vec2.from(s.x, s.y));
+          const sz2  = Math.max(4, 50 * zoom);
+
+          // Rotation — mirrors the hover-highlight derivation
+          let rotRad2 = 0;
+          if (s.type === 'wooden_floor' || s.type === 'workbench' || s.type === 'shipyard' || s.type === 'wood_ceiling' || s.type === 'cannon') {
+            rotRad2 = (s.rotation ?? 0) * Math.PI / 180;
+          } else if (s.type === 'wall' || s.type === 'door_frame' || s.type === 'door') {
+            const nf = this.placedStructures.find(f => f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30);
+            if (nf) rotRad2 = Math.atan2(s.y - nf.y, s.x - nf.x) + Math.PI / 2;
+          }
+
+          const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+
+          ctx.save();
+          ctx.globalAlpha = flashAlpha;
+          ctx.strokeStyle = entry.color;
+          ctx.translate(ssp2.x, ssp2.y);
+          ctx.rotate(rotRad2);
+          ctx.strokeRect(-rawW2 / 2, -rawH2 / 2, rawW2, rawH2);
+          ctx.restore();
+        }
+
+        ctx.restore(); // reset lineDash / lineWidth
+      }
     }
   }
 
@@ -5316,7 +6506,7 @@ export class RenderSystem {
       // Check if a workbench or door panel occupies this slot
       if (!wallOccupied && !noEdge) {
         blockedByStructure = this.placedStructures.some(s => {
-          if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame') return false;
+          if (s.type === 'wooden_floor' || s.type === 'wall' || s.type === 'door_frame' || s.type === 'wood_ceiling') return false;
           return Math.hypot(s.x - mx, s.y - my) < 35;
         });
       }
@@ -5363,12 +6553,84 @@ export class RenderSystem {
       }
     }
 
-    // Enemy territory: any structure not belonging to the current company within 500 world px
+    // Enemy territory: any structure not belonging to the current company within 500 world px.
+    // Mirrors server logic: bypassed when the placement point lies inside the player's own
+    // claim area AND the player's company is the dominant claimant on this island
+    // (Company Fortress > Flag Fort > older fort id). Same dominance rule used by the
+    // territory overlay renderer.
     const myCompany = (this._localCompanyId ?? 0) as number;
-    const enemyTerritory = this.placedStructures.some(s =>
-      s.companyId !== myCompany &&
-      (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) < 500 * 500
-    );
+    let inMyDominantArea = false;
+    let cursorIsl = 0;
+    if (myCompany > 0) {
+      // Find which island the cursor is on by scanning any claim circle that
+      // contains it (forts use 600px, others use 400px).
+      for (const s of this.placedStructures) {
+        if ((s.companyId ?? 0) === 0) continue;
+        const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+        if ((s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr) {
+          cursorIsl = (s.islandId ?? 0) as number;
+          if (cursorIsl !== 0) break;
+        }
+      }
+      // Dominators-only law: I own this point iff per-pixel Render-Rule-X
+      // assigns it to my company (own uncarved territory OR captured enemy
+      // overlap).
+      if (cursorIsl !== 0) {
+        inMyDominantArea = this.pointInMyEffectiveTerritory(cursorIsl, myCompany, mx, my);
+      }
+    }
+    const enemyTerritory = !inMyDominantArea && this.islandBuildKind !== 'claim_flag' && this.placedStructures.some(s => {
+      const co = s.companyId ?? 0;
+      if (co === 0 || co === myCompany) return false;
+      if (s.claimOrphaned) return false;
+      // Use the actual claim radius (400 for standard, 600 for forts) so the
+      // placement ghost correctly mirrors the server boundary rather than an
+      // arbitrary magic number.
+      const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+      return (s.x - mx) * (s.x - mx) + (s.y - my) * (s.y - my) <= cr * cr;
+    });
+
+    // Claim flag: cursor must be inside the CONTESTED AREA = intersection of
+    // (any own non-orphaned claim radius) AND (any enemy non-orphaned claim radius).
+    // Mirrors server-side rules in structures.c handle_place_structure.
+    let cfInOwnClaim = false;
+    let cfInEnemyClaim = false;
+    // Closest own/enemy source structures whose claim disc covers the cursor.
+    // Used to draw the slice-preview highlight matching server placement logic.
+    let cfMineSrc: { x: number; y: number; r: number; islandId: number } | null = null;
+    let cfEnemySrc: { x: number; y: number; r: number; islandId: number } | null = null;
+    let cfMineBestD2 = 0, cfEnemyBestD2 = 0;
+    if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
+      for (const s of this.placedStructures) {
+        if (s.claimOrphaned) continue;
+        // Inactive flag forts (not complete) cannot champion a claim — match server.
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+        const co = s.companyId ?? 0;
+        const cr = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+        const dx = s.x - mx, dy = s.y - my;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > cr * cr) continue;
+        if (co === myCompany) {
+          cfInOwnClaim = true;
+          if (!cfMineSrc || d2 < cfMineBestD2) {
+            cfMineSrc = { x: s.x, y: s.y, r: cr, islandId: s.islandId };
+            cfMineBestD2 = d2;
+          }
+        } else if (co !== 0) {
+          cfInEnemyClaim = true;
+          if (!cfEnemySrc || d2 < cfEnemyBestD2) {
+            cfEnemySrc = { x: s.x, y: s.y, r: cr, islandId: s.islandId };
+            cfEnemyBestD2 = d2;
+          }
+        }
+      }
+    }
+    const cfNotInMyTerritory   = this.islandBuildKind === 'claim_flag' && !cfInOwnClaim;
+    const cfNotInContestedArea = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && !cfInEnemyClaim;
+    // Slice ownership: if the cursor sits in own dominant territory (per the
+    // dominators visibility), the placer already owns this slice and cannot
+    // claim what they hold. Mirrors server's slice_already_owned check.
+    const cfSliceAlreadyOwned  = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && cfInEnemyClaim && inMyDominantArea;
 
     // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
@@ -5384,9 +6646,230 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
+
+    // ── Claim-flag slice preview ──────────────────────────────────────────
+    // When hovering with a claim_flag selected and the cursor sits in a
+    // valid contested area, highlight the claimable slice — exactly the
+    // shape that will be hatched after placement = lens(Mi, Ej) ∖ tmp_own,
+    // where tmp_own is own company's visible territory (own discs carved by
+    // their dominators). Pulses slowly. Hidden when the cursor is not on a
+    // claimable slice (already-owned region, or sitting inside own's
+    // visible territory).
+    let cursorInOwnVisible = false;
+    if (this.islandBuildKind === 'claim_flag' && myCompany > 0) {
+      // Cursor is "in own visible territory" if it lies inside some own
+      // structure S whose dominators do NOT cover the cursor — i.e. on the
+      // own side of every dominance border at this point.
+      for (const s of this.placedStructures) {
+        if ((s.companyId ?? 0) !== myCompany) continue;
+        if (s.claimOrphaned) continue;
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+        const r = (s.type === 'flag_fort' || s.type === 'company_fortress') ? 600 : 400;
+        const dx = s.x - mx, dy = s.y - my;
+        if (dx * dx + dy * dy > r * r) continue;
+        let carved = false;
+        for (const did of s.dominators ?? []) {
+          const d = this.placedStructures.find(p => p.id === did);
+          if (!d || d.claimOrphaned) continue;
+          if (d.type === 'flag_fort' && !d.fortressComplete) continue;
+          const dr = (d.type === 'flag_fort' || d.type === 'company_fortress') ? 600 : 400;
+          const ddx = d.x - mx, ddy = d.y - my;
+          if (ddx * ddx + ddy * ddy <= dr * dr) { carved = true; break; }
+        }
+        if (!carved) { cursorInOwnVisible = true; break; }
+      }
+    }
+    const showSlicePreview = this.islandBuildKind === 'claim_flag'
+      && !!cfMineSrc && !!cfEnemySrc
+      && !cfSliceAlreadyOwned
+      && !cfNotInContestedArea
+      && !cfNotInMyTerritory
+      && !cursorInOwnVisible;
+    if (showSlicePreview && cfMineSrc && cfEnemySrc) {
+      const claimRadiusOf = (t: string): number =>
+        (t === 'flag_fort' || t === 'company_fortress') ? 600 : 400;
+      const cvW = ctx.canvas.width, cvH = ctx.canvas.height;
+      const islandId = cfMineSrc.islandId;
+      const msp = camera.worldToScreen(Vec2.from(mx, my));
+      const previewInvalid = false; // hidden when invalid
+      const fillCol   = previewInvalid ? 'rgba(220, 60, 40, 1)' : 'rgba(120, 220, 120, 1)';
+      // Slow flash: ~2.4s period.
+      const t = performance.now() / 1200;
+      const pulse = 0.5 + 0.5 * Math.sin(t * Math.PI);
+      const fillAlpha   = 0.12 + 0.32 * pulse;
+
+      // ── Build section mask ─────────────────────────────────────────────
+      // 1) lensUnion = ⋃ over all (Mi, Ej) pairs on this island whose discs
+      //    overlap: lens(Mi, Ej) = Mi.disc ∩ Ej.disc.
+      // 2) tmp_own  = ⋃ over own structures of (S.disc ∖ ⋃ dominators).
+      // 3) sliceAll = lensUnion ∖ tmp_own  (all claimable slice pieces).
+      // 4) section   = connected component of sliceAll containing the cursor
+      //    pixel, found via JS flood-fill on the alpha channel.
+
+      const ownStructs:   typeof this.placedStructures = [];
+      const enemyStructs: typeof this.placedStructures = [];
+      for (const s of this.placedStructures) {
+        if (s.claimOrphaned) continue;
+        if (s.islandId !== islandId) continue;
+        if (s.type === 'flag_fort' && !s.fortressComplete) continue;
+        const co = s.companyId ?? 0;
+        if (co === 0) continue;
+        if (co === myCompany) ownStructs.push(s);
+        else enemyStructs.push(s);
+      }
+
+      // (a) Lens union
+      const lensUnion = this._getScratch('cfSecLensU', cvW, cvH);
+      const lu = lensUnion.getContext('2d')!;
+      lu.clearRect(0, 0, cvW, cvH);
+      const lensTmp = this._getScratch('cfSecLensT', cvW, cvH);
+      const lt = lensTmp.getContext('2d')!;
+      for (const mi of ownStructs) {
+        const miR = claimRadiusOf(mi.type);
+        const miSp = camera.worldToScreen(Vec2.from(mi.x, mi.y));
+        const miRz = miR * zoom;
+        for (const ej of enemyStructs) {
+          const ejR = claimRadiusOf(ej.type);
+          const sum = miR + ejR;
+          const dx = mi.x - ej.x, dy = mi.y - ej.y;
+          if (dx * dx + dy * dy >= sum * sum) continue; // discs disjoint
+          const ejSp = camera.worldToScreen(Vec2.from(ej.x, ej.y));
+          lt.globalCompositeOperation = 'source-over';
+          lt.clearRect(0, 0, cvW, cvH);
+          lt.fillStyle = '#fff';
+          lt.beginPath(); lt.arc(miSp.x, miSp.y, miRz, 0, Math.PI * 2); lt.fill();
+          lt.globalCompositeOperation = 'destination-in';
+          lt.beginPath(); lt.arc(ejSp.x, ejSp.y, ejR * zoom, 0, Math.PI * 2); lt.fill();
+          lu.drawImage(lensTmp, 0, 0);
+        }
+      }
+
+      // (b) tmp_own (own visible territory)
+      const tmpOwn = this._getScratch('cfSecTmpOwn', cvW, cvH);
+      const tc = tmpOwn.getContext('2d')!;
+      tc.clearRect(0, 0, cvW, cvH);
+      const blob = this._getScratch('cfSecBlob', cvW, cvH);
+      const bc = blob.getContext('2d')!;
+      for (const s of ownStructs) {
+        const r = claimRadiusOf(s.type) * zoom;
+        if (r <= 0) continue;
+        const sp = camera.worldToScreen(Vec2.from(s.x, s.y));
+        bc.globalCompositeOperation = 'source-over';
+        bc.clearRect(0, 0, cvW, cvH);
+        bc.fillStyle = '#fff';
+        bc.beginPath(); bc.arc(sp.x, sp.y, r, 0, Math.PI * 2); bc.fill();
+        const doms = s.dominators ?? [];
+        if (doms.length > 0) {
+          bc.globalCompositeOperation = 'destination-out';
+          for (const did of doms) {
+            const d = this.placedStructures.find(p => p.id === did);
+            if (!d || d.claimOrphaned) continue;
+            if (d.type === 'flag_fort' && !d.fortressComplete) continue;
+            const dr = claimRadiusOf(d.type) * zoom;
+            const dsp = camera.worldToScreen(Vec2.from(d.x, d.y));
+            bc.beginPath(); bc.arc(dsp.x, dsp.y, dr, 0, Math.PI * 2); bc.fill();
+          }
+        }
+        tc.drawImage(blob, 0, 0);
+      }
+
+      // (c) sliceAll = lensUnion ∖ tmp_own
+      lu.globalCompositeOperation = 'destination-out';
+      lu.drawImage(tmpOwn, 0, 0);
+      lu.globalCompositeOperation = 'source-over';
+
+      // (d) Flood-fill section from cursor pixel at downsampled resolution
+      // (~4 world units per cell). We operate on the canvas-space mask so
+      // we sample at zoom-dependent stride.
+      const cellWorld = 4;
+      const cellPx = Math.max(1, Math.round(cellWorld * zoom));
+      const gw = Math.max(1, Math.floor(cvW / cellPx));
+      const gh = Math.max(1, Math.floor(cvH / cellPx));
+      // Read alpha at grid cell centres
+      const img = lu.getImageData(0, 0, cvW, cvH).data;
+      const inSlice = new Uint8Array(gw * gh);
+      for (let gy = 0; gy < gh; gy++) {
+        const py = Math.min(cvH - 1, (gy + 0.5) * cellPx | 0);
+        for (let gx = 0; gx < gw; gx++) {
+          const px = Math.min(cvW - 1, (gx + 0.5) * cellPx | 0);
+          const idx = (py * cvW + px) * 4 + 3;
+          if (img[idx] > 8) inSlice[gy * gw + gx] = 1;
+        }
+      }
+      const cgx = Math.max(0, Math.min(gw - 1, Math.floor(msp.x / cellPx)));
+      const cgy = Math.max(0, Math.min(gh - 1, Math.floor(msp.y / cellPx)));
+      const section = new Uint8Array(gw * gh);
+      if (inSlice[cgy * gw + cgx]) {
+        const stack: number[] = [cgy * gw + cgx];
+        section[cgy * gw + cgx] = 1;
+        while (stack.length) {
+          const k = stack.pop()!;
+          const x = k % gw, y = (k / gw) | 0;
+          if (x > 0) {
+            const n = k - 1;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+          if (x < gw - 1) {
+            const n = k + 1;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+          if (y > 0) {
+            const n = k - gw;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+          if (y < gh - 1) {
+            const n = k + gw;
+            if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); }
+          }
+        }
+      }
+
+      // (e) Build a section mask canvas by drawing each cell of `section`
+      //     as a filled rect at cell resolution, then intersecting with the
+      //     true sliceAll mask so the boundary stays smooth.
+      const sectionGrid = this._getScratch('cfSecGrid', cvW, cvH);
+      const sg = sectionGrid.getContext('2d')!;
+      sg.clearRect(0, 0, cvW, cvH);
+      sg.fillStyle = '#fff';
+      // Group runs along x to reduce fillRect count
+      for (let gy = 0; gy < gh; gy++) {
+        let runStart = -1;
+        for (let gx = 0; gx <= gw; gx++) {
+          const on = gx < gw && !!section[gy * gw + gx];
+          if (on && runStart < 0) runStart = gx;
+          else if (!on && runStart >= 0) {
+            sg.fillRect(runStart * cellPx, gy * cellPx, (gx - runStart) * cellPx, cellPx);
+            runStart = -1;
+          }
+        }
+      }
+      // Dilate grid by 1 cell to make sure the smooth slice mask is fully
+      // covered where the section is on. Done implicitly by intersecting:
+      const sectionMask = this._getScratch('cfSecMask', cvW, cvH);
+      const smc = sectionMask.getContext('2d')!;
+      smc.clearRect(0, 0, cvW, cvH);
+      smc.drawImage(lu.canvas, 0, 0);
+      smc.globalCompositeOperation = 'destination-in';
+      smc.drawImage(sectionGrid, 0, 0);
+      smc.globalCompositeOperation = 'source-over';
+
+      // (f) Tint and draw with pulse.
+      const tint = this._getScratch('cfSecTint', cvW, cvH);
+      const tnc = tint.getContext('2d')!;
+      tnc.clearRect(0, 0, cvW, cvH);
+      tnc.fillStyle = fillCol;
+      tnc.fillRect(0, 0, cvW, cvH);
+      tnc.globalCompositeOperation = 'destination-in';
+      tnc.drawImage(sectionMask, 0, 0);
+
+      ctx.save();
+      ctx.globalAlpha = fillAlpha;
+      ctx.drawImage(tint, 0, 0);
+      ctx.restore();
+    }
 
     ctx.save();
     ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
@@ -5446,6 +6929,25 @@ export class RenderSystem {
       ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
+    } else if (this.islandBuildKind === 'claim_flag') {
+      // Ghost shaped like a flag pole with a pennant
+      const poleH = sz / 2;
+      const poleW = Math.max(2, 4 * zoom);
+      const flagW = Math.max(6, 16 * zoom);
+      const flagH = Math.max(4, 10 * zoom);
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Pole (from center up to ghostH/2)
+      ctx.fillRect(msp.x - poleW / 2, msp.y - poleH, poleW, poleH);
+      ctx.strokeRect(msp.x - poleW / 2, msp.y - poleH, poleW, poleH);
+      // Pennant triangle at pole top
+      ctx.beginPath();
+      ctx.moveTo(msp.x + poleW / 2, msp.y - poleH);
+      ctx.lineTo(msp.x + poleW / 2 + flagW, msp.y - poleH + flagH / 2);
+      ctx.lineTo(msp.x + poleW / 2, msp.y - poleH + flagH);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
     } else {
       ctx.beginPath();
       ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
@@ -5465,7 +6967,7 @@ export class RenderSystem {
       ctx.fillText('IN WATER', msp.x, labelY);
     } else if (enemyTerritory) {
       ctx.fillStyle = '#ff3333';
-      ctx.fillText('ENEMY FLOOR', msp.x, labelY);
+      ctx.fillText('ENEMY TERRITORY', msp.x, labelY);
     } else if (blockedByTree) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
@@ -5493,6 +6995,15 @@ export class RenderSystem {
     } else if (noEdge) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('NEEDS FLOOR EDGE', msp.x, labelY);
+    } else if (cfNotInMyTerritory) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('NOT IN YOUR TERRITORY', msp.x, labelY);
+    } else if (cfNotInContestedArea) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('ALREADY OWNED', msp.x, labelY);
+    } else if (cfSliceAlreadyOwned) {
+      ctx.fillStyle = '#ff3333';
+      ctx.fillText('ALREADY OWNED', msp.x, labelY);
     } else {
       ctx.fillStyle = '#aaffaa';
       const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
@@ -5501,6 +7012,9 @@ export class RenderSystem {
                   : this.islandBuildKind === 'door' ? 'Door'
                   : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
                   : this.islandBuildKind === 'cannon' ? 'Cannon'
+                  : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
+                  : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
+                  : this.islandBuildKind === 'claim_flag' ? 'Claim Flag — Contested Area'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
@@ -5680,9 +7194,19 @@ export class RenderSystem {
       }
     }
     
-    // Queue players (layer 2)
+    // Queue players (layer 2 normally; layer 3 priority 5 when in shipyard build mode
+    // so the local player renders above placed planks/modules)
+    const inBuildMode = this.buildMode || this.cannonBuildMode || this.mastBuildMode
+                     || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode;
     for (const player of renderPlayers) {
-      this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+      const isLocal = player.id === this.localPlayerId;
+      // Also render above planks when on a scaffolded ship (building in shipyard) even without explicit build mode
+      const onScaffoldedShip = isLocal && player.carrierId !== 0 && this._scaffoldedShips.has(player.carrierId);
+      if (isLocal && (inBuildMode || onScaffoldedShip)) {
+        this.queueRenderItem(3, 'players', () => this.drawPlayer(player, worldState, camera), 5);
+      } else {
+        this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+      }
     }
     
     // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
@@ -5963,6 +7487,216 @@ export class RenderSystem {
     const idx = layer < 0 ? 0 : layer;
     this.renderBuckets[idx].push({ layer, layerName, renderFn, priority });
   }
+
+  // ── Building shadow (visibility polygon) ─────────────────────────────────
+
+  /**
+   * Compute a 2D visibility polygon from the player position using the cached
+   * wall segments.  Rays are cast toward every wall endpoint (+ ±0.0001 rad
+   * offset to cleanly handle corners).  The result is stored in _visPolyPts
+   * as a flat [x0,y0, x1,y1, ...] world-space array, sorted by angle.
+   * Only recomputed when the player moves or walls change.
+   */
+  private _buildVisibilityPoly(px: number, py: number): void {
+    const segs = this._wallSegs;
+    const nSegs = segs.length / 4;
+    if (nSegs === 0) { this._visPolyPts = new Float32Array(0); return; }
+
+    // Bounding box around the player, FAR units to each side. Acts as a guaranteed
+    // backstop so rays in directions with no wall still terminate at a finite distance.
+    const FAR = 2000;
+    const bx0 = px - FAR, by0 = py - FAR;
+    const bx1 = px + FAR, by1 = py + FAR;
+    // Treat box edges as 4 extra wall segments so every ray hits something.
+    const allSegsLen = segs.length + 16;
+    const all = new Float32Array(allSegsLen);
+    all.set(segs);
+    let bi = segs.length;
+    all[bi++] = bx0; all[bi++] = by0; all[bi++] = bx1; all[bi++] = by0; // top
+    all[bi++] = bx1; all[bi++] = by0; all[bi++] = bx1; all[bi++] = by1; // right
+    all[bi++] = bx1; all[bi++] = by1; all[bi++] = bx0; all[bi++] = by1; // bottom
+    all[bi++] = bx0; all[bi++] = by1; all[bi++] = bx0; all[bi++] = by0; // left
+
+    // Collect angles toward every wall endpoint (±epsilon to peek around corners),
+    // plus the 4 box corners so the polygon is well-defined in empty directions.
+    const angles: number[] = [];
+    for (let i = 0; i < segs.length; i += 4) {
+      for (let k = 0; k < 2; k++) {
+        const ex = segs[i + k * 2], ey = segs[i + k * 2 + 1];
+        const a = Math.atan2(ey - py, ex - px);
+        angles.push(a - 0.0001, a, a + 0.0001);
+      }
+    }
+    angles.push(
+      Math.atan2(by0 - py, bx0 - px),
+      Math.atan2(by0 - py, bx1 - px),
+      Math.atan2(by1 - py, bx1 - px),
+      Math.atan2(by1 - py, bx0 - px),
+    );
+
+    const rayHit = (angle: number): [number, number] => {
+      const rdx = Math.cos(angle), rdy = Math.sin(angle);
+      let minT = FAR * 2;
+      for (let i = 0; i < all.length; i += 4) {
+        const sx = all[i], sy = all[i+1], ex = all[i+2], ey = all[i+3];
+        const sdx = ex - sx, sdy = ey - sy;
+        const denom = rdx * sdy - rdy * sdx;
+        if (Math.abs(denom) < 1e-9) continue;
+        const t1 = ((sx - px) * sdy - (sy - py) * sdx) / denom;
+        const t2 = ((sx - px) * rdy - (sy - py) * rdx) / denom;
+        if (t1 >= 0 && t2 >= 0 && t2 <= 1 && t1 < minT) minT = t1;
+      }
+      return [px + rdx * minT, py + rdy * minT];
+    };
+
+    angles.sort((a, b) => a - b);
+    const pts = new Float32Array(angles.length * 2);
+    for (let i = 0; i < angles.length; i++) {
+      const [hx, hy] = rayHit(angles[i]);
+      pts[i * 2]     = hx;
+      pts[i * 2 + 1] = hy;
+    }
+    this._visPolyPts = pts;
+    this._visPolyPx  = px;
+    this._visPolyPy  = py;
+  }
+
+  /**
+   * Draw a dark shadow mask over building interiors that are not in the
+   * player's line of sight.  Only active when the player is on foot and
+   * there are walls present.
+   *
+   * Technique:
+   *  1. Fill an offscreen canvas fully black (the "dark" layer).
+   *  2. Punch out the visibility polygon using 'destination-out' compositing.
+   *  3. Blit the result onto the main canvas.
+   */
+  private _shadowCanvas: OffscreenCanvas | null = null;
+  private _shadowCtx: OffscreenCanvasRenderingContext2D | null = null;
+
+  drawBuildingShadow(camera: Camera): void {
+    const lp = this._cachedLocalPlayer;
+    if (!lp || lp.carrierId !== 0) return;  // only on foot
+    if (this._wallSegs.length === 0) return; // no walls → no shadow
+
+    const px = lp.position.x, py = lp.position.y;
+
+    // Collect all floor tiles of every building near enough to be visible.
+    const SHADOW_RANGE = 600; // world units — covers typical screen at any zoom
+    const ADJ = 55;
+    const allFloors = this.placedStructures.filter(f => f.type === 'wooden_floor');
+
+    const seedFloors = allFloors.filter(f => {
+      const dx = f.x - px, dy = f.y - py;
+      return dx * dx + dy * dy <= SHADOW_RANGE * SHADOW_RANGE;
+    });
+    if (seedFloors.length === 0) return;
+
+    // Flood-fill to include all tiles in any building that has at least one seed tile.
+    const shadowFloorIds = new Set<number>(seedFloors.map(f => f.id));
+    const floorQueue: PlacedStructure[] = [...seedFloors];
+    while (floorQueue.length > 0) {
+      const cur = floorQueue.shift()!;
+      for (const f of allFloors) {
+        if (shadowFloorIds.has(f.id)) continue;
+        const dx = f.x - cur.x, dy = f.y - cur.y;
+        if (dx * dx + dy * dy <= ADJ * ADJ) { shadowFloorIds.add(f.id); floorQueue.push(f); }
+      }
+    }
+    const connectedFloors = allFloors.filter(f => shadowFloorIds.has(f.id));
+
+    const cw = this.canvas.width, ch = this.canvas.height;
+    if (!this._shadowCanvas || this._shadowCanvas.width !== cw || this._shadowCanvas.height !== ch) {
+      this._shadowCanvas = new OffscreenCanvas(cw, ch);
+      this._shadowCtx    = this._shadowCanvas.getContext('2d')!;
+    }
+    const sc = this._shadowCtx!;
+    sc.clearRect(0, 0, cw, ch);
+
+    // Inline world→screen.
+    const camState = camera.getState();
+    const camX = camState.position.x, camY = camState.position.y;
+    const zoom  = camState.zoom;
+    const rot   = -camState.rotation;
+    const cosR  = Math.cos(rot), sinR = Math.sin(rot);
+    const hw = cw / 2, hh = ch / 2;
+    const toSx = (wx: number, wy: number) => {
+      const tx = (wx - camX) * zoom, ty = (wy - camY) * zoom;
+      return tx * cosR - ty * sinR + hw;
+    };
+    const toSy = (wx: number, wy: number) => {
+      const tx = (wx - camX) * zoom, ty = (wy - camY) * zoom;
+      return tx * sinR + ty * cosR + hh;
+    };
+
+    // ── Per-tile line-of-sight: a tile is "hidden" if a wall segment crosses
+    //    every ray from the player to all 4 corners (plus center). If ANY of
+    //    those 5 sample points is unblocked, the tile is visible → no shadow.
+    const segs = this._wallSegs;
+    // Strict segment-vs-segment intersection (cross-product sign method).
+    const segIntersects = (
+      ax: number, ay: number, bx: number, by: number,
+      cx: number, cy: number, dx: number, dy: number,
+    ): boolean => {
+      const d1x = bx - ax, d1y = by - ay;
+      const d2x = dx - cx, d2y = dy - cy;
+      const denom = d1x * d2y - d1y * d2x;
+      if (Math.abs(denom) < 1e-9) return false;
+      const sx = ax - cx, sy = ay - cy;
+      const t = (d2x * sy - d2y * sx) / denom;
+      const u = (d1x * sy - d1y * sx) / denom;
+      return t > 1e-6 && t < 1 - 1e-6 && u > 1e-6 && u < 1 - 1e-6;
+    };
+    const losBlocked = (tx: number, ty: number): boolean => {
+      for (let i = 0; i < segs.length; i += 4) {
+        if (segIntersects(px, py, tx, ty, segs[i], segs[i+1], segs[i+2], segs[i+3])) return true;
+      }
+      return false;
+    };
+
+    sc.globalCompositeOperation = 'source-over';
+    sc.fillStyle = 'rgba(0,0,0,0.78)';
+    const tileHalf = 26; // 25 + 1px to close seams between adjacent tiles
+    const sampleHalf = 22; // sample slightly inside the tile to avoid grazing wall endpoints
+    sc.beginPath();
+    let drewAny = false;
+    for (const f of connectedFloors) {
+      const fRot = (f.rotation ?? 0) * Math.PI / 180;
+      const cosF = Math.cos(fRot), sinF = Math.sin(fRot);
+
+      // Sample points (center + 4 inset corners). Tile is hidden only if ALL are blocked.
+      const samples: [number, number][] = [
+        [f.x, f.y],
+        [f.x + (-sampleHalf) * cosF - (-sampleHalf) * sinF, f.y + (-sampleHalf) * sinF + (-sampleHalf) * cosF],
+        [f.x + ( sampleHalf) * cosF - (-sampleHalf) * sinF, f.y + ( sampleHalf) * sinF + (-sampleHalf) * cosF],
+        [f.x + ( sampleHalf) * cosF - ( sampleHalf) * sinF, f.y + ( sampleHalf) * sinF + ( sampleHalf) * cosF],
+        [f.x + (-sampleHalf) * cosF - ( sampleHalf) * sinF, f.y + (-sampleHalf) * sinF + ( sampleHalf) * cosF],
+      ];
+      let allBlocked = true;
+      for (const [sx, sy] of samples) {
+        if (!losBlocked(sx, sy)) { allBlocked = false; break; }
+      }
+      if (!allBlocked) continue; // tile visible from player → leave it lit
+
+      // Draw the full tile quad (tileHalf, slight overrun to close seams).
+      const corners: [number, number][] = [
+        [f.x + (-tileHalf) * cosF - (-tileHalf) * sinF, f.y + (-tileHalf) * sinF + (-tileHalf) * cosF],
+        [f.x + ( tileHalf) * cosF - (-tileHalf) * sinF, f.y + ( tileHalf) * sinF + (-tileHalf) * cosF],
+        [f.x + ( tileHalf) * cosF - ( tileHalf) * sinF, f.y + ( tileHalf) * sinF + ( tileHalf) * cosF],
+        [f.x + (-tileHalf) * cosF - ( tileHalf) * sinF, f.y + (-tileHalf) * sinF + ( tileHalf) * cosF],
+      ];
+      sc.moveTo(toSx(corners[0][0], corners[0][1]), toSy(corners[0][0], corners[0][1]));
+      for (let i = 1; i < 4; i++) sc.lineTo(toSx(corners[i][0], corners[i][1]), toSy(corners[i][0], corners[i][1]));
+      sc.closePath();
+      drewAny = true;
+    }
+    if (!drewAny) return;
+    sc.fill();
+
+    this.ctx.drawImage(this._shadowCanvas, 0, 0);
+  }
+
+
   
   private executeRenderQueue(): void {
     // Iterate pre-allocated layer buckets in order (bucket 0 = layer -1, 1-9 = layers 1-9).
@@ -6646,10 +8380,11 @@ export class RenderSystem {
   private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    // Build set of present plank slot keys
+    // Build set of present plank slot keys — only slots with health > 0 are "placed".
+    // Slots with health = 0 are absent (not yet built) and should show ghost highlights.
     const presentKeys = new Set<string>();
     for (const mod of ship.modules) {
-      if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank') {
+      if (mod.kind === 'plank' && mod.moduleData?.kind === 'plank' && mod.moduleData.health > 0) {
         presentKeys.add(`${mod.moduleData.sectionName}_${mod.moduleData.segmentIndex}`);
       }
     }
@@ -6744,6 +8479,8 @@ export class RenderSystem {
   private _fireDbgLastLog = 0;
   private drawBurningModules(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    // Suppress fire overlays for ships under construction in a shipyard
+    if (this._scaffoldedShips.has(ship.id)) return;
     const cosR = Math.cos(ship.rotation);
     const sinR = Math.sin(ship.rotation);
     const zoom = camera.getState().zoom;
@@ -8114,6 +9851,1372 @@ export class RenderSystem {
       }
     }
     return tMin;
+  }
+
+  // ── Territory helpers ───────────────────────────────────────────────────────
+
+  /** Returns a CSS color string for a given company id. */
+  private _companyColor(companyId: number): string {
+    if (companyId === 0) return '#888888';
+    if (companyId === 1) return '#ddaa00';  // COMPANY_SOLO — gold
+    if (companyId === 2) return '#cc3333';  // COMPANY_PIRATES — red
+    if (companyId === 3) return '#3366cc';  // COMPANY_NAVY — blue
+    if (companyId === 99) return '#33cc99'; // COMPANY_GHOST — teal
+    // Dynamic companies (≥100): hash into a palette
+    const palette = ['#e06c22','#22a0e0','#22e06c','#e022a0','#a0e022','#6c22e0','#e0a022','#22e0a0'];
+    return palette[(companyId - 100) % palette.length];
+  }
+
+  /**
+   * Draw the territory claim overlay for all claimed islands.
+   * Called each frame when Alt is held.
+   */
+  private drawTerritoryOverlay(camera: Camera): void {
+    const camState = camera.getState();
+    const zoom = camState.zoom;
+    const camX = camState.position.x;
+    const camY = camState.position.y;
+    const margin = this._claimOverlayMargin;
+
+    // ── Invalidate BFS/miInfos caches on structural change ────────────────
+    if (this._claimOverlayDirty) {
+      this._claimOverlayCache.clear();
+      this._miInfosCache.clear();
+      this._claimOverlayDirty = false;
+      // _claimOverlayBitmapValid already false (set by the dirty setter)
+    }
+    if (zoom !== this._claimOverlayCachedZoom) this._claimOverlayBitmapValid = false;
+
+    // ── Render overlay into an oversized offscreen canvas once per change ─
+    // Camera pan is handled each frame by a single offset drawImage; only
+    // zoom changes or structural events trigger a full re-rasterisation.
+    if (!this._claimOverlayBitmapValid) {
+      const vpW = this.ctx.canvas.width;
+      const vpH = this.ctx.canvas.height;
+      const cw = vpW + 2 * margin;
+      const ch = vpH + 2 * margin;
+      if (!this._claimOverlayCachedCanvas
+          || this._claimOverlayCachedCanvas.width !== cw
+          || this._claimOverlayCachedCanvas.height !== ch) {
+        this._claimOverlayCachedCanvas = new OffscreenCanvas(cw, ch);
+      }
+      const offCtx = this._claimOverlayCachedCanvas.getContext('2d')!;
+      offCtx.clearRect(0, 0, cw, ch);
+      offCtx.save();
+      // Shift so worldToScreen coords (centred on vpW/2, vpH/2) land at
+      // the centre of the oversized canvas (vpW/2+margin, vpH/2+margin).
+      offCtx.translate(margin, margin);
+      const ctx = offCtx as unknown as CanvasRenderingContext2D;
+      const CLAIM_RADIUS_DEFAULT = 400;  // server CLAIM_RADIUS_DEFAULT
+      const CLAIM_RADIUS_FORT    = 600;  // server CLAIM_RADIUS_FLAG_FORT / COMPANY_FORT
+      const myCompany = this._localCompanyId;
+
+    // ── Pass 1: claimed-island territory fill + fort rings + labels ──────────
+    for (const isl of this.islands) {
+      const claim = this._islandClaims.get(isl.id);
+      if (claim === undefined || claim.companyId === 0) continue;
+      const claimCompany = claim.companyId;
+
+      const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+      for (const off of wrapOffsets) {
+        const islandX = isl.x + off.dx;
+        const islandY = isl.y + off.dy;
+
+        const color = this._companyColor(claimCompany);
+        const companyName = this._cachedCompanies.find(c => c.id === claimCompany)?.name
+          ?? (claimCompany === 1 ? 'Solo' : claimCompany === 2 ? 'Pirates' : claimCompany === 3 ? 'Navy' : `Company #${claimCompany}`);
+
+        ctx.save();
+
+        // Fill the island polygon with the company color (semi-transparent)
+        if (isl.vertices && isl.vertices.length > 2) {
+          const screenVerts = isl.vertices.map(v =>
+            camera.worldToScreen(Vec2.from(v.x + off.dx, v.y + off.dy))
+          );
+          ctx.beginPath();
+          screenVerts.forEach((sp, i) => i === 0 ? ctx.moveTo(sp.x, sp.y) : ctx.lineTo(sp.x, sp.y));
+          ctx.closePath();
+          ctx.fillStyle = color + '44'; // 27% opacity
+          ctx.fill();
+          ctx.strokeStyle = color + 'aa';
+          ctx.lineWidth = Math.max(1, 2.5 * zoom);
+          ctx.stroke();
+        } else {
+          // Fallback: circle
+          const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
+          const r = Math.max(40, 150 * zoom);
+          ctx.beginPath();
+          ctx.arc(sc.x, sc.y, r, 0, Math.PI * 2);
+          ctx.fillStyle = color + '44';
+          ctx.fill();
+          ctx.strokeStyle = color + 'aa';
+          ctx.lineWidth = Math.max(1, 2.5 * zoom);
+          ctx.stroke();
+        }
+
+
+        // Company label in the centre
+        const sc = camera.worldToScreen(Vec2.from(islandX, islandY));
+        const fontSize = Math.max(11, Math.round(13 * zoom));
+        ctx.font = `bold ${fontSize}px Georgia, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        ctx.lineWidth = Math.max(2, 3 * zoom);
+        ctx.strokeText(companyName, sc.x, sc.y);
+        ctx.fillText(companyName, sc.x, sc.y);
+
+        ctx.restore();
+      }
+    }
+
+    // ── Pass 2: territory blobs for all companies with structures ─────────
+    // Own company gets full rendering (inactive grey blob + active fill+ring).
+    // Other companies get a ring-only treatment at reduced opacity so players
+    // can read the full territorial picture after leaving or when spectating.
+
+    // Per-overlay-render id → PlacedStructure lookup. Built once per re-rasterisation
+    // (not per frame) inside the !_claimOverlayBitmapValid block above.
+    const structById: Map<number, PlacedStructure> = new Map();
+    for (const ps of this.placedStructures) structById.set(ps.id, ps);
+
+    // Collect all company IDs that have placed structures on any island
+    const allCompanyIds = new Set<number>();
+    for (const ps of this.placedStructures) {
+      if (ps.companyId && ps.companyId !== 0) allCompanyIds.add(ps.companyId);
+    }
+    if (myCompany !== 0) allCompanyIds.add(myCompany);
+    if (allCompanyIds.size === 0) {
+      // Nothing to draw — restore, mark valid, and blit the empty canvas.
+      offCtx.restore();
+      this._claimOverlayCachedCamX = camX;
+      this._claimOverlayCachedCamY = camY;
+      this._claimOverlayCachedZoom = zoom;
+      this._claimOverlayBitmapValid = true;
+      this.ctx.drawImage(this._claimOverlayCachedCanvas!, -margin, -margin);
+      return;
+    }
+
+    const cvs = ctx.canvas;
+
+    // ── Helper: resolve a company's active claim circles in world space ──
+    // Returns { worldCircles: [{x, y, r}], inactiveList, hasFort } where the
+    // first entry of worldCircles is the fort (if present) at its larger radius,
+    // followed by every BFS-connected non-fort structure at CLAIM_RADIUS_DEFAULT.
+    type CompanyClaim = {
+      // `id` is the underlying PlacedStructure id (0 when synthesised from
+      // an island_claims fallback — only used by per-structure dominator
+      // lookups, so id=0 just falls back to global behaviour).
+      worldCircles: Array<{ id: number; x: number; y: number; r: number }>;
+      inactiveList: PlacedStructure[];
+      hasFort: boolean;
+      // Dominance metadata: structure id of this company's anchor fort on the
+      // island (0 if none) and whether that fort is a Company Fortress. Used
+      // to determine which company's contested arc gets the doubled solid
+      // border vs the thin dashed line.
+      fortId: number;
+      fortIsCompanyFortress: boolean;
+      // Forts that are NOT in the ACTIVE phase yet (CLAIMING or BUILDING).
+      // They render as separate per-fort blobs (NOT merged into the company's
+      // main active blob) so the claim overlay visually distinguishes
+      // pending territory from established territory.
+      nonActiveForts: PlacedStructure[];
+    };
+    type IslandClaimEntry = ReturnType<typeof this._islandClaims.get>;
+    const isFortActive = (ps: PlacedStructure): boolean => {
+      if (ps.type === 'company_fortress') return ps.fortressComplete === true;
+      if (ps.type === 'flag_fort') {
+        // Phase-aware: only ACTIVE phase (2) projects territory. CLAIMING (0)
+        // and BUILDING (1) render as standalone per-fort blobs. Legacy data
+        // (claimPhase === undefined) falls back to the old fortressComplete
+        // gate so older saves keep working.
+        if (typeof ps.claimPhase === 'number') return ps.claimPhase === 2;
+        return ps.fortressComplete !== false;
+      }
+      return false;
+    };
+    const resolveCompanyClaim = (islId: number, cid: number, claim: IslandClaimEntry): CompanyClaim => {
+      // ── Collect ALL forts (flag forts + company fortresses) for this
+      // company on this island. ACTIVE forts seed the main territory blob;
+      // non-active forts (CLAIMING / BUILDING) are returned separately and
+      // drawn as standalone per-fort blobs by the caller.
+      const fortCircles: Array<{ id: number; x: number; y: number; r: number }> = [];
+      const allFortStructs = this.placedStructures.filter(
+        ps => ps.islandId === islId
+           && ps.companyId === cid
+           && (!ps.claimOrphaned || ps.claimPhase === 3 || (ps.claimPhase === 0 && ps.hp === 0)) // DEMOLISHING (phase 3) and post-demolish countdown still render a flashing ring
+           && (ps.type === 'flag_fort' || ps.type === 'company_fortress')
+      );
+      const fortStructs    = allFortStructs.filter(isFortActive);
+      const nonActiveForts = allFortStructs.filter(ps => ps.type === 'flag_fort' && !isFortActive(ps));
+      for (const f of fortStructs) {
+        fortCircles.push({ id: f.id, x: f.x, y: f.y, r: CLAIM_RADIUS_FORT });
+      }
+      // territory_update fallback: if no flag/company fort was found in
+      // placedStructures but the island_claims map has one for this company,
+      // synthesise a single anchor circle from it (handles edge cases where
+      // structure_placed hasn't arrived yet but territory_update has).
+      if (fortCircles.length === 0
+          && claim?.companyId === cid
+          && (claim.fortX !== 0 || claim.fortY !== 0)) {
+        fortCircles.push({ id: 0, x: claim.fortX, y: claim.fortY, r: claim.fortRadius });
+      }
+      const hasFort = fortCircles.length > 0;
+
+      // Locate this company's anchor fort in placedStructures for dominance.
+      // Prefer Company Fortress over Flag Fort if both exist (shouldn't happen
+      // in practice but keeps the rule well-defined). Falls back to lowest id.
+      let fortId = 0;
+      let fortIsCompanyFortress = false;
+      {
+        const companyFortress = this.placedStructures.find(
+          ps => ps.islandId === islId && ps.type === 'company_fortress' && ps.companyId === cid
+        );
+        if (companyFortress) {
+          fortId = companyFortress.id;
+          fortIsCompanyFortress = true;
+        } else {
+          const flagFort = this.placedStructures
+            .filter(ps => ps.islandId === islId && ps.type === 'flag_fort' && ps.companyId === cid)
+            .reduce<PlacedStructure | null>((min, ps) => (!min || ps.id < min.id ? ps : min), null);
+          if (flagFort) fortId = flagFort.id;
+        }
+      }
+
+      const companyStructs = this.placedStructures.filter(
+        ps => ps.islandId === islId
+           && ps.companyId === cid
+           && !ps.claimOrphaned
+           && ps.type !== 'flag_fort'
+           && ps.type !== 'company_fortress'
+           && ps.type !== 'claim_flag'
+      );
+
+      // ── BFS cache (world-space, camera-independent) ─────────────────────
+      // Connectivity rule (matches server `claim_rebuild_graph`): two
+      // structures are connected when their claim circles OVERLAP, i.e. the
+      // distance between centres is ≤ (r_a + r_b).
+      const cacheKey = `${islId}_${cid}`;
+      if (!this._claimOverlayCache.has(cacheKey)) {
+        const connectedIds = new Set<number>();
+        const bfsQueue: PlacedStructure[] = [];
+        // Seed from EVERY fort: any non-fort structure whose circle (radius
+        // CLAIM_RADIUS_DEFAULT) overlaps that fort's circle joins the BFS.
+        for (const fc of fortCircles) {
+          const seedR = fc.r + CLAIM_RADIUS_DEFAULT;
+          const seedR2 = seedR * seedR;
+          for (const ps of companyStructs) {
+            if (connectedIds.has(ps.id)) continue;
+            const dx = ps.x - fc.x, dy = ps.y - fc.y;
+            if (dx * dx + dy * dy <= seedR2) {
+              connectedIds.add(ps.id);
+              bfsQueue.push(ps);
+            }
+          }
+        }
+        // Step rule: two non-fort structures both have radius
+        // CLAIM_RADIUS_DEFAULT, so they connect when centre distance
+        // ≤ 2 × CLAIM_RADIUS_DEFAULT.
+        const stepR = 2 * CLAIM_RADIUS_DEFAULT;
+        const stepR2 = stepR * stepR;
+        let qi = 0;
+        while (qi < bfsQueue.length) {
+          const cur = bfsQueue[qi++];
+          for (const ps of companyStructs) {
+            if (connectedIds.has(ps.id)) continue;
+            const dx = ps.x - cur.x, dy = ps.y - cur.y;
+            if (dx * dx + dy * dy <= stepR2) {
+              connectedIds.add(ps.id);
+              bfsQueue.push(ps);
+            }
+          }
+        }
+        const inactiveIds = new Set<number>(
+          companyStructs.filter(ps => !connectedIds.has(ps.id)).map(ps => ps.id)
+        );
+        this._claimOverlayCache.set(cacheKey, { connectedIds, inactiveIds });
+      }
+      const bfs           = this._claimOverlayCache.get(cacheKey)!;
+      const connectedList = companyStructs.filter(ps => bfs.connectedIds.has(ps.id));
+      const inactiveList  = companyStructs.filter(ps => bfs.inactiveIds.has(ps.id));
+
+      const worldCircles: Array<{ id: number; x: number; y: number; r: number }> = [];
+      for (const fc of fortCircles) worldCircles.push(fc);
+      for (const ps of connectedList) worldCircles.push({ id: ps.id, x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT });
+      return { worldCircles, inactiveList, hasFort, fortId, fortIsCompanyFortress, nonActiveForts };
+    };
+
+    for (const isl of this.islands) {
+      const islClaim = this._islandClaims.get(isl.id);
+
+      // Pre-compute each company's claim circles for this island once.
+      // Used both to render that company's own blob and to clip enemy overlap
+      // out of every other company's blob.
+      const islandClaimsByCo = new Map<number, CompanyClaim>();
+      for (const cid of allCompanyIds) {
+        islandClaimsByCo.set(cid, resolveCompanyClaim(isl.id, cid, islClaim));
+      }
+
+      // ── miInfos cache: world-space subord/dominated ID sets ─────────────
+      // Computed once per structural change (same lifecycle as BFS cache).
+      // The subord/dominated filter ("owner area" check) is camera-independent
+      // — it only depends on structure positions/radii and dominator lists —
+      // so results are valid across all zoom levels and pan positions.
+      for (const cid of allCompanyIds) {
+        const miKey = `${isl.id}_${cid}`;
+        if (this._miInfosCache.has(miKey)) continue;
+
+        const myClaim = islandClaimsByCo.get(cid)!;
+        const ownWorld     = myClaim.worldCircles; // [{id,x,y,r}] — active
+        const ownInactive  = myClaim.inactiveList.map(
+          ps => ({ id: ps.id, x: ps.x, y: ps.y, r: CLAIM_RADIUS_DEFAULT as number })
+        );
+        const allOwn = [...ownWorld, ...ownInactive];
+
+        // All enemy world circles for this company on this island.
+        const enemyWorldById = new Map<number, { id: number; x: number; y: number; r: number }>();
+        for (const [otherCid, otherClaim] of islandClaimsByCo) {
+          if (otherCid === cid) continue;
+          for (const wc of otherClaim.worldCircles) enemyWorldById.set(wc.id, wc);
+        }
+
+        const activeSubordIds:   Map<number, number[]> = new Map();
+        const activeDomIds:      Map<number, number[]> = new Map();
+        const inactiveSubordIds: Map<number, number[]> = new Map();
+        const inactiveDomIds:    Map<number, number[]> = new Map();
+
+        const computeSets = (
+          circles: Array<{ id: number; x: number; y: number; r: number }>,
+          subordOut: Map<number, number[]>,
+          domOut:    Map<number, number[]>
+        ): void => {
+          for (const mi of circles) {
+            const myStruct = mi.id > 0 ? structById.get(mi.id) : undefined;
+            const subord: number[] = [];
+            const dominated: number[] = [];
+
+            if (myStruct?.dominators) {
+              for (const eid of myStruct.dominators) {
+                const ec = enemyWorldById.get(eid);
+                if (!ec) continue;
+                const eStruct = structById.get(ec.id);
+                // Drop Ej when Mi.centre lies inside an allied M2 that also
+                // dominates Ej (M2 is the "owner" of this area w.r.t. Ej).
+                const ownedByAlly = !!eStruct?.dominators && allOwn.some(m2 => {
+                  if (m2.id === mi.id || m2.r <= 0) return false;
+                  if (!eStruct.dominators!.includes(m2.id)) return false;
+                  const dx = mi.x - m2.x, dy = mi.y - m2.y;
+                  return dx * dx + dy * dy <= m2.r * m2.r;
+                });
+                if (!ownedByAlly) subord.push(eid);
+              }
+            }
+
+            if (mi.id > 0) {
+              for (const ec of enemyWorldById.values()) {
+                if (ec.id <= 0) continue;
+                const eStruct = structById.get(ec.id);
+                if (!eStruct?.dominators?.includes(mi.id)) continue;
+                const coveredByAlly = allOwn.some(m2 => {
+                  if (m2.id === mi.id || m2.r <= 0) return false;
+                  if (!eStruct.dominators!.includes(m2.id)) return false;
+                  const dx = mi.x - m2.x, dy = mi.y - m2.y;
+                  return dx * dx + dy * dy <= m2.r * m2.r;
+                });
+                if (!coveredByAlly) dominated.push(ec.id);
+              }
+            }
+
+            subordOut.set(mi.id, subord);
+            domOut.set(mi.id, dominated);
+          }
+        };
+
+        computeSets(ownWorld,    activeSubordIds,   activeDomIds);
+        computeSets(ownInactive, inactiveSubordIds, inactiveDomIds);
+
+        this._miInfosCache.set(miKey, {
+          activeSubordIds, activeDomIds, inactiveSubordIds, inactiveDomIds,
+        });
+      }
+
+      for (const cid of allCompanyIds) {
+        const isOwn = cid === myCompany;
+        const myClaim = islandClaimsByCo.get(cid)!;
+        const { worldCircles, inactiveList, hasFort, nonActiveForts } = myClaim;
+
+        if (worldCircles.length === 0 && inactiveList.length === 0 && nonActiveForts.length === 0) continue;
+
+        const psR = CLAIM_RADIUS_DEFAULT * zoom;
+
+        const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, 800);
+        for (const off of wrapOffsets) {
+          const color = this._companyColor(cid);
+          const companyName = this._cachedCompanies.find(c => c.id === cid)?.name
+            ?? (cid === 1 ? 'Solo' : cid === 2 ? 'Pirates' : cid === 3 ? 'Navy' : `Company #${cid}`);
+          ctx.save();
+
+          // ── Active blob: fort + connected structures ───────────────────────
+          const screenPts: Array<{ id: number; x: number; y: number; r: number }> = [];
+          for (const wc of worldCircles) {
+            const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+            screenPts.push({ id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom });
+          }
+
+          // Cache is guaranteed to be populated above for every cid on this island.
+          const _cachedMi = this._miInfosCache.get(`${isl.id}_${cid}`)!;
+
+          if (screenPts.length > 0) {
+            const borderWidth = Math.max(8, 10 * zoom);
+
+            // ── Per-structure dominance from server `dominators` lists ────
+            // Mirrors the server's Render-Rule-X exactly: each circle (Mi)
+            // is the unit of dominance, NOT the fort or the company. A
+            // newly-placed structure has every overlapping enemy appended
+            // to its own dominators list at placement time, so its overlap
+            // with that enemy must render as the enemy's territory until a
+            // claim flag promotes it. The fort itself, the conjoint blob,
+            // and other dominant structures are unaffected.
+            //
+            // Per-Mi sets:
+            //   subord(Mi)    = enemy circles E where E.id ∈ Mi.dominators
+            //                   (E dominates Mi at the overlap → Mi.disc
+            //                    carved + dashed Mi arc inside E).
+            //   dominated(Mi) = enemy circles E where Mi.id ∈ E.dominators
+            //                   (Mi dominates E at the overlap → solid
+            //                    Mi-inner-rim + E-outer-rim doubled border).
+            type EnemyCircle = { id: number; x: number; y: number; r: number };
+            const allEnemyCircles: EnemyCircle[] = [];
+            const enemyById = new Map<number, EnemyCircle>();
+            for (const [otherCid, otherClaim] of islandClaimsByCo) {
+              if (otherCid === cid) continue;
+              for (const wc of otherClaim.worldCircles) {
+                const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                const ec: EnemyCircle = { id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom };
+                if (wc.id > 0) enemyById.set(wc.id, ec);
+                allEnemyCircles.push(ec);
+              }
+            }
+            const lookupStruct = (id: number): PlacedStructure | undefined =>
+              id > 0 ? structById.get(id) : undefined;
+
+            // ── miInfos: resolve subord/dominated from world-space cache ──
+            // The filter sets (which enemies are in subord/dominated for each
+            // Mi) are camera-independent and were computed once on structural
+            // change. Here we just map the cached IDs to live screen-space
+            // enemy circles.
+            type MiInfo = {
+              mi: { id: number; x: number; y: number; r: number };
+              subord:    EnemyCircle[];
+              dominated: EnemyCircle[];
+            };
+            const miInfos: MiInfo[] = screenPts.map(mi => ({
+              mi,
+              subord:    (_cachedMi.activeSubordIds.get(mi.id) ?? [])
+                           .map(id => enemyById.get(id)).filter(Boolean) as EnemyCircle[],
+              dominated: (_cachedMi.activeDomIds.get(mi.id) ?? [])
+                           .map(id => enemyById.get(id)).filter(Boolean) as EnemyCircle[],
+            }));
+
+            // ── Helper: build a filled-disc union mask in this colour ─────
+            const buildMask = (pts: Array<{ x: number; y: number; r: number }>, slot: string) => {
+              if (pts.length === 0) return null;
+              const m = this._getScratch(slot, cvs.width, cvs.height);
+              const mc = m.getContext('2d')!;
+              mc.fillStyle = color;
+              for (const { x, y, r } of pts) {
+                if (r <= 0) continue;
+                mc.beginPath(); mc.arc(x, y, r, 0, Math.PI * 2); mc.fill();
+              }
+              return m;
+            };
+
+            const ownInnerCv      = buildMask(screenPts, 'ovOwnInner')!;
+            const allEnemyInnerCv = buildMask(allEnemyCircles, 'ovEnemyInner');
+
+            // ── Fill (tmp): per-Mi carve ──────────────────────────────────
+            // tmp = ⋃ over Mi of (Mi.disc ∖ ⋃ subord(Mi).discs)
+            // A pixel inside Mk that has no subord enemy at that pixel will
+            // restore the fill via union, so dominant siblings preserve the
+            // overlap they own even when a subordinate sibling is carved.
+            const tmp = this._getScratch('ovActiveTmp', cvs.width, cvs.height);
+            const tc  = tmp.getContext('2d')!;
+            for (const info of miInfos) {
+              if (info.mi.r <= 0) continue;
+              const m = this._getScratch('ovActiveM', cvs.width, cvs.height);
+              const mc = m.getContext('2d')!;
+              mc.fillStyle = color;
+              mc.beginPath(); mc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); mc.fill();
+              if (info.subord.length > 0) {
+                mc.globalCompositeOperation = 'destination-out';
+                for (const e of info.subord) {
+                  mc.beginPath(); mc.arc(e.x, e.y, e.r, 0, Math.PI * 2); mc.fill();
+                }
+              }
+              tc.drawImage(m, 0, 0);
+            }
+
+            // ── Ring construction ─────────────────────────────────────────
+            const ring = this._getScratch('ovActiveRing', cvs.width, cvs.height);
+            const rc   = ring.getContext('2d')!;
+            rc.fillStyle = color;
+
+            // Inset eraser used by pieces 1 & 2 and the dashed pass to
+            // collapse concentric sibling contours into a single outermost
+            // contour: a pixel inside any of MY circles shrunk by
+            // (bw/2 + 1) lies DEEP inside that circle, so any other
+            // circle's stroke / inner-rim band passing through that point
+            // is interior to the union and should be erased. Preserves
+            // each circle's own band [r-bw/2, r+bw/2] since
+            // r-bw/2 > r-(bw/2+1).
+            const ownShrunk = this._getScratch('ovShrunk', cvs.width, cvs.height);
+            {
+              const osc = ownShrunk.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = borderWidth / 2 + 1;
+              for (const { x, y, r } of screenPts) {
+                const rr = r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
+              }
+            }
+
+            // Piece (1) standard outer rim, centered on the circle boundary
+            // so its center aligns with the doubled-border center along
+            // contested arcs. Band spans [r - bw/2, r + bw/2]. Carved by
+            // ALL enemy interiors so it disappears wherever a contested
+            // doubled band (pieces 2 + 3) takes over.
+            //   (own_dilated_by_bw/2 ∖ own_shrunk_by_bw/2) ∖ all_enemy_inner
+            for (const { x, y, r } of screenPts) {
+              rc.beginPath(); rc.arc(x, y, r + borderWidth / 2, 0, Math.PI * 2); rc.fill();
+            }
+            rc.globalCompositeOperation = 'destination-out';
+            rc.drawImage(ownShrunk, 0, 0);
+            if (allEnemyInnerCv) rc.drawImage(allEnemyInnerCv, 0, 0);
+            rc.globalCompositeOperation = 'source-over';
+
+            // ownShrunkDominant: same as ownShrunk but ONLY includes own
+            // circles that are themselves dominant against at least one
+            // enemy (non-empty dominated set). Used by piece (2) so that a
+            // newly-placed subordinate sibling (e.g. A.new pushing into B)
+            // does NOT erase the EXISTING dominant sibling's solid border
+            // (e.g. A.fort's border with B) where it passes through the
+            // newcomer's disc. The "true claim area" of the established
+            // dominant structure must remain visible even when a contestable
+            // newcomer overlaps it.
+            const ownShrunkDominant = this._getScratch('ovShrunkDom', cvs.width, cvs.height);
+            {
+              const osc = ownShrunkDominant.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = borderWidth / 2 + 1;
+              for (const info of miInfos) {
+                if (info.dominated.length === 0) continue;
+                const rr = info.mi.r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); osc.fill();
+              }
+            }
+
+            // Piece (2) per-Mi inner rim — only along arcs inside enemies
+            // that THIS Mi dominates. Per-Mi ensures a new structure placed
+            // in dominant territory does NOT inherit the fort's doubled
+            // border treatment vs. the same enemy. ownShrunkDominant erase
+            // folds concentric DOMINANT sibling rings into a single
+            // combined outline, but does NOT erase by subord-only siblings
+            // (preserving the established dominant border where a new
+            // contestable structure overlaps it).
+            //
+            // Band thickness is borderWidth/2 (half of a single line). The
+            // matching piece (3) drawn by the dominating enemy's pass
+            // contributes the other half, so the combined doubled border
+            // along Mi's contested arc visually equals one full-width line
+            // — split half own-colour / half enemy-colour.
+            for (const info of miInfos) {
+              if (info.dominated.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const p2 = this._getScratch('ovP2', cvs.width, cvs.height);
+              const p2c = p2.getContext('2d')!;
+              p2c.fillStyle = color;
+              p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p2c.fill();
+              const rr = info.mi.r - borderWidth / 2;
+              if (rr > 0) {
+                p2c.globalCompositeOperation = 'destination-out';
+                p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
+              }
+              // Erase deep-interior segments so only the outermost contour
+              // of own-dominant-union shows inside the contested area.
+              p2c.globalCompositeOperation = 'destination-out';
+              p2c.drawImage(ownShrunkDominant, 0, 0);
+              // Erase arc segments that fall inside another allied circle M2
+              // which also dominates the same enemy (co-dominant). Mi's ring
+              // inside M2's disc lies within M2's established territory — it
+              // would render as a redundant second border line on top of M2's
+              // existing contested border. Remove it regardless of whether Mi
+              // is fully or only partially enclosed in M2.
+              {
+                const allyErase = this._getScratch('ovP2AllyErase', cvs.width, cvs.height);
+                const aec = allyErase.getContext('2d')!;
+                aec.fillStyle = color;
+                for (const e of info.dominated) {
+                  const eStruct = lookupStruct(e.id);
+                  if (!eStruct?.dominators) continue;
+                  for (const m2 of screenPts) {
+                    if (m2.id === info.mi.id || m2.r <= 0) continue;
+                    if (!eStruct.dominators.includes(m2.id)) continue;
+                    aec.beginPath(); aec.arc(m2.x, m2.y, m2.r, 0, Math.PI * 2); aec.fill();
+                  }
+                }
+                p2c.drawImage(allyErase, 0, 0);
+              }
+              // Clip to union of dominated enemies of THIS Mi.
+              p2c.globalCompositeOperation = 'destination-in';
+              const domMask = this._getScratch('ovP2Dom', cvs.width, cvs.height);
+              const dmc2 = domMask.getContext('2d')!;
+              dmc2.fillStyle = color;
+              for (const e of info.dominated) {
+                dmc2.beginPath(); dmc2.arc(e.x, e.y, e.r, 0, Math.PI * 2); dmc2.fill();
+              }
+              p2c.drawImage(domMask, 0, 0);
+              rc.drawImage(p2, 0, 0);
+            }
+
+            // Piece (3) per-Mi: outer-rim band of the UNION of enemies that
+            // dominate Mi, clipped to Mi.disc — the E-outer half of the
+            // doubled border along Mi's contested arc. Using the union (vs
+            // per-enemy bands) prevents a band from being drawn through the
+            // interior of an adjacent dominant enemy when several overlap.
+            //
+            // Band thickness is borderWidth/2; pairs with the dominating
+            // enemy's piece (2) inset band (also borderWidth/2) so the two
+            // colours stack into a single-line-equivalent doubled border.
+            for (const info of miInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const p3 = this._getScratch('ovP3', cvs.width, cvs.height);
+              const p3c = p3.getContext('2d')!;
+              p3c.fillStyle = color;
+              // dilated union of subord enemies
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r + borderWidth / 2, 0, Math.PI * 2); p3c.fill();
+              }
+              // subtract un-dilated union → band along ∂(union)
+              p3c.globalCompositeOperation = 'destination-out';
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r, 0, Math.PI * 2); p3c.fill();
+              }
+              // Clip to Mi.disc.
+              p3c.globalCompositeOperation = 'destination-in';
+              p3c.beginPath(); p3c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p3c.fill();
+              rc.drawImage(p3, 0, 0);
+            }
+
+            // Dashed pass: per-Mi. Stroke Mi clipped to its subord union;
+            // ownShrunk erase folds concentric sibling arcs into one clean
+            // dashed loop per contested region.
+            for (const info of miInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const d = this._getScratch('ovDashed', cvs.width, cvs.height);
+              const dc = d.getContext('2d')!;
+              dc.strokeStyle = color;
+              dc.lineWidth   = borderWidth;
+              dc.setLineDash([borderWidth * 1.5, borderWidth * 1.5]);
+              dc.beginPath(); dc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); dc.stroke();
+              dc.globalCompositeOperation = 'destination-out';
+              dc.drawImage(ownShrunk, 0, 0);
+              dc.globalCompositeOperation = 'destination-in';
+              const subMask = this._getScratch('ovDashedSub', cvs.width, cvs.height);
+              const sbc = subMask.getContext('2d')!;
+              sbc.fillStyle = color;
+              for (const e of info.subord) {
+                sbc.beginPath(); sbc.arc(e.x, e.y, e.r, 0, Math.PI * 2); sbc.fill();
+              }
+              dc.drawImage(subMask, 0, 0);
+              rc.drawImage(d, 0, 0);
+            }
+
+            // Own company: full fill + solid border.
+            // Other companies: subtle fill + softer border (still readable, less prominent).
+            // (Translucent blob fill removed by user request — only borders
+            // and contested-area hatching remain as visual cues.)
+
+            // ── Contested area: solid diagonal hatching ───────────────────
+            // Drawn only when THIS company (cid) has an active (non-orphaned)
+            // claim_flag down on this island. Hatching is rendered in the
+            // claimer's territory colour over the intersection of the
+            // claimer's claim circles with any enemy claim circles.
+            const hasActiveClaimFlag = this.placedStructures.some(
+              s => s.type === 'claim_flag'
+                && !s.claimOrphaned
+                && s.islandId === isl.id
+                && (s.companyId ?? 0) === cid
+            );
+            // True when ANY of this company's active claim flags on this
+            // island is currently in the CONTEST state (claimState === 0).
+            // Used to flicker the hatching so contested areas read as
+            // visually unstable.
+            const isContestFlickering = hasActiveClaimFlag && this.placedStructures.some(
+              s => s.type === 'claim_flag'
+                && !s.claimOrphaned
+                && s.islandId === isl.id
+                && (s.companyId ?? 0) === cid
+                && (s.claimState ?? 0) === 0
+            );
+            if (hasActiveClaimFlag && allEnemyInnerCv) {
+              // Build per-flag SECTION mask: for each of this company's
+              // active claim_flags on this island, the contested section is
+              // the connected component (under disc-overlap adjacency) of
+              //   sliceAll = ⋃ lens(Mi, Ej) ∖ tmp_own
+              // that contains the flag's position. This matches the server
+              // section flood-fill, so the hatching covers EVERY targeted
+              // structure pair, not just the flag's bound source pair.
+              const sliceMask = this._getScratch('ovSliceMask', cvs.width, cvs.height);
+              const smc = sliceMask.getContext('2d')!;
+              smc.clearRect(0, 0, cvs.width, cvs.height);
+
+              // (1) Build lensUnion in screen space once for this island/cid.
+              const lensUnion = this._getScratch('ovSliceLensU', cvs.width, cvs.height);
+              const lu = lensUnion.getContext('2d')!;
+              lu.clearRect(0, 0, cvs.width, cvs.height);
+              const lensTmp = this._getScratch('ovSliceLensT', cvs.width, cvs.height);
+              const lt = lensTmp.getContext('2d')!;
+              for (const mi of screenPts) {
+                for (const ej of allEnemyCircles) {
+                  const dx = mi.x - ej.x, dy = mi.y - ej.y;
+                  const sum = mi.r + ej.r;
+                  if (dx * dx + dy * dy >= sum * sum) continue;
+                  lt.globalCompositeOperation = 'source-over';
+                  lt.clearRect(0, 0, cvs.width, cvs.height);
+                  lt.fillStyle = '#fff';
+                  lt.beginPath(); lt.arc(mi.x, mi.y, mi.r, 0, Math.PI * 2); lt.fill();
+                  lt.globalCompositeOperation = 'destination-in';
+                  lt.beginPath(); lt.arc(ej.x, ej.y, ej.r, 0, Math.PI * 2); lt.fill();
+                  lu.drawImage(lensTmp, 0, 0);
+                }
+              }
+
+              // (2) sliceAll = lensUnion ∖ tmp_own (tmp already carved per Mi).
+              lu.globalCompositeOperation = 'destination-out';
+              lu.drawImage(tmp, 0, 0);
+              lu.globalCompositeOperation = 'source-over';
+
+              // (3) Downsample alpha into grid for flood-fill.
+              const cellWorld = 4;
+              const cellPx = Math.max(1, Math.round(cellWorld * zoom));
+              const gw = Math.max(1, Math.floor(cvs.width / cellPx));
+              const gh = Math.max(1, Math.floor(cvs.height / cellPx));
+              const sliceData = lu.getImageData(0, 0, cvs.width, cvs.height).data;
+              const inSlice = new Uint8Array(gw * gh);
+              for (let gy = 0; gy < gh; gy++) {
+                const py = Math.min(cvs.height - 1, (gy + 0.5) * cellPx | 0);
+                for (let gx = 0; gx < gw; gx++) {
+                  const px = Math.min(cvs.width - 1, (gx + 0.5) * cellPx | 0);
+                  if (sliceData[(py * cvs.width + px) * 4 + 3] > 8) inSlice[gy * gw + gx] = 1;
+                }
+              }
+
+              // (4) For each flag, flood-fill from its grid cell and OR the
+              //     resulting section into sliceMask (intersected with the
+              //     smooth sliceAll mask).
+              const sectionGrid = this._getScratch('ovSliceGrid', cvs.width, cvs.height);
+              const sg = sectionGrid.getContext('2d')!;
+              const perFlagMask = this._getScratch('ovSliceFlag', cvs.width, cvs.height);
+              const pfc = perFlagMask.getContext('2d')!;
+              for (const flag of this.placedStructures) {
+                if (flag.type !== 'claim_flag') continue;
+                if (flag.claimOrphaned) continue;
+                if (flag.islandId !== isl.id) continue;
+                if ((flag.companyId ?? 0) !== cid) continue;
+                const fsp = camera.worldToScreen(Vec2.from(flag.x + off.dx, flag.y + off.dy));
+                const cgx = Math.max(0, Math.min(gw - 1, Math.floor(fsp.x / cellPx)));
+                const cgy = Math.max(0, Math.min(gh - 1, Math.floor(fsp.y / cellPx)));
+                if (!inSlice[cgy * gw + cgx]) continue;
+                const section = new Uint8Array(gw * gh);
+                const stack: number[] = [cgy * gw + cgx];
+                section[cgy * gw + cgx] = 1;
+                while (stack.length) {
+                  const k = stack.pop()!;
+                  const x = k % gw, y = (k / gw) | 0;
+                  if (x > 0)        { const n = k - 1;  if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                  if (x < gw - 1)   { const n = k + 1;  if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                  if (y > 0)        { const n = k - gw; if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                  if (y < gh - 1)   { const n = k + gw; if (inSlice[n] && !section[n]) { section[n] = 1; stack.push(n); } }
+                }
+                // Rasterize section cells into sectionGrid (run-length).
+                sg.clearRect(0, 0, cvs.width, cvs.height);
+                sg.fillStyle = '#fff';
+                for (let gy = 0; gy < gh; gy++) {
+                  let runStart = -1;
+                  for (let gx = 0; gx <= gw; gx++) {
+                    const on = gx < gw && !!section[gy * gw + gx];
+                    if (on && runStart < 0) runStart = gx;
+                    else if (!on && runStart >= 0) {
+                      sg.fillRect(runStart * cellPx, gy * cellPx, (gx - runStart) * cellPx, cellPx);
+                      runStart = -1;
+                    }
+                  }
+                }
+                // Intersect grid with smooth sliceAll for clean edges.
+                pfc.clearRect(0, 0, cvs.width, cvs.height);
+                pfc.drawImage(lu.canvas, 0, 0);
+                pfc.globalCompositeOperation = 'destination-in';
+                pfc.drawImage(sectionGrid, 0, 0);
+                pfc.globalCompositeOperation = 'source-over';
+                smc.drawImage(perFlagMask, 0, 0);
+              }
+              // Hatching belongs on the ENEMY's side of the dominance
+              // border: the slice's visible portion is the lens minus own's
+              // carved territory (tmp). Where own dominates the enemy, the
+              // lens is already painted with own's solid territory, so we
+              // remove it. Where own is subordinate (the claim-flag scenario),
+              // the lens lies in the enemy's visible area — that's exactly
+              // what remains and is what gets hatched.
+              smc.globalCompositeOperation = 'destination-out';
+              smc.drawImage(tmp, 0, 0);
+              smc.globalCompositeOperation = 'source-over';
+
+              // Solid diagonal stripe pattern in the claimer's colour.
+              // Stripes are anchored to world space (move with the camera) and
+              // slowly translate along their perpendicular axis for a "marching
+               // ants" feel without the harsh blink.
+              const hatch = this._getScratch('ovHatch', cvs.width, cvs.height);
+              const hc = hatch.getContext('2d')!;
+              // `stripeGap` is the x-axis spacing between consecutive 45°
+              // strokes. Their PERPENDICULAR spacing is stripeGap / √2, so
+              // for equal painted-band and gap widths, lineWidth must be
+              // half of that perpendicular spacing.
+              const stripeGap = Math.max(16, 28 * zoom);
+              hc.strokeStyle = color;
+              hc.lineWidth   = stripeGap / (2 * Math.SQRT2);
+              // World-anchored phase: project world origin onto stripe-perp
+              // axis (x - y). Adding camera-anchored offset makes stripes
+              // appear to stay glued to the world as the camera pans.
+              const worldOrigin = camera.worldToScreen(Vec2.from(off.dx, off.dy));
+              const animSpeedPxPerMs = 0.006; // ~6 px/sec at zoom 1
+              const phase = ((worldOrigin.x - worldOrigin.y)
+                           + performance.now() * animSpeedPxPerMs) % stripeGap;
+              const diagLen = cvs.width + cvs.height;
+              for (let d = -diagLen + phase; d < diagLen + cvs.width; d += stripeGap) {
+                hc.beginPath();
+                hc.moveTo(d, 0);
+                hc.lineTo(d + cvs.height, cvs.height);
+                hc.stroke();
+              }
+              // Clip stripes to the per-flag slice mask
+              hc.globalCompositeOperation = 'destination-in';
+              hc.drawImage(sliceMask, 0, 0);
+
+              ctx.globalAlpha = 0.30;
+              if (isContestFlickering) {
+                // Sine-wave flicker between ~0.10 and ~0.50, ~1.4 Hz.
+                const t = performance.now() * 0.009;
+                ctx.globalAlpha = 0.30 + 0.20 * Math.sin(t);
+              }
+              ctx.drawImage(hatch, 0, 0);
+              ctx.globalAlpha = 1.0;
+
+              // ── Contest section labels ────────────────────────────────────
+              // For each enemy company this company is actively contesting,
+              // draw a "CompanyA↔CompanyB" badge at the centroid of their
+              // overlapping disc pairs so it sits inside the hatched zone.
+              if (zoom >= 0.5) {
+                for (const [enemyCid, enemyClaim] of islandClaimsByCo) {
+                  if (enemyCid === cid) continue;
+                  if (enemyClaim.worldCircles.length === 0) continue;
+                  // Only show label when there's an active flag for this section
+                  const sectHasFlag = this.placedStructures.some(f =>
+                    f.type === 'claim_flag'
+                    && !f.claimOrphaned
+                    && f.islandId === isl.id
+                    && (f.companyId ?? 0) === cid
+                    && (() => { const es = structById.get(f.claimSourceEnemy ?? 0); return es !== undefined && es.companyId === enemyCid; })()
+                  );
+                  if (!sectHasFlag) continue;
+                  const enemySP = enemyClaim.worldCircles.map(wc => {
+                    const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                    return { x: sp.x, y: sp.y, r: wc.r * zoom };
+                  });
+                  let scx = 0, scy = 0, sn = 0;
+                  for (const mi of screenPts) {
+                    for (const ej of enemySP) {
+                      const dx = mi.x - ej.x, dy = mi.y - ej.y;
+                      const sum = mi.r + ej.r;
+                      if (dx * dx + dy * dy < sum * sum) {
+                        scx += (mi.x + ej.x) * 0.5;
+                        scy += (mi.y + ej.y) * 0.5;
+                        sn++;
+                      }
+                    }
+                  }
+                  if (sn === 0) continue;
+                  scx /= sn; scy /= sn;
+                  const enemyName = this._cachedCompanies.find(c => c.id === enemyCid)?.name
+                    ?? (enemyCid === 1 ? 'Solo' : enemyCid === 2 ? 'Pirates' : enemyCid === 3 ? 'Navy' : `#${enemyCid}`);
+                  const sectLabel = `${companyName}↔${enemyName}`;
+                  const sf = Math.max(10, Math.round(12 * zoom));
+                  ctx.save();
+                  ctx.font = `bold ${sf}px Georgia, serif`;
+                  ctx.textAlign = 'center';
+                  ctx.textBaseline = 'middle';
+                  const tw = ctx.measureText(sectLabel).width;
+                  ctx.fillStyle = 'rgba(10,10,10,0.80)';
+                  ctx.fillRect(scx - tw / 2 - 4, scy - sf / 2 - 3, tw + 8, sf + 6);
+                  ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+                  ctx.lineWidth = Math.max(2, 2.5 * zoom);
+                  ctx.fillStyle = 'rgba(255,220,80,0.95)';
+                  ctx.strokeText(sectLabel, scx, scy);
+                  ctx.fillText(sectLabel, scx, scy);
+                  ctx.restore();
+                }
+              }
+            }
+
+            // Borders (including the dashed subordinate "inner" border) are
+            // drawn LAST so they sit above the contested-area hatching.
+            ctx.globalAlpha = isOwn ? 0.90 : 0.50;
+            ctx.drawImage(ring, 0, 0);
+            ctx.globalAlpha = 1.0;
+
+            // Label at blob centroid
+            let cx = 0, cy = 0;
+            for (const p of screenPts) { cx += p.x; cy += p.y; }
+            cx /= screenPts.length; cy /= screenPts.length;
+
+            const fontSize = Math.max(12, Math.round(14 * zoom));
+            ctx.font = `bold ${fontSize}px Georgia, serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = Math.max(2, 3 * zoom);
+            ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+            ctx.fillStyle = '#ffffff';
+            ctx.strokeText(companyName, cx, cy);
+            ctx.fillText(companyName, cx, cy);
+          }
+
+          // ── Inactive territory: same multi-pass border system, dimmed ─────
+          // inactiveList circles (BFS-disconnected from own fort) are rendered
+          // with the same piece 1/2/3/dashed ring system as active territory so
+          // borders between inactive and enemy circles look identical to active
+          // vs. active borders. The only differences are:
+          //   • iOwnShrunkAll includes ALL own circles (active + inactive), so
+          //     no double-border appears at the active/inactive company boundary.
+          //   • The ring is drawn at a reduced alpha to visually distinguish
+          //     disconnected territory from fully-connected territory.
+          if (inactiveList.length > 0) {
+            const iBW = Math.max(8, 10 * zoom);
+
+            // Convert inactive structures to screen-space points.
+            const iPts: Array<{ id: number; x: number; y: number; r: number }> = [];
+            for (const ps of inactiveList) {
+              const sp = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+              iPts.push({ id: ps.id, x: sp.x, y: sp.y, r: psR });
+            }
+
+            // Enemy circles: active territory circles of other companies.
+            const iEnemyCircles: Array<{ id: number; x: number; y: number; r: number }> = [];
+            const iEnemyById = new Map<number, { id: number; x: number; y: number; r: number }>();
+            for (const [otherCid, otherClaim] of islandClaimsByCo) {
+              if (otherCid === cid) continue;
+              for (const wc of otherClaim.worldCircles) {
+                const sp = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                const ec = { id: wc.id, x: sp.x, y: sp.y, r: wc.r * zoom };
+                if (wc.id > 0) iEnemyById.set(wc.id, ec);
+                iEnemyCircles.push(ec);
+              }
+            }
+
+            // Shrunk union of ALL own circles (active + inactive). Prevents a
+            // double-border from appearing where active and inactive own territory
+            // share a boundary.
+            const iOwnShrunkAll = this._getScratch('ovInaOwnShrunk', cvs.width, cvs.height);
+            {
+              const osc = iOwnShrunkAll.getContext('2d')!;
+              osc.fillStyle = color;
+              const inset = iBW / 2 + 1;
+              for (const { x, y, r } of [...screenPts, ...iPts]) {
+                const rr = r - inset;
+                if (rr <= 0) continue;
+                osc.beginPath(); osc.arc(x, y, rr, 0, Math.PI * 2); osc.fill();
+              }
+            }
+
+            // Filled enemy inner discs for carving piece 1.
+            let iAllEnemyInner: OffscreenCanvas | null = null;
+            if (iEnemyCircles.length > 0) {
+              const m = this._getScratch('ovInaEnemyInner', cvs.width, cvs.height);
+              const mc = m.getContext('2d')!;
+              mc.fillStyle = color;
+              for (const { x, y, r } of iEnemyCircles) {
+                if (r <= 0) continue;
+                mc.beginPath(); mc.arc(x, y, r, 0, Math.PI * 2); mc.fill();
+              }
+              iAllEnemyInner = m;
+            }
+
+            // Per-inactive-circle dominance info — resolved from world-space cache.
+            const iMiInfos = iPts.map(mi => ({
+              mi,
+              subord:    (_cachedMi.inactiveSubordIds.get(mi.id) ?? [])
+                           .map(id => iEnemyById.get(id)).filter(Boolean) as typeof iEnemyCircles,
+              dominated: (_cachedMi.inactiveDomIds.get(mi.id) ?? [])
+                           .map(id => iEnemyById.get(id)).filter(Boolean) as typeof iEnemyCircles,
+            }));
+
+            const iRing = this._getScratch('ovInaRing', cvs.width, cvs.height);
+            const irc   = iRing.getContext('2d')!;
+            irc.fillStyle = color;
+
+            // Piece 1: standard outer rim, carved by enemy interiors and iOwnShrunkAll.
+            for (const { x, y, r } of iPts) {
+              irc.beginPath(); irc.arc(x, y, r + iBW / 2, 0, Math.PI * 2); irc.fill();
+            }
+            irc.globalCompositeOperation = 'destination-out';
+            irc.drawImage(iOwnShrunkAll, 0, 0);
+            if (iAllEnemyInner) irc.drawImage(iAllEnemyInner, 0, 0);
+            irc.globalCompositeOperation = 'source-over';
+
+            // Piece 2: inner rim where an inactive circle dominates an enemy.
+            for (const info of iMiInfos) {
+              if (info.dominated.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const p2  = this._getScratch('ovInaP2', cvs.width, cvs.height);
+              const p2c = p2.getContext('2d')!;
+              p2c.fillStyle = color;
+              p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p2c.fill();
+              const rr = info.mi.r - iBW / 2;
+              if (rr > 0) {
+                p2c.globalCompositeOperation = 'destination-out';
+                p2c.beginPath(); p2c.arc(info.mi.x, info.mi.y, rr, 0, Math.PI * 2); p2c.fill();
+              }
+              p2c.globalCompositeOperation = 'destination-out';
+              p2c.drawImage(iOwnShrunkAll, 0, 0);
+              // Same allied co-dominant erase as active territory: remove
+              // ring pixels inside any allied circle M2 (active or inactive)
+              // that also dominates the same enemy.
+              {
+                const allyErase = this._getScratch('ovInaP2AllyErase', cvs.width, cvs.height);
+                const aec = allyErase.getContext('2d')!;
+                aec.fillStyle = color;
+                const allOwnPts = [...screenPts, ...iPts];
+                for (const e of info.dominated) {
+                  const eStruct = structById.get(e.id);
+                  if (!eStruct?.dominators) continue;
+                  for (const m2 of allOwnPts) {
+                    if (m2.id === info.mi.id || m2.r <= 0) continue;
+                    if (!eStruct.dominators.includes(m2.id)) continue;
+                    aec.beginPath(); aec.arc(m2.x, m2.y, m2.r, 0, Math.PI * 2); aec.fill();
+                  }
+                }
+                p2c.drawImage(allyErase, 0, 0);
+              }
+              p2c.globalCompositeOperation = 'destination-in';
+              const domMask = this._getScratch('ovInaP2Dom', cvs.width, cvs.height);
+              const dmc    = domMask.getContext('2d')!;
+              dmc.fillStyle = color;
+              for (const e of info.dominated) {
+                dmc.beginPath(); dmc.arc(e.x, e.y, e.r, 0, Math.PI * 2); dmc.fill();
+              }
+              p2c.drawImage(domMask, 0, 0);
+              irc.drawImage(p2, 0, 0);
+            }
+
+            // Piece 3: outer rim of dominating enemies clipped to the inactive circle.
+            for (const info of iMiInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const p3  = this._getScratch('ovInaP3', cvs.width, cvs.height);
+              const p3c = p3.getContext('2d')!;
+              p3c.fillStyle = color;
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r + iBW / 2, 0, Math.PI * 2); p3c.fill();
+              }
+              p3c.globalCompositeOperation = 'destination-out';
+              for (const e of info.subord) {
+                p3c.beginPath(); p3c.arc(e.x, e.y, e.r, 0, Math.PI * 2); p3c.fill();
+              }
+              p3c.globalCompositeOperation = 'destination-in';
+              p3c.beginPath(); p3c.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); p3c.fill();
+              irc.drawImage(p3, 0, 0);
+            }
+
+            // Dashed pass: dashed arc inside each subord enemy, per inactive circle.
+            for (const info of iMiInfos) {
+              if (info.subord.length === 0) continue;
+              if (info.mi.r <= 0) continue;
+              const d  = this._getScratch('ovInaDashed', cvs.width, cvs.height);
+              const dc = d.getContext('2d')!;
+              dc.strokeStyle = color;
+              dc.lineWidth   = iBW;
+              dc.setLineDash([iBW * 1.5, iBW * 1.5]);
+              dc.beginPath(); dc.arc(info.mi.x, info.mi.y, info.mi.r, 0, Math.PI * 2); dc.stroke();
+              dc.globalCompositeOperation = 'destination-out';
+              dc.drawImage(iOwnShrunkAll, 0, 0);
+              dc.globalCompositeOperation = 'destination-in';
+              const subMask = this._getScratch('ovInaDashedSub', cvs.width, cvs.height);
+              const sbc     = subMask.getContext('2d')!;
+              sbc.fillStyle = color;
+              for (const e of info.subord) {
+                sbc.beginPath(); sbc.arc(e.x, e.y, e.r, 0, Math.PI * 2); sbc.fill();
+              }
+              dc.drawImage(subMask, 0, 0);
+              irc.drawImage(d, 0, 0);
+            }
+
+            // Draw at dimmed alpha (≈60 % of the active territory alpha).
+            ctx.globalAlpha = isOwn ? 0.55 : 0.30;
+            ctx.drawImage(iRing, 0, 0);
+            ctx.globalAlpha = 1.0;
+
+            // Label: company name + "(inactive)" at centroid.
+            let icx = 0, icy = 0;
+            for (const p of iPts) { icx += p.x; icy += p.y; }
+            icx /= iPts.length; icy /= iPts.length;
+            const iFontSize = Math.max(11, Math.round(13 * zoom));
+            ctx.font = `bold ${iFontSize}px Georgia, serif`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.lineWidth = Math.max(2, 3 * zoom);
+            ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+            const iLineGap = iFontSize * 1.2;
+            ctx.fillStyle = '#ffffff';
+            ctx.strokeText(companyName, icx, icy - iLineGap / 2);
+            ctx.fillText(companyName, icx, icy - iLineGap / 2);
+            ctx.fillStyle = '#ff5555';
+            ctx.strokeText('(inactive)', icx, icy + iLineGap / 2);
+            ctx.fillText('(inactive)', icx, icy + iLineGap / 2);
+          }
+
+          // ── Per-fort claim-phase blobs (CLAIMING / BUILDING) ─────────────
+          // Each non-active flag fort renders its own standalone circle so
+          // pending territory is visually distinct from established blobs.
+          // We render these for every company (own and others) at all times
+          // — players need to see incoming claims even on enemy turf.
+          //
+          // SUBORDINATE-TO-ACTIVE rule: any pixel inside ANY company's
+          // active territory (own or enemy) carves the non-active blob
+          // (fill + ring). Along that cut arc we draw a 1× dashed border
+          // in the non-active company's colour, mirroring the dashed
+          // subordinate-arc treatment used between two active companies
+          // in a dominance pair.
+          if (nonActiveForts.length > 0) {
+            const borderWidth = Math.max(8, 10 * zoom);
+            const r = CLAIM_RADIUS_FORT * zoom;
+            // 1Hz flashing alpha for BUILDING phase (sine wave 0.35–0.85).
+            const flashT     = performance.now() * 0.006; // ≈1 Hz
+            const flashAlpha = 0.60 + 0.25 * Math.sin(flashT);
+
+            // Union of all ACTIVE interiors on this island (every company,
+            // own + enemy). Used to carve each non-active fort blob so
+            // active territory always wins overlapping pixels.
+            const activeUnion = this._getScratch('ovActiveUnion', cvs.width, cvs.height);
+            const auc = activeUnion.getContext('2d')!;
+            auc.fillStyle = '#000';
+            let activeUnionHasAny = false;
+            for (const [, otherClaim] of islandClaimsByCo) {
+              for (const wc of otherClaim.worldCircles) {
+                const sp2 = camera.worldToScreen(Vec2.from(wc.x + off.dx, wc.y + off.dy));
+                const rr  = wc.r * zoom;
+                if (rr <= 0) continue;
+                auc.beginPath(); auc.arc(sp2.x, sp2.y, rr, 0, Math.PI * 2); auc.fill();
+                activeUnionHasAny = true;
+              }
+            }
+
+            for (const fort of nonActiveForts) {
+              const sp = camera.worldToScreen(Vec2.from(fort.x + off.dx, fort.y + off.dy));
+              const phase = (typeof fort.claimPhase === 'number') ? fort.claimPhase : 1;
+              const contested = fort.fortressContested || fort.claimContested;
+
+              // Colour scheme: CLAIMING is grey (territory not yet claimed),
+              // BUILDING uses the company colour but flashes (territory
+              // claimed but fortifications not yet established).
+              // DEMOLISHING (phase 3) = captured; red flashing ring.
+              const isClaiming    = phase === 0;
+              const isDemolishing = phase === 3;
+              // Post-demolish: fort is in CLAIMING with hp==0 (counting down to destruction)
+              const isPostDemolish = isClaiming && (fort.hp ?? 1) === 0;
+              const fillCol = (isDemolishing || isPostDemolish) ? '#882222' : (isClaiming ? '#888888' : color);
+              const ringCol = (isDemolishing || isPostDemolish) ? '#cc3333' : (isClaiming ? '#666666' : color);
+
+              // Build fill mask, then carve by active union so active
+              // territory wins overlapping pixels.
+              const ftmp = this._getScratch('ovFTmp', cvs.width, cvs.height);
+              const ftc  = ftmp.getContext('2d')!;
+              ftc.fillStyle = fillCol;
+              ftc.beginPath(); ftc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ftc.fill();
+              if (activeUnionHasAny) {
+                ftc.globalCompositeOperation = 'destination-out';
+                ftc.drawImage(activeUnion, 0, 0);
+                ftc.globalCompositeOperation = 'source-over';
+              }
+
+              // Build ring mask. For BUILDING (phase 1) the ring is centred on
+              // the circle boundary to match the active-fort border design:
+              //   inner = r - bw/2, outer = r + bw/2
+              // All other non-active phases keep the ring fully outside:
+              //   inner = r, outer = r + bw
+              const isBuilding = !isClaiming && !isDemolishing && !isPostDemolish;
+              const ringOuter = isBuilding ? r + borderWidth / 2 : r + borderWidth;
+              const ringInner = isBuilding ? Math.max(0, r - borderWidth / 2) : r;
+              const fring = this._getScratch('ovFRing', cvs.width, cvs.height);
+              const frc   = fring.getContext('2d')!;
+              frc.fillStyle = ringCol;
+              frc.beginPath(); frc.arc(sp.x, sp.y, ringOuter, 0, Math.PI * 2); frc.fill();
+              frc.globalCompositeOperation = 'destination-out';
+              frc.beginPath(); frc.arc(sp.x, sp.y, ringInner, 0, Math.PI * 2); frc.fill();
+              if (activeUnionHasAny) {
+                frc.drawImage(activeUnion, 0, 0);
+              }
+              frc.globalCompositeOperation = 'source-over';
+
+              // Translucent fill removed by user request — only borders and
+              // contested hatching remain as visual cues. ftmp is still built
+              // because the hatching pass uses it as its clip mask.
+
+              // Contest stripes (CLAIMING phase only): the whole CLAIMING
+              // phase is an in-progress capture, so we show the same
+              // company-coloured "marching ants" hatching that the claim_flag
+              // capture system uses, with the same sine-flicker when the
+              // claim is in the CONTEST state (claimState === 0).
+              if (isClaiming) {
+                const hatch = this._getScratch('ovFHatch', cvs.width, cvs.height);
+                const hc = hatch.getContext('2d')!;
+                const stripeGap = Math.max(16, 28 * zoom);
+                hc.strokeStyle = color;
+                hc.lineWidth   = stripeGap / (2 * Math.SQRT2);
+                // World-anchored phase: project world origin onto stripe-perp
+                // axis (x - y) + slow time march. Matches capture-overlay.
+                const worldOrigin = camera.worldToScreen(Vec2.from(off.dx, off.dy));
+                const animSpeedPxPerMs = 0.006;
+                const stripePhase = ((worldOrigin.x - worldOrigin.y)
+                                  + performance.now() * animSpeedPxPerMs) % stripeGap;
+                const diagLen = cvs.width + cvs.height;
+                for (let d = -diagLen + stripePhase; d < diagLen + cvs.width; d += stripeGap) {
+                  hc.beginPath();
+                  hc.moveTo(d, 0);
+                  hc.lineTo(d + cvs.height, cvs.height);
+                  hc.stroke();
+                }
+                hc.globalCompositeOperation = 'destination-in';
+                hc.drawImage(ftmp, 0, 0);
+
+                // Flicker when CONTEST (enemy in radius stalling the claim).
+                const isContestState = (fort.claimState ?? 0) === 0 && contested;
+                ctx.globalAlpha = isContestState
+                  ? 0.30 + 0.20 * Math.sin(performance.now() * 0.009)
+                  : 0.30;
+                ctx.drawImage(hatch, 0, 0);
+              }
+
+              // BUILDING uses active-fort base alphas (own 0.90, enemy 0.50)
+              // modulated by flashAlpha so the ring pulses but at the same
+              // peak brightness as a fully-active fort border.
+              const ringAlpha = isClaiming ? 0.55
+                : (isDemolishing || isPostDemolish) ? flashAlpha
+                : flashAlpha * (isOwn ? 0.90 : 0.50);
+              ctx.globalAlpha = ringAlpha;
+              ctx.drawImage(fring, 0, 0);
+              ctx.globalAlpha = 1.0;
+
+              // ── Subordinate dashed border ────────────────────────────
+              // Along this non-active fort's perimeter where it sits INSIDE
+              // any active territory, draw a 1× dashed line in the
+              // non-active company's colour. Mirrors the dashed subordinate
+              // arc drawn between two active companies in a dominance pair.
+              if (activeUnionHasAny) {
+                const dash = this._getScratch('ovFDash', cvs.width, cvs.height);
+                const ddc  = dash.getContext('2d')!;
+                ddc.strokeStyle = ringCol;
+                ddc.lineWidth   = borderWidth;
+                ddc.setLineDash([borderWidth * 1.5, borderWidth * 1.5]);
+                ddc.beginPath(); ddc.arc(sp.x, sp.y, r, 0, Math.PI * 2); ddc.stroke();
+                ddc.globalCompositeOperation = 'destination-in';
+                ddc.drawImage(activeUnion, 0, 0);
+                ctx.globalAlpha = ringAlpha;
+                ctx.drawImage(dash, 0, 0);
+                ctx.globalAlpha = 1.0;
+              }
+
+              // Label inside the blob: phase + (CONTESTED tag).
+              const fontSize = Math.max(11, Math.round(12 * zoom));
+              ctx.font = `bold ${fontSize}px Georgia, serif`;
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.lineWidth = Math.max(2, 3 * zoom);
+              ctx.strokeStyle = 'rgba(0,0,0,0.75)';
+              const remSec = typeof fort.claimPhaseProgressMs === 'number'
+                ? Math.ceil(fort.claimPhaseProgressMs / 1000) : null;
+              const label = isDemolishing
+                ? (contested ? `${companyName} — DEMOLISHING (defended)` : `${companyName} — DEMOLISHING`)
+                : isPostDemolish
+                ? (contested
+                  ? `${companyName} — UNCLAIMING (defended)${remSec !== null ? ` ${remSec}s` : ''}`
+                  : `${companyName} — UNCLAIMING${remSec !== null ? ` ${remSec}s` : ''}`)
+                : (isClaiming
+                  ? (contested ? `${companyName} — CLAIMING (contested)` : `${companyName} — CLAIMING`)
+                  : (contested ? `${companyName} — BUILDING (contested)` : `${companyName} — BUILDING`));
+              ctx.fillStyle = (isDemolishing || isPostDemolish) ? '#ff8888' : (isClaiming ? '#dddddd' : '#ffffff');
+              ctx.strokeText(label, sp.x, sp.y);
+              ctx.fillText(label, sp.x, sp.y);
+            }
+          }
+
+          ctx.restore();
+        }
+      }
+    }
+
+    // ── Pass 3: removed by user request ─────────────────────────────────
+    // Previously repainted dominator-captured overlaps in the dominator's
+    // colour at the same alpha as Pass 2's fill. With all translucent
+    // fills removed, captured overlaps are now expressed solely through
+    // the doubled solid border (Pass 2 pieces 2+3) along the contested
+    // arc, with no fill colour distinction inside.
+
+    // ── Pass 4: inactive Flag Fort indicator ─────────────────────────────
+    // Draws a dashed amber outline around the claim radius of any flag fort
+    // that hasn't yet healed to its 30%-HP active gate. This is a passive
+    // visual cue — territory dominance is unchanged for inactive forts, but
+    // the player should be able to see at-a-glance which anchors are still
+    // building up (or have been beaten below the active threshold).
+    for (const ps of this.placedStructures) {
+      if (ps.type !== 'flag_fort') continue;
+      if (ps.fortressComplete !== false) continue; // active or unknown → no overlay
+      if (ps.claimOrphaned) continue;
+      const color = ps.fortressContested ? '#ff7050' : '#ffc848';
+      const wrapOffsetsAll = this.getWrapRenderOffsets(Vec2.from(ps.x, ps.y), camera, CLAIM_RADIUS_FORT + 50);
+      for (const off of wrapOffsetsAll) {
+        const sc = camera.worldToScreen(Vec2.from(ps.x + off.dx, ps.y + off.dy));
+        const sr = CLAIM_RADIUS_FORT * zoom;
+        if (sr <= 0) continue;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1, 2 * zoom);
+        ctx.setLineDash([8 * zoom, 6 * zoom]);
+        ctx.globalAlpha = 0.65;
+        ctx.beginPath();
+        ctx.arc(sc.x, sc.y, sr, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+
+      offCtx.restore();
+      this._claimOverlayCachedCamX = camX;
+      this._claimOverlayCachedCamY = camY;
+      this._claimOverlayCachedZoom = zoom;
+      this._claimOverlayBitmapValid = true;
+    } // close if (!this._claimOverlayBitmapValid)
+
+    // ── Blit cached overlay canvas, offset by camera pan delta ───────────
+    const ddx = (this._claimOverlayCachedCamX - camX) * zoom;
+    const ddy = (this._claimOverlayCachedCamY - camY) * zoom;
+    this.ctx.drawImage(this._claimOverlayCachedCanvas!, -margin + ddx, -margin + ddy);
+    // Trigger re-render next frame if pan has drifted past 60% of the margin
+    if (Math.abs(ddx) > margin * 0.6 || Math.abs(ddy) > margin * 0.6) {
+      this._claimOverlayBitmapValid = false;
+    }
   }
 
   private drawCannonGroupOverlay(ship: Ship, camera: Camera): void {
@@ -10275,6 +13378,250 @@ export class RenderSystem {
   }
 
   /**
+   * Draws a fixed debug HUD panel in the bottom-right corner showing raw field data
+   * for the currently hovered entity (module > npc > ship > structure priority).
+   * Toggle with [ key via toggleHoverDebugHUD().
+   */
+  /** Called from ClientApplication after all UI layers so it always renders on top. */
+  renderHoverDebugHUD(): void {
+    if (!this._showHoverDebugHUD) return;
+    this.drawHoverDebugHUD();
+  }
+
+  private drawHoverDebugHUD(): void {
+    if (!this._showHoverDebugHUD) return;
+
+    interface Row {
+      label: string;
+      value: string;
+      color?: string;
+      bar?: number;
+      barColor?: string;
+    }
+
+    let title = '';
+    let accentColor = '#ffcc44';
+    const rows: Row[] = [];
+
+    const COMPANY_COLORS: Record<number, string> = { 0: '#888888', 1: '#ffcc44', 2: '#ff6644', 3: '#4488ff', 4: '#00eeff' };
+    const coColor = (id: number): string => COMPANY_COLORS[id] ?? '#cccccc';
+    const coName = (id: number): string => ({ 0: 'Unclaimed', 1: 'Solo', 2: 'Pirates', 3: 'Navy', 4: 'Ghost' } as Record<number, string>)[id] ?? `Co#${id}`;
+    const hpColor = (pct: number): string => pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa44' : '#ff5544';
+    const fmtRad = (r: number): string => `${(r * 180 / Math.PI).toFixed(1)}°`;
+
+    if (this.hoveredModule) {
+      const { ship, module } = this.hoveredModule;
+      const md = module.moduleData as Record<string, unknown> | undefined;
+      const kind = (md?.kind as string) ?? module.kind ?? '?';
+      title = `⚙ MODULE · ${kind.toUpperCase()}`;
+      accentColor = '#66ee99';
+      rows.push({ label: 'Mod ID',    value: String(module.id) });
+      rows.push({ label: 'Ship ID',   value: String(ship.id) });
+      rows.push({ label: 'Kind',      value: kind });
+      rows.push({ label: 'Deck',      value: String(module.deckId) });
+      rows.push({ label: 'LocalPos',  value: `(${module.localPos.x.toFixed(0)}, ${module.localPos.y.toFixed(0)})` });
+      if (module.occupiedBy !== null) rows.push({ label: 'OccupiedBy', value: String(module.occupiedBy), color: '#ffee88' });
+      if (md) {
+        const hp = Number(md.health ?? 0);
+        const maxHp = Number(md.maxHealth ?? 1);
+        const pct = maxHp > 0 ? hp / maxHp : 1;
+        rows.push({ label: 'HP', value: `${hp} / ${maxHp}`, bar: pct, barColor: hpColor(pct) });
+        if ('targetHealth' in md) rows.push({ label: 'TargetHP', value: String(md.targetHealth) });
+        if (kind === 'mast') {
+          rows.push({ label: 'Sail',    value: `${String(md.sailState).toUpperCase()}  open:${Number(md.openness ?? 0).toFixed(0)}%` });
+          const fp = Number(md.fiberHealth ?? 0);
+          const fmax = Number(md.fiberMaxHealth ?? 1);
+          rows.push({ label: 'Fiber', value: `${fp} / ${fmax}`, bar: fmax > 0 ? fp / fmax : 1, barColor: hpColor(fmax > 0 ? fp / fmax : 1) });
+          rows.push({ label: 'WindEff', value: `${(Number(md.windEfficiency ?? 0) * 100).toFixed(1)}%` });
+          rows.push({ label: 'Fire',    value: `${Number(md.sailFireIntensity ?? 0).toFixed(0)}%` });
+        } else if (kind === 'cannon') {
+          rows.push({ label: 'Reload',  value: `${Number(md.reloadTime ?? 3).toFixed(2)}s` });
+          rows.push({ label: 'Ammo',    value: `${md.ammunition} / ${md.maxAmmunition}` });
+          rows.push({ label: 'Range',   value: String(md.fireRange ?? '-') });
+        } else if (kind === 'helm' || kind === 'steering-wheel') {
+          rows.push({ label: 'TurnRate', value: `${Number(md.maxTurnRate ?? 0).toFixed(3)} r/s` });
+          rows.push({ label: 'Resp',     value: `${(Number(md.responsiveness ?? 0) * 100).toFixed(0)}%` });
+        } else if (kind === 'plank') {
+          if (md.sectionName) rows.push({ label: 'Section', value: String(md.sectionName) });
+          rows.push({ label: 'Material', value: String(md.material ?? '-') });
+          rows.push({ label: 'Segment', value: String(md.segmentIndex ?? '-') });
+        }
+      }
+
+    } else if (this.hoveredNpc) {
+      const npc = this.hoveredNpc;
+      title = `👤 NPC · ${npc.name}`;
+      accentColor = '#66ccff';
+      rows.push({ label: 'ID',       value: String(npc.id) });
+      rows.push({ label: 'Level',    value: String(npc.npcLevel) });
+      rows.push({ label: 'Company',  value: coName(npc.companyId), color: coColor(npc.companyId) });
+      if (npc.ownerId) rows.push({ label: 'OwnerID', value: String(npc.ownerId) });
+      const hpPct = npc.maxHealth > 0 ? npc.health / npc.maxHealth : 1;
+      rows.push({ label: 'HP', value: `${npc.health} / ${npc.maxHealth}`, bar: hpPct, barColor: hpColor(hpPct) });
+      const NPC_STATES: Record<number, string> = { 0: 'Idle', 1: 'Moving', 2: 'AtStation', 3: 'Repairing', 4: 'Fighting' };
+      const NPC_ROLES: Record<number, string>  = { 0: 'Sailor', 1: 'Gunner', 2: 'Helmsman', 3: 'Rigger', 4: 'Repairer' };
+      rows.push({ label: 'State',    value: NPC_STATES[npc.state] ?? String(npc.state) });
+      rows.push({ label: 'Role',     value: NPC_ROLES[npc.role] ?? String(npc.role) });
+      rows.push({ label: 'XP',       value: String(npc.xp) });
+      rows.push({ label: 'StatPts',  value: String(npc.statPoints) });
+      if (npc.shipId) rows.push({ label: 'ShipID', value: String(npc.shipId) });
+      if (npc.assignedWeaponId) rows.push({ label: 'Weapon', value: String(npc.assignedWeaponId) });
+      rows.push({ label: 'World',    value: `(${npc.position.x.toFixed(0)}, ${npc.position.y.toFixed(0)})` });
+
+    } else if (this.hoveredShip) {
+      const ship = this.hoveredShip;
+      title = `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
+      accentColor = '#ff8844';
+      rows.push({ label: 'ID',       value: String(ship.id) });
+      rows.push({ label: 'Company',  value: coName(ship.companyId), color: coColor(ship.companyId) });
+      const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
+      rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });
+      rows.push({ label: 'Rotation', value: fmtRad(ship.rotation) });
+      rows.push({ label: 'AngVel',   value: `${ship.angularVelocity.toFixed(3)} r/s` });
+      rows.push({ label: 'Velocity', value: `(${ship.velocity.x.toFixed(1)}, ${ship.velocity.y.toFixed(1)})` });
+      rows.push({ label: 'Position', value: `(${ship.position.x.toFixed(0)}, ${ship.position.y.toFixed(0)})` });
+      rows.push({ label: 'Modules',  value: String(ship.modules.length) });
+      rows.push({ label: 'Type',     value: String(ship.shipType) });
+      rows.push({ label: 'Ammo',     value: ship.infiniteAmmo ? '∞' : String(ship.cannonAmmo) });
+      if (ship.claimFlag) {
+        const cf = ship.claimFlag;
+        const prog = Math.round((1 - cf.progressMs / cf.totalMs) * 100);
+        rows.push({ label: 'Claimed!', value: `${prog}% Co#${cf.planterCompany}`, color: '#ff4444' });
+      }
+
+    } else if (this._hoveredStructure) {
+      const st = this._hoveredStructure;
+      const STRUCT_NAMES: Record<string, string> = {
+        wooden_floor: 'Floor', workbench: 'Workbench', wall: 'Wall',
+        door_frame: 'DoorFrame', door: 'Door', shipyard: 'Shipyard',
+        wood_ceiling: 'Ceiling', cannon: 'Cannon', flag_fort: 'Flag Fort',
+        claim_flag: 'Claim Flag', company_fortress: 'C.Fortress', wreck: 'Wreck',
+      };
+      title = `🏗 STRUCT · ${STRUCT_NAMES[st.type] ?? st.type}`;
+      accentColor = '#ffcc44';
+      rows.push({ label: 'ID',       value: String(st.id) });
+      rows.push({ label: 'Island',   value: String(st.islandId) });
+      rows.push({ label: 'Company',  value: coName(st.companyId), color: coColor(st.companyId) });
+      rows.push({ label: 'Placer',   value: st.placerName || '—' });
+      const tgtHp = st.targetHp ?? st.maxHp;
+      const hpPct = tgtHp > 0 ? st.hp / tgtHp : 1;
+      rows.push({ label: 'HP',       value: `${st.hp} / ${tgtHp} / ${st.maxHp}`, bar: hpPct, barColor: hpColor(hpPct) });
+      rows.push({ label: 'Position', value: `(${st.x.toFixed(0)}, ${st.y.toFixed(0)})` });
+      if (st.rotation !== undefined) rows.push({ label: 'Rotation', value: `${st.rotation}°` });
+      if (st.claimOrphaned) rows.push({ label: 'Orphaned', value: 'YES', color: '#ff4444' });
+      if (st.claimPhase !== undefined) {
+        const PHASES: Record<number, string> = { 0: 'CLAIMING', 1: 'BUILDING', 2: 'ACTIVE', 3: 'DEMOLISHING' };
+        rows.push({ label: 'Phase',  value: PHASES[st.claimPhase] ?? String(st.claimPhase), color: '#aaddff' });
+        if (st.claimPhaseProgressMs !== undefined && st.claimPhaseTotalMs) {
+          const pp = Math.max(0, 1 - st.claimPhaseProgressMs / st.claimPhaseTotalMs);
+          rows.push({ label: 'PhaseProgress', value: `${(pp * 100).toFixed(1)}%`, bar: pp, barColor: '#44aaff' });
+        }
+      }
+      if (st.claimState !== undefined) {
+        const STATES: Record<number, string> = { 0: 'CONTEST', 1: 'CLAIM_GRACE', 2: 'CLAIMING', 3: 'REV_GRACE', 4: 'REVERSING' };
+        rows.push({ label: 'ClaimState', value: STATES[st.claimState] ?? String(st.claimState), color: '#ffee44' });
+      }
+      if (st.claimProgress !== undefined) rows.push({ label: 'ClaimProg', value: `${(st.claimProgress / 1000).toFixed(1)}s` });
+      if (st.claimLinkedFort !== undefined) rows.push({ label: 'LinkFort',  value: String(st.claimLinkedFort) });
+      if (st.claimSourceEnemy !== undefined) rows.push({ label: 'SrcEnemy', value: String(st.claimSourceEnemy) });
+      if (st.dominators && st.dominators.length > 0) {
+        rows.push({ label: 'Dominators', value: st.dominators.slice(0, 5).join(', ') + (st.dominators.length > 5 ? '…' : ''), color: '#ff8866' });
+      }
+      if (st.fortressComplete !== undefined) rows.push({ label: 'FortComplete', value: st.fortressComplete ? 'YES' : 'NO' });
+      if (st.fortressContested) rows.push({ label: 'Contested', value: 'YES', color: '#ff4444' });
+    } else {
+      return; // nothing hovered
+    }
+
+    const ctx = this.ctx;
+    const cw = this.canvas.width;
+    const ch = this.canvas.height;
+
+    const PAD = 10;
+    const ROW_H = 16;
+    const BAR_H = 4;
+    const W = 290;
+
+    let panelH = PAD + 20; // header
+    panelH += 6;           // separator gap
+    for (const row of rows) {
+      panelH += ROW_H;
+      if (row.bar !== undefined) panelH += BAR_H + 4;
+    }
+    panelH += PAD;
+
+    const px = 12;
+    const py = ch - panelH - 12;
+
+    ctx.save();
+    ctx.globalAlpha = 1;
+
+    // Background panel
+    ctx.fillStyle = 'rgba(0,4,16,0.94)';
+    ctx.strokeStyle = accentColor;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, panelH, 5);
+    ctx.fill();
+    ctx.stroke();
+
+    // Left accent bar
+    ctx.fillStyle = accentColor;
+    ctx.globalAlpha = 0.65;
+    ctx.beginPath();
+    ctx.roundRect(px, py, 3, panelH, [5, 0, 0, 5]);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    let curY = py + PAD;
+
+    // Title
+    ctx.font = 'bold 12px "Courier New", monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = accentColor;
+    ctx.fillText(title, px + PAD + 6, curY);
+    curY += 20;
+
+    // Separator
+    ctx.strokeStyle = accentColor + '44';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px + PAD, curY);
+    ctx.lineTo(px + W - PAD, curY);
+    ctx.stroke();
+    curY += 6;
+
+    // Data rows
+    ctx.font = '11px "Courier New", monospace';
+    for (const row of rows) {
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = 'rgba(160,180,200,0.72)';
+      ctx.fillText(row.label, px + PAD + 6, curY);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = row.color ?? '#ddeeff';
+      ctx.fillText(row.value, px + W - PAD, curY);
+      curY += ROW_H;
+
+      if (row.bar !== undefined) {
+        const bx = px + PAD + 6;
+        const bw = W - PAD * 2 - 6;
+        ctx.fillStyle = 'rgba(255,255,255,0.07)';
+        ctx.fillRect(bx, curY, bw, BAR_H);
+        ctx.fillStyle = row.barColor ?? '#44cc66';
+        ctx.fillRect(bx, curY, Math.round(bw * Math.max(0, Math.min(1, row.bar))), BAR_H);
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.lineWidth = 0.5;
+        ctx.strokeRect(bx, curY, bw, BAR_H);
+        curY += BAR_H + 4;
+      }
+    }
+
+    ctx.restore();
+  }
+
+  /**
    * Debug visualization for hover boundaries
    */
   private drawHoverBoundariesDebug(worldState: WorldState, camera: Camera): void {
@@ -11256,10 +14603,13 @@ export class RenderSystem {
         const halfHeight = height / 2;
         this.ctx.strokeRect(-halfWidth, -halfHeight, width, height);
       } else if (moduleData.kind === 'cannon') {
-        // Draw cannon highlight
-        const width = 30;
-        const height = 20;
-        this.ctx.strokeRect(-width/2, -height/2, width, height);
+        // Draw cannon highlight: base rect + barrel at its current aim angle
+        this.ctx.strokeRect(-15, -10, 30, 20);
+        const turretAngle = (moduleData as any).aimDirection ?? 0;
+        this.ctx.save();
+        this.ctx.rotate(turretAngle);
+        this.ctx.strokeRect(-8, -40, 16, 40); // barrel: same dims as drawShipCannons
+        this.ctx.restore();
       } else if (moduleData.kind === 'ladder') {
         // Ladder renders as fillRect(-10, -20, 20, 40)
         this.ctx.strokeRect(-10, -20, 20, 40);

@@ -23,6 +23,9 @@
 /* Wrap a float coordinate into [0, limit).  Use for both client-px and srv-unit coords. */
 #define WORLD_WRAP(v, limit) ((v) < 0 ? (v) + (limit) : ((v) >= (limit) ? (v) - (limit) : (v)))
 
+/* Squared Euclidean distance between two 2-D float points. */
+#define DIST_SQ(ax, ay, bx, by) (((ax)-(bx))*((ax)-(bx)) + ((ay)-(by))*((ay)-(by)))
+
 // Q16.16 Fixed-point math for determinism
 typedef int32_t q16_t;
 typedef int64_t q32_t;

@@ -12,7 +12,118 @@
 #include "net/structures.h"
 #include "net/dock_physics.h"
 #include "net/cannon_fire.h"
+#include "net/crafting.h"
+#include "net/claim.h"
 #include "sim/island.h"
+#include "util/time.h"
+
+/* ── Spatial hash for ceiling-connectivity flood-fill (O(N) cascade) ─────────
+ * Tiles sit on a 50-px grid; walls sit at edge midpoints (25-px offset). We key
+ * by 25-px cells so both ceilings and walls/door_frames have unique integer
+ * coordinates. Open-addressing linear-probe hash, capacity = MAX_PLACED_STRUCTURES*4
+ * (load factor ≤ 0.25, no resize ever needed). */
+#define CELL_HASH_CAP (MAX_PLACED_STRUCTURES * 4)
+typedef struct { int32_t cx, cy, idx; } CellEntry;
+
+static inline int32_t cell_x(float x) { return (int32_t)lroundf(x / 25.0f); }
+static inline int32_t cell_y(float y) { return (int32_t)lroundf(y / 25.0f); }
+
+static inline uint32_t cell_hash(int32_t cx, int32_t cy) {
+    uint32_t h = (uint32_t)cx * 2654435761u ^ (uint32_t)cy * 40503u;
+    return h & (CELL_HASH_CAP - 1);
+}
+
+static void cell_put(CellEntry *t, int32_t cx, int32_t cy, int32_t idx) {
+    uint32_t h = cell_hash(cx, cy);
+    while (t[h].idx >= 0) {
+        if (t[h].cx == cx && t[h].cy == cy) { t[h].idx = idx; return; }
+        h = (h + 1) & (CELL_HASH_CAP - 1);
+    }
+    t[h].cx = cx; t[h].cy = cy; t[h].idx = idx;
+}
+
+static int32_t cell_get(const CellEntry *t, int32_t cx, int32_t cy) {
+    uint32_t h = cell_hash(cx, cy);
+    while (t[h].idx >= 0) {
+        if (t[h].cx == cx && t[h].cy == cy) return t[h].idx;
+        h = (h + 1) & (CELL_HASH_CAP - 1);
+    }
+    return -1;
+}
+
+/*
+ * cascade_orphan_ceilings — flood-fill from walls/door_frames through edge-adjacent
+ * ceilings; demolish any ceiling not reachable to a wall.
+ *
+ * O(N) using two spatial hashes (walls + ceilings) and a BFS queue. Ceilings are
+ * square 50×50 tiles, so rotation only permutes the 4 edge offsets — they always
+ * map to the same set of 4 cells regardless of placement angle.
+ *
+ * Caller must already have removed/marked-inactive the wall that triggered this.
+ */
+static void cascade_orphan_ceilings(uint32_t trigger_id, const char *trigger_kind) {
+    static CellEntry walls[CELL_HASH_CAP];
+    static CellEntry ceils[CELL_HASH_CAP];
+    static int32_t   queue[MAX_PLACED_STRUCTURES];
+    static bool      reached[MAX_PLACED_STRUCTURES];
+
+    for (uint32_t i = 0; i < CELL_HASH_CAP; i++) { walls[i].idx = -1; ceils[i].idx = -1; }
+    for (uint32_t i = 0; i < placed_structure_count; i++) reached[i] = false;
+    int32_t qh = 0, qt = 0;
+
+    /* Build wall-support map */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        const PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->type != STRUCT_WALL && s->type != STRUCT_DOOR_FRAME) continue;
+        cell_put(walls, cell_x(s->x), cell_y(s->y), (int32_t)i);
+    }
+
+    /* Build ceiling map and seed the queue with directly-supported ceilings */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        const PlacedStructure *c = &placed_structures[i];
+        if (!c->active || c->type != STRUCT_CEILING) continue;
+        int32_t cx = cell_x(c->x), cy = cell_y(c->y);
+        cell_put(ceils, cx, cy, (int32_t)i);
+        if (cell_get(walls, cx,     cy - 1) >= 0 ||
+            cell_get(walls, cx,     cy + 1) >= 0 ||
+            cell_get(walls, cx - 1, cy    ) >= 0 ||
+            cell_get(walls, cx + 1, cy    ) >= 0) {
+            reached[i] = true;
+            queue[qt++] = (int32_t)i;
+        }
+    }
+
+    /* BFS: spread reachability through edge-adjacent ceilings (Δ = ±2 cells = ±50px) */
+    while (qh < qt) {
+        int32_t ai = queue[qh++];
+        const PlacedStructure *a = &placed_structures[ai];
+        int32_t cx = cell_x(a->x), cy = cell_y(a->y);
+        const int32_t dx[4] = {  2, -2,  0,  0 };
+        const int32_t dy[4] = {  0,  0,  2, -2 };
+        for (int k = 0; k < 4; k++) {
+            int32_t bi = cell_get(ceils, cx + dx[k], cy + dy[k]);
+            if (bi >= 0 && !reached[bi]) {
+                reached[bi] = true;
+                queue[qt++] = bi;
+            }
+        }
+    }
+
+    /* Demolish unreached ceilings */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *c = &placed_structures[i];
+        if (!c->active || c->type != STRUCT_CEILING) continue;
+        if (reached[i]) continue;
+        c->active = false;
+        char cm[128];
+        snprintf(cm, sizeof(cm),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+        websocket_server_broadcast(cm);
+        log_info("🔨 Cascade-demolished ceiling %u (lost wall connectivity after %s %u removed)",
+                 c->id, trigger_kind, trigger_id);
+    }
+}
 
 /* ── Island structure placement ─────────────────────────────────────────────
  * place_structure: payload = {"type":"place_structure","structure_type":"wooden_floor","x":123,"y":456}
@@ -22,7 +133,8 @@
 #define STRUCT_FLOOR_RADIUS  30.0f  /* world-px half-extent of a floor tile (for overlap, not enforced hard) */
 #define STRUCT_PLACE_RANGE  200.0f  /* player must be within this range of placement point */
 #define STRUCT_FLOOR_REQ_R   55.0f  /* workbench centre must be within this of a floor tile */
-#define STRUCT_INTERACT_R   110.0f  /* E-key range to open workbench */
+/* Half the floor-tile side length (50px / 2 = 25px). Players must be this close to interact. */
+#define STRUCT_INTERACT_R    50.0f  /* E-key interact range (world-px) — one full floor tile */
 #define SHIPYARD_INTERACT_R 700.0f  /* larger range for the big shipyard structure */
 
 /*
@@ -56,6 +168,58 @@ static bool floor_tiles_overlap(float ax, float ay, float a_rad,
         if (d >= rA + rB - EPS) return false;
     }
     return true;
+}
+
+/* Dominant company on an island.
+ * Per-pair rule:
+ *   - A dominance override (from a successful claim flag) wins outright.
+ *   - Otherwise the company with the EARLIER fort (lower structure id) wins —
+ *     i.e. whoever claimed the area first keeps their territory when a later
+ *     company places forts/structures next door.
+ * Returns the unique company that dominates ALL others on the island, or 0
+ * if there is no fort/fortress on the island or no unique dominator. */
+static uint32_t island_dominant_company(uint32_t island_id) __attribute__((unused));
+static uint32_t island_dominant_company(uint32_t island_id) {
+    /* Gather forts per company on this island (oldest id per company). */
+    typedef struct { uint32_t co; uint32_t id; } CoFort;
+    CoFort forts[32]; int nf = 0;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->claim_orphaned) continue;
+        if ((uint32_t)s->island_id != island_id) continue;
+        if (s->type != STRUCT_COMPANY_FORTRESS && s->type != STRUCT_FLAG_FORT) continue;
+        /* Skip CF that hasn't completed yet — only completed structures count. */
+        if (s->type == STRUCT_COMPANY_FORTRESS && !s->fortress_complete) continue;
+        /* Merge into existing slot for this company (keep oldest / lowest id). */
+        bool merged = false;
+        for (int k = 0; k < nf; k++) {
+            if (forts[k].co == s->company_id) {
+                if (s->id < forts[k].id) forts[k].id = s->id;
+                merged = true; break;
+            }
+        }
+        if (!merged && nf < 32) {
+            forts[nf].co = s->company_id; forts[nf].id = s->id;
+            nf++;
+        }
+    }
+    if (nf == 0) return 0;
+    if (nf == 1) return forts[0].co;
+    /* A company is "the" dominant company iff it dominates every other. */
+    for (int a = 0; a < nf; a++) {
+        bool dominates_all = true;
+        for (int b = 0; b < nf; b++) {
+            if (a == b) continue;
+            /* Natural rule: earlier (lower id) fort wins. Per-structure
+             * dominator promotions from claim captures are evaluated in
+             * the client renderer (territory carving), not here. */
+            if (forts[a].id < forts[b].id) continue;
+            dominates_all = false; break;
+        }
+        if (dominates_all) return forts[a].co;
+    }
+    return 0;
 }
 
 void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
@@ -173,25 +337,36 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "cannon") == 0) {
         stype_enum    = STRUCT_CANNON;
         required_item = ITEM_CANNON;
+    } else if (strcmp(stype, "flag_fort") == 0) {
+        stype_enum    = STRUCT_FLAG_FORT;
+        required_item = ITEM_FLAG_FORT;  /* crafted from 40 wood + 40 stone */
+    } else if (strcmp(stype, "company_fortress") == 0) {
+        stype_enum    = STRUCT_COMPANY_FORTRESS;
+        required_item = ITEM_COMPANY_FORTRESS;  /* 100 wood + 100 stone + 20 metal */
+    } else if (strcmp(stype, "claim_flag") == 0) {
+        stype_enum    = STRUCT_CLAIM_FLAG;
+        required_item = ITEM_CLAIM_FLAG;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
         goto ps_send;
     }
 
-    /* Player must have the item somewhere in their inventory */
+    /* Player must have the item somewhere in their inventory (skip for ITEM_NONE) */
     int found_slot = -1;
-    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-        if (player->inventory.slots[s].item == required_item &&
-            player->inventory.slots[s].quantity > 0) {
-            found_slot = s;
-            break;
+    if (required_item != ITEM_NONE) {
+        for (int s = 0; s < INVENTORY_SLOTS; s++) {
+            if (player->inventory.slots[s].item == required_item &&
+                player->inventory.slots[s].quantity > 0) {
+                found_slot = s;
+                break;
+            }
         }
-    }
-    if (found_slot < 0) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
-        goto ps_send;
+        if (found_slot < 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
+            goto ps_send;
+        }
     }
 
     /* Player must be reasonably close to placement point */
@@ -206,20 +381,288 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Cannot place within 500 px of an enemy-company structure */
-    {
+    /* ── Dominance bypass ────────────────────────────────────────────────
+     * Dominators-only law (matches client Render Rule X):
+     * if the placement point is owned by the player's company per the
+     * per-pixel dominators test (own uncarved territory OR captured enemy
+     * overlap), then enemy claim areas are subordinate at this point and
+     * do not block placement. */
+    bool in_my_dominant_area = false;
+    if (player->company_id != 0 && target_island_id != 0 &&
+        claim_point_in_my_territory(px, py, (uint32_t)player->company_id)) {
+        in_my_dominant_area = true;
+    }
+
+    /* Cannot place within an enemy structure's claim radius
+       — bypassed when the player is inside their own dominant claim area.
+       Also bypassed for claim flags: they are intentionally placed where
+       enemy structures are present (the contested area).
+       Orphaned structures (fort destroyed / BFS disconnected) do not block
+       placement; their claim_orphaned flag marks them as dead territory. */
+    if (stype_enum != STRUCT_CLAIM_FLAG && !in_my_dominant_area) {
         bool enemy_block = false;
         for (uint32_t si = 0; si < placed_structure_count && !enemy_block; si++) {
-            if (!placed_structures[si].active) continue;
-            if (placed_structures[si].company_id == (uint8_t)player->company_id) continue; /* own */
-            float dx = placed_structures[si].x - px;
-            float dy = placed_structures[si].y - py;
-            if (dx*dx + dy*dy < 500.0f * 500.0f) enemy_block = true;
+            PlacedStructure *es = &placed_structures[si];
+            if (!es->active) continue;
+            if (es->company_id == 0) continue;                           /* neutral  */
+            if (es->company_id == (uint8_t)player->company_id) continue; /* own      */
+            if (es->claim_orphaned) continue;                            /* dead fort */
+            float cr = (es->type == STRUCT_FLAG_FORT || es->type == STRUCT_COMPANY_FORTRESS)
+                       ? CLAIM_RADIUS_FLAG_FORT
+                       : CLAIM_RADIUS_DEFAULT;
+            float dx = es->x - px;
+            float dy = es->y - py;
+            if (dx*dx + dy*dy <= cr * cr) enemy_block = true;
         }
         if (enemy_block) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
             goto ps_send;
+        }
+    }
+
+    /* ── Flag Fort: validate island is unclaimed; register claim on placement ── */
+    if (stype_enum == STRUCT_FLAG_FORT) {
+        if (target_island_id == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_on_island\"}");
+            goto ps_send;
+        }
+        if (island_get_claim((uint8_t)target_island_id)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"island_already_claimed\"}");
+            goto ps_send;
+        }
+        /* Max 3 flag forts per company per island */
+        {
+            int company_fort_count = 0;
+            for (uint32_t si = 0; si < placed_structure_count; si++) {
+                PlacedStructure *ex = &placed_structures[si];
+                if (!ex->active) continue;
+                if (ex->type != STRUCT_FLAG_FORT) continue;
+                if ((uint8_t)ex->island_id != (uint8_t)target_island_id) continue;
+                if (ex->company_id != (uint8_t)player->company_id) continue;
+                company_fort_count++;
+            }
+            if (company_fort_count >= 3) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"fort_exists\"}");
+                goto ps_send;
+            }
+        }
+        /* Item (ITEM_FLAG_FORT) is consumed by the normal item-slot path below */
+    }
+
+    /* ── Claiming Flag: must be placed in a CONTESTED AREA ── */
+    /* Contested area = a point covered by BOTH (a) a claim radius of the placer's
+     * company AND (b) a claim radius of ANY other company. The flag is uniquely
+     * identified by the (mine_src, enemy_src) source pair — only one active flag
+     * per pair per company at a time. */
+    uint32_t cf_src_mine = 0, cf_src_enemy = 0;
+    if (stype_enum == STRUCT_CLAIM_FLAG) {
+        /* Find best "mine" source: closest active non-orphaned structure of the
+         * placer's company whose claim radius covers (px,py).
+         * INACTIVE flag forts (HP below 30%) are excluded, UNLESS the fort is
+         * currently demolishing — in that case the owner may use it as mine
+         * source to fight back and rescue it with a counter-claim flag. */
+        float best_mine_d2 = 0.0f;
+        bool  cf_mine_is_demolishing = false;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->company_id != (uint8_t)player->company_id) continue;
+            /* Exception: a demolishing flag fort of our company may act as the
+             * mine source so the owner can counter-claim and stop the demolish. */
+            bool ex_demolishing = (ex->type == STRUCT_FLAG_FORT
+                && (ex->claim_phase == FLAG_FORT_PHASE_DEMOLISHING
+                    || (ex->claim_phase == FLAG_FORT_PHASE_CLAIMING && ex->hp == 0)));
+            if (ex->claim_orphaned && !ex_demolishing) continue;
+            if (ex->type == STRUCT_FLAG_FORT && !ex->fortress_complete && !ex_demolishing) continue;
+            float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                     : (ex->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                              : CLAIM_RADIUS_DEFAULT;
+            float dx = px - ex->x, dy = py - ex->y;
+            float d2 = dx*dx + dy*dy;
+            if (d2 > cr * cr) continue;
+            if (cf_src_mine == 0 || d2 < best_mine_d2) {
+                cf_src_mine            = ex->id;
+                best_mine_d2           = d2;
+                cf_mine_is_demolishing = ex_demolishing;
+            }
+        }
+        if (cf_src_mine == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_my_territory\"}");
+            goto ps_send;
+        }
+        /* Find best "enemy" source: closest active structure of a DIFFERENT
+         * company whose claim radius covers (px,py).  Orphaned (inactive)
+         * structures are also eligible — a challenger can drop a claim flag
+         * on inactive enemy territory to sweep the whole connected cluster. */
+        float best_enemy_d2  = 0.0f;
+        bool  cf_enemy_inactive = false; /* true when best enemy source is orphaned */
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->company_id == COMPANY_UNCLAIMED) continue;
+            if (ex->company_id == (uint8_t)player->company_id) continue;
+            float cr = (ex->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                     : (ex->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                              : CLAIM_RADIUS_DEFAULT;
+            float dx = px - ex->x, dy = py - ex->y;
+            float d2 = dx*dx + dy*dy;
+            if (d2 > cr * cr) continue;
+            if (cf_src_enemy == 0 || d2 < best_enemy_d2) {
+                cf_src_enemy      = ex->id;
+                best_enemy_d2     = d2;
+                cf_enemy_inactive = ex->claim_orphaned;
+            }
+        }
+        if (cf_src_enemy == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
+            goto ps_send;
+        }
+        /* Slice ownership: the contested slice is the lens of (cf_src_mine ∩
+         * cf_src_enemy). If the placer's source ALREADY dominates the enemy
+         * source at this slice, the placer already owns it and cannot claim
+         * what they hold. Dominance: cf_src_enemy.dominators[] contains
+         * cf_src_mine → Mi dominates Ej (Mi already won this slice). */
+        {
+            PlacedStructure *mine_ps = NULL, *enemy_ps = NULL;
+            for (uint32_t si = 0; si < placed_structure_count; si++) {
+                PlacedStructure *ex = &placed_structures[si];
+                if (!ex->active) continue;
+                if (ex->id == cf_src_mine)  mine_ps  = ex;
+                if (ex->id == cf_src_enemy) enemy_ps = ex;
+            }
+            if (mine_ps && enemy_ps) {
+                for (uint8_t di = 0; di < enemy_ps->dominator_count; di++) {
+                    if (enemy_ps->dominators[di] == mine_ps->id) {
+                        snprintf(response, sizeof(response),
+                                 "{\"type\":\"place_structure_fail\",\"reason\":\"slice_already_owned\"}");
+                        goto ps_send;
+                    }
+                }
+            }
+        }
+        /* Section: placement point must lie inside an actual slice piece
+         * (lens minus tmp_own) on this island.  Skip this check when the
+         * enemy source is inactive (orphaned) — claim_section_build only
+         * considers non-orphaned structures, so it would always return NULL
+         * for orphaned territory.  The radius test from the source search
+         * above is sufficient in that case.
+         *
+         * After the existence check, enumerate all mine and enemy structures
+         * whose discs overlap the section to determine the full valid section
+         * and validate that the registered (mine, enemy) source pair are
+         * legitimate participants. */
+        /* Skip section check when mine source is demolishing: claim_section_build
+         * uses only non-orphaned structures, so an orphaned demolishing fort as
+         * mine won't produce a valid section.  The disc intersection above is enough. */
+        if (!cf_enemy_inactive && !cf_mine_is_demolishing) {
+            ClaimSectionGrid *sec = claim_section_build((uint8_t)target_island_id,
+                                                        (uint8_t)player->company_id,
+                                                        px, py);
+            if (!sec) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
+                goto ps_send;
+            }
+            /* Enumerate all mine/enemy participants whose discs touch the section. */
+            int sec_mine_n = 0, sec_enmy_n = 0;
+            bool cf_mine_valid = false, cf_enmy_valid = false;
+            for (uint32_t _si = 0; _si < placed_structure_count; _si++) {
+                PlacedStructure *_p = &placed_structures[_si];
+                if (!_p->active || _p->claim_orphaned) continue;
+                if (_p->island_id != (uint8_t)target_island_id) continue;
+                if (_p->type == STRUCT_CLAIM_FLAG) continue;
+                if (_p->type == STRUCT_FLAG_FORT && !_p->fortress_complete) continue;
+                float _r = (_p->type == STRUCT_FLAG_FORT)        ? CLAIM_RADIUS_FLAG_FORT
+                         : (_p->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT
+                                                                  : CLAIM_RADIUS_DEFAULT;
+                if (!claim_section_disc_overlaps(sec, _p->x, _p->y, _r)) continue;
+                if (_p->company_id == (uint8_t)player->company_id) {
+                    sec_mine_n++;
+                    if (_p->id == cf_src_mine) cf_mine_valid = true;
+                } else if (_p->company_id != (uint8_t)COMPANY_UNCLAIMED) {
+                    sec_enmy_n++;
+                    if (_p->id == cf_src_enemy) cf_enmy_valid = true;
+                }
+            }
+            log_info("📐 Claim flag section: %d mine, %d enemy participants (mine_id=%u valid=%d, enemy_id=%u valid=%d)",
+                     sec_mine_n, sec_enmy_n,
+                     cf_src_mine, (int)cf_mine_valid,
+                     cf_src_enemy, (int)cf_enmy_valid);
+            /* Reject if the registered sources are not part of the section. */
+            if (!cf_mine_valid || !cf_enmy_valid) {
+                claim_section_free(sec);
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"not_in_contested_area\"}");
+                goto ps_send;
+            }
+            claim_section_free(sec);
+        }
+        /* Uniqueness: one active claim flag per (my company, enemy company,
+         * island). A "contested area" between two companies on the same island
+         * is treated as a single region — my company may only contest it with
+         * one flag at a time, regardless of which fort/structure pair was
+         * chosen as the (mine, enemy) source. */
+        uint8_t enemy_company = 0;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (ex->active && ex->id == cf_src_enemy) {
+                enemy_company = ex->company_id;
+                break;
+            }
+        }
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure *ex = &placed_structures[si];
+            if (!ex->active) continue;
+            if (ex->type != STRUCT_CLAIM_FLAG) continue;
+            if (ex->company_id != (uint8_t)player->company_id) continue;
+            if (ex->island_id  != (uint8_t)target_island_id) continue;
+            /* Find this existing flag's enemy company. */
+            uint8_t ex_enemy_company = 0;
+            for (uint32_t sj = 0; sj < placed_structure_count; sj++) {
+                PlacedStructure *es = &placed_structures[sj];
+                if (es->active && es->id == ex->claim_source_enemy) {
+                    ex_enemy_company = es->company_id;
+                    break;
+                }
+            }
+            if (ex_enemy_company == enemy_company) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"contested_area_already_claimed\"}");
+                goto ps_send;
+            }
+        }
+    }
+
+    /* ── Company Fortress: must be on an island ── */
+    if (stype_enum == STRUCT_COMPANY_FORTRESS) {
+        if (target_island_id == 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"not_on_island\"}");
+            goto ps_send;
+        }
+        /* Multiple in-progress fortresses are allowed; only one can complete */
+    }
+
+    /* Cannot place within claim radius of an enemy non-orphaned structure
+       (orphaned structures = dead fort — they are passable for building purposes).
+       Bypassed when the player is inside their own dominant claim area, mirroring
+       the client's overlay logic where subordinate enemy claims are visually carved out. */
+    if (stype_enum != STRUCT_CLAIM_FLAG && !in_my_dominant_area) {  /* claim flags are placed IN contested territory */
+        bool enemy_block = territory_is_claimed_by_any(px, py, NULL);
+        if (enemy_block) {
+            uint32_t owner_co = 0;
+            territory_is_claimed_by_any(px, py, &owner_co);
+            if (owner_co != 0 && owner_co != (uint32_t)player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"place_structure_fail\",\"reason\":\"enemy_territory\"}");
+                goto ps_send;
+            }
         }
     }
 
@@ -447,6 +890,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                 if (placed_structures[si].type == STRUCT_WALL) continue;
                 if (placed_structures[si].type == STRUCT_DOOR_FRAME) continue;
                 if (placed_structures[si].type == STRUCT_DOOR) continue;
+                if (placed_structures[si].type == STRUCT_CEILING) continue;
                 float dpx = placed_structures[si].x - px;
                 float dpy = placed_structures[si].y - py;
                 if (dpx*dpx + dpy*dpy < BLOCK_R * BLOCK_R) struct_in_way = true;
@@ -581,7 +1025,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Consume 1 item from the found slot */
-    {
+    if (found_slot >= 0) {
         player->inventory.slots[found_slot].quantity--;
         if (player->inventory.slots[found_slot].quantity == 0)
             player->inventory.slots[found_slot].item = ITEM_NONE;
@@ -598,6 +1042,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
     placed_structures[placed_structure_count].max_hp     = 100;
     placed_structures[placed_structure_count].hp         = 100;
+    placed_structures[placed_structure_count].target_hp  = 100;
     placed_structures[placed_structure_count].placer_id  = player->player_id;
     strncpy(placed_structures[placed_structure_count].placer_name, player->name,
             sizeof(placed_structures[placed_structure_count].placer_name) - 1);
@@ -608,7 +1053,108 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
          stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
          stype_enum == STRUCT_CANNON) ? place_rotation : 0.0f;
+    /* Cannon: initialise aim angle to match the placement rotation so first fire goes the right way.
+       The barrel points "up" in local space (−y), which corresponds to rotRad − π/2 in world space. */
+    if (stype_enum == STRUCT_CANNON) {
+        placed_structures[placed_structure_count].cannon_aim_angle =
+            place_rotation * (float)M_PI / 180.0f - (float)(M_PI / 2.0);
+        placed_structures[placed_structure_count].cannon_desired_aim_angle =
+            placed_structures[placed_structure_count].cannon_aim_angle;
+    }
     placed_structure_count++;
+
+    /* New territorial anchor — invalidate claim-flag section caches so
+     * claim flags re-evaluate their contest area next tick. */
+    if (stype_enum != STRUCT_CLAIM_FLAG) {
+        claim_invalidate_cf_sections();
+    }
+
+    /* ── Post-placement: register claims ─────────────────────────────────── */
+
+    /* Flag Fort: override HP and register the island claim */
+    if (stype_enum == STRUCT_FLAG_FORT) {
+        /* Flag forts go through 3 phases:
+         *   CLAIMING (1 min, claim_flag-style contest) — semi-transparent,
+         *     non-damageable, no HP bar. SKIPPED if the placement point lies
+         *     inside this company's existing ACTIVE territory on this island
+         *     (i.e., within an active flag fort / company fortress radius).
+         *   BUILDING (heals 10%→30% HP over 5 min) — damageable, normal HP
+         *     bar, flashing claim border on client. Mechanics identical to
+         *     previous "first phase".
+         *   ACTIVE (≥30% HP) — full territory participation.
+         * While CLAIMING or BUILDING a flag fort does NOT push dominance
+         * onto enemy territory (it cannot be used as the "mine" source for
+         * a claim flag); the client also renders it as its own non-merging
+         * blob in the overlay. */
+        PlacedStructure *ff = &placed_structures[placed_structure_count - 1];
+        ff->max_hp            = 500;
+        ff->hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
+        ff->target_hp         = ff->max_hp; /* heal ceiling; permanently reduced by combat damage */
+        ff->fortress_complete = false;
+        ff->claim_contested   = false;
+        ff->claim_state       = CLAIM_FLAG_STATE_CONTEST;
+        ff->claim_grace_ms    = 0.0f;
+
+        /* Detect "placed in already-active friendly territory" — search for
+         * any active (non-orphaned, fortress_complete) flag fort or company
+         * fortress belonging to the SAME company on the SAME island whose
+         * claim radius contains the placement point. */
+        bool in_friendly_active = false;
+        for (uint32_t qi = 0; qi < placed_structure_count - 1; qi++) {
+            PlacedStructure *q = &placed_structures[qi];
+            if (!q->active) continue;
+            if (q->claim_orphaned) continue;
+            if (!q->fortress_complete) continue;
+            if (q->company_id != ff->company_id) continue;
+            if (q->island_id  != ff->island_id)  continue;
+            if (q->type != STRUCT_FLAG_FORT && q->type != STRUCT_COMPANY_FORTRESS) continue;
+            float qr = (q->type == STRUCT_COMPANY_FORTRESS) ? CLAIM_RADIUS_COMPANY_FORT : CLAIM_RADIUS_FLAG_FORT;
+            float dx = ff->x - q->x, dy = ff->y - q->y;
+            if (dx*dx + dy*dy <= qr*qr) { in_friendly_active = true; break; }
+        }
+
+        if (in_friendly_active) {
+            /* Skip claim phase entirely; jump straight to BUILDING.
+             * claim_progress_ms is now the float HP accumulator (see flag_fort_tick). */
+            ff->claim_phase       = FLAG_FORT_PHASE_BUILDING;
+            ff->claim_progress_ms = (float)ff->hp;
+        } else {
+            /* Enter CLAIMING phase. claim_progress_ms counts FLAG_FORT_CLAIM_MS → 0
+             * (mirrors claim_flag). Transition to BUILDING re-purposes it as the
+             * fractional-HP accumulator. */
+            ff->claim_phase       = FLAG_FORT_PHASE_CLAIMING;
+            ff->claim_progress_ms = (float)FLAG_FORT_CLAIM_MS;
+        }
+
+        claim_register_fort((uint8_t)target_island_id,
+                            (uint32_t)player->company_id,
+                            (uint32_t)new_id,
+                            player->player_id);
+    }
+
+    /* Company Fortress: start build timer (HP = 1 until complete) */
+    if (stype_enum == STRUCT_COMPANY_FORTRESS) {
+        placed_structures[placed_structure_count - 1].max_hp            = 1000;
+        placed_structures[placed_structure_count - 1].hp                = 1;   /* incomplete */
+        placed_structures[placed_structure_count - 1].target_hp         = 1000;
+        placed_structures[placed_structure_count - 1].claim_progress_ms = 0.0f;
+        placed_structures[placed_structure_count - 1].fortress_complete  = false;
+        placed_structures[placed_structure_count - 1].claim_contested    = false;
+        log_info("🏰 Player %u started building Company Fortress #%u on island %u",
+                 player->player_id, new_id, target_island_id);
+    }
+
+    /* Claim Flag: link to (mine, enemy) source structures, start countdown at full */
+    if (stype_enum == STRUCT_CLAIM_FLAG) {
+        PlacedStructure *cf = &placed_structures[placed_structure_count - 1];
+        cf->claim_linked_fort       = cf_src_mine;
+        cf->claim_source_enemy      = cf_src_enemy;
+        cf->claim_progress_ms       = (float)FLAG_CLAIM_DURATION_MS; /* starts FULL, ticks down to 0 = capture */
+        cf->claim_contested         = true;                          /* placed in CONTEST state */
+        cf->claim_state             = CLAIM_FLAG_STATE_CONTEST;
+        cf->claim_grace_ms          = 0.0f;
+        cf->claim_targets_fortress  = false;                         /* legacy field — unused in new flow */
+    }
 
     log_info("🏗️ Player %u placed %s (id=%u) at (%.1f,%.1f) on island %u",
              player->player_id, stype, new_id, px, py, target_island_id);
@@ -616,17 +1162,53 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     /* Broadcast to all clients */
     char bcast[384];
     bool new_is_door = (stype_enum == STRUCT_DOOR);
+    bool new_is_cannon = (stype_enum == STRUCT_CANNON);
     float bcast_rot  = placed_structures[placed_structure_count - 1].rotation;
+    char cannon_extra[64] = "";
+    if (new_is_cannon) {
+        snprintf(cannon_extra, sizeof(cannon_extra),
+                 ",\"cannon_aim_angle\":%.4f",
+                 placed_structures[placed_structure_count - 1].cannon_aim_angle);
+    }
+    uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
+    uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
+    uint16_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
+    /* Flag-fort phase initial broadcast (claim/build/active). Other types: 0. */
+    uint8_t bcast_phase = (stype_enum == STRUCT_FLAG_FORT)
+        ? placed_structures[placed_structure_count - 1].claim_phase : 0u;
+    char phase_extra[48] = "";
+    if (stype_enum == STRUCT_FLAG_FORT) {
+        snprintf(phase_extra, sizeof(phase_extra), ",\"claim_phase\":%u", (unsigned)bcast_phase);
+    }
+    /* Claim flag: include link IDs so client can render per-flag contested slice */
+    char cflag_extra[96] = "";
+    if (stype_enum == STRUCT_CLAIM_FLAG) {
+        snprintf(cflag_extra, sizeof(cflag_extra),
+                 ",\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
+                 (unsigned)placed_structures[placed_structure_count - 1].claim_linked_fort,
+                 (unsigned)placed_structures[placed_structure_count - 1].claim_source_enemy);
+    }
     snprintf(bcast, sizeof(bcast),
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-             ",\"rotation\":%.2f%s}",
+             "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
+             ",\"rotation\":%.2f%s%s%s%s}",
              new_id, stype, target_island_id, px, py,
-             (unsigned)player->company_id, 100u, 100u, player->name,
+             (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp,
+             (unsigned)bcast_target, player->name,
              bcast_rot,
-             new_is_door ? ",\"open\":false" : "");
+             new_is_door ? ",\"open\":false" : "",
+             cannon_extra,
+             phase_extra,
+             cflag_extra);
     websocket_server_broadcast(bcast);
+    /* Render-Rule-X: populate dominators for the newcomer AFTER the
+     * `structure_placed` broadcast so clients have the structure in their
+     * local placedStructures[] before the follow-up `structure_dominators`
+     * message arrives. Skipped for claim flags (transient). */
+    if (stype_enum != STRUCT_CLAIM_FLAG) {
+        claim_register_placement_dominators(new_id);
+    }
     return; /* already sent via broadcast */
 
 ps_send:;
@@ -808,13 +1390,18 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             placed_structures[i].cannon_mounted_player_id = player->player_id;
             player->is_mounted = true;
             player->mounted_cannon_structure_id = placed_structures[i].id;
-            /* Position player behind the cannon breech */
+            /* Position player behind the cannon base (opposite the barrel).
+               Use the fixed placement rotation so the mount point is always at the
+               back of the cannon carriage regardless of current aim angle.
+               The barrel points in direction (rotRad - π/2), so the back is +π/2
+               from rotRad: back_dir = (-sin(rotRad), cos(rotRad)). */
             float _mount_x, _mount_y;
             {
-                const float MOUNT_DIST = 25.0f;
-                float aim = placed_structures[i].cannon_aim_angle;
-                _mount_x = placed_structures[i].x - cosf(aim) * MOUNT_DIST;
-                _mount_y = placed_structures[i].y - sinf(aim) * MOUNT_DIST;
+                const float MOUNT_DIST = 30.0f;
+                float rot_rad = placed_structures[i].rotation * (float)M_PI / 180.0f;
+                /* back of cannon = opposite of barrel direction = rotRad + π/2 offset */
+                _mount_x = placed_structures[i].x + (-sinf(rot_rad)) * MOUNT_DIST;
+                _mount_y = placed_structures[i].y + ( cosf(rot_rad)) * MOUNT_DIST;
                 player->x = _mount_x;
                 player->y = _mount_y;
             }
@@ -832,11 +1419,13 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             snprintf(response, sizeof(response),
                      "{\"type\":\"island_cannon_mounted\",\"structure_id\":%u,"
                      "\"aim_angle\":%.4f,\"reload_ms\":%u,"
-                     "\"mount_x\":%.2f,\"mount_y\":%.2f}",
+                     "\"mount_x\":%.2f,\"mount_y\":%.2f,"
+                     "\"rotation\":%.4f}",
                      placed_structures[i].id,
                      placed_structures[i].cannon_aim_angle,
                      placed_structures[i].cannon_reload_ms,
-                     _mount_x, _mount_y);
+                     _mount_x, _mount_y,
+                     placed_structures[i].rotation * (float)M_PI / 180.0f);
             goto si_send;
         }
         snprintf(response, sizeof(response),
@@ -927,36 +1516,14 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
             goto sya_send;
         }
         /* Count totals (may span multiple slots) */
-        int wood_total = 0, fiber_total = 0;
-        for (int s2 = 0; s2 < INVENTORY_SLOTS; s2++) {
-            if (player->inventory.slots[s2].item == ITEM_WOOD)  wood_total  += player->inventory.slots[s2].quantity;
-            if (player->inventory.slots[s2].item == ITEM_FIBER) fiber_total += player->inventory.slots[s2].quantity;
-        }
-        if (wood_total < 20 || fiber_total < 10) {
+        if (craft_count_item(player, ITEM_WOOD) < 20 || craft_count_item(player, ITEM_FIBER) < 10) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"shipyard_action_fail\",\"reason\":\"missing_materials\"}");
             goto sya_send;
         }
         /* Consume */
-        int need_wood = 20, need_fiber = 10;
-        for (int s2 = 0; s2 < INVENTORY_SLOTS && (need_wood > 0 || need_fiber > 0); s2++) {
-            if (need_wood > 0 && player->inventory.slots[s2].item == ITEM_WOOD) {
-                int take = player->inventory.slots[s2].quantity < need_wood
-                           ? player->inventory.slots[s2].quantity : need_wood;
-                player->inventory.slots[s2].quantity -= (uint8_t)take;
-                if (player->inventory.slots[s2].quantity == 0)
-                    player->inventory.slots[s2].item = ITEM_NONE;
-                need_wood -= take;
-            }
-            if (need_fiber > 0 && player->inventory.slots[s2].item == ITEM_FIBER) {
-                int take = player->inventory.slots[s2].quantity < need_fiber
-                           ? player->inventory.slots[s2].quantity : need_fiber;
-                player->inventory.slots[s2].quantity -= (uint8_t)take;
-                if (player->inventory.slots[s2].quantity == 0)
-                    player->inventory.slots[s2].item = ITEM_NONE;
-                need_fiber -= take;
-            }
-        }
+        craft_consume(player, ITEM_WOOD, 20);
+        craft_consume(player, ITEM_FIBER, 10);
         /* Spawn a real empty ship (modules_placed = 0 → bare hull only) */
         uint16_t new_ship_id = websocket_server_create_ship(sy->x, sy->y + 450.0f, player->company_id, 0);
         if (new_ship_id == 0) {
@@ -1036,6 +1603,217 @@ sya_send:;
 }
 
 /*
+ * destroy_placed_structure — shared destruction helper.
+ *
+ * 1. Finds the structure by ID, marks it inactive, broadcasts structure_demolished.
+ * 2. If it was a floor, cascade-destroys dependent workbenches, walls, door_frames,
+ *    ceilings, and doors (using active=false + broadcast for each).
+ * 3. If it was a door_frame, cascade-destroys any door sitting on it.
+ * 4. Compacts inactive entries from placed_structures[] in one final pass so the
+ *    array stays dense and placed_structure_count stays accurate.
+ *
+ * Safe to call from any code path (demolish, cannon hit, etc.).
+ */
+void destroy_placed_structure(uint32_t structure_id) {
+    /* Find the target */
+    uint32_t idx = UINT32_MAX;
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (placed_structures[i].active && placed_structures[i].id == structure_id) {
+            idx = i; break;
+        }
+    }
+    if (idx == UINT32_MAX) return; /* not found */
+
+    PlacedStructureType dtype = placed_structures[idx].type;
+    float fx = placed_structures[idx].x;
+    float fy = placed_structures[idx].y;
+
+    /* Mark primary dead and broadcast */
+    placed_structures[idx].active = false;
+    char msg[192];
+    snprintf(msg, sizeof(msg),
+             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
+    websocket_server_broadcast(msg);
+    log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
+
+    /* Remove this id from every other structure's dominators[] list so it
+     * stops carving territory it previously dominated. Broadcasts updated
+     * `structure_dominators` for each affected structure. */
+    claim_remove_id_from_all_dominators(structure_id);
+    /* Structural change — invalidate claim-flag section caches so the
+     * contest areas for all active claim flags are recomputed next tick. */
+    claim_invalidate_cf_sections();
+
+    /* ── Territory claim: fort/company-fortress destroyed → drop island claim ─ */
+    if (dtype == STRUCT_FLAG_FORT) {
+        claim_on_fort_destroyed(structure_id);
+    }
+    if (dtype == STRUCT_COMPANY_FORTRESS) {
+        claim_on_fort_destroyed(structure_id);  /* same handler — drops IslandClaim if one exists */
+    }
+
+    /* ── Cascade: floor destroyed ──────────────────────────────────────── */
+    if (dtype == STRUCT_WOODEN_FLOOR) {
+        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+            PlacedStructure* c = &placed_structures[ci];
+            if (!c->active) continue;
+
+            if (c->type == STRUCT_WORKBENCH) {
+                if (fabsf(c->x - fx) > 25.0f || fabsf(c->y - fy) > 25.0f) continue;
+                /* Any other active floor still supporting this workbench? */
+                bool has = false;
+                for (uint32_t fi = 0; fi < placed_structure_count && !has; fi++) {
+                    PlacedStructure* f = &placed_structures[fi];
+                    if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                    if (fabsf(c->x - f->x) <= 25.0f && fabsf(c->y - f->y) <= 25.0f) has = true;
+                }
+                if (!has) {
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished workbench %u (floor %u removed)", c->id, structure_id);
+                }
+
+            } else if (c->type == STRUCT_WALL || c->type == STRUCT_DOOR_FRAME ||
+                       c->type == STRUCT_DOOR) {
+                /* Is this wall/door adjacent to the demolished floor? */
+                float at_dx = c->x - fx, at_dy = c->y - fy;
+                if (at_dx*at_dx + at_dy*at_dy > 30.0f * 30.0f) continue;
+                bool has = wall_has_support(c->x, c->y);
+                if (!has) {
+                    bool was_frame = (c->type == STRUCT_DOOR_FRAME);
+                    float dfx = c->x, dfy = c->y;
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished wall/frame/door %u (floor %u removed)", c->id, structure_id);
+                    /* door_frame lost: cascade any door on it */
+                    if (was_frame) {
+                        for (uint32_t di = 0; di < placed_structure_count; di++) {
+                            PlacedStructure* dp = &placed_structures[di];
+                            if (!dp->active || dp->type != STRUCT_DOOR) continue;
+                            if (fabsf(dp->x - dfx) >= 3.0f || fabsf(dp->y - dfy) >= 3.0f) continue;
+                            dp->active = false;
+                            char dm[128];
+                            snprintf(dm, sizeof(dm),
+                                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dp->id);
+                            websocket_server_broadcast(dm);
+                            break;
+                        }
+                    }
+                }
+
+            } else if (c->type == STRUCT_CANNON) {
+                /* Cannon requires a same-company floor tile within its footprint.
+                 * Check using the same OBB test as place_cannon. */
+                const float HALF_TILE = 25.0f;
+                bool has_floor = false;
+                for (uint32_t fi = 0; fi < placed_structure_count && !has_floor; fi++) {
+                    PlacedStructure* f = &placed_structures[fi];
+                    if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
+                    if (f->company_id != c->company_id) continue;
+                    float rad = f->rotation * (float)M_PI / 180.0f;
+                    float fc  = cosf(-rad), fs = sinf(-rad);
+                    float ddx = c->x - f->x;
+                    float ddy = c->y - f->y;
+                    float lx  = ddx * fc - ddy * fs;
+                    float ly  = ddx * fs + ddy * fc;
+                    if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) has_floor = true;
+                }
+                if (!has_floor) {
+                    c->active = false;
+                    char cm[128];
+                    snprintf(cm, sizeof(cm),
+                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", c->id);
+                    websocket_server_broadcast(cm);
+                    log_info("🔨 Cascade-demolished cannon %u (floor %u removed)", c->id, structure_id);
+                }
+
+            }
+            /* Note: ceilings handled below by cascade_orphan_ceilings() — the
+             * strict wall-connectivity rule supersedes any floor-proximity check. */
+        }
+    }
+
+    /* ── Cascade: door_frame destroyed ────────────────────────────────── */
+    if (dtype == STRUCT_DOOR_FRAME) {
+        for (uint32_t di = 0; di < placed_structure_count; di++) {
+            PlacedStructure* dp = &placed_structures[di];
+            if (!dp->active || dp->type != STRUCT_DOOR) continue;
+            if (fabsf(dp->x - fx) >= 3.0f || fabsf(dp->y - fy) >= 3.0f) continue;
+            dp->active = false;
+            char dm[128];
+            snprintf(dm, sizeof(dm),
+                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dp->id);
+            websocket_server_broadcast(dm);
+            break;
+        }
+    }
+
+    /* ── Cascade: any wall/door_frame loss may orphan ceilings ──────────────
+     * Fires for direct wall/door_frame demolish AND for floor demolish (since
+     * the floor-cascade above may have just removed walls without re-checking
+     * ceilings). cascade_orphan_ceilings() rebuilds the wall map from current
+     * active state, so it's safe and idempotent. */
+    if (dtype == STRUCT_WALL || dtype == STRUCT_DOOR_FRAME ||
+        dtype == STRUCT_WOODEN_FLOOR) {
+        const char *kind = dtype == STRUCT_WALL       ? "wall"
+                         : dtype == STRUCT_DOOR_FRAME ? "door_frame"
+                                                      : "floor";
+        cascade_orphan_ceilings(structure_id, kind);
+    }
+
+    /* ── Compact inactive entries out of the array in one pass ─────────── */
+    uint32_t write = 0;
+    for (uint32_t read = 0; read < placed_structure_count; read++) {
+        if (placed_structures[read].active)
+            placed_structures[write++] = placed_structures[read];
+    }
+    placed_structure_count = write;
+}
+
+/*
+ * apply_structure_damage — shared hit-damage helper.
+ * Subtracts dmg from s->hp, broadcasts structure_hp_changed on partial damage,
+ * and delegates to destroy_placed_structure on death.
+ * Returns true if the structure was destroyed (s is then stale).
+ */
+bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
+    /* Claim flags are immune to damage — they only "die" by completing/reversing
+     * their territory-claim timer (handled in claim.c). */
+    if (s->type == STRUCT_CLAIM_FLAG) return false;
+    /* Flag forts are non-damageable during the CLAIMING phase — they only
+     * become vulnerable once the 1-min ground claim succeeds and they enter
+     * BUILDING. */
+    if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) return false;
+    s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+    /* All structures track a heal ceiling that combat damage permanently
+     * lowers. For most types there is no auto-repair (so target_hp just
+     * mirrors hp), but flag forts use it to cap their heal-back. */
+    s->target_hp = (s->target_hp > dmg) ? (uint16_t)(s->target_hp - dmg) : 0u;
+    /* Stamp the damage time so player-funded repairs can enforce a cooldown
+     * (no repairing structures that took combat damage in the last 30s). */
+    s->last_damaged_ms = get_time_ms();
+    if (s->hp == 0) {
+        uint32_t sid = s->id;
+        destroy_placed_structure(sid);
+        return true;
+    }
+    char msg[224];
+    snprintf(msg, sizeof(msg),
+             "{\"type\":\"structure_hp_changed\","
+             "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u"
+             ",\"x\":%.1f,\"y\":%.1f}",
+             s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, s->x, s->y);
+    websocket_server_broadcast(msg);
+    return false;
+}
+
+/*
  * demolish_structure: player holds E on a placed structure to remove it.
  * Validates proximity, then removes from placed_structures[] and broadcasts.
  */
@@ -1061,16 +1839,11 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
                      "{\"type\":\"demolish_fail\",\"reason\":\"wrong_company\"}");
             goto ds_send;
         }
-        /* Save position/type before compacting — needed for cascade below */
-        PlacedStructureType demolished_type = placed_structures[i].type;
-        float fx = placed_structures[i].x;
-        float fy = placed_structures[i].y;
         /* Shipyard: auto-release any scaffolded ship before demolishing */
-        if (demolished_type == STRUCT_SHIPYARD
+        if (placed_structures[i].type == STRUCT_SHIPYARD
             && placed_structures[i].construction_phase == CONSTRUCTION_BUILDING
             && placed_structures[i].scaffolded_ship_id != 0) {
             uint32_t rel_id = placed_structures[i].scaffolded_ship_id;
-            /* Clear scaffold flag and set initial_plank_count so normal sinking applies */
             if (global_sim) {
                 for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                     if (global_sim->ships[si].id == rel_id) {
@@ -1085,119 +1858,12 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
                      "{\"type\":\"ship_auto_released\",\"ship_id\":%u}", rel_id);
             websocket_server_broadcast(abcast);
             log_info("⚓ Shipyard %u demolished — auto-released ship %u", sid, rel_id);
-            /* Clear construction state before array compact */
             placed_structures[i].construction_phase  = CONSTRUCTION_EMPTY;
             placed_structures[i].modules_placed      = 0;
             placed_structures[i].scaffolded_ship_id  = 0;
         }
-        /* Shift subsequent entries down to keep the array dense */
-        for (uint32_t j = i; j + 1 < placed_structure_count; j++)
-            placed_structures[j] = placed_structures[j + 1];
-        placed_structure_count--;
         log_info("🔨 Player %u demolished structure %u", player->player_id, sid);
-        /* Broadcast removal to all clients */
-        char bcast[128];
-        snprintf(bcast, sizeof(bcast),
-                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", sid);
-        websocket_server_broadcast(bcast);
-        /* Cascade: if a floor was demolished, remove any workbenches sitting on it
-           and any walls at its edges that have no other supporting floor. */
-        if (demolished_type == STRUCT_WOODEN_FLOOR) {
-            uint32_t j = 0;
-            while (j < placed_structure_count) {
-                if (placed_structures[j].type == STRUCT_WORKBENCH) {
-                    float wdx = fabsf(placed_structures[j].x - fx);
-                    float wdy = fabsf(placed_structures[j].y - fy);
-                    if (wdx <= 25.0f && wdy <= 25.0f) {
-                        uint32_t wid = placed_structures[j].id;
-                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                            placed_structures[k] = placed_structures[k + 1];
-                        placed_structure_count--;
-                        log_info("🔨 Cascade-demolished workbench %u (floor %u removed)", wid, sid);
-                        char wbcast[128];
-                        snprintf(wbcast, sizeof(wbcast),
-                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
-                        websocket_server_broadcast(wbcast);
-                        continue; /* don't increment — array shifted left */
-                    }
-                } else if (placed_structures[j].type == STRUCT_WALL ||
-                           placed_structures[j].type == STRUCT_DOOR_FRAME ||
-                           placed_structures[j].type == STRUCT_DOOR) {
-                    /* Wall is at one of the 4 edge midpoints of the demolished floor? */
-                    float wx = placed_structures[j].x;
-                    float wy = placed_structures[j].y;
-                    bool at_edge =
-                        (fabsf(wx - fx) < 3.0f && fabsf(fabsf(wy - fy) - 25.0f) < 3.0f) ||
-                        (fabsf(wy - fy) < 3.0f && fabsf(fabsf(wx - fx) - 25.0f) < 3.0f);
-                    if (at_edge) {
-                        /* Check if another active floor still supports this wall edge */
-                        bool has_support = false;
-                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
-                            PlacedStructure* f = &placed_structures[fi];
-                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                            bool supports =
-                                (fabsf(wx - f->x) < 3.0f && fabsf(fabsf(wy - f->y) - 25.0f) < 3.0f) ||
-                                (fabsf(wy - f->y) < 3.0f && fabsf(fabsf(wx - f->x) - 25.0f) < 3.0f);
-                            if (supports) has_support = true;
-                        }
-                        if (!has_support) {
-                            uint32_t wid = placed_structures[j].id;
-                            for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                                placed_structures[k] = placed_structures[k + 1];
-                            placed_structure_count--;
-                            log_info("🔨 Cascade-demolished wall %u (floor %u removed)", wid, sid);
-                            char wcast[128];
-                            snprintf(wcast, sizeof(wcast),
-                                     "{\"type\":\"structure_demolished\",\"structure_id\":%u}", wid);
-                            websocket_server_broadcast(wcast);
-                            continue;
-                        }
-                    }
-                } else if (placed_structures[j].type == STRUCT_CEILING) {
-                    /* Ceiling needs a floor within 150 px — check if any remain */
-                    float cx2 = placed_structures[j].x;
-                    float cy2 = placed_structures[j].y;
-                    bool ceil_has_floor = false;
-                    for (uint32_t fi = 0; fi < placed_structure_count && !ceil_has_floor; fi++) {
-                        PlacedStructure* f = &placed_structures[fi];
-                        if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                        float fdx2 = f->x - cx2, fdy2 = f->y - cy2;
-                        if (fdx2*fdx2 + fdy2*fdy2 <= 150.0f * 150.0f) ceil_has_floor = true;
-                    }
-                    if (!ceil_has_floor) {
-                        uint32_t cid = placed_structures[j].id;
-                        for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                            placed_structures[k] = placed_structures[k + 1];
-                        placed_structure_count--;
-                        log_info("🔨 Cascade-demolished ceiling %u (floor %u removed)", cid, sid);
-                        char cccast[128];
-                        snprintf(cccast, sizeof(cccast),
-                                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", cid);
-                        websocket_server_broadcast(cccast);
-                        continue;
-                    }
-                }
-                j++;
-            }
-        }
-        /* door_frame demolished: cascade any door panel sitting on it */
-        if (demolished_type == STRUCT_DOOR_FRAME) {
-            for (uint32_t j = 0; j < placed_structure_count; j++) {
-                if (placed_structures[j].type != STRUCT_DOOR) continue;
-                if (fabsf(placed_structures[j].x - fx) >= 3.0f ||
-                    fabsf(placed_structures[j].y - fy) >= 3.0f) continue;
-                uint32_t dpid = placed_structures[j].id;
-                for (uint32_t k = j; k + 1 < placed_structure_count; k++)
-                    placed_structures[k] = placed_structures[k + 1];
-                placed_structure_count--;
-                log_info("\U0001F528 Cascade-demolished door panel %u (frame removed)", dpid);
-                char dpcast[128];
-                snprintf(dpcast, sizeof(dpcast),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u}", dpid);
-                websocket_server_broadcast(dpcast);
-                break;
-            }
-        }
+        destroy_placed_structure(sid);
         return; /* already sent via broadcast */
     }
 
@@ -1490,4 +2156,268 @@ sv_send:;
         WS_OPCODE_TEXT, response, strlen(response), sv_frame, sizeof(sv_frame));
     if (sv_flen > 0 && sv_flen < sizeof(sv_frame))
         send(client->fd, sv_frame, sv_flen, 0);
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * Repair system (any structure with target_hp < max_hp)
+ * ────────────────────────────────────────────────────────────────────────────
+ * Full restore (target_hp = 0 → max_hp) costs the structure's full recipe and
+ * takes STRUCTURE_REPAIR_FULL_MS. Partial repairs scale linearly: the cost is
+ * ceil(recipe_qty * missing / max_hp), and the duration shrinks proportionally
+ * so the per-tick HP gain is constant across full and partial repairs.
+ */
+
+typedef struct {
+    ItemKind item;
+    uint16_t qty;
+} RepairIng;
+
+/* Canonical full-build recipe per structure type (one tile/unit worth).
+ * Sourced from server/src/net/crafting.c — see "craft_*" recipes. */
+static int repair_recipe_for_struct(PlacedStructureType type,
+                                    RepairIng out[4]) {
+    switch (type) {
+        case STRUCT_WOODEN_FLOOR:     out[0] = (RepairIng){ ITEM_WOOD,  2 }; return 1; /* craft yields 2 per 4 wood */
+        case STRUCT_CEILING:          out[0] = (RepairIng){ ITEM_WOOD, 15 }; return 1;
+        case STRUCT_WORKBENCH:        out[0] = (RepairIng){ ITEM_WOOD, 10 }; return 1;
+        case STRUCT_WALL:             out[0] = (RepairIng){ ITEM_WOOD,  3 }; return 1; /* craft yields 4 per 10 wood ≈ 2.5; round up */
+        case STRUCT_DOOR_FRAME:       out[0] = (RepairIng){ ITEM_WOOD,  6 }; return 1;
+        case STRUCT_DOOR:             out[0] = (RepairIng){ ITEM_WOOD,  4 }; return 1;
+        case STRUCT_SHIPYARD:
+            out[0] = (RepairIng){ ITEM_WOOD,  30 };
+            out[1] = (RepairIng){ ITEM_PLANK, 10 };
+            return 2;
+        case STRUCT_CANNON:
+            out[0] = (RepairIng){ ITEM_WOOD,   8 };
+            out[1] = (RepairIng){ ITEM_METAL, 20 };
+            return 2;
+        case STRUCT_FLAG_FORT:
+            out[0] = (RepairIng){ ITEM_WOOD,  40 };
+            out[1] = (RepairIng){ ITEM_STONE, 40 };
+            return 2;
+        case STRUCT_COMPANY_FORTRESS:
+            out[0] = (RepairIng){ ITEM_WOOD,  100 };
+            out[1] = (RepairIng){ ITEM_STONE, 100 };
+            out[2] = (RepairIng){ ITEM_METAL,  20 };
+            return 3;
+        default: return 0; /* claim_flag, wreck — not repairable */
+    }
+}
+
+/* Compute prorated repair cost: ceil(recipe_qty * missing_hp / max_hp), min 1
+ * per ingredient. Returns the ingredient count. */
+static int compute_repair_cost(PlacedStructureType type,
+                               uint16_t missing_hp, uint16_t max_hp,
+                               RepairIng out[4]) {
+    RepairIng base[4];
+    int n = repair_recipe_for_struct(type, base);
+    if (n <= 0 || missing_hp == 0 || max_hp == 0) return 0;
+    for (int i = 0; i < n; i++) {
+        uint32_t scaled = ((uint32_t)base[i].qty * (uint32_t)missing_hp + (uint32_t)max_hp - 1u) / (uint32_t)max_hp;
+        if (scaled < 1u) scaled = 1u;
+        out[i].item = base[i].item;
+        out[i].qty  = (uint16_t)scaled;
+    }
+    return n;
+}
+
+void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    uint32_t sid = 0;
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active || s->id != sid) continue;
+
+        /* Range */
+        float dx = player->x - s->x;
+        float dy = player->y - s->y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"too_far\"}", sid);
+            goto rs_send;
+        }
+        /* Company */
+        if (s->company_id != (uint8_t)player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"wrong_company\"}", sid);
+            goto rs_send;
+        }
+        /* Excluded types */
+        if (s->type == STRUCT_CLAIM_FLAG || s->type == STRUCT_WRECK) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"not_repairable\"}", sid);
+            goto rs_send;
+        }
+        if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"claiming\"}", sid);
+            goto rs_send;
+        }
+
+        /* Toggle-cancel: same player re-interacts → cancel (no refund) */
+        if (s->repair_player_id == player->player_id) {
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            s->repair_start_hp    = 0;
+            char cmsg[160];
+            snprintf(cmsg, sizeof(cmsg),
+                     "{\"type\":\"repair_cancelled\",\"structure_id\":%u,\"player_id\":%u}",
+                     sid, player->player_id);
+            websocket_server_broadcast(cmsg);
+            return;
+        }
+        if (s->repair_player_id != 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"in_progress\"}", sid);
+            goto rs_send;
+        }
+
+        /* Already at full ceiling? Nothing to repair. */
+        if (s->target_hp >= s->max_hp) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"already_full\"}", sid);
+            goto rs_send;
+        }
+
+        /* Combat-damage cooldown: cannot start a repair within 30s of the
+         * last combat hit. Prevents instant-heal under fire. */
+        {
+            uint32_t now_ms = get_time_ms();
+            uint32_t since  = now_ms - s->last_damaged_ms;
+            if (s->last_damaged_ms != 0 && since < 30000u) {
+                uint32_t remaining = 30000u - since;
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"recently_damaged\",\"cooldown_ms\":%u}",
+                         sid, remaining);
+                goto rs_send;
+            }
+        }
+
+        /* Compute cost */
+        uint16_t missing = (uint16_t)(s->max_hp - s->target_hp);
+        RepairIng cost[4];
+        int nc = compute_repair_cost(s->type, missing, s->max_hp, cost);
+        if (nc <= 0) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"not_repairable\"}", sid);
+            goto rs_send;
+        }
+        /* Check resources */
+        for (int k = 0; k < nc; k++) {
+            if (craft_count_item(player, cost[k].item) < (int)cost[k].qty) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"insufficient_resources\"}", sid);
+                goto rs_send;
+            }
+        }
+        /* Consume */
+        for (int k = 0; k < nc; k++) {
+            craft_consume(player, cost[k].item, (int)cost[k].qty);
+        }
+
+        /* Start repair */
+        s->repair_player_id   = player->player_id;
+        s->repair_progress_ms = 0.0f;
+        s->repair_start_hp    = s->hp;
+        s->repair_broadcast_acc_ms = 0;
+
+        /* Broadcast started */
+        char smsg[256];
+        snprintf(smsg, sizeof(smsg),
+                 "{\"type\":\"repair_started\",\"structure_id\":%u,\"player_id\":%u,"
+                 "\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u}",
+                 sid, player->player_id,
+                 (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp);
+        websocket_server_broadcast(smsg);
+        log_info("🔧 Player %u started repair on structure %u (missing %u hp)",
+                 player->player_id, sid, (unsigned)missing);
+        return;
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"repair_fail\",\"structure_id\":%u,\"reason\":\"not_found\"}", sid);
+
+rs_send:;
+    char frm[256];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frm, sizeof(frm));
+    if (flen > 0 && flen < sizeof(frm)) send(client->fd, frm, flen, 0);
+}
+
+void structure_repair_tick(uint32_t delta_ms) {
+    if (delta_ms == 0) return;
+    /* Rate: STRUCTURE_REPAIR_FULL_MS restores max_hp worth of HP. */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active) continue;
+        if (s->repair_player_id == 0) continue;
+
+        /* If structure was destroyed mid-repair, repair_player_id was cleared
+         * by destroy_placed_structure (active=false). Skip stale state. */
+        if (s->target_hp >= s->max_hp || s->max_hp == 0) {
+            /* Nothing more to repair */
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            continue;
+        }
+        /* Flag fort entering CLAIMING is impossible mid-repair, but defensive: */
+        if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            continue;
+        }
+
+        s->repair_progress_ms += (float)delta_ms;
+        s->repair_broadcast_acc_ms += delta_ms;
+        /* HP gained = max_hp * delta / STRUCTURE_REPAIR_FULL_MS, accumulated */
+        float hp_gained_f = (float)s->max_hp * s->repair_progress_ms / (float)STRUCTURE_REPAIR_FULL_MS;
+        uint16_t hp_gain_int = (uint16_t)hp_gained_f;
+        if (hp_gain_int > 0) {
+            /* Reset accumulator carry for next tick */
+            float consumed_ms = (float)hp_gain_int * (float)STRUCTURE_REPAIR_FULL_MS / (float)s->max_hp;
+            s->repair_progress_ms -= consumed_ms;
+            if (s->repair_progress_ms < 0.0f) s->repair_progress_ms = 0.0f;
+
+            uint16_t cap = s->max_hp;
+            uint32_t new_hp        = (uint32_t)s->hp + (uint32_t)hp_gain_int;
+            uint32_t new_target_hp = (uint32_t)s->target_hp + (uint32_t)hp_gain_int;
+            if (new_hp        > cap) new_hp        = cap;
+            if (new_target_hp > cap) new_target_hp = cap;
+            s->hp        = (uint16_t)new_hp;
+            s->target_hp = (uint16_t)new_target_hp;
+        }
+
+        /* Throttle hp_changed broadcasts to ~1Hz so clients see steady
+         * progress without flooding. Always broadcast on completion. */
+        int complete = (s->target_hp >= s->max_hp) ? 1 : 0;
+        if (s->repair_broadcast_acc_ms < 1000u && !complete) continue;
+        s->repair_broadcast_acc_ms = 0;
+
+        /* Broadcast hp change */
+        char msg[224];
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"structure_hp_changed\","
+                 "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u"
+                 ",\"x\":%.1f,\"y\":%.1f}",
+                 s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, s->x, s->y);
+        websocket_server_broadcast(msg);
+
+        /* Completion */
+        if (complete) {
+            uint32_t pid = s->repair_player_id;
+            s->repair_player_id   = 0;
+            s->repair_progress_ms = 0.0f;
+            s->repair_broadcast_acc_ms = 0;
+            char cmsg[160];
+            snprintf(cmsg, sizeof(cmsg),
+                     "{\"type\":\"repair_complete\",\"structure_id\":%u,\"player_id\":%u}",
+                     s->id, pid);
+            websocket_server_broadcast(cmsg);
+            log_info("🔧 Repair complete on structure %u (player %u)", s->id, pid);
+        }
+    }
 }

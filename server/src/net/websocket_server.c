@@ -37,6 +37,19 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* Format a PlacedStructure's dominators list as a JSON fragment, e.g.
+ * `,"dominators":[12,7,3]`. Writes empty string if the list is empty (so
+ * the field is omitted from the JSON object). Returns bytes written. */
+static int format_dominators_extra(const PlacedStructure *s, char *buf, int cap) {
+    if (!s || s->dominator_count == 0) { if (cap > 0) buf[0] = '\0'; return 0; }
+    int n = snprintf(buf, cap, ",\"dominators\":[");
+    for (int i = 0; i < s->dominator_count && n < cap - 16; i++) {
+        n += snprintf(buf + n, cap - n, "%s%u", i ? "," : "", s->dominators[i]);
+    }
+    n += snprintf(buf + n, cap - n, "]");
+    return n;
+}
+
 // WebSocket magic key for handshake
 #define WS_MAGIC_KEY "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_MAX_CLIENTS 100
@@ -723,6 +736,23 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
  * 2. Wipes the player's inventory.
  * 3. Broadcasts tombstone_spawned to all clients.
  */
+
+/**
+ * Returns total flat armour value for a player based on equipped cloth gear.
+ * Damage is reduced by this amount (minimum 1 per hit).
+ */
+static int player_armor_value(const WebSocketPlayer* p) {
+    int v = 0;
+    const PlayerEquipment* eq = &p->inventory.equipment;
+    if (eq->helm  == ITEM_CLOTH_HAT)    v += 5;
+    if (eq->torso == ITEM_CLOTH_SHIRT)  v += 20;
+    if (eq->torso == ITEM_CLOTH_ARMOR)  v += 5;   /* legacy generic cloth */
+    if (eq->legs  == ITEM_CLOTH_PANTS)  v += 15;
+    if (eq->feet  == ITEM_CLOTH_SHOES)  v += 8;
+    if (eq->hands == ITEM_CLOTH_GLOVES) v += 7;
+    return v;
+}
+
 void player_die(WebSocketPlayer* player) {
     /* Check whether the player has any items worth dropping */
     bool has_items = false;
@@ -1347,6 +1377,7 @@ static void remove_player(uint32_t player_id) {
 
 // ── Cannon aim, fire, weapon groups ─────────────────────────────────────────
 #include "net/cannon_fire.h"
+#include "net/claim.h"
 
 // Forward declarations now in ship_init.h
 
@@ -2267,7 +2298,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send current placed structures
                                     {
-                                        static char hs_structs_buf[8192];
+                                        static char hs_structs_buf[16384];
                                         int hs_sp = 0;
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -2283,11 +2314,22 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                             placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
                                             placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
-                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" :
+                                            placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
+                                            placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
+                                            placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                            "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        bool hs_is_cannon = (placed_structures[si].type == STRUCT_CANNON);
+                                        bool hs_is_cfrt   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
+                                        bool hs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         /* Build extra fields for shipyard construction state */
                                         char hs_sy_extra[256] = "";
+                                        char hs_cannon_extra[64] = "";
+                                        char hs_claim_extra[320] = "";
+                                        char hs_dom_extra[512] = "";
+                                        format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
                                         if (hs_is_sy) {
                                             char hs_mj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -2307,14 +2349,59 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                             const char* hs_phase = placed_structures[si].construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
                                             snprintf(hs_sy_extra, sizeof(hs_sy_extra),
-                                                     ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
-                                                     hs_phase, hs_mj);
+                                                     ",\"construction_phase\":\"%s\",\"modules_placed\":%s,\"scaffolded_ship_id\":%u",
+                                                     hs_phase, hs_mj, (unsigned)placed_structures[si].scaffolded_ship_id);
+                                        }
+                                        if (hs_is_cannon) {
+                                            snprintf(hs_cannon_extra, sizeof(hs_cannon_extra),
+                                                     ",\"cannon_aim_angle\":%.4f",
+                                                     placed_structures[si].cannon_aim_angle);
+                                        }
+                                        if (hs_is_cfrt) {
+                                            snprintf(hs_claim_extra, sizeof(hs_claim_extra),
+                                                     ",\"fortress_build_progress\":%.0f,\"fortress_complete\":%s,\"fortress_contested\":%s,\"claim_orphaned\":%s",
+                                                     placed_structures[si].claim_progress_ms,
+                                                     placed_structures[si].fortress_complete ? "true" : "false",
+                                                     placed_structures[si].claim_contested   ? "true" : "false",
+                                                     placed_structures[si].claim_orphaned    ? "true" : "false");
+                                        }
+                                        if (hs_is_cflag) {
+                                            snprintf(hs_claim_extra, sizeof(hs_claim_extra),
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s,\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
+                                                     placed_structures[si].claim_progress_ms,
+                                                     placed_structures[si].claim_contested         ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms,
+                                                     placed_structures[si].claim_targets_fortress  ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_linked_fort,
+                                                     (unsigned)placed_structures[si].claim_source_enemy);
+                                        } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
+                                            float ff_prog = (placed_structures[si].max_hp > 0)
+                                                ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
+                                                : 0.0f;
+                                            snprintf(hs_claim_extra, sizeof(hs_claim_extra),
+                                                     ",\"claim_orphaned\":%s"
+                                                     ",\"fortress_complete\":%s"
+                                                     ",\"fortress_build_progress\":%.0f"
+                                                     ",\"fortress_contested\":%s"
+                                                     ",\"claim_phase\":%u"
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                                                     ",\"claim_state\":%u,\"claim_grace_ms\":%.0f",
+                                                     placed_structures[si].claim_orphaned   ? "true" : "false",
+                                                     placed_structures[si].fortress_complete ? "true" : "false",
+                                                     ff_prog,
+                                                     placed_structures[si].claim_contested  ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_phase,
+                                                     (placed_structures[si].claim_phase == FLAG_FORT_PHASE_CLAIMING) ? placed_structures[si].claim_progress_ms : 0.0f,
+                                                     (unsigned)FLAG_FORT_CLAIM_MS,
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms);
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s%s}",
+                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
+                                                          ",\"rotation\":%.2f%s%s%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -2322,14 +2409,18 @@ int websocket_server_update(struct Sim* sim) {
                                                           (unsigned)placed_structures[si].company_id,
                                                           (unsigned)placed_structures[si].hp,
                                                           (unsigned)placed_structures[si].max_hp,
+                                                          (unsigned)placed_structures[si].target_hp,
                                                           placed_structures[si].placer_name,
                                                           placed_structures[si].rotation,
                                                           hs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
-                                                          hs_sy_extra);
+                                                          hs_sy_extra,
+                                                          hs_cannon_extra,
+                                                          hs_claim_extra,
+                                                          hs_dom_extra);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
-                                        char hs_sf[8448];
+                                        char hs_sf[16640];
                                         size_t hs_sflen = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_structs_buf, (size_t)hs_sp,
                                             hs_sf, sizeof(hs_sf));
@@ -2668,6 +2759,14 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_demolish_structure(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "repair_structure") == 0) {
+                            // Radial repair option: start/cancel a player-funded repair
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_repair_structure(player, client, payload);
                             }
                             handled = true;
 
@@ -3125,7 +3224,9 @@ int websocket_server_update(struct Sim* sim) {
                                                     while (pdiff < -(float)M_PI) pdiff += 2.0f*(float)M_PI;
                                                     if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
 
-                                                    uint16_t dmg16 = (uint16_t)SWORD_DAMAGE;
+                                                    int _raw_dmg = (int)SWORD_DAMAGE;
+                                                    int _arm_val = player_armor_value(tp);
+                                                    uint16_t dmg16 = (uint16_t)(_raw_dmg - _arm_val > 1 ? _raw_dmg - _arm_val : 1);
                                                     bool killed_player = (tp->health <= dmg16);
                                                     if (killed_player) tp->health = 0;
                                                     else tp->health -= dmg16;
@@ -3360,7 +3461,20 @@ int websocket_server_update(struct Sim* sim) {
                                     char* angle_start = strstr(payload, "\"aim_angle\":");
                                     if (angle_start) sscanf(angle_start + 12, "%f", &aim_angle);
                                     handle_island_cannon_aim(player, aim_angle);
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"aim_updated\"}");
+                                    {
+                                        float cur_aim = aim_angle;
+                                        for (uint32_t _si = 0; _si < placed_structure_count; _si++) {
+                                            if (!placed_structures[_si].active) continue;
+                                            if (placed_structures[_si].id != player->mounted_cannon_structure_id) continue;
+                                            cur_aim = placed_structures[_si].cannon_aim_angle;
+                                            break;
+                                        }
+                                        snprintf(response, sizeof(response),
+                                                 "{\"type\":\"message_ack\",\"status\":\"aim_updated\","
+                                                 "\"structure_id\":%u,\"cannon_aim_angle\":%.4f}",
+                                                 (unsigned)player->mounted_cannon_structure_id,
+                                                 cur_aim);
+                                    }
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 }
@@ -3430,8 +3544,11 @@ int websocket_server_update(struct Sim* sim) {
                                     char* at = strstr(payload, "\"ammo_type\":");
                                     if (at) ammo_type = (uint8_t)atoi(at + 12);
                                     if (ammo_type > 1) ammo_type = PROJ_TYPE_CANNONBALL;
-                                    handle_island_cannon_fire(player, ammo_type);
-                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
+                                    int fire_result = handle_island_cannon_fire(player, ammo_type);
+                                    if (fire_result == 2)
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_ammo\"}");
+                                    else
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 }
@@ -3532,6 +3649,101 @@ int websocket_server_update(struct Sim* sim) {
                                 if (player) {
                                     player->inventory.active_slot = 255;
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unequipped\"}");
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "equip_armor") == 0) {
+                            // INVENTORY: player equips an armour piece from a specific inventory slot
+                            // payload: {"type":"equip_armor","slot_idx":<N>}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    int slot_idx = -1;
+                                    const char* si_ptr = strstr(payload, "\"slot_idx\":");
+                                    if (si_ptr) sscanf(si_ptr + 11, "%d", &slot_idx);
+
+                                    if (slot_idx < 0 || slot_idx >= INVENTORY_SLOTS) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_slot\"}");
+                                    } else {
+                                        InventorySlot* src  = &player->inventory.slots[slot_idx];
+                                        ItemKind       item = src->item;
+                                        PlayerEquipment* eq = &player->inventory.equipment;
+                                        ItemKind* eq_slot   = NULL;
+
+                                        switch (item) {
+                                            case ITEM_CLOTH_HAT:     eq_slot = &eq->helm;   break;
+                                            case ITEM_CLOTH_SHIRT:   eq_slot = &eq->torso;  break;
+                                            case ITEM_CLOTH_ARMOR:   eq_slot = &eq->torso;  break; /* legacy */
+                                            case ITEM_CLOTH_PANTS:   eq_slot = &eq->legs;   break;
+                                            case ITEM_CLOTH_SHOES:   eq_slot = &eq->feet;   break;
+                                            case ITEM_CLOTH_GLOVES:  eq_slot = &eq->hands;  break;
+                                            case ITEM_WOODEN_SHIELD: eq_slot = &eq->shield; break;
+                                            case ITEM_IRON_SHIELD:   eq_slot = &eq->shield; break;
+                                            case ITEM_LEATHER_ARMOR: eq_slot = &eq->torso;  break;
+                                            case ITEM_IRON_ARMOR:    eq_slot = &eq->torso;  break;
+                                            default: break;
+                                        }
+
+                                        if (eq_slot == NULL || item == ITEM_NONE) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"not_equippable\"}");
+                                        } else {
+                                            /* If something already equipped in that slot, return it to inventory */
+                                            if (*eq_slot != ITEM_NONE) {
+                                                craft_grant(player, *eq_slot, 1);
+                                            }
+                                            /* Equip */
+                                            *eq_slot       = item;
+                                            src->item      = ITEM_NONE;
+                                            src->quantity  = 0;
+                                            strcpy(response, "{\"type\":\"message_ack\",\"status\":\"armor_equipped\"}");
+                                        }
+                                    }
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "unequip_armor") == 0) {
+                            // INVENTORY: player removes an armour piece from an equipment slot
+                            // payload: {"type":"unequip_armor","slot":"helm"|"torso"|"legs"|"feet"|"hands"|"shield"}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    char slot_name[16] = {0};
+                                    const char* sn_ptr = strstr(payload, "\"slot\":");
+                                    if (sn_ptr) {
+                                        sn_ptr += 7;
+                                        while (*sn_ptr == ' ' || *sn_ptr == '"') sn_ptr++;
+                                        int si = 0;
+                                        while (*sn_ptr && *sn_ptr != '"' && si < 15)
+                                            slot_name[si++] = *sn_ptr++;
+                                        slot_name[si] = '\0';
+                                    }
+
+                                    PlayerEquipment* eq = &player->inventory.equipment;
+                                    ItemKind* eq_slot   = NULL;
+                                    if      (strcmp(slot_name, "helm")   == 0) eq_slot = &eq->helm;
+                                    else if (strcmp(slot_name, "torso")  == 0) eq_slot = &eq->torso;
+                                    else if (strcmp(slot_name, "legs")   == 0) eq_slot = &eq->legs;
+                                    else if (strcmp(slot_name, "feet")   == 0) eq_slot = &eq->feet;
+                                    else if (strcmp(slot_name, "hands")  == 0) eq_slot = &eq->hands;
+                                    else if (strcmp(slot_name, "shield") == 0) eq_slot = &eq->shield;
+
+                                    if (eq_slot == NULL || *eq_slot == ITEM_NONE) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"slot_empty\"}");
+                                    } else {
+                                        craft_grant(player, *eq_slot, 1);
+                                        *eq_slot = ITEM_NONE;
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"armor_unequipped\"}");
+                                    }
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }
@@ -3815,9 +4027,15 @@ int websocket_server_update(struct Sim* sim) {
                                                 };
                                                 ShipModule new_plank = module_create(
                                                     plank_id, MODULE_TYPE_PLANK, plank_pos, 0);
-                                                // New planks start at 10% HP and heal passively
-                                                new_plank.health = new_plank.max_health / 10;
-                                                new_plank.state_bits |= MODULE_STATE_DAMAGED;
+                                                // Planks on scaffolded ships (construction) start at full HP;
+                                                // planks placed on a live ship start at 10% and heal passively.
+                                                bool placing_on_scaffold = (sim_ship->flags & SHIP_FLAG_SCAFFOLDED) != 0;
+                                                if (placing_on_scaffold) {
+                                                    new_plank.health = new_plank.max_health;
+                                                } else {
+                                                    new_plank.health = new_plank.max_health / 10;
+                                                    new_plank.state_bits |= MODULE_STATE_DAMAGED;
+                                                }
                                                 // Add to sim ship (physics) and SimpleShip (broadcast) layers
                                                 sim_ship->modules[sim_ship->module_count++] = new_plank;
                                                 if (simple_ship->module_count < MAX_MODULES_PER_SHIP)
@@ -5509,6 +5727,54 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "player_level_up") == 0) {
+                            // PLAYER LEVEL UP: client requests to consume XP and advance one level.
+                            // {"type":"player_level_up"}
+                            // The server validates that the player has enough XP before promoting.
+                            WebSocketPlayer* lup_player = find_player(client->player_id);
+                            if (!lup_player) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"player_not_found\"}");
+                            } else if (lup_player->player_level >= PLAYER_MAX_LEVEL) {
+                                strcpy(response, "{\"type\":\"player_level_up_fail\",\"reason\":\"max_level\"}");
+                            } else {
+                                uint32_t cost = PLAYER_LEVEL_XP_BASE * (uint32_t)lup_player->player_level;
+                                if (lup_player->player_xp < cost) {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"player_level_up_fail\",\"reason\":\"not_enough_xp\","
+                                        "\"xp\":%u,\"cost\":%u}",
+                                        lup_player->player_xp, cost);
+                                } else {
+                                    lup_player->player_xp -= cost;
+                                    lup_player->player_level++;
+                                    log_info("🎉 Player %u levelled up to %u!", lup_player->player_id, (unsigned)lup_player->player_level);
+                                    /* Broadcast level-up to all clients */
+                                    char lup_msg[256];
+                                    uint8_t lup_pts_earned = (uint8_t)(lup_player->player_level > 1 ? lup_player->player_level - 1 : 0);
+                                    uint8_t lup_total_spent = (uint8_t)(lup_player->stat_health + lup_player->stat_damage + lup_player->stat_stamina + lup_player->stat_weight);
+                                    uint8_t lup_pts_left = (uint8_t)(lup_pts_earned > lup_total_spent ? lup_pts_earned - lup_total_spent : 0);
+                                    snprintf(lup_msg, sizeof(lup_msg),
+                                        "{\"type\":\"PLAYER_LEVEL_UP\",\"playerId\":%u,"
+                                        "\"playerLevel\":%u,\"xp\":%u,\"statPoints\":%u}",
+                                        lup_player->player_id, lup_player->player_level,
+                                        lup_player->player_xp, lup_pts_left);
+                                    uint8_t lup_frame[512];
+                                    size_t lup_flen = websocket_create_frame(WS_OPCODE_TEXT,
+                                        lup_msg, strlen(lup_msg), (char*)lup_frame, sizeof(lup_frame));
+                                    if (lup_flen > 0) {
+                                        for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                                            struct WebSocketClient* wc = &ws_server.clients[ci];
+                                            if (wc->connected && wc->handshake_complete)
+                                                send(wc->fd, lup_frame, lup_flen, 0);
+                                        }
+                                    }
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"message_ack\",\"status\":\"levelled_up\","
+                                        "\"playerLevel\":%u,\"xp\":%u,\"statPoints\":%u}",
+                                        lup_player->player_level, lup_player->player_xp, lup_pts_left);
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "toggle_ladder") == 0) {
                             // TOGGLE LADDER: retract or extend a ladder on the player's current ship.
                             // {"type":"toggle_ladder","moduleId":N}
@@ -6427,7 +6693,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 /* Send current placed structures */
                                 {
-                                    static char structs_buf[8192];
+                                    static char structs_buf[16384];
                                     int spos = 0;
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                      "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -6443,10 +6709,21 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                             placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
                                             placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
-                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
-                                        bool is_door_s = (placed_structures[si].type == STRUCT_DOOR);
-                                        bool is_sy_s   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                            placed_structures[si].type == STRUCT_CANNON       ? "cannon" :
+                                            placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
+                                            placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
+                                            placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                            "unknown";
+                                        bool is_door_s   = (placed_structures[si].type == STRUCT_DOOR);
+                                        bool is_sy_s     = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        bool is_cannon_s = (placed_structures[si].type == STRUCT_CANNON);
+                                        bool is_cfrt_s   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
+                                        bool is_cflag_s  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         char sy_extra_s[256] = "";
+                                        char cannon_extra_s[64] = "";
+                                        char claim_extra_s[320] = "";
+                                        char dom_extra_s[512] = "";
+                                        format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
                                         if (is_sy_s) {
                                             char smj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -6469,11 +6746,56 @@ int websocket_server_update(struct Sim* sim) {
                                                      ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
                                                      sphase, smj);
                                         }
+                                        if (is_cannon_s) {
+                                            snprintf(cannon_extra_s, sizeof(cannon_extra_s),
+                                                     ",\"cannon_aim_angle\":%.4f",
+                                                     placed_structures[si].cannon_aim_angle);
+                                        }
+                                        if (is_cfrt_s) {
+                                            snprintf(claim_extra_s, sizeof(claim_extra_s),
+                                                     ",\"fortress_build_progress\":%.0f,\"fortress_complete\":%s,\"fortress_contested\":%s,\"claim_orphaned\":%s",
+                                                     placed_structures[si].claim_progress_ms,
+                                                     placed_structures[si].fortress_complete ? "true" : "false",
+                                                     placed_structures[si].claim_contested   ? "true" : "false",
+                                                     placed_structures[si].claim_orphaned    ? "true" : "false");
+                                        }
+                                        if (is_cflag_s) {
+                                            snprintf(claim_extra_s, sizeof(claim_extra_s),
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s,\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
+                                                     placed_structures[si].claim_progress_ms,
+                                                     placed_structures[si].claim_contested        ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms,
+                                                     placed_structures[si].claim_targets_fortress ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_linked_fort,
+                                                     (unsigned)placed_structures[si].claim_source_enemy);
+                                        } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
+                                            float ff_prog = (placed_structures[si].max_hp > 0)
+                                                ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
+                                                : 0.0f;
+                                            snprintf(claim_extra_s, sizeof(claim_extra_s),
+                                                     ",\"claim_orphaned\":%s"
+                                                     ",\"fortress_complete\":%s"
+                                                     ",\"fortress_build_progress\":%.0f"
+                                                     ",\"fortress_contested\":%s"
+                                                     ",\"claim_phase\":%u"
+                                                     ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                                                     ",\"claim_state\":%u,\"claim_grace_ms\":%.0f",
+                                                     placed_structures[si].claim_orphaned   ? "true" : "false",
+                                                     placed_structures[si].fortress_complete ? "true" : "false",
+                                                     ff_prog,
+                                                     placed_structures[si].claim_contested  ? "true" : "false",
+                                                     (unsigned)placed_structures[si].claim_phase,
+                                                     (placed_structures[si].claim_phase == FLAG_FORT_PHASE_CLAIMING) ? placed_structures[si].claim_progress_ms : 0.0f,
+                                                     (unsigned)FLAG_FORT_CLAIM_MS,
+                                                     (unsigned)placed_structures[si].claim_state,
+                                                     placed_structures[si].claim_grace_ms);
+                                        }
                                         spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos,
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s%s}",
+                                                         "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
+                                                         ",\"rotation\":%.2f%s%s%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -6483,14 +6805,18 @@ int websocket_server_update(struct Sim* sim) {
                                                          (unsigned)placed_structures[si].company_id,
                                                          (unsigned)placed_structures[si].hp,
                                                          (unsigned)placed_structures[si].max_hp,
+                                                         (unsigned)placed_structures[si].target_hp,
                                                          placed_structures[si].placer_name,
                                                          placed_structures[si].rotation,
                                                          is_door_s ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
-                                                         sy_extra_s);
+                                                         sy_extra_s,
+                                                         cannon_extra_s,
+                                                         claim_extra_s,
+                                                         dom_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
-                                    char sf[8448];
+                                    char sf[16640];
                                     size_t sflen = websocket_create_frame(
                                         WS_OPCODE_TEXT, structs_buf, (size_t)spos, sf, sizeof(sf));
                                     if (sflen > 0 && sflen < sizeof(sf))
@@ -6502,7 +6828,7 @@ int websocket_server_update(struct Sim* sim) {
                         } else if (strncmp(payload, "GET_STRUCTURES", 14) == 0) {
                             /* Re-send the full placed-structures list to this client. */
                             {
-                                static char gs_buf[8192];
+                                static char gs_buf[16384];
                                 int gp = 0;
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -6518,10 +6844,21 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_SHIPYARD     ? "shipyard" :
                                         placed_structures[si].type == STRUCT_WRECK        ? "wreck" :
                                         placed_structures[si].type == STRUCT_CEILING      ? "wood_ceiling" :
-                                        placed_structures[si].type == STRUCT_CANNON       ? "cannon" : "unknown";
-                                    bool gs_is_door = (placed_structures[si].type == STRUCT_DOOR);
-                                    bool gs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                        placed_structures[si].type == STRUCT_CANNON       ? "cannon" :
+                                        placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
+                                        placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
+                                        placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                        "unknown";
+                                    bool gs_is_door   = (placed_structures[si].type == STRUCT_DOOR);
+                                    bool gs_is_sy     = (placed_structures[si].type == STRUCT_SHIPYARD);
+                                    bool gs_is_cannon = (placed_structures[si].type == STRUCT_CANNON);
+                                    bool gs_is_cfrt   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
+                                    bool gs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                     char gs_sy_extra[256] = "";
+                                    char gs_cannon_extra[64] = "";
+                                    char gs_claim_extra[320] = "";
+                                    char gs_dom_extra[512] = "";
+                                    format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
                                     if (gs_is_sy) {
                                         char gmj[128] = "[]";
                                         if (placed_structures[si].modules_placed) {
@@ -6544,11 +6881,56 @@ int websocket_server_update(struct Sim* sim) {
                                                  ",\"construction_phase\":\"%s\",\"modules_placed\":%s",
                                                  gphase, gmj);
                                     }
+                                                                        if (gs_is_cannon) {
+                                                                                snprintf(gs_cannon_extra, sizeof(gs_cannon_extra),
+                                                                                                 ",\"cannon_aim_angle\":%.4f",
+                                                                                                 placed_structures[si].cannon_aim_angle);
+                                                                        }
+                                    if (gs_is_cfrt) {
+                                        snprintf(gs_claim_extra, sizeof(gs_claim_extra),
+                                                 ",\"fortress_build_progress\":%.0f,\"fortress_complete\":%s,\"fortress_contested\":%s,\"claim_orphaned\":%s",
+                                                 placed_structures[si].claim_progress_ms,
+                                                 placed_structures[si].fortress_complete ? "true" : "false",
+                                                 placed_structures[si].claim_contested   ? "true" : "false",
+                                                 placed_structures[si].claim_orphaned    ? "true" : "false");
+                                    }
+                                    if (gs_is_cflag) {
+                                        snprintf(gs_claim_extra, sizeof(gs_claim_extra),
+                                                 ",\"claim_progress_ms\":%.0f,\"claim_contested\":%s,\"claim_state\":%u,\"claim_grace_ms\":%.0f,\"claim_targets_fortress\":%s,\"claim_linked_fort\":%u,\"claim_source_enemy\":%u",
+                                                 placed_structures[si].claim_progress_ms,
+                                                 placed_structures[si].claim_contested        ? "true" : "false",
+                                                 (unsigned)placed_structures[si].claim_state,
+                                                 placed_structures[si].claim_grace_ms,
+                                                 placed_structures[si].claim_targets_fortress ? "true" : "false",
+                                                 (unsigned)placed_structures[si].claim_linked_fort,
+                                                 (unsigned)placed_structures[si].claim_source_enemy);
+                                    } else if (placed_structures[si].type == STRUCT_FLAG_FORT) {
+                                        float ff_prog = (placed_structures[si].max_hp > 0)
+                                            ? ((float)placed_structures[si].hp / (float)placed_structures[si].max_hp) * (float)FLAG_FORT_BUILD_MS
+                                            : 0.0f;
+                                        snprintf(gs_claim_extra, sizeof(gs_claim_extra),
+                                                 ",\"claim_orphaned\":%s"
+                                                 ",\"fortress_complete\":%s"
+                                                 ",\"fortress_build_progress\":%.0f"
+                                                 ",\"fortress_contested\":%s"
+                                                 ",\"claim_phase\":%u"
+                                                 ",\"claim_progress_ms\":%.0f,\"claim_total_ms\":%u"
+                                                 ",\"claim_state\":%u,\"claim_grace_ms\":%.0f",
+                                                 placed_structures[si].claim_orphaned   ? "true" : "false",
+                                                 placed_structures[si].fortress_complete ? "true" : "false",
+                                                 ff_prog,
+                                                 placed_structures[si].claim_contested  ? "true" : "false",
+                                                 (unsigned)placed_structures[si].claim_phase,
+                                                 (placed_structures[si].claim_phase == FLAG_FORT_PHASE_CLAIMING) ? placed_structures[si].claim_progress_ms : 0.0f,
+                                                 (unsigned)FLAG_FORT_CLAIM_MS,
+                                                 (unsigned)placed_structures[si].claim_state,
+                                                 placed_structures[si].claim_grace_ms);
+                                    }
                                     gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"placer_name\":\"%s\""
-                                                   ",\"rotation\":%.2f%s%s}",
+                                                   "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
+                                                                                                     ",\"rotation\":%.2f%s%s%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -6556,14 +6938,18 @@ int websocket_server_update(struct Sim* sim) {
                                                    (unsigned)placed_structures[si].company_id,
                                                    (unsigned)placed_structures[si].hp,
                                                    (unsigned)placed_structures[si].max_hp,
+                                                   (unsigned)placed_structures[si].target_hp,
                                                    placed_structures[si].placer_name,
                                                    placed_structures[si].rotation,
                                                    gs_is_door ? (placed_structures[si].open ? ",\"open\":true" : ",\"open\":false") : "",
-                                                   gs_sy_extra);
+                                                                                                     gs_sy_extra,
+                                                                                                     gs_cannon_extra,
+                                                                                                     gs_claim_extra,
+                                                                                                     gs_dom_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
-                                char gf[8448];
+                                char gf[16640];
                                 size_t gflen = websocket_create_frame(
                                     WS_OPCODE_TEXT, gs_buf, (size_t)gp, gf, sizeof(gf));
                                 if (gflen > 0 && gflen < sizeof(gf))
@@ -7478,14 +7864,22 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
                          npc->id, npc->name, company_id, player_id);
             }
 
-            /* One-way structure promotion: if the new company is non-neutral,
-             * upgrade every neutral structure this player placed to that company.
-             * Structures already claimed by a non-neutral company are never changed. */
-            if (company_id != COMPANY_NEUTRAL) {
+            /* One-way structure promotion: when the player joins a real company
+             * (non-solo, non-neutral), upgrade every neutral OR solo-owned structure
+             * this player placed to that company.  Structures already claimed by a
+             * real company are never changed.  Going back to SOLO leaves all
+             * company-owned structures with their current company.
+             * Flag forts and company fortresses are intentionally excluded —
+             * territorial ownership transfers will be handled separately. */
+            if (company_id != COMPANY_NEUTRAL && company_id != COMPANY_SOLO) {
                 for (uint32_t si = 0; si < placed_structure_count; si++) {
                     if (!placed_structures[si].active) continue;
                     if (placed_structures[si].placer_id != player_id) continue;
-                    if (placed_structures[si].company_id != COMPANY_NEUTRAL) continue;
+                    if (placed_structures[si].company_id != COMPANY_NEUTRAL &&
+                        placed_structures[si].company_id != COMPANY_SOLO) continue;
+                    /* Territorial anchors must never auto-transfer when a player changes company */
+                    if (placed_structures[si].type == STRUCT_FLAG_FORT ||
+                        placed_structures[si].type == STRUCT_COMPANY_FORTRESS) continue;
                     placed_structures[si].company_id = company_id;
                     char upd[128];
                     snprintf(upd, sizeof(upd),
@@ -7975,7 +8369,9 @@ void websocket_server_tick(float dt) {
                         wp->fire_timer_ms = FIRE_DURATION_MS;
                     }
                 } else {
-                    uint16_t dmg16 = (damage >= 65535.0f) ? 65535u : (uint16_t)damage;
+                    int _raw_dmg_p = (int)damage;
+                    int _arm_val_p = player_armor_value(wp);
+                    uint16_t dmg16 = (uint16_t)(_raw_dmg_p - _arm_val_p > 1 ? _raw_dmg_p - _arm_val_p : 1);
                     if (wp->health <= dmg16) { wp->health = 0; player_die(wp); } else { wp->health -= dmg16; }
                     if (!wp->is_mounted) {
                         float dist = sqrtf(dx * dx + dy * dy);
@@ -8160,6 +8556,25 @@ void websocket_server_tick(float dt) {
     // barrels track the oscillation without visible lag.
     {
         const float CANNON_TURN_SPEED        = 60.0f  * (float)(M_PI / 180.0f); // rad/s
+        for (uint32_t _csi = 0; _csi < placed_structure_count; _csi++) {
+            PlacedStructure* _cs = &placed_structures[_csi];
+            if (!_cs->active || _cs->type != STRUCT_CANNON) continue;
+            float cur  = _cs->cannon_aim_angle;
+            float tgt  = _cs->cannon_desired_aim_angle;
+            float diff = tgt - cur;
+            while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+            while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+            const float max_step = CANNON_TURN_SPEED * dt;
+            if (fabsf(diff) <= max_step) {
+                cur = tgt;
+            } else {
+                cur += (diff > 0.0f ? max_step : -max_step);
+            }
+            while (cur >  (float)M_PI) cur -= 2.0f * (float)M_PI;
+            while (cur < -(float)M_PI) cur += 2.0f * (float)M_PI;
+            _cs->cannon_aim_angle = cur;
+        }
+
         const float GHOST_CANNON_TURN_SPEED  = 180.0f * (float)(M_PI / 180.0f); // rad/s
         for (int s = 0; s < ship_count; s++) {
             if (!ships[s].active) continue;
@@ -8326,7 +8741,8 @@ void websocket_server_tick(float dt) {
                         const float STAMINA_REGEN_PCT_PER_S = 0.20f;
                         const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
                         uint32_t now_st = get_time_ms();
-                        if (ws_player->is_sprinting && ws_player->is_moving) {
+                        bool is_swimming = (ws_player->movement_state == PLAYER_STATE_SWIMMING);
+                        if (ws_player->is_sprinting && ws_player->is_moving && !is_swimming) {
                             uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
                             if (drain >= ws_player->stamina) {
                                 ws_player->stamina = 0;
@@ -8345,6 +8761,19 @@ void websocket_server_tick(float dt) {
                                 ? ws_player->max_stamina : (uint16_t)newSt;
                         }
                     }
+                    /* ── Passive HP regeneration ─────────────────────────────────────────
+                     * Recover 1 HP every 10 seconds when alive and not at full health. */
+                    if (ws_player->health > 0 && ws_player->health < ws_player->max_health) {
+                        ws_player->hp_regen_accum_ms += (uint32_t)(dt * 1000.0f + 0.5f);
+                        if (ws_player->hp_regen_accum_ms >= 10000u) {
+                            ws_player->hp_regen_accum_ms -= 10000u;
+                            ws_player->health++;
+                            if (ws_player->health > ws_player->max_health)
+                                ws_player->health = ws_player->max_health;
+                        }
+                    } else {
+                        ws_player->hp_regen_accum_ms = 0; /* reset when dead or full */
+                    }
                 }
                 if (ws_player->health == 0) {
                     /* already handled above — no-op block to keep else-chain correct */
@@ -8354,6 +8783,13 @@ void websocket_server_tick(float dt) {
                     if (on_ship && player_ship) {
                         ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
                                           &ws_player->x, &ws_player->y);
+                    } else {
+                        /* Island cannon: pin sim to ws mount position so the copy-back
+                         * below doesn't overwrite the mount coords with stale sim data. */
+                        sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
+                        sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
+                        sim_player->velocity.x = 0;
+                        sim_player->velocity.y = 0;
                     }
                     // Skip movement processing
                 } else if (ws_player->is_moving) {
@@ -8686,7 +9122,7 @@ void websocket_server_tick(float dt) {
                                     static const float BSR[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
                                     for (int ri = 0; ri < isl_mv->resource_count; ri++) {
                                         const IslandResource *res = &isl_mv->resources[ri];
-                                        if (res->type_id != RES_BOULDER) continue;
+                                        if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
                                         if (res->health <= 0) continue;
                                         uint32_t bseed = ((uint32_t)((int)res->ox * 73856093)) ^
                                                          ((uint32_t)((int)res->oy * 19349663));
@@ -9690,6 +10126,9 @@ void websocket_server_tick(float dt) {
      * so the dock constraint is the last thing to write angular_velocity
      * before sim_step integrates it into position. */
     handle_ship_dock_collisions();
+
+    /* Advance claiming-flag timers */
+    claim_tick((uint32_t)(dt * 1000.0f));
 
     // Tick processing complete
 }

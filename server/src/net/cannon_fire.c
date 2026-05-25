@@ -6,6 +6,9 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+/* Set to 1 to allow island cannons to fire without consuming ammo (testing). */
+#define ISLAND_CANNON_INFINITE_AMMO 1
 #include "net/structures.h"
 #include "net/websocket_server_internal.h"
 #include "net/cannon_fire.h"
@@ -1750,23 +1753,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             float ly = dx * wsn + dy * wc;
             if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
             /* Hit wall */
-            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
-            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
-            char msg[192];
-            if (s->hp == 0) {
-                s->active = false;
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, s->x, s->y);
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_hp_changed\","
-                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
-            }
-            websocket_server_broadcast(msg);
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1786,23 +1773,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
                   dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H)) continue;
             /* Hit workbench */
-            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
-            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
-            char msg[192];
-            if (s->hp == 0) {
-                s->active = false;
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, s->x, s->y);
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_hp_changed\","
-                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
-            }
-            websocket_server_broadcast(msg);
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1820,84 +1791,88 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
                   dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT)) continue;
             /* Hit floor */
-            uint16_t dmg = PROJ_HIT_STRUCT_DAMAGE;
-            s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
-            char msg[192];
-            if (s->hp == 0) {
-                float kx = s->x, ky = s->y;
-                s->active = false;
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_demolished\",\"structure_id\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, kx, ky);
-                websocket_server_broadcast(msg);
-                /* Cascade: floor destroyed — demolish workbenches that were resting
-                 * on this floor and have no other active floor still supporting them,
-                 * and demolish walls at its edges with no other supporting floor.
-                 * (The killed floor is already inactive so the inner scan finds only
-                 * surviving floors.) */
-                for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
-                    PlacedStructure* wb = &placed_structures[ci];
-                    if (!wb->active) continue;
-                    if (wb->type == STRUCT_WORKBENCH) {
-                        if (fabsf(wb->x - kx) > 25.0f || fabsf(wb->y - ky) > 25.0f) continue;
-                        bool has_support = false;
-                        for (uint32_t fi = 0; fi < placed_structure_count && !has_support; fi++) {
-                            PlacedStructure* f = &placed_structures[fi];
-                            if (!f->active || f->type != STRUCT_WOODEN_FLOOR) continue;
-                            if (fabsf(wb->x - f->x) <= 25.0f && fabsf(wb->y - f->y) <= 25.0f)
-                                has_support = true;
-                        }
-                        if (!has_support) {
-                            wb->active = false;
-                            char cwmsg[192];
-                            snprintf(cwmsg, sizeof(cwmsg),
-                                     "{\"type\":\"structure_demolished\","
-                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                                     wb->id, wb->x, wb->y);
-                            websocket_server_broadcast(cwmsg);
-                        }
-                    } else if (wb->type == STRUCT_WALL || wb->type == STRUCT_DOOR_FRAME) {
-                        /* Is this wall/door_frame adjacent to the demolished floor? */
-                        float _at_dx = wb->x - kx, _at_dy = wb->y - ky;
-                        if (_at_dx*_at_dx + _at_dy*_at_dy > 30.0f * 30.0f) continue;
-                        bool has_support = wall_has_support(wb->x, wb->y);
-                        if (!has_support) {
-                            float dfx = wb->x, dfy = wb->y;
-                            bool is_frame = (wb->type == STRUCT_DOOR_FRAME);
-                            wb->active = false;
-                            char cwmsg[192];
-                            snprintf(cwmsg, sizeof(cwmsg),
-                                     "{\"type\":\"structure_demolished\","
-                                     "\"structure_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                                     wb->id, wb->x, wb->y);
-                            websocket_server_broadcast(cwmsg);
-                            /* If a door_frame was lost, cascade any door sitting on it */
-                            if (is_frame) {
-                                for (uint32_t di = 0; di < placed_structure_count; di++) {
-                                    PlacedStructure* dp = &placed_structures[di];
-                                    if (!dp->active || dp->type != STRUCT_DOOR) continue;
-                                    if (fabsf(dp->x - dfx) >= 3.0f || fabsf(dp->y - dfy) >= 3.0f) continue;
-                                    dp->active = false;
-                                    char dmsg[128];
-                                    snprintf(dmsg, sizeof(dmsg),
-                                             "{\"type\":\"structure_demolished\",\"structure_id\":%u}",
-                                             dp->id);
-                                    websocket_server_broadcast(dmsg);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                snprintf(msg, sizeof(msg),
-                         "{\"type\":\"structure_hp_changed\","
-                         "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u"
-                         ",\"x\":%.1f,\"y\":%.1f}",
-                         s->id, (unsigned)s->hp, (unsigned)s->max_hp, s->x, s->y);
-                websocket_server_broadcast(msg);
-            }
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 3: island cannons — checked after floors so the cannon barrel
+         * takes direct hits rather than the underlying floor absorbing them. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_CANNON) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            /* Circular hit-box ~15px radius covering the cannon mount */
+            if (dx * dx + dy * dy > 15.0f * 15.0f) continue;
+            /* Hit island cannon */
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 4: shipyards — U-shaped dock arms and back wall. */
+        /* Dock local constants (client px, matching dock_physics.c) */
+        #define SY_HW      170.0f   /* half total width */
+        #define SY_HH      445.0f   /* half total height */
+        #define SY_ARM_T    50.0f   /* arm thickness */
+        #define SY_BACK_T   50.0f   /* back wall thickness */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_SHIPYARD) continue;
+            /* Broad radial cull (bounding circle of 170×445 box ≈ 476) */
+            float bdx = px - s->x, bdy = py - s->y;
+            if (bdx * bdx + bdy * bdy > 476.0f * 476.0f) continue;
+            /* Transform into dock-local space */
+            float lx, ly;
+            dock_world_to_local(s, px, py, &lx, &ly);
+            /* Check against the three physical members of the U-shape:
+             * Left arm:  lx ∈ [−SY_HW, −(SY_HW − SY_ARM_T)], ly ∈ [−SY_HH, +SY_HH]
+             * Right arm: lx ∈ [+(SY_HW − SY_ARM_T), +SY_HW],  ly ∈ [−SY_HH, +SY_HH]
+             * Back wall: lx ∈ [−SY_HW, +SY_HW], ly ∈ [−SY_HH, −SY_HH + SY_BACK_T] */
+            const float ai = SY_HW - SY_ARM_T;   /* arm inner edge = 120 */
+            bool in_left  = (lx >= -SY_HW && lx <= -ai)
+                         && (ly >= -SY_HH && ly <= SY_HH);
+            bool in_right = (lx >=  ai    && lx <=  SY_HW)
+                         && (ly >= -SY_HH && ly <= SY_HH);
+            bool in_back  = (fabsf(lx) <= SY_HW)
+                         && (ly >= -SY_HH && ly <= -SY_HH + SY_BACK_T);
+            if (!in_left && !in_right && !in_back) continue;
+            /* Hit shipyard */
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+        #undef SY_HW
+        #undef SY_HH
+        #undef SY_ARM_T
+        #undef SY_BACK_T
+
+        /* Pass 5: flag forts & company fortresses — radial hit-box.
+         * Hit radii match the rendered tower footprint (≈44px / 60px tile).
+         * apply_structure_damage gates the CLAIMING phase internally, so it's
+         * safe to hit-test unconditionally here. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active) continue;
+            float hit_r;
+            if (s->type == STRUCT_FLAG_FORT)            hit_r = 22.0f;
+            else if (s->type == STRUCT_COMPANY_FORTRESS) hit_r = 30.0f;
+            else continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            if (dx * dx + dy * dy > hit_r * hit_r) continue;
+            /* Hit fort */
+            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1961,6 +1936,43 @@ void check_projectile_static_collisions(struct Sim* sim) {
             }
         }
 
+        /* ── Test vs. island boulders (linear scan, boulders are sparse) ─ */
+        if (!removed) {
+            const float BOULDER_BASE_HIT_R = 38.0f; /* matches client-side boulder radius */
+            const int   CANNON_BOULDER_DMG  = 50;
+            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
+                IslandDef* isl = &ISLAND_PRESETS[ii];
+                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
+                    IslandResource* res = &isl->resources[ri];
+                    if (res->type_id != RES_BOULDER) continue;
+                    if (res->health <= 0) continue;
+                    float bx = isl->x + res->ox;
+                    float by = isl->y + res->oy;
+                    float dx = px - bx;
+                    float dy = py - by;
+                    float hitR = BOULDER_BASE_HIT_R * res->size;
+                    if (dx * dx + dy * dy > hitR * hitR) continue;
+                    /* Hit boulder */
+                    res->health -= CANNON_BOULDER_DMG;
+                    if (res->health < 0) res->health = 0;
+                    if (res->health == 0) {
+                        res->respawn_at_ms = get_time_ms() + 180000u; /* 3 min */
+                    }
+                    char bmsg[160];
+                    snprintf(bmsg, sizeof(bmsg),
+                             "{\"type\":\"resource_damaged\",\"island_id\":%u"
+                             ",\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
+                             (unsigned)isl->id, ri, res->ox, res->oy, res->health, res->max_health);
+                    websocket_server_broadcast(bmsg);
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            ((size_t)sim->projectile_count - (size_t)i - 1u)
+                            * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
+            }
+        }
+
         if (!removed) i++;
     }
 }
@@ -1986,6 +1998,7 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
         return;
     }
 
+#if !ISLAND_CANNON_INFINITE_AMMO
     /* Consume 1 cannonball from the player's inventory */
     bool found_ammo = false;
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
@@ -1998,15 +2011,17 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
         }
     }
     if (!found_ammo) {
-        /* Player has no cannonballs — silently fail (client can show "no ammo" if needed) */
+        /* Signal no-ammo to caller so it can send feedback to client */
+        str->no_ammo_flag = true;
         return;
     }
+#endif
 
     /* Set reload timer (matches ship cannon) */
     str->cannon_reload_ms = (uint32_t)CANNON_RELOAD_TIME_MS;
 
     float aim = str->cannon_aim_angle;
-    const float BARREL_LENGTH = 30.0f;  /* px, same as ship cannon */
+    const float BARREL_LENGTH = 40.0f;  /* px — matches the 40-unit barrel drawn by the client */
     float spawn_x = str->x + cosf(aim) * BARREL_LENGTH;
     float spawn_y = str->y + sinf(aim) * BARREL_LENGTH;
 
@@ -2054,8 +2069,31 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         if (!placed_structures[si].active) continue;
         if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
-        placed_structures[si].cannon_aim_angle = aim_angle;
-        player->cannon_aim_angle = aim_angle;
+
+        /* Barrel faces at (rotation_deg × π/180 − π/2) in world space — same convention
+         * used in the client renderer (barrel points local −y, base rotation from placement). */
+        float facing = placed_structures[si].rotation * (float)(M_PI / 180.0) - (float)(M_PI / 2.0);
+
+        /* Compute signed offset from facing direction */
+        float offset = aim_angle - facing;
+        while (offset >  (float)M_PI) offset -= 2.0f * (float)M_PI;
+        while (offset < -(float)M_PI) offset += 2.0f * (float)M_PI;
+
+        /* Three zones — same as ship cannon:
+         *   |offset| ≤ 30°          → track normally
+         *   30° < |offset| ≤ 45°   → clamp to ±30° edge
+         *   |offset| > 45°         → reset barrel to facing direction */
+        const float AIM_RANGE  = 30.0f * ((float)M_PI / 180.0f);
+        const float RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
+        if (fabsf(offset) > AIM_RANGE + RESET_MARGIN) {
+            offset = 0.0f;
+        } else if (fabsf(offset) > AIM_RANGE) {
+            offset = (offset > 0.0f) ? AIM_RANGE : -AIM_RANGE;
+        }
+
+        float clamped = facing + offset;
+        placed_structures[si].cannon_desired_aim_angle = clamped;
+        player->cannon_aim_angle = clamped;
         break;
     }
 }
@@ -2063,13 +2101,17 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
 /**
  * handle_island_cannon_fire – called when a player mounted on an island cannon
  * sends a cannon_fire message.
+ * Returns: 0 = fired OK, 1 = still reloading, 2 = no ammo.
  */
-void handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type) {
-    if (!player || player->mounted_cannon_structure_id == 0) return;
+int handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type) {
+    if (!player || player->mounted_cannon_structure_id == 0) return 1;
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         if (!placed_structures[si].active) continue;
         if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
+        placed_structures[si].no_ammo_flag = false;
         fire_island_cannon(&placed_structures[si], player, ammo_type);
-        break;
+        if (placed_structures[si].no_ammo_flag) return 2; /* no ammo */
+        return 0; /* fired */
     }
+    return 1;
 }

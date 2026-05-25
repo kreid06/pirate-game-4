@@ -12,6 +12,13 @@
 export interface RadialOption {
   id: string;
   label: string;
+  /** When true the slice is rendered greyed-out and cannot be selected
+   *  (getHoveredId returns null while hovering a disabled slice, but the
+   *  slice is still hover-detected so its tooltip can render). */
+  disabled?: boolean;
+  /** Optional multi-line tooltip rendered below the radial when the slice
+   *  is hovered. Each entry is one line. */
+  tooltip?: string[];
 }
 
 const RING_INNER        = 40;   // px — inner radius of the ring
@@ -25,6 +32,8 @@ export class RadialMenu {
   private _center: { x: number; y: number } | null = null;
   private _open = false;
   private _hoveredId: string | null = null;
+  /** Slice currently under the cursor (regardless of disabled). -1 = dead zone. */
+  private _hoveredIdx: number = -1;
   private _mouseX = 0;
   private _mouseY = 0;
 
@@ -46,6 +55,7 @@ export class RadialMenu {
     this._open      = false;
     this._center    = null;
     this._hoveredId = null;
+    this._hoveredIdx = -1;
   }
 
   getHoveredId(): string | null {
@@ -64,6 +74,7 @@ export class RadialMenu {
     if (dist < DEAD_ZONE) {
       // Inside dead zone — null signals a cancelled interaction
       this._hoveredId = null;
+      this._hoveredIdx = -1;
       return;
     }
 
@@ -81,7 +92,12 @@ export class RadialMenu {
       if (diff > Math.PI) diff = Math.PI * 2 - diff;
       if (diff < bestDiff) { bestDiff = diff; bestIdx = i; }
     }
-    this._hoveredId = this._options[bestIdx].id;
+    this._hoveredIdx = bestIdx;
+    const opt = this._options[bestIdx];
+    // Disabled slices are hover-detected (for tooltip rendering) but never
+    // selectable — getHoveredId reports null so the caller treats the click
+    // as a cancel.
+    this._hoveredId = opt.disabled ? null : opt.id;
   }
 
   // ── Rendering ──────────────────────────────────────────────────────────
@@ -101,7 +117,8 @@ export class RadialMenu {
     // ── Ring slices ────────────────────────────────────────────
     for (let i = 0; i < n; i++) {
       const opt       = this._options[i];
-      const isHovered = opt.id === this._hoveredId;
+      const isHovered = i === this._hoveredIdx;
+      const isDisabled = opt.disabled === true;
 
       ctx.beginPath();
 
@@ -139,9 +156,21 @@ export class RadialMenu {
       ctx.closePath();
 
       if (isHovered) {
-        ctx.fillStyle   = 'rgba(200, 145, 20, 0.90)';
-        ctx.strokeStyle = 'rgba(255, 220, 80, 1.0)';
-        ctx.lineWidth   = 2;
+        if (isDisabled) {
+          // Disabled + hovered: muted highlight so the cursor is visible but
+          // the slice clearly reads as "not selectable".
+          ctx.fillStyle   = 'rgba(50, 50, 50, 0.85)';
+          ctx.strokeStyle = 'rgba(140, 60, 60, 0.85)';
+          ctx.lineWidth   = 2;
+        } else {
+          ctx.fillStyle   = 'rgba(200, 145, 20, 0.90)';
+          ctx.strokeStyle = 'rgba(255, 220, 80, 1.0)';
+          ctx.lineWidth   = 2;
+        }
+      } else if (isDisabled) {
+        ctx.fillStyle   = 'rgba(14, 18, 26, 0.55)';
+        ctx.strokeStyle = 'rgba(90, 70, 40, 0.40)';
+        ctx.lineWidth   = 1.5;
       } else {
         ctx.fillStyle   = 'rgba(14, 18, 26, 0.82)';
         ctx.strokeStyle = 'rgba(130, 105, 55, 0.55)';
@@ -156,7 +185,11 @@ export class RadialMenu {
       const ly = cy + Math.sin(midAngle) * RING_MID;
 
       ctx.font         = isHovered ? 'bold 11px Georgia, serif' : '10px Georgia, serif';
-      ctx.fillStyle    = isHovered ? '#fff8e0' : 'rgba(200, 185, 140, 0.85)';
+      if (isDisabled) {
+        ctx.fillStyle  = isHovered ? 'rgba(220, 170, 170, 0.85)' : 'rgba(140, 130, 110, 0.45)';
+      } else {
+        ctx.fillStyle  = isHovered ? '#fff8e0' : 'rgba(200, 185, 140, 0.85)';
+      }
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(opt.label, lx, ly);
@@ -174,6 +207,47 @@ export class RadialMenu {
     ctx.strokeStyle = isCancelling ? 'rgba(200, 60, 60, 0.30)' : 'rgba(180, 140, 60, 0.15)';
     ctx.lineWidth   = 1;
     ctx.stroke();
+
+    // ── Tooltip for hovered slice (works for disabled slices too) ─────────
+    const hoveredOpt = this._hoveredIdx >= 0 ? this._options[this._hoveredIdx] : null;
+    const tip = hoveredOpt?.tooltip;
+    if (tip && tip.length > 0) {
+      const lineH = 14;
+      const padX  = 8;
+      const padY  = 6;
+      ctx.font = '11px Georgia, serif';
+      let maxW = 0;
+      for (const line of tip) {
+        const w = ctx.measureText(line).width;
+        if (w > maxW) maxW = w;
+      }
+      const boxW = maxW + padX * 2;
+      const boxH = tip.length * lineH + padY * 2;
+      const boxX = cx - boxW / 2;
+      const boxY = cy + RING_OUTER + 10;
+
+      ctx.fillStyle   = 'rgba(10, 14, 20, 0.92)';
+      ctx.strokeStyle = 'rgba(130, 105, 55, 0.7)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.rect(boxX, boxY, boxW, boxH);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      for (let k = 0; k < tip.length; k++) {
+        const line = tip[k];
+        // Lines beginning with "!" render in red (used for shortfalls).
+        if (line.startsWith('!')) {
+          ctx.fillStyle = 'rgba(255, 130, 130, 0.95)';
+          ctx.fillText(line.slice(1), boxX + padX, boxY + padY + k * lineH);
+        } else {
+          ctx.fillStyle = 'rgba(220, 205, 160, 0.95)';
+          ctx.fillText(line, boxX + padX, boxY + padY + k * lineH);
+        }
+      }
+    }
 
     ctx.restore();
   }

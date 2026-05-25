@@ -10,7 +10,7 @@
 
 
 /** Count total quantity of an item across all inventory slots. */
-static int craft_count_item(WebSocketPlayer* player, ItemKind item) {
+int craft_count_item(WebSocketPlayer* player, ItemKind item) {
     int total = 0;
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
         if (player->inventory.slots[s].item == item)
@@ -20,7 +20,7 @@ static int craft_count_item(WebSocketPlayer* player, ItemKind item) {
 }
 
 /** Consume `amount` units of `item` from inventory. Returns true on success. */
-static bool craft_consume(WebSocketPlayer* player, ItemKind item, int amount) {
+bool craft_consume(WebSocketPlayer* player, ItemKind item, int amount) {
     int remaining = amount;
     for (int s = 0; s < INVENTORY_SLOTS && remaining > 0; s++) {
         if (player->inventory.slots[s].item == item) {
@@ -88,13 +88,20 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         const char* id;
         ItemKind    output;
         int         output_count;
-        CraftIng    ing[2];
+        CraftIng    ing[3];
         int         ing_count;
     } CraftRecipe;
 
     static const CraftRecipe recipes[] = {
         /* Hand-craft recipes (no workbench required) */
         { "craft_repair_kit",    ITEM_REPAIR_KIT,   1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
+        /* Cloth armour set */
+        { "craft_cloth_hat",     ITEM_CLOTH_HAT,    1, { {ITEM_FIBER,  8}, {0,0}            }, 1 },
+        { "craft_cloth_shirt",   ITEM_CLOTH_SHIRT,  1, { {ITEM_FIBER, 25}, {0,0}            }, 1 },
+        { "craft_cloth_pants",   ITEM_CLOTH_PANTS,  1, { {ITEM_FIBER, 20}, {0,0}            }, 1 },
+        { "craft_cloth_shoes",   ITEM_CLOTH_SHOES,  1, { {ITEM_FIBER, 12}, {0,0}            }, 1 },
+        { "craft_cloth_gloves",  ITEM_CLOTH_GLOVES, 1, { {ITEM_FIBER, 10}, {0,0}            }, 1 },
+        /* Legacy generic cloth armor — kept for save compatibility */
         { "craft_cloth_armor",   ITEM_CLOTH_ARMOR,  1, { {ITEM_FIBER, 8}, {0,0}             }, 1 },
         { "craft_wooden_shield", ITEM_WOODEN_SHIELD,1, { {ITEM_WOOD,  6}, {0,0}             }, 1 },
         { "craft_axe",           ITEM_AXE,          1, { {ITEM_WOOD,  3}, {ITEM_STONE, 2}   }, 2 },
@@ -103,6 +110,7 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         { "craft_workbench",     ITEM_WORKBENCH,    1, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
         /* Workbench recipes */
         { "craft_plank",         ITEM_PLANK,        1, { {ITEM_WOOD, 30}, {0,0}             }, 1 },
+        { "craft_deck",          ITEM_DECK,         1, { {ITEM_WOOD, 75}, {0,0}             }, 2 },
         { "craft_sail",          ITEM_SAIL,          1, { {ITEM_WOOD, 40}, {ITEM_FIBER, 100} }, 2 },
         { "craft_helm",          ITEM_HELM,          1, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
         { "craft_cannon",        ITEM_CANNON,        1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20}  }, 2 },
@@ -119,7 +127,9 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         { "craft_stone_axe",     ITEM_AXE,           1, { {ITEM_WOOD,  2}, {ITEM_STONE,  5}  }, 2 },
         { "craft_stone_pickaxe", ITEM_PICKAXE,       1, { {ITEM_WOOD,  2}, {ITEM_STONE,  4}  }, 2 },
         { "craft_hammer",        ITEM_HAMMER,        1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
-        { "craft_claim_flag",    ITEM_CLAIM_FLAG,    1, { {ITEM_WOOD,  5}, {0,0}             }, 1 },
+        { "craft_claim_flag",       ITEM_CLAIM_FLAG,      1, { {ITEM_WOOD,  5}, {0,0},          {0,0}            }, 1 },
+        { "craft_flag_fort",         ITEM_FLAG_FORT,       1, { {ITEM_WOOD, 40}, {ITEM_STONE, 40},{0,0}            }, 2 },
+        { "craft_company_fortress",  ITEM_COMPANY_FORTRESS,1, { {ITEM_WOOD,100}, {ITEM_STONE,100},{ITEM_METAL, 20} }, 3 },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 

@@ -161,7 +161,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress';
   islandId: number;
   x: number;
   y: number;
@@ -171,12 +171,63 @@ export interface PlacedStructure {
   placerName: string;  // display name of the player who built this
   doorOpen?: boolean;  // doors only: true = open (passable)
   rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
+  cannonAimAngle?: number; // cannons only: world-space aim angle in radians
   /** Shipyard only — current ship under construction. Absent when empty. */
   construction?: ShipConstruction;
+  /** Claiming flag: countdown progress in ms (starts at FLAG_CLAIM_DURATION_MS=300000, reaches 0 to capture) */
+  claimProgress?: number;
+  /** Claiming flag: convenience flag, true while state == CONTEST */
+  claimContested?: boolean;
+  /** Claiming flag: legacy field, always false in current server protocol */
+  claimTargetsFortress?: boolean;
+  /** Claiming flag: id of own source structure (the "mine" anchor) — defines half of the contested slice. */
+  claimLinkedFort?: number;
+  /** Claiming flag: id of enemy source structure — defines the other half of the contested slice. */
+  claimSourceEnemy?: number;
+  /** Claiming flag: 0=CONTEST, 1=CLAIMING_GRACE, 2=CLAIMING, 3=REVERSING_GRACE, 4=REVERSING */
+  claimState?: number;
+  /** Claiming flag: accumulated time (ms) toward leaving the current grace state */
+  claimGraceMs?: number;
+  /** Forts/fortresses: true when this structure was orphaned by a successful claim flip. Orphaned structures no longer project a claim radius. */
+  claimOrphaned?: boolean;
+  /** Per-structure dominators: ordered list of OTHER-company structure IDs
+   * that dominate this one on the overlap of their claim radii. Index 0 = top
+   * (strongest). Pushed by successful claim flag captures. */
+  dominators?: number[];
+  /** Company Fortress: 0 → COMPANY_FORTRESS_BUILD_MS (900000) build progress in ms */
+  fortressBuildProgress?: number;
+  /** Company Fortress: true when the 15-minute build is complete */
+  fortressComplete?: boolean;
+  /** Company Fortress: true when an enemy is inside the radius, pausing the build */
+  fortressContested?: boolean;
+  /** Flag Fort: lifecycle phase. 0=CLAIMING (1-min ground claim, semi-transparent,
+   *  non-damageable, no HP bar), 1=BUILDING (heals 10%→30% HP, damageable, flashing
+   *  claim border), 2=ACTIVE (mirrors fortressComplete). Absent on non-flag-fort types. */
+  claimPhase?: number;
+  /** Flag Fort (CLAIMING phase only): countdown progress in ms toward 0 = phase complete. */
+  claimPhaseProgressMs?: number;
+  /** Flag Fort (CLAIMING phase only): total claim duration in ms (FLAG_FORT_CLAIM_MS). */
+  claimPhaseTotalMs?: number;
+  /** Flag Fort only: heal ceiling. Drops with each combat hit (target_hp -= damage)
+   *  and never recovers; the auto-repair heals current `hp` up to `targetHp` (not maxHp).
+   *  Render "REPAIRING" label whenever `hp < targetHp`. Defaults to maxHp when absent. */
+  targetHp?: number;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)
 export const COMPANY_UNCLAIMED = 0; // No owner — ship/NPC has no faction
+
+/** Represents an island territory claim. */
+export interface IslandClaim {
+  islandId: number;
+  companyId: number;
+  fortStructureId: number;
+  /** World position of the flag fort (for drawing radius ring). */
+  fortX: number;
+  fortY: number;
+  /** Claim radius in world units (matches server CLAIM_RADIUS_FLAG_FORT). */
+  fortRadius: number;
+}
 export const COMPANY_NEUTRAL   = 0; // Alias for COMPANY_UNCLAIMED (backward compat)
 export const COMPANY_SOLO      = 1; // Player-owned, no guild affiliation
 export const COMPANY_PIRATES   = 2; // Pirates guild faction

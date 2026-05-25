@@ -209,6 +209,33 @@ const RECIPES: Recipe[] = [
       { label: 'Wood', count: 5 },
     ],
   },
+  {
+    id: 'craft_flag_fort',
+    category: 'Structures',
+    outputName: 'Flag Fort',
+    outputCount: 1,
+    symbol: '🏰',
+    color: '#cc8822',
+    borderColor: '#886611',
+    ingredients: [
+      { label: 'Wood',  count: 40 },
+      { label: 'Stone', count: 40 },
+    ],
+  },
+  {
+    id: 'craft_company_fortress',
+    category: 'Structures',
+    outputName: 'Company Fortress',
+    outputCount: 1,
+    symbol: '🏯',
+    color: '#8844cc',
+    borderColor: '#5522aa',
+    ingredients: [
+      { label: 'Wood',  count: 100 },
+      { label: 'Stone', count: 100 },
+      { label: 'Metal', count: 20 },
+    ],
+  },
   // ── Ship ──────────────────────────────────────────────────────────────────
   {
     id: 'craft_plank',
@@ -220,6 +247,18 @@ const RECIPES: Recipe[] = [
     borderColor: '#7a5520',
     ingredients: [
       { label: 'Wood', count: 30 },
+    ],
+  },
+  {
+    id: 'craft_deck',
+    category: 'Ship',
+    outputName: 'Deck',
+    outputCount: 1,
+    symbol: '⊟',
+    color: '#8b5e3c',
+    borderColor: '#5c3a1c',
+    ingredients: [
+      { label: 'Wood', count: 75 },
     ],
   },
   {
@@ -625,6 +664,7 @@ export class CraftingMenu {
         // Map recipe id → ItemKind
         const KIND_MAP: Record<string, ItemKind> = {
           craft_plank:       'plank',
+          craft_deck:        'deck',
           craft_sail:        'sail',
           craft_helm:        'helm_kit',
           craft_cannon:      'cannon',

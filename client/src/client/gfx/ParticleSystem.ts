@@ -18,6 +18,10 @@ interface Particle {
   size: number;
   color: string;
   alpha: number;
+  // Smoke particles use a distinct fade + grow-then-shrink curve
+  smoke?: true;
+  _initAlpha?: number;  // captured at spawn for the smoke curve
+  _initSize?: number;   // captured at spawn for the smoke curve
 }
 
 /**
@@ -38,11 +42,20 @@ export enum ParticleEffectType {
 /**
  * Particle effect configuration
  */
+interface ParticleEmitter {
+  elapsed: number;      // seconds since emitter was created
+  duration: number;     // total active spawn duration (seconds)
+  accumulator: number;  // fractional accumulator for spawn rate
+  spawnRate: number;    // particles per second
+  spawn: () => Particle;
+}
+
 interface ParticleEffect {
   position: Vec2;
   type: ParticleEffectType;
   intensity: number;
   particles: Particle[];
+  emitter?: ParticleEmitter; // optional continuous emitter
 }
 
 /**
@@ -416,6 +429,108 @@ export class ParticleSystem {
   }
 
   /**
+   * Burst of wood debris and smoke puffs when a structure tile is destroyed.
+   * @param position  World-space centre of the destroyed tile.
+   */
+  createStructureDestroy(position: Vec2): void {
+    const q = this.qualityMultipliers[this.quality];
+    const particles: Particle[] = [];
+
+    // Wood splinter debris — fast, short-lived, warm browns
+    const debrisCount = Math.floor(14 * q);
+    const woodColors  = ['#8B4513', '#a0522d', '#c8813a', '#6b3510', '#e0aa60'];
+    for (let i = 0; i < debrisCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 80 + Math.random() * 160;
+      particles.push({
+        position: position.add(Vec2.from((Math.random() - 0.5) * 10, (Math.random() - 0.5) * 10)),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed),
+        life: 0,
+        maxLife: 0.35 + Math.random() * 0.45,
+        size: 2 + Math.random() * 4,
+        color: woodColors[Math.floor(Math.random() * woodColors.length)],
+        alpha: 0.9,
+      });
+    }
+
+    // Smoke emitter — spawns continuously for 30 s with rich variety so the
+    // plume keeps churning instead of looking like a static cloud.
+    const spawnSmokePuff = (): Particle => {
+      // Three puff "flavours" picked at random for visual variety:
+      //   0 — wide slow drifter, mid-grey
+      //   1 — small fast lofter (rises a bit, dark soot)
+      //   2 — bright pale ash, medium
+      const flavour = Math.random();
+      let velX: number, velY: number, size: number, grey: number, life: number, alpha: number;
+
+      if (flavour < 0.5) {
+        // Slow lateral drifter — bulk of the plume
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 2 + Math.random() * 5;
+        velX = Math.cos(ang) * spd;
+        velY = Math.sin(ang) * spd - 1;            // gentle upward bias
+        size = 14 + Math.random() * 20;
+        grey = 90 + Math.floor(Math.random() * 60); // darker
+        life = 4 + Math.random() * 3;               // 4–7 s
+        alpha = 0.45 + Math.random() * 0.2;
+      } else if (flavour < 0.8) {
+        // Soot lofter — small, rises faster, darker
+        const ang = -Math.PI / 2 + (Math.random() - 0.5) * 0.8;
+        const spd = 12 + Math.random() * 18;
+        velX = Math.cos(ang) * spd;
+        velY = Math.sin(ang) * spd;
+        size = 6 + Math.random() * 10;
+        grey = 60 + Math.floor(Math.random() * 50); // dark soot
+        life = 2 + Math.random() * 2;               // 2–4 s
+        alpha = 0.55 + Math.random() * 0.2;
+      } else {
+        // Pale ash burst — bright, large, short
+        const ang = Math.random() * Math.PI * 2;
+        const spd = 5 + Math.random() * 10;
+        velX = Math.cos(ang) * spd;
+        velY = Math.sin(ang) * spd - 4;
+        size = 18 + Math.random() * 14;
+        grey = 170 + Math.floor(Math.random() * 60); // pale
+        life = 2.5 + Math.random() * 2;
+        alpha = 0.35 + Math.random() * 0.15;
+      }
+
+      return {
+        position: position.add(Vec2.from(
+          (Math.random() - 0.5) * 28,
+          (Math.random() - 0.5) * 28,
+        )),
+        velocity: Vec2.from(velX, velY),
+        life: 0,
+        maxLife: life,
+        size,
+        color: `rgb(${grey},${grey},${grey})`,
+        alpha: alpha,   // starts at full opacity — expand+fade curve takes over
+        smoke: true,
+        _initAlpha: alpha,
+        _initSize: size,
+      };
+    };
+
+    // Seed an initial cluster so the plume looks alive from frame 1
+    for (let i = 0; i < 3; i++) particles.push(spawnSmokePuff());
+
+    this.effects.push({
+      position: position.clone(),
+      type: ParticleEffectType.EXPLOSION,
+      intensity: 0.6,
+      particles,
+      emitter: {
+        elapsed: 0,
+        duration: 30,
+        accumulator: 0,
+        spawnRate: 2,       // ~2 puffs/sec
+        spawn: spawnSmokePuff,
+      },
+    });
+  }
+
+  /**
    * Scatter fire blobs through the live flame-cone volume.
    * Called every frame from RenderSystem.drawFlameCones.
    *
@@ -587,6 +702,19 @@ export class ParticleSystem {
     const isFire = effect.type === ParticleEffectType.FLAME_CONE_EMBERS
                 || effect.type === ParticleEffectType.FLAME_TRAIL;
 
+    // Continuous emitter — spawn new particles while still active
+    if (effect.emitter) {
+      const em = effect.emitter;
+      em.elapsed += deltaTime;
+      if (em.elapsed < em.duration) {
+        em.accumulator += deltaTime * em.spawnRate;
+        while (em.accumulator >= 1) {
+          em.accumulator -= 1;
+          effect.particles.push(em.spawn());
+        }
+      }
+    }
+
     for (let i = effect.particles.length - 1; i >= 0; i--) {
       const particle = effect.particles[i];
       particle.life += deltaTime;
@@ -616,14 +744,23 @@ export class ParticleSystem {
   private updateParticle(particle: Particle, deltaTime: number): void {
     // Apply velocity
     particle.position = particle.position.add(particle.velocity.mul(deltaTime));
-    
-    // Update alpha based on life (fade out over time)
+
     const lifeRatio = particle.life / particle.maxLife;
-    particle.alpha = 1.0 - lifeRatio;
-    
-    // Update size for some effect types (shrink over time)
-    if (lifeRatio > 0.5) {
-      particle.size *= 0.95; // Gradually shrink
+
+    if (particle.smoke) {
+      // Smoke curve: spawn fully visible, expand outward, fade out linearly.
+      const initA = particle._initAlpha ?? 0.5;
+      const initS = particle._initSize  ?? particle.size;
+      // Alpha: linear fade from initAlpha → 0
+      particle.alpha = initA * (1 - lifeRatio);
+      // Size: expand from initSize → 2.5× initSize over full lifetime
+      particle.size = initS * (1 + 1.5 * lifeRatio);
+    } else {
+      // Default: linear fade out
+      particle.alpha = 1.0 - lifeRatio;
+      if (lifeRatio > 0.5) {
+        particle.size *= 0.95;
+      }
     }
   }
   

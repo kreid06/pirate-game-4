@@ -26,7 +26,7 @@ import { PhysicsConfig } from '../sim/Types.js';
 // UI System
 import { UIManager } from './ui/UIManager.js';
 import { MENU_ID } from './ui/UIManager.js';
-import { RadialMenu } from './ui/RadialMenu.js';
+import { RadialMenu, type RadialOption } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
@@ -105,9 +105,13 @@ export class ClientApplication {
   private pendingActiveSlot: number | null = null;
   /** companyId keyed by structure id — for team-colouring damage numbers on structure hits. */
   private _structureCompanyMap = new Map<number, number>();
+  /** performance.now() timestamp of the most recent combat damage seen for a
+   *  given structure id. Used to grey out the Repair option during the 30s
+   *  post-damage cooldown enforced by the server. */
+  private _structureLastDamagedAt = new Map<number, number>();
   // Optimistic mount state — held from module_interact_success until the server's
   // world-state echo confirms isMounted=true for the same module.
-  private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2 } | null = null;
+  private pendingMount: { moduleId: number; moduleKind: string; mountOffset?: Vec2; mountWorldPos?: Vec2 } | null = null;
 
   // Camera zoom animation
   private targetZoom  = 1.0;  // Zoom level we're animating toward
@@ -164,7 +168,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -193,6 +197,8 @@ export class ClientApplication {
   private islandEditor: IslandEditor | null = null;
   /** True when the player's active slot is wooden_floor or workbench on an island. */
   private islandBuildMode = false;
+  /** When true, renders the territory claim overlay (Alt key held). */
+  private showTerritoryOverlay = false;
   private accumulator = 0;
   private readonly clientTickDuration: number; // milliseconds per client tick
   
@@ -364,23 +370,26 @@ export class ClientApplication {
       this.networkManager.onModuleMountFailure = (reason) => {
         this.handleModuleMountFailure(reason);
       };
-      this.networkManager.onIslandCannonMounted = (structureId, _aimAngle, _reloadMs, mountX, mountY) => {
+      this.networkManager.onIslandCannonMounted = (structureId, aimAngle, _reloadMs, mountX, mountY, facingAngle) => {
         console.log(`🎯 [ISLAND CANNON] Mounted to island cannon ${structureId} at (${mountX.toFixed(1)}, ${mountY.toFixed(1)})`);
-        // Snap player to the mount position optimistically (before next world-state echo).
-        // We reuse pendingMount so the same guard in the world-state loop keeps it applied.
-        this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON' };
-        const pid = this.networkManager.getAssignedPlayerId();
-        const ws  = this.authoritativeWorldState || this.predictedWorldState;
-        if (pid !== null && ws) {
-          const p = ws.players.find(pl => pl.id === pid);
-          if (p) {
-            p.position = Vec2.from(mountX, mountY);
-            p.isMounted = true;
-            p.mountedModuleId = structureId;
-          }
-        }
-        // Enable aim/fire controls (no shipId — island cannon is not on a ship)
-        this.inputManager?.setMountState(true, undefined, 'CANNON', structureId);
+        // Store world mount position so the pendingMount loop re-applies it every
+        // frame until the server's world-state echo confirms isMounted=true.
+        const mountPos = Vec2.from(mountX, mountY);
+        this.pendingMount = { moduleId: structureId, moduleKind: 'CANNON', mountWorldPos: mountPos };
+        // Enable aim/fire controls (no shipId — island cannon is not on a ship).
+        // Pass initial aim and facing angle so clamping and barrel rendering start correctly.
+        this.inputManager?.setMountState(true, undefined, 'CANNON', structureId, undefined, aimAngle, facingAngle);
+      };
+      this.networkManager.onIslandCannonAimSync = (structureId, aimAngle) => {
+        this.inputManager?.syncIslandCannonAim(structureId, aimAngle);
+      };
+      this.networkManager.onNoAmmo = () => {
+        // Show floating "No cannonballs!" warning at the player's current position
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const ws = this.predictedWorldState || this.authoritativeWorldState;
+        const player = assignedId !== null ? ws?.players.find(p => p.id === assignedId) : ws?.players[0];
+        const pos = player?.position ?? Vec2.from(0, 0);
+        this.renderSystem.spawnResourcePickup(pos, 'No cannonballs!', '#ff4444');
       };
       this.networkManager.onModuleDestroyed = (shipId, moduleId, damage, hitX, hitY) => {
         // Spawn a kill damage number at the hit location
@@ -617,7 +626,7 @@ export class ClientApplication {
         if (success) {
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
         } else if (reason === 'no_stamina') {
-          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'No stamina!', '#e05050');
+          if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -631,7 +640,7 @@ export class ClientApplication {
             if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
           }
         } else if (reason === 'no_stamina') {
-          if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'No stamina!', '#e05050');
+          if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -642,7 +651,7 @@ export class ClientApplication {
         if (success) {
           if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
         } else if (reason === 'no_stamina') {
-          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -653,18 +662,19 @@ export class ClientApplication {
         if (success) {
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
         } else if (reason === 'no_stamina') {
-          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'No stamina!', '#e05050');
+          if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'Out of stamina!', '#e05050');
         }
       };
 
-      this.networkManager.onBoulderHarvestResult = (success, metal, reason) => {
+      this.networkManager.onBoulderHarvestResult = (success, metal, stone, reason) => {
         const ws = this.authoritativeWorldState ?? this.predictedWorldState;
         const myId = this.networkManager.getAssignedPlayerId();
         const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+          if (me && metal > 0) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+          if (me && stone > 0) this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a');
         } else if (reason === 'no_stamina') {
-          if (me) this.renderSystem.spawnResourcePickup(me.position, 'No stamina!', '#e05050');
+          if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
       };
 
@@ -672,7 +682,7 @@ export class ClientApplication {
         const _wsS = this.authoritativeWorldState ?? this.predictedWorldState;
         const _idS = this.networkManager.getAssignedPlayerId();
         const _meS = _idS !== null && _wsS ? _wsS.players.find(p => p.id === _idS) : null;
-        if (_meS) this.renderSystem.spawnResourcePickup(_meS.position, 'No stamina!', '#e05050');
+        if (_meS) this.renderSystem.spawnResourcePickup(_meS.position, 'Out of stamina!', '#e05050');
       };
 
       // Authoritative per-ship weapon group state from server
@@ -1232,7 +1242,7 @@ export class ClientApplication {
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
           const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -1249,7 +1259,7 @@ export class ClientApplication {
               : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
               : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
-            this.networkManager.sendPlaceStructure(kind, pos.x, pos.y, rot);
+            this.networkManager.sendPlaceStructure(kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', pos.x, pos.y, rot);
           }
           return;
         }
@@ -1761,6 +1771,13 @@ export class ClientApplication {
         this.networkManager.sendPlayerStatUpgrade(stat);
       });
 
+      this.uiManager.onPlayerLevelUp = () => {
+        this.networkManager.sendPlayerLevelUp();
+      };
+
+      // Sync the level-up callback so the LEVEL UP button in the player menu works
+      this.uiManager.syncPlayerLevelUpCallback();
+
       // Wire respawn confirmation: flash white, snap camera, send network request immediately
       this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
         // 1. Hold screen at full white
@@ -1828,6 +1845,16 @@ export class ClientApplication {
         this.networkManager.sendCraftItem(recipeId);
       };
 
+      // Equip armour item from inventory slot (click on armor item in bag)
+      this.uiManager.playerMenu.onEquipItem = (slotIdx) => {
+        this.networkManager.sendEquipArmor(slotIdx);
+      };
+
+      // Unequip armour from equipment slot (click on filled equipment slot)
+      this.uiManager.playerMenu.onUnequipSlot = (slot) => {
+        this.networkManager.sendUnequipArmor(slot);
+      };
+
       // Wreck salvage menu
       this.uiManager.salvageMenu.onTakeItem = (wreckId) => {
         this.networkManager.sendStructureInteract(wreckId);
@@ -1882,15 +1909,15 @@ export class ClientApplication {
           if (!ws) continue;
           const p = ws.players.find(pl => pl.id === playerId);
           if (!p) continue;
-          p.xp         = xp;
-          p.maxHealth  = maxHealth;
-          p.maxStamina = maxStamina;
-          p.level      = playerLevel;
-          p.statHealth  = statHealth;
-          p.statDamage  = statDamage;
-          p.statStamina = statStamina;
-          p.statWeight  = statWeight;
-          p.statPoints  = statPoints;
+          if (xp !== undefined)         p.xp         = xp;
+          if (playerLevel !== undefined) p.level      = playerLevel;
+          if (maxHealth)                 p.maxHealth  = maxHealth;
+          if (maxStamina)                p.maxStamina = maxStamina;
+          if (statHealth !== undefined)  p.statHealth  = statHealth;
+          if (statDamage !== undefined)  p.statDamage  = statDamage;
+          if (statStamina !== undefined) p.statStamina = statStamina;
+          if (statWeight !== undefined)  p.statWeight  = statWeight;
+          if (statPoints !== undefined)  p.statPoints  = statPoints;
         }
       };
 
@@ -2050,6 +2077,7 @@ export class ClientApplication {
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
         this._structureCompanyMap.delete(id);
+        this._structureLastDamagedAt.delete(id);
         this.renderSystem.removePlacedStructure(id);
         if (x !== undefined && y !== undefined) {
           // Cannonball kill — big explosion
@@ -2066,8 +2094,15 @@ export class ClientApplication {
         this._structureCompanyMap.set(id, companyId);
         this.renderSystem.updateStructureCompany(id, companyId);
       };
-      this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y) => {
-        this.renderSystem.updateStructureHp(id, hp, maxHp);
+      this.networkManager.onStructureHpChanged = (id, hp, maxHp, x, y, targetHp) => {
+        const prev = this.renderSystem.updateStructureHp(id, hp, maxHp, targetHp);
+        // Suppress damage FX (explosion + red damage number) when HP is going
+        // up — this fires during repair ticks and shouldn't look like damage.
+        const isRepairTick = prev !== null && hp >= prev.prevHp && (targetHp === undefined || targetHp >= prev.prevTargetHp);
+        if (isRepairTick) return;
+        // Real damage — stamp the time so the Repair radial option can apply
+        // the 30s cooldown that the server enforces.
+        this._structureLastDamagedAt.set(id, performance.now());
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.6);
         const _shComp = this._structureCompanyMap.get(id) ?? -1;
         const _shMyId = this.networkManager.getAssignedPlayerId();
@@ -2084,6 +2119,62 @@ export class ClientApplication {
         this._structureCompanyMap.set(s.id, s.companyId ?? 0);
         this.renderSystem.addPlacedStructure(s);
       };
+
+      // Territory claim events
+      this.networkManager.onTerritoryUpdate = (islandId, companyId, claimed, fortX, fortY, fortRadius, isCompanyFortress) => {
+        if (claimed) {
+          this.renderSystem.setIslandClaim(islandId, companyId, fortX, fortY, fortRadius, isCompanyFortress);
+        } else {
+          this.renderSystem.clearIslandClaim(islandId);
+        }
+      };
+      this.networkManager.onTerritoryCaptured = (islandId, newCompanyId) => {
+        this.renderSystem.setIslandClaim(islandId, newCompanyId);
+        this.renderSystem.showAnnouncement(`🏰 Island ${islandId} captured!`, 'info', 3.0);
+      };
+      this.networkManager.onClaimFlagProgress = (structId, progressMs, contested, targetsFortress, state, graceMs) => {
+        this.renderSystem.updateClaimFlagProgress(structId, progressMs, contested, targetsFortress, state, graceMs);
+      };
+      this.networkManager.onTerritoryFlipped = (_flagId, orphanedId, oldCompanyId, newCompanyId, islandId) => {
+        // Immediate visual flip: mark the captured source structure as orphaned so its
+        // claim radius (and any contested-area hatching it implies) disappears right away,
+        // without waiting for the next full snapshot.
+        if (orphanedId) this.renderSystem.setStructureClaimOrphaned(orphanedId, true);
+        this.renderSystem.showAnnouncement(
+          `🏴 Territory flipped on island ${islandId}: company ${oldCompanyId} → ${newCompanyId}`,
+          'info', 4.0,
+        );
+      };
+      this.networkManager.onStructureDominators = (structureId, dominators) => {
+        this.renderSystem.setStructureDominators(structureId, dominators);
+      };
+      this.networkManager.onFortressBuildProgress = (structId, companyId, islandId, progressMs, totalMs, contested) => {
+        this.renderSystem.updateFortressBuildProgress(structId, companyId, islandId, progressMs, totalMs, contested);
+      };
+      this.networkManager.onFortressComplete = (structId, companyId, islandId) => {
+        // Defensive: ignore if this id is actually a flag fort (server should
+        // never emit `fortress_complete` for flag forts — they use the
+        // dedicated `flag_fort_active` event — but guard anyway).
+        const ps = this.renderSystem.getPlacedStructureById?.(structId);
+        if (ps && ps.type === 'flag_fort') return;
+        this.renderSystem.onFortressComplete(structId, companyId, islandId);
+        this.renderSystem.showAnnouncement(`🏰 Company Fortress complete! Island ${islandId} claimed!`, 'info', 5.0);
+      };
+      this.networkManager.onFortressCaptured = (structId, newCompanyId, _oldCompanyId, islandId) => {
+        this.renderSystem.onFortressCaptured(structId, newCompanyId, islandId);
+        this.renderSystem.showAnnouncement(`⚔️ Company Fortress captured! Island ${islandId} changing hands…`, 'info', 5.0);
+      };
+      this.networkManager.onFlagFortActive = (structId, _companyId, islandId, active, claimPhase) => {
+        this.renderSystem.onFlagFortActive(structId, active, claimPhase);
+        if (active) {
+          this.renderSystem.showAnnouncement(`🚩 Flag Fort active on island ${islandId}`, 'info', 3.0);
+        } else {
+          this.renderSystem.showAnnouncement(`🚩 Flag Fort deactivated on island ${islandId}`, 'info', 3.0);
+        }
+      };
+      this.networkManager.onFlagFortBuildProgress = (structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs, targetHp) => {
+        this.renderSystem.updateFlagFortBuildProgress(structId, hp, maxHp, contested, active, claimPhase, claimProgressMs, claimTotalMs, claimState, claimGraceMs, targetHp);
+      };
       this.networkManager.onPlacementFailed = (reason, _x, _y, _structureType, blockerId) => {
         const REASONS: Record<string, string> = {
           occupied:          'Space already occupied',
@@ -2092,7 +2183,18 @@ export class ClientApplication {
           needs_floor_edge:  'Must snap to a floor edge',
           needs_door_frame:  'Requires a door frame',
           wrong_company:     'Belongs to another company',
-          enemy_territory:   'Enemy territory',
+          enemy_territory:       'Enemy territory',
+          not_in_my_territory:     'Not inside your claimed area',
+          not_in_contested_area:   'Not in a contested area (need overlapping enemy claim)',
+          contested_area_already_claimed: 'Contested area already has your claim flag',
+          slice_already_owned:     'Your company already owns this slice',
+          island_already_claimed: 'Island already claimed',
+          fort_exists:            'Company fort limit reached (max 3 per island)',
+          not_on_island:          'Must be placed on an island',
+          not_contested_territory: 'Not in contested territory',
+          not_in_fort_radius:      'Must be placed within an enemy fort or fortress radius',
+          not_in_fort_or_fortress_radius: 'Must be inside an enemy fort or fortress radius',
+          no_flag_fort:            'Your company has no flag fort',
           blocked_by_player: 'Blocked by a player',
           too_far:           'Too far away',
           in_water:          'Cannot place in water',
@@ -2154,6 +2256,31 @@ export class ClientApplication {
           };
           this.renderSystem.showAnnouncement(`\u2692 ${msg[reason ?? ''] ?? 'Cannot craft right now'}`, 'info', 2.0);
         }
+      };
+
+      // ── Structure repair feedback ─────────────────────────────────────
+      this.networkManager.onRepairStarted = (_id, _pid, _hp, _maxHp, _tHp) => {
+        this.renderSystem.showAnnouncement('\ud83d\udd27 Repair started', 'info', 1.5);
+      };
+      this.networkManager.onRepairCancelled = (_id, _pid) => {
+        this.renderSystem.showAnnouncement('\ud83d\udd27 Repair cancelled', 'info', 1.5);
+      };
+      this.networkManager.onRepairComplete = (_id, _pid) => {
+        this.renderSystem.showAnnouncement('\ud83d\udd27 Repair complete', 'info', 1.5);
+      };
+      this.networkManager.onRepairFail = (_id, reason) => {
+        const msg: Record<string, string> = {
+          insufficient_resources: 'Not enough materials to repair',
+          already_full:           'Structure is already fully repaired',
+          in_progress:            'Repair already in progress',
+          too_far:                'Too far to repair',
+          wrong_company:          'Cannot repair another company\u2019s structure',
+          not_repairable:         'This structure cannot be repaired',
+          claiming:               'Cannot repair during claim phase',
+          recently_damaged:       'Recently damaged \u2014 wait before repairing',
+          not_found:              'Structure not found',
+        };
+        this.renderSystem.showAnnouncement(`\ud83d\udd27 ${msg[reason] ?? 'Repair failed'}`, 'info', 2.0);
       };
 
       // Handle FLAME_CONE_FIRE / FLAME_WAVE_UPDATE: advancing/retreating cone visual
@@ -2456,6 +2583,7 @@ export class ClientApplication {
         if (player) {
           this.inputManager.setPlayerPosition(player.position);
           this.inputManager.setPlayerVelocity(player.velocity); // For stop detection
+          this.inputManager.setPlayerStamina(player.stamina ?? player.maxStamina ?? 100);
           this.renderSystem.playerInteractInfo = {
             worldPos: player.position,
             localPos: player.localPosition ?? null,
@@ -2466,6 +2594,15 @@ export class ClientApplication {
       
       // Update module interactions
       this.moduleInteractionSystem.update(this.predictedWorldState || this.authoritativeWorldState, dt);
+    }
+
+    // Update island cannon aim angle for barrel rendering
+    if (this.inputManager.isOnIslandCannon) {
+      this.renderSystem.islandCannonId = this.inputManager.mountedCannonModuleId;
+      this.renderSystem.islandCannonAimAngle = this.inputManager.getLastCannonAimAngle();
+    } else {
+      this.renderSystem.islandCannonId = null;
+      this.renderSystem.islandCannonAimAngle = null;
     }
   }
   
@@ -2685,6 +2822,9 @@ export class ClientApplication {
           this.canvas.height,
         );
       }
+
+      // Hover debug HUD — rendered last so it always appears above all UI layers
+      this.renderSystem.renderHoverDebugHUD();
     }
   }
   
@@ -2793,17 +2933,29 @@ export class ClientApplication {
       const pid = this.networkManager.getAssignedPlayerId();
       const p   = pid !== null ? worldState.players.find(pl => pl.id === pid) : null;
       if (p) {
-        if (p.isMounted && p.mountedModuleId === this.pendingMount.moduleId) {
-          this.pendingMount = null; // server confirmed — stop overriding
+        const isIslandCannon = !!this.pendingMount.mountWorldPos;
+        if (isIslandCannon) {
+          // Island cannon: server won't mirror the structure ID in mounted_module_id.
+          // Always apply position snap while pendingMount is active (until server confirms mount).
+          if (this.pendingMount.mountWorldPos) p.position = this.pendingMount.mountWorldPos;
+          if (p.isMounted) {
+            this.pendingMount = null; // server confirmed — stop overriding position
+          } else {
+            // Not yet confirmed — force isMounted so UI/controls stay in mount state
+            p.isMounted = true;
+          }
+        } else if (p.isMounted && p.mountedModuleId === this.pendingMount.moduleId) {
+          this.pendingMount = null; // server confirmed ship-mount — stop overriding
         } else {
-          // Keep local mount state visible until server catches up
+          // Keep local mount state visible until server catches up (ship cannon/helm)
           p.isMounted        = true;
           p.mountedModuleId  = this.pendingMount.moduleId;
-          if (this.pendingMount.mountOffset) p.mountOffset = this.pendingMount.mountOffset;
+          if (this.pendingMount.mountOffset)   p.mountOffset = this.pendingMount.mountOffset;
+          if (this.pendingMount.mountWorldPos) p.position    = this.pendingMount.mountWorldPos;
         }
       }
     }
-    
+
     // Update network latency for dynamic interpolation buffer
     const networkStats = this.networkManager.getStats();
     if (networkStats.ping > 0) {
@@ -2845,8 +2997,14 @@ export class ClientApplication {
             console.log(`⚓ [MOUNT STATE] Server says player is mounted to module ${player.mountedModuleId}`);
             this.exitAllBuildModes();
             // Look up the module kind from the ship
-            let moduleKind = 'helm'; // default fallback
             const ship = worldState.ships.find(s => s.id === player.carrierId);
+            // Island cannon: player.carrierId == 0, ship not found — mount is
+            // already handled by onIslandCannonMounted; skip setMountState here
+            // so we don't overwrite mountKind with the 'helm' default fallback.
+            if (!ship && player.carrierId === 0) {
+              // island cannon already configured — nothing to do
+            } else {
+            let moduleKind = 'helm'; // default fallback (only reached with a real ship)
             if (ship && player.mountedModuleId) {
               const mod = ship.modules.find(m => m.id === player.mountedModuleId);
               if (mod) moduleKind = mod.kind.toLowerCase();
@@ -2864,6 +3022,7 @@ export class ClientApplication {
               this.preHelmZoom = this.camera.getState().zoom;
               this.targetZoom  = ClientApplication.HELM_ZOOM;
             }
+            } // end else (ship cannon / helm branch)
           } else {
             // Player is now dismounted - disable ship controls
             console.log(`⚓ [MOUNT STATE] Server says player is dismounted`);
@@ -2973,13 +3132,17 @@ export class ClientApplication {
     const inDeckBuildMode   = activeItem === 'deck';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon');
+    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress' || activeItem === 'claim_flag');
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon') : null
+      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
+
+    // Show territory claim overlay when Alt is held OR a territory item is active in the hotbar
+    const territoryHotbarActive = activeItem === 'flag_fort' || activeItem === 'claim_flag' || activeItem === 'company_fortress';
+    this.renderSystem.setTerritoryOverlay(this.showTerritoryOverlay || territoryHotbarActive);
 
     // Track whether the active item changed while in explicit build mode
     if (this.explicitBuildMode) {
@@ -3786,6 +3949,77 @@ export class ClientApplication {
             if (struct) {
               const myCompanyE = meE.companyId ?? 0;
               const isOwnCompany = struct.companyId === myCompanyE;
+              // Repair option is shown when the structure has been damaged
+              // (target_hp < max_hp). Claim flags, wrecks, and forts still in
+              // their CLAIMING phase are never repairable on the server side,
+              // so we suppress the option for those types client-side too.
+              const _structIsDamaged = (s: typeof struct): boolean => {
+                if (s.type === 'claim_flag' || s.type === 'wreck') return false;
+                if (s.type === 'flag_fort' && (s as any).claimPhase === 0) return false;
+                const maxHp = s.maxHp ?? 0;
+                if (maxHp <= 0) return false;
+                const tHp = (typeof (s as any).targetHp === 'number') ? (s as any).targetHp as number : maxHp;
+                return tHp < maxHp;
+              };
+
+              // Repair recipes — must mirror server `repair_recipe_for_struct`
+              // in server/src/net/structures.c exactly. Cost per ingredient is
+              // ceil(qty * missing_hp / max_hp), min 1 (mirrors `compute_repair_cost`).
+              const REPAIR_RECIPES: Record<string, { item: string; qty: number }[]> = {
+                wooden_floor:     [{ item: 'wood',  qty: 2   }],
+                wood_ceiling:     [{ item: 'wood',  qty: 15  }],
+                workbench:        [{ item: 'wood',  qty: 10  }],
+                wall:             [{ item: 'wood',  qty: 3   }],
+                door_frame:       [{ item: 'wood',  qty: 6   }],
+                door:             [{ item: 'wood',  qty: 4   }],
+                shipyard:         [{ item: 'wood',  qty: 30  }, { item: 'plank', qty: 10 }],
+                cannon:           [{ item: 'wood',  qty: 8   }, { item: 'metal', qty: 20 }],
+                flag_fort:        [{ item: 'wood',  qty: 40  }, { item: 'stone', qty: 40 }],
+                company_fortress: [{ item: 'wood',  qty: 100 }, { item: 'stone', qty: 100 }, { item: 'metal', qty: 20 }],
+              };
+              const ITEM_PRETTY: Record<string, string> = {
+                wood: 'Wood', plank: 'Plank', stone: 'Stone', metal: 'Metal',
+              };
+              const _have = (item: string): number => {
+                const slots = (meE as any).inventory?.slots ?? [];
+                let total = 0;
+                for (const sl of slots) {
+                  if (sl && sl.item === item) total += sl.quantity ?? 0;
+                }
+                return total;
+              };
+              const _buildRepairOption = (s: typeof struct): RadialOption | null => {
+                if (!_structIsDamaged(s)) return null;
+                const recipe = REPAIR_RECIPES[s.type];
+                if (!recipe) return null;
+                const maxHp = s.maxHp ?? 0;
+                const tHp = (typeof (s as any).targetHp === 'number') ? (s as any).targetHp as number : maxHp;
+                const missing = Math.max(0, maxHp - tHp);
+                if (missing <= 0 || maxHp <= 0) return null;
+                // 30s post-damage cooldown (mirrors server enforcement).
+                const lastDmgAt = this._structureLastDamagedAt.get(s.id) ?? 0;
+                const sinceDmg  = lastDmgAt > 0 ? (performance.now() - lastDmgAt) : Infinity;
+                const cooldownRemainingMs = sinceDmg < 30000 ? (30000 - sinceDmg) : 0;
+                const tip: string[] = ['Repair cost:'];
+                let affordable = true;
+                for (const ing of recipe) {
+                  const cost = Math.max(1, Math.ceil(ing.qty * missing / maxHp));
+                  const h    = _have(ing.item);
+                  const ok   = h >= cost;
+                  if (!ok) affordable = false;
+                  const name = ITEM_PRETTY[ing.item] ?? ing.item;
+                  const line = `  ${name}: ${h}/${cost}`;
+                  // Lines that start with '!' are rendered red by RadialMenu.
+                  tip.push(ok ? line : '!' + line);
+                }
+                if (cooldownRemainingMs > 0) {
+                  tip.push(`!Recently damaged — wait ${Math.ceil(cooldownRemainingMs / 1000)}s`);
+                } else if (!affordable) {
+                  tip.push('!Not enough resources');
+                }
+                const disabled = !affordable || cooldownRemainingMs > 0;
+                return { id: 'repair', label: 'Repair', disabled, tooltip: tip };
+              };
 
               // Can't interact at all with another company's floor (no use, no demolish)
               if (!isOwnCompany && struct.type === 'wooden_floor') {
@@ -3805,8 +4039,9 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const opts: { id: string; label: string }[] = [{ id: 'use', label: 'Open Workbench' }];
+                  const opts: RadialOption[] = [{ id: 'use', label: 'Open Workbench' }];
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) opts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, opts);
                 }, 400);
               } else if (struct.type === 'wall') {
@@ -3815,9 +4050,9 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'demolish', label: 'Demolish Wall' },
-                  ]);
+                  const wallOpts: RadialOption[] = [{ id: 'demolish', label: 'Demolish Wall' }];
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) wallOpts.push(r); }
+                  this._radialMenu.open(mp2.x, mp2.y, wallOpts);
                 }, 600);
               } else if (struct.type === 'door_frame') {
                 // Door Frame: hold E = radial with Demolish (removing the frame also removes the panel)
@@ -3825,9 +4060,9 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  this._radialMenu.open(mp2.x, mp2.y, [
-                    { id: 'demolish', label: 'Demolish Door Frame' },
-                  ]);
+                  const dfOpts: RadialOption[] = [{ id: 'demolish', label: 'Demolish Door Frame' }];
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) dfOpts.push(r); }
+                  this._radialMenu.open(mp2.x, mp2.y, dfOpts);
                 }, 600);
               } else if (struct.type === 'door') {
                 // Door: tap E = toggle open/closed; hold E = radial with Demolish
@@ -3835,10 +4070,11 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const doorOpts: { id: string; label: string }[] = [
+                  const doorOpts: RadialOption[] = [
                     { id: 'use', label: struct.doorOpen ? 'Close Door' : 'Open Door' },
                   ];
                   if (isOwnCompany) doorOpts.push({ id: 'demolish', label: 'Demolish' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) doorOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, doorOpts);
                 }, 400);
               } else if (struct.type === 'shipyard') {
@@ -3847,12 +4083,13 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const opts: { id: string; label: string }[] = [];
+                  const opts: RadialOption[] = [];
                   if (struct.construction?.phase === 'building') {
                     // Ship can be released at any time — it's a real entity
                     opts.push({ id: 'release', label: '⚓ Release Ship' });
                   }
                   if (isOwnCompany) opts.push({ id: 'demolish', label: 'Demolish Shipyard' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) opts.push(r); }
                   if (opts.length > 0) {
                     this._radialMenu.open(mp2.x, mp2.y, opts);
                   }
@@ -3871,10 +4108,11 @@ export class ClientApplication {
                   this._ladderHoldTimer = null;
                   this.renderSystem.stopLadderHoldRing();
                   const mp2 = this.inputManager.getMouseScreenPosition();
-                  const cannonOpts: { id: string; label: string }[] = [
+                  const cannonOpts: RadialOption[] = [
                     { id: 'use', label: 'Mount Cannon' },
                   ];
                   if (isOwnCompany) cannonOpts.push({ id: 'demolish', label: 'Demolish Cannon' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) cannonOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
                 }, 300);
               } else {
@@ -3890,9 +4128,11 @@ export class ClientApplication {
                     : struct.type === 'workbench'   ? 'Demolish Workbench'
                     : struct.type === 'shipyard'    ? 'Demolish Shipyard'
                     : 'Demolish Floor';
-                  this._radialMenu.open(mp2.x, mp2.y, [
+                  const defOpts: RadialOption[] = [
                     { id: 'demolish', label: _demolishLabel },
-                  ]);
+                  ];
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) defOpts.push(r); }
+                  this._radialMenu.open(mp2.x, mp2.y, defOpts);
                 }, 600);
               }
               break;
@@ -4029,6 +4269,11 @@ export class ClientApplication {
           e.preventDefault();
           break;
 
+        case '[':
+          this.renderSystem.toggleHoverDebugHUD();
+          e.preventDefault();
+          break;
+
         case 'm':
         case 'M': {
           if (e.repeat) break;
@@ -4063,6 +4308,30 @@ export class ClientApplication {
           break;
         }
       }
+    });
+
+    // Alt key — show territory claim overlay while held
+    window.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Alt') {
+        ev.preventDefault(); // suppress browser menu activation
+        this.showTerritoryOverlay = true;
+        this.renderSystem.setTerritoryOverlay(true);
+      }
+    });
+    window.addEventListener('keyup', (ev) => {
+      if (ev.key === 'Alt') {
+        this.showTerritoryOverlay = false;
+        this.renderSystem.setTerritoryOverlay(false);
+      }
+    });
+
+    // Close radial menu when the tab/window loses focus so it doesn't stay
+    // permanently open if the player tabs out while the wheel is visible.
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) this._radialMenu.close();
+    });
+    window.addEventListener('blur', () => {
+      this._radialMenu.close();
     });
 
     // L key — mass-toggle all company ladders, wired via InputManager.onToggleAllLadders
@@ -4174,6 +4443,12 @@ export class ClientApplication {
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           console.log(`🔨 [STRUCTURE] Demolish ${structType} ${structId}`);
         };
+        const doRepair = () => {
+          if (structId === null) return;
+          this.networkManager.sendRepairStructure(structId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🔧 [STRUCTURE] Repair ${structType} ${structId}`);
+        };
 
         if (this._ladderHoldTimer !== null) {
           // Tap (released before radial opened)
@@ -4208,6 +4483,7 @@ export class ClientApplication {
           this._radialMenu.close();
           if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
+          else if (selected === 'repair')   doRepair();
           else if (selected === 'release' && structId !== null) {
             this.networkManager.sendShipyardAction(structId, 'release_ship');
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());

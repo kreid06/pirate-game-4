@@ -163,6 +163,11 @@ export class UIManager {
     enemyClose: boolean;
   } | null = null;
 
+  /** Called when the player clicks the XP bar to level up (has enough XP). */
+  public onPlayerLevelUp: (() => void) | null = null;
+  /** Cached player level/xp for XP bar click detection. */
+  private _cachedPlayerLevel = 1;
+  private _cachedPlayerXp = 0;
   /** Called when the player clicks a build item button (cannon/sail/swivel). */
   public onBuildItemSelect: ((item: 'cannon' | 'sail' | 'swivel') => void) | null = null;
   /** Called when a weapon group has its mode cycled via right-click. */
@@ -445,8 +450,15 @@ export class UIManager {
   /**
    * Handle a right-click: if the cursor is over a weapon group hotbar slot while on helm,
    * cycles that group’s mode and returns true to consume the click.
+   * Also handles right-click equip of armor items in the player menu inventory.
    */
   handleRightClick(x: number, y: number): boolean {
+    // Player menu open — check inventory for armor right-click equip first
+    if (this.activeMenuId === MENU_ID.PLAYER && this.playerMenu.visible) {
+      const inv = this.getPlayerInventory?.() ?? null;
+      if (inv && this.playerMenu.handleRightClick(x, y, inv)) return true;
+    }
+
     if (!this._cachedControlGroups) return false;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
     const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
@@ -476,6 +488,13 @@ export class UIManager {
       this._cachedControlGroups = context.controlGroups;
     } else {
       this._cachedControlGroups = null;
+    }
+    // Cache player level/xp for XP bar click detection in handleClick
+    const _localPlayerForCache = context.worldState.players.find(p => p.id === context.assignedPlayerId)
+      ?? context.worldState.players[0];
+    if (_localPlayerForCache) {
+      this._cachedPlayerLevel = _localPlayerForCache.level ?? 1;
+      this._cachedPlayerXp    = _localPlayerForCache.xp    ?? 0;
     }
 
     // Render elements in order
@@ -1108,6 +1127,15 @@ export class UIManager {
   }
 
   /**
+   * Wire the level-up callback from the player menu to the UIManager handler.
+   * Called once during setup so the LEVEL UP button in the player menu fires
+   * the same action as clicking the XP bar above the hotbar.
+   */
+  syncPlayerLevelUpCallback(): void {
+    this.playerMenu.onPlayerLevelUp = () => this.onPlayerLevelUp?.();
+  }
+
+  /**
    * Open the crew level menu for a specific NPC (e.g. from a world click).
    */
   openCrewMenuForNpc(npc: Npc): void {
@@ -1229,6 +1257,26 @@ export class UIManager {
       const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
       const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
       const startX = Math.round((this.canvas.width - totalW) / 2);
+      const hotbarY = this.canvas.height - totalH - 8;
+
+      // XP bar click — check ABOVE the hotbar in the stats panel
+      const XP_BAR_H = 6, GAP = 3, BAR_H = 10, PANEL_PAD = 4;
+      const panelH = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP;
+      const panelY = hotbarY - panelH - 4;
+      const barX   = startX + PANEL_PAD;
+      const barW   = totalW - PANEL_PAD * 2;
+      if (x >= barX && x <= barX + barW && y >= panelY + PANEL_PAD && y <= panelY + PANEL_PAD + XP_BAR_H + 4) {
+        const PLAYER_MAX_LEVEL = 120;
+        const lvl = this._cachedPlayerLevel;
+        const xp  = this._cachedPlayerXp;
+        const xpToNext = lvl * 100;
+        const canLevelUp = lvl < PLAYER_MAX_LEVEL && xp >= xpToNext;
+        if (canLevelUp && this.onPlayerLevelUp) {
+          this.onPlayerLevelUp();
+          return true;
+        }
+      }
+
       const startY = this.canvas.height - totalH - 8;
       if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
         for (let i = 0; i < HOTBAR_SLOTS; i++) {
@@ -2076,6 +2124,8 @@ class HUDElement implements UIElement {
   visible = true;
   public mouseX = 0;
   public mouseY = 0;
+  private _cachedPlayerLevel = 1;
+  private _cachedPlayerXp    = 0;
   
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
     // Find our player using the server-assigned player ID
@@ -2169,7 +2219,11 @@ class HUDElement implements UIElement {
     // Health / stamina bars above hotbar
     const maxSt = player.maxStamina ?? 100;
     const st    = player.stamina    ?? maxSt;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, player.level ?? 1, player.xp ?? 0);
+    const _lvl = player.level ?? 1;
+    const _xp  = player.xp ?? 0;
+    this._cachedPlayerLevel = _lvl;
+    this._cachedPlayerXp    = _xp;
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -2177,8 +2231,8 @@ class HUDElement implements UIElement {
       : undefined;
     this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
 
-    // Equipment panel (armor + shield)
-    this.renderEquipmentPanel(ctx, ctx.canvas, player.inventory.equipment.torso, player.inventory.equipment.shield);
+    // Equipment HUD — all 6 slots (helm, chest, legs, feet, hands, shield)
+    this.renderEquipmentHUD(ctx, ctx.canvas, player.inventory.equipment);
   }
 
   private renderPlayerBars(
@@ -2190,8 +2244,9 @@ class HUDElement implements UIElement {
     maxStamina: number,
     level = 1,
     xp = 0,
+    statPoints = 0,
   ): void {
-    const PLAYER_MAX_LEVEL = 66;
+    const PLAYER_MAX_LEVEL = 120;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
     const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
     const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
@@ -2212,6 +2267,7 @@ class HUDElement implements UIElement {
     const isMaxLevel = level >= PLAYER_MAX_LEVEL;
     const xpToNext  = isMaxLevel ? PLAYER_MAX_LEVEL * 100 : level * 100;
     const xpRatio   = isMaxLevel ? 1 : Math.min(xp / xpToNext, 1);
+    const canLevelUp = !isMaxLevel && xp >= xpToNext;
 
     ctx.save();
 
@@ -2226,8 +2282,21 @@ class HUDElement implements UIElement {
     const xpY = panelY + PANEL_PAD;
     ctx.fillStyle = 'rgba(255,255,255,0.07)';
     ctx.fillRect(barX, xpY, barW, XP_BAR_H);
-    ctx.fillStyle = isMaxLevel ? '#ffdd44' : '#4488ff';
-    ctx.fillRect(barX, xpY, Math.round(barW * xpRatio), XP_BAR_H);
+    let xpBarColor: string;
+    if (isMaxLevel) {
+      xpBarColor = '#ffdd44';
+    } else if (canLevelUp || statPoints > 0) {
+      // Flash gold when stat points are pending (pulse brightness instead of toggling colour)
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 300);
+      const gold = Math.round(pulse * 255).toString(16).padStart(2, '0');
+      xpBarColor = `#ffdd${gold}`;
+    } else {
+      xpBarColor = '#4488ff';
+    }
+    // When points are available, always show the bar at full to signal the milestone
+    const xpDrawRatio = (canLevelUp || statPoints > 0) ? 1 : xpRatio;
+    ctx.fillStyle = xpBarColor;
+    ctx.fillRect(barX, xpY, Math.round(barW * xpDrawRatio), XP_BAR_H);
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
@@ -2238,6 +2307,13 @@ class HUDElement implements UIElement {
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
     ctx.fillText(`Lv.${level}${isMaxLevel ? ' MAX' : ''}`, barX + 3, xpY + XP_BAR_H / 2);
     ctx.textAlign = 'right';
+    if (statPoints > 0 && !isMaxLevel) {
+      // Overlay stat point count in the centre of the bar
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#fff';
+      ctx.fillText(`★ ${statPoints} pt${statPoints !== 1 ? 's' : ''} to spend`, barX + barW / 2, xpY + XP_BAR_H / 2);
+      ctx.textAlign = 'right';
+    }
     ctx.fillStyle = 'rgba(180,200,255,0.65)';
     ctx.fillText(isMaxLevel ? 'MAX' : `${xp}/${xpToNext} XP`, barX + barW - 3, xpY + XP_BAR_H / 2);
 
@@ -2573,75 +2649,96 @@ class HUDElement implements UIElement {
     ctx.closePath();
   }
 
-  private renderEquipmentPanel(
-    ctx: CanvasRenderingContext2D,
+  /**
+   * HUD equipment panel — bottom-right corner.
+   * Shows all 6 equipment slots (helm, chest, legs, feet, hands, shield)
+   * as small icon slots with labels. Filled slots glow gold.
+   */
+  private renderEquipmentHUD(
+    ctx:    CanvasRenderingContext2D,
     canvas: HTMLCanvasElement,
-    armor: ItemKind,
-    shield: ItemKind
+    equip:  { helm: ItemKind; torso: ItemKind; legs: ItemKind; feet: ItemKind; hands: ItemKind; shield: ItemKind },
   ): void {
-    const SLOT_SIZE = 44;
-    const SLOT_GAP = 6;
-    const PADDING = 8;
-    const panelW = 2 * SLOT_SIZE + SLOT_GAP + PADDING * 2;
-    const panelH = SLOT_SIZE + PADDING * 2 + 16 + 14; // slots + labels + header
-    const px = canvas.width - panelW - 8;
-    const py = canvas.height - panelH - 8;
+    // 6 slots arranged in two columns of 3, matching the character sheet layout:
+    //   col0 (body):  Helm, Chest, Legs
+    //   col1 (extra): Hands, Feet, Shield
+    const SLOT_W  = 36;
+    const SLOT_H  = 32;
+    const SLOT_GAP_X = 6;
+    const SLOT_GAP_Y = 4;
+    const LABEL_H = 11;
+    const COL_STRIDE = SLOT_W + SLOT_GAP_X;
+    const ROW_STRIDE = SLOT_H + LABEL_H + SLOT_GAP_Y;
+    const PADDING = 7;
+    const COLS = 2, ROWS = 3;
+    const panelW = COLS * COL_STRIDE - SLOT_GAP_X + PADDING * 2;
+    const panelH = ROWS * ROW_STRIDE - SLOT_GAP_Y + PADDING * 2;
+
+    // Position: bottom-right, just above the hotbar is not needed — place it at bottom-right edge
+    const px = canvas.width  - panelW - 6;
+    const py = canvas.height - panelH - 6;
 
     ctx.save();
 
-    // Background
-    ctx.fillStyle = 'rgba(0,0,0,0.75)';
-    ctx.fillRect(px, py, panelW, panelH);
-    ctx.strokeStyle = '#556';
+    // Panel background
+    ctx.fillStyle = 'rgba(8,10,18,0.82)';
+    ctx.strokeStyle = 'rgba(80,80,120,0.6)';
     ctx.lineWidth = 1;
-    ctx.strokeRect(px, py, panelW, panelH);
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px, py, panelW, panelH, 4);
+    else ctx.rect(px, py, panelW, panelH);
+    ctx.fill();
+    ctx.stroke();
 
-    // Header
-    ctx.fillStyle = '#aaa';
-    ctx.font = 'bold 11px Georgia, serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText('EQUIP', px + panelW / 2, py + 4);
-
-    const slots: { item: ItemKind; label: string }[] = [
-      { item: armor,  label: 'Armor'  },
-      { item: shield, label: 'Shield' },
+    // Slot definitions — col0: body column, col1: extras
+    const slots: { label: string; item: ItemKind; col: number; row: number }[] = [
+      { label: 'Helm',   item: equip.helm,   col: 0, row: 0 },
+      { label: 'Chest',  item: equip.torso,  col: 0, row: 1 },
+      { label: 'Legs',   item: equip.legs,   col: 0, row: 2 },
+      { label: 'Hands',  item: equip.hands,  col: 1, row: 0 },
+      { label: 'Feet',   item: equip.feet,   col: 1, row: 1 },
+      { label: 'Shield', item: equip.shield, col: 1, row: 2 },
     ];
 
-    for (let i = 0; i < 2; i++) {
-      const { item, label } = slots[i];
+    for (const { label, item, col, row } of slots) {
       const def = ITEM_DEFS[item] ?? ITEM_DEFS['none'];
-      const sx = px + PADDING + i * (SLOT_SIZE + SLOT_GAP);
-      const sy = py + 4 + 14; // below header
+      const sx  = px + PADDING + col * COL_STRIDE;
+      const sy  = py + PADDING + row * ROW_STRIDE;
+      const filled = item !== 'none';
 
-      // Background
-      ctx.fillStyle = item !== 'none' ? 'rgba(50,40,20,0.9)' : 'rgba(30,30,40,0.9)';
-      ctx.fillRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
-      ctx.strokeStyle = def.borderColor;
-      ctx.lineWidth = 1;
-      ctx.strokeRect(sx, sy, SLOT_SIZE, SLOT_SIZE);
+      // Slot background
+      ctx.fillStyle   = filled ? 'rgba(55,44,18,0.95)' : 'rgba(20,22,36,0.9)';
+      ctx.strokeStyle = filled ? def.borderColor        : 'rgba(60,65,100,0.7)';
+      ctx.lineWidth   = filled ? 1.5 : 1;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(sx, sy, SLOT_W, SLOT_H, 3);
+      else ctx.rect(sx, sy, SLOT_W, SLOT_H);
+      ctx.fill();
+      ctx.stroke();
 
-      if (item !== 'none') {
-        const swatchPad = 5;
+      if (filled) {
+        // Color swatch
+        const pad = 5;
         ctx.fillStyle = def.color;
-        ctx.fillRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
-        ctx.strokeStyle = def.borderColor;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(sx + swatchPad, sy + swatchPad, SLOT_SIZE - swatchPad * 2, SLOT_SIZE - swatchPad * 2);
-        ctx.fillStyle = '#fff';
-        ctx.font = 'bold 16px Georgia, serif';
-        ctx.textAlign = 'center';
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(sx + pad, sy + pad, SLOT_W - pad * 2, SLOT_H - pad * 2, 2);
+        else ctx.rect(sx + pad, sy + pad, SLOT_W - pad * 2, SLOT_H - pad * 2);
+        ctx.fill();
+        // Symbol
+        ctx.font         = `bold ${SLOT_H <= 32 ? 13 : 15}px Georgia, serif`;
+        ctx.fillStyle    = '#fff';
+        ctx.textAlign    = 'center';
         ctx.textBaseline = 'middle';
-        if (item === 'axe') drawAxeIcon(ctx, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2, SLOT_SIZE);
-        else ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+        if (item === 'axe') drawAxeIcon(ctx, sx + SLOT_W / 2, sy + SLOT_H / 2, SLOT_W);
+        else ctx.fillText(def.symbol, sx + SLOT_W / 2, sy + SLOT_H / 2);
       }
 
-      // Label
-      ctx.fillStyle = '#778';
-      ctx.font = '10px Georgia, serif';
-      ctx.textAlign = 'center';
+      // Label below slot
+      ctx.font         = '9px Georgia, serif';
+      ctx.textAlign    = 'center';
       ctx.textBaseline = 'top';
-      ctx.fillText(label, sx + SLOT_SIZE / 2, sy + SLOT_SIZE + 3);
+      ctx.fillStyle    = filled ? '#c8b87a' : 'rgba(80,85,120,0.9)';
+      ctx.fillText(label, sx + SLOT_W / 2, sy + SLOT_H + 2);
     }
 
     ctx.restore();
