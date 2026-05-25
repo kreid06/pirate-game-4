@@ -323,6 +323,17 @@ export class RenderSystem {
   private lastKnownNpcIds: Set<number> = new Set();
   /** NPC id → name cache for the kill announcement message. */
   private _lastNpcNames: Map<number, string> = new Map();
+  /** True once at least one world state has been processed; suppresses false kill
+   *  announcements on the first update after a page reload or reconnect. */
+  private _npcKillTrackingReady = false;
+
+  /** Reset NPC kill tracking — call on disconnect so the first world-state update
+   *  after reconnect does not produce spurious "eliminated" announcements. */
+  resetNpcTracking(): void {
+    this.lastKnownNpcIds.clear();
+    this._lastNpcNames.clear();
+    this._npcKillTrackingReady = false;
+  }
   /** Last ship to fire a cannonball near each ship — used for sink announcements. */
   private lastAttackerOf: Map<number, number> = new Map();
   /** Last splash emit time (ms) per sinking ship — throttles particle emission. */
@@ -7109,17 +7120,18 @@ export class RenderSystem {
     // Build current NPC id set and detect disappearances.
     const currentNpcIds = new Set<number>();
     for (const npc of worldState.npcs) currentNpcIds.add(npc.id);
-    for (const id of this.lastKnownNpcIds) {
-      if (!currentNpcIds.has(id)) {
-        // NPC vanished — find its last known name from the previous frame's NPC list
-        // (we keep it in lastKnownShips-style via a name map below).
-        const name = this._lastNpcNames.get(id) ?? `Crew ${id}`;
-        this.effectRenderer.createAnnouncement(`${name} eliminated`, 'npc_kill');
-        this._lastNpcNames.delete(id);
+    if (this._npcKillTrackingReady) {
+      for (const id of this.lastKnownNpcIds) {
+        if (!currentNpcIds.has(id)) {
+          const name = this._lastNpcNames.get(id) ?? `Crew ${id}`;
+          this.effectRenderer.createAnnouncement(`${name} eliminated`, 'npc_kill');
+          this._lastNpcNames.delete(id);
+        }
       }
     }
     // Update id set and name map for next frame.
     this.lastKnownNpcIds = currentNpcIds;
+    this._npcKillTrackingReady = true;
     for (const npc of worldState.npcs) this._lastNpcNames.set(npc.id, npc.name);
     // ───────────────────────────────────────────────────────────────────────
     // Emit water-splash bursts for every ship currently in the sink sequence.

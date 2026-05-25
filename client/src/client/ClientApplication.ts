@@ -3128,7 +3128,8 @@ export class ClientApplication {
     } else if (state === ConnectionState.DISCONNECTED || state === ConnectionState.ERROR) {
       this.state = ClientState.DISCONNECTED;
       console.log('🔌 Disconnected from server:', state);
-      
+      // Reset NPC kill tracking so reconnect does not produce spurious "eliminated" announcements.
+      this.renderSystem.resetNpcTracking();
       // TODO: Handle reconnection logic
     } else if (state === ConnectionState.CONNECTING) {
       this.state = ClientState.CONNECTING;

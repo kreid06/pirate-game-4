@@ -6109,10 +6109,42 @@ int websocket_server_update(struct Sim* sim) {
                                         "\"text\":\"Unknown entity '%s'. Known: crewmember\"}",
                                         cmd_arg1);
                                 } else {
-                                    /* Resolve company (default neutral) */
-                                    uint8_t spawn_company = 0;
-                                    if (strcmp(cmd_arg2, "pirates") == 0)      spawn_company = 1;
-                                    else if (strcmp(cmd_arg2, "navy") == 0)    spawn_company = 2;
+                                    /* Resolve company by name (case-insensitive) or numeric ID.
+                                     * Checks static factions then player-created dynamic companies. */
+                                    uint8_t spawn_company = COMPANY_UNCLAIMED;
+                                    if (cmd_arg2[0] != '\0') {
+                                        char *_eptr;
+                                        unsigned long _nid = strtoul(cmd_arg2, &_eptr, 10);
+                                        if (*_eptr == '\0') {
+                                            /* Pure numeric — use as-is */
+                                            spawn_company = (uint8_t)(_nid & 0xFF);
+                                        } else {
+                                            bool _found = false;
+                                            /* Static factions */
+                                            for (int _ci = 0; _ci < G_COMPANIES_COUNT && !_found; _ci++) {
+                                                if (strncasecmp(g_companies[_ci].name, cmd_arg2, 32) == 0) {
+                                                    spawn_company = (uint8_t)g_companies[_ci].id;
+                                                    _found = true;
+                                                }
+                                            }
+                                            /* Player-created dynamic companies */
+                                            for (int _ci = 0; _ci < dynamic_company_count && !_found; _ci++) {
+                                                if (dynamic_companies[_ci].active &&
+                                                    strncasecmp(dynamic_companies[_ci].name, cmd_arg2, 32) == 0) {
+                                                    spawn_company = (uint8_t)(dynamic_companies[_ci].id & 0xFF);
+                                                    _found = true;
+                                                }
+                                            }
+                                            if (!_found) {
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"command_response\","
+                                                    "\"success\":false,"
+                                                    "\"text\":\"Unknown company '%s'. Use a faction name, company name, or numeric ID.\"}",
+                                                    cmd_arg2);
+                                                goto spawn_npc_done;
+                                            }
+                                        }
+                                    }
 
                                     /* Issuing player's world position */
                                     WebSocketPlayer *issuer = find_player(client->player_id);
