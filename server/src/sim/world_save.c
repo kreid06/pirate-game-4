@@ -307,6 +307,7 @@ int world_save(const char *path) {
             "      \"placer_id\": %u,\n"
             "      \"placer_name\": \"%s\",\n"
             "      \"open\": %s,\n"
+            "      \"locked\": %s,\n"
             "      \"construction_phase\": %u,\n"
             "      \"construction_company\": %u,\n"
             "      \"modules_placed\": %u,\n"
@@ -325,6 +326,7 @@ int world_save(const char *path) {
             (unsigned)ps->placer_id,
             ps->placer_name,
             ps->open ? "true" : "false",
+            ps->door_locked ? "true" : "false",
             (unsigned)ps->construction_phase,
             (unsigned)ps->construction_company,
             (unsigned)ps->modules_placed,
@@ -759,6 +761,7 @@ int world_load(const char *path) {
                 unsigned modules_placed_saved = 0;
                 float x = 0, y = 0, rot = 0;
                 bool open = false;
+                bool door_locked = false;
 
                 ws_json_uint(obj,  "id",                   &id);
                 ws_json_uint(obj,  "type",                 &type);
@@ -774,6 +777,7 @@ int world_load(const char *path) {
                 ws_json_str (obj,  "placer_name",          ps->placer_name,
                              sizeof(ps->placer_name));
                 ws_json_bool(obj,  "open",                 &open);
+                ws_json_bool(obj,  "locked",               &door_locked);
                 ws_json_uint(obj,  "construction_phase",   &construction_phase);
                 ws_json_uint(obj,  "construction_company", &construction_company);
                 ws_json_uint(obj,  "modules_placed",       &modules_placed_saved);
@@ -813,6 +817,7 @@ int world_load(const char *path) {
                 ps->target_hp  = target_hp ? (uint16_t)target_hp : (uint16_t)max_hp;
                 ps->placer_id  = placer_id;
                 ps->open       = open;
+                ps->door_locked = door_locked;
                 ps->active     = true;
 
                 /* Restore shipyard construction state */

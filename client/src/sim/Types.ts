@@ -170,6 +170,7 @@ export interface PlacedStructure {
   maxHp: number;       // maximum hit points
   placerName: string;  // display name of the player who built this
   doorOpen?: boolean;  // doors only: true = open (passable)
+  doorLocked?: boolean; // doors only: true = locked (only company members can open)
   rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
   cannonAimAngle?: number; // cannons only: world-space aim angle in radians
   /** Shipyard only — current ship under construction. Absent when empty. */

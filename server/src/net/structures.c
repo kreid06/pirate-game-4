@@ -1048,7 +1048,8 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             sizeof(placed_structures[placed_structure_count].placer_name) - 1);
     placed_structures[placed_structure_count].placer_name[
         sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
-    placed_structures[placed_structure_count].open       = false;
+    placed_structures[placed_structure_count].open        = false;
+    placed_structures[placed_structure_count].door_locked = (stype_enum == STRUCT_DOOR);
     placed_structures[placed_structure_count].rotation   =
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
          stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
@@ -1173,6 +1174,13 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
     uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
     uint16_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
+    /* Door: initial locked state (always true for new doors) */
+    char door_lock_extra[32] = "";
+    if (new_is_door) {
+        snprintf(door_lock_extra, sizeof(door_lock_extra),
+                 ",\"locked\":%s",
+                 placed_structures[placed_structure_count - 1].door_locked ? "true" : "false");
+    }
     /* Flag-fort phase initial broadcast (claim/build/active). Other types: 0. */
     uint8_t bcast_phase = (stype_enum == STRUCT_FLAG_FORT)
         ? placed_structures[placed_structure_count - 1].claim_phase : 0u;
@@ -1192,12 +1200,13 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
              "{\"type\":\"structure_placed\",\"id\":%u,\"structure_type\":\"%s\","
              "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
              "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-             ",\"rotation\":%.2f%s%s%s%s}",
+             ",\"rotation\":%.2f%s%s%s%s%s}",
              new_id, stype, target_island_id, px, py,
              (unsigned)player->company_id, (unsigned)bcast_hp, (unsigned)bcast_max_hp,
              (unsigned)bcast_target, player->name,
              bcast_rot,
              new_is_door ? ",\"open\":false" : "",
+             door_lock_extra,
              cannon_extra,
              phase_extra,
              cflag_extra);
@@ -1361,6 +1370,15 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_DOOR) {
+            /* Locked doors can only be opened by the owning company */
+            if (placed_structures[i].door_locked &&
+                placed_structures[i].company_id != 0 &&
+                player->company_id != 0 &&
+                placed_structures[i].company_id != player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"door_locked\"}");
+                goto si_send;
+            }
             /* Toggle door open/closed and broadcast to all clients */
             placed_structures[i].open = !placed_structures[i].open;
             char bcast[128];
@@ -2420,4 +2438,74 @@ void structure_repair_tick(uint32_t delta_ms) {
             log_info("🔧 Repair complete on structure %u (player %u)", s->id, pid);
         }
     }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+ * handle_door_lock — toggle a door's locked state (own company only).
+ * ───────────────────────────────────────────────────────────────────────── */
+void handle_door_lock(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+
+    uint32_t sid = 0;
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+
+    bool lock_state = false;
+    const char* lp = strstr(payload, "\"locked\":");
+    if (lp) lock_state = (strncmp(lp + 9, "true", 4) == 0);
+
+    if (player->on_island_id == 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"door_lock_fail\",\"reason\":\"not_on_island\"}");
+        goto dl_send;
+    }
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        PlacedStructure *s = &placed_structures[i];
+        if (!s->active || s->id != sid) continue;
+        if (s->type != STRUCT_DOOR) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"door_lock_fail\",\"reason\":\"not_a_door\"}");
+            goto dl_send;
+        }
+        /* Range check */
+        float dx = player->x - s->x, dy = player->y - s->y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"door_lock_fail\",\"reason\":\"too_far\"}");
+            goto dl_send;
+        }
+        /* Company check: only the owning company can lock/unlock */
+        if (s->company_id != 0 && player->company_id != 0 &&
+            s->company_id != player->company_id) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"door_lock_fail\",\"reason\":\"wrong_company\"}");
+            goto dl_send;
+        }
+
+        s->door_locked = lock_state;
+        /* If locking, close the door too (a locked door can't stay open) */
+        bool was_open = s->open;
+        if (lock_state && s->open) s->open = false;
+
+        char bcast[128];
+        snprintf(bcast, sizeof(bcast),
+                 "{\"type\":\"door_lock_toggled\",\"id\":%u,\"locked\":%s,\"open\":%s}",
+                 (unsigned)s->id,
+                 s->door_locked ? "true" : "false",
+                 s->open ? "true" : "false");
+        websocket_server_broadcast(bcast);
+        log_info("🔒 Player %u %s door %u", player->player_id,
+                 lock_state ? "locked" : "unlocked", (unsigned)s->id);
+        return;
+    }
+
+    snprintf(response, sizeof(response),
+             "{\"type\":\"door_lock_fail\",\"reason\":\"not_found\"}");
+
+dl_send:;
+    char frm[256];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frm, sizeof(frm));
+    if (flen > 0 && flen < sizeof(frm)) send(client->fd, frm, flen, 0);
 }

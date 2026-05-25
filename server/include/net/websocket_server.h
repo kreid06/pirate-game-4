@@ -450,6 +450,7 @@ typedef struct {
     /* bool fields */
     bool     active;
     bool     open;                /* doors only: true = open (passable) */
+    bool     door_locked;         /* doors only: true = locked (only company members can open/close) */
     /* Wreck-only salvage loot (STRUCT_WRECK); unused for other types */
     uint8_t  wreck_items[6];     /* ItemKind as uint8_t, 0 = empty slot   */
     uint8_t  wreck_qtys[6];      /* quantity per loot slot                */

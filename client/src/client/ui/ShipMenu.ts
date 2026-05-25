@@ -240,7 +240,7 @@ export class ShipMenu {
     }
 
     this._currentShipName = ship.shipName ?? '';
-    cur = this._identity(ctx, px, cur, ship);
+    cur = this._identity(ctx, px, cur, ship, worldState.companies ?? []);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._modulesSection(ctx, px, cur, ship.modules);
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
@@ -413,6 +413,7 @@ export class ShipMenu {
     ctx:  CanvasRenderingContext2D,
     px:   number, py: number,
     ship: NonNullable<ReturnType<WorldState['ships']['find']>>,
+    companies: WorldState['companies'] = [],
   ): number {
     const sectionH = 52;
     py += 4;
@@ -430,7 +431,8 @@ export class ShipMenu {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = TEXT_HEAD;
-    ctx.fillText(`Ship #${ship.id}   — ${COMPANY_NAMES[co] ?? 'Unknown'}`, px + PAD + 30, py + 9);
+    const _coName = COMPANY_NAMES[co] ?? companies.find(c => c.id === co)?.name ?? 'Unknown';
+    ctx.fillText(`Ship #${ship.id}   — ${_coName}`, px + PAD + 30, py + 9);
 
     // Speed + heading
     const spd = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.y ** 2);
