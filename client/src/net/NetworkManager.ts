@@ -1627,9 +1627,11 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'claim_ship', shipId }));
   }
 
-  sendPlantClaimFlag(shipId: number): void {
+  sendPlantClaimFlag(shipId: number, x?: number, y?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.socket.send(JSON.stringify({ type: 'plant_claim_flag', shipId }));
+    const msg: Record<string, unknown> = { type: 'plant_claim_flag', shipId };
+    if (x !== undefined && y !== undefined) { msg.x = x; msg.y = y; }
+    this.socket.send(JSON.stringify(msg));
   }
 
   sendRemoveClaimFlag(shipId: number): void {

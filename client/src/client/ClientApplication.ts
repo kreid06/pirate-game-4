@@ -1263,6 +1263,17 @@ export class ClientApplication {
           }
           return;
         }
+        // Ship deck claim flag placement: claim_flag in hotbar while boarding a ship → plant at click position
+        {
+          const ws2 = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          const pid2 = this.networkManager.getAssignedPlayerId();
+          const p2   = ws2?.players.find(pl => pl.id === pid2);
+          const kind2 = p2?.inventory?.slots[p2?.inventory?.activeSlot ?? 0]?.item;
+          if (kind2 === 'claim_flag' && (p2?.carrierId ?? 0) !== 0) {
+            this.networkManager.sendPlantClaimFlag(p2!.carrierId, worldPos.x, worldPos.y);
+            return;
+          }
+        }
         // Ghost menu pending placement takes highest priority
         if (this.buildMenuOpen && this.pendingGhostKind !== null) {
           this.handleGhostPlace(worldPos);
@@ -3178,7 +3189,8 @@ export class ClientApplication {
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || this.islandBuildMode;
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || this.islandBuildMode
+      || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
   }
 
   /**
@@ -4185,17 +4197,6 @@ export class ClientApplication {
                   { id: `remove_flag_${hov.ship.id}`, label: '⛳ Remove Flag' },
                 ]);
                 break;
-              }
-
-              // Plant flag: helm module, enemy ship, player has claim_flag item
-              if (hov.module.kind === 'helm' && isEnemyShip) {
-                const inv = ws?.players?.find(p => p.id === meE.id)?.inventory ?? meE.inventory;
-                const hasCF = inv?.slots?.some(s => s.item === 'claim_flag' && s.quantity > 0);
-                if (hasCF) {
-                  this.networkManager.sendPlantClaimFlag(hov.ship.id);
-                  console.log(`🚩 Planting claim flag on ship ${hov.ship.id}`);
-                  break;
-                }
               }
             }
           }

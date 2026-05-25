@@ -4903,7 +4903,11 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 if (rn_npc_ptr && rn_npc_ptr->company_id == 0) {
                                     rn_npc_ptr->company_id      = rn_player->company_id;
-                                    rn_npc_ptr->owner_player_id = rn_player->player_id;
+                                    /* Personal ownership only applies to SOLO-company NPCs.
+                                     * NPCs recruited into a guild (Navy, Pirates, dynamic) are
+                                     * guild property and won't follow the player if they leave. */
+                                    rn_npc_ptr->owner_player_id = (rn_player->company_id == COMPANY_SOLO)
+                                                                  ? rn_player->player_id : 0;
                                     log_info("🤝 Player %u recruited NPC %u '%s' (company %u)",
                                              rn_player->player_id, rn_npc_id,
                                              rn_npc_ptr->name, rn_player->company_id);
@@ -5349,20 +5353,48 @@ int websocket_server_update(struct Sim* sim) {
                                         if (pcf_slot < 0) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"too_many_flags\"}");
                                         } else {
+                                            // Parse optional world position (client units) sent with deck click
+                                            float pcf_lx = 0.0f, pcf_ly = -100.0f;
+                                            {
+                                                char* _px = strstr(payload, "\"x\":");
+                                                char* _py = strstr(payload, "\"y\":");
+                                                if (_px && _py) {
+                                                    float _wx = 0.0f, _wy = 0.0f;
+                                                    sscanf(_px + 4, "%f", &_wx);
+                                                    sscanf(_py + 4, "%f", &_wy);
+                                                    /* Convert world client-units to ship-local client-units */
+                                                    float _dx = _wx - SERVER_TO_CLIENT(pcf_ship->x);
+                                                    float _dy = _wy - SERVER_TO_CLIENT(pcf_ship->y);
+                                                    float _cr = cosf(-pcf_ship->rotation);
+                                                    float _sr = sinf(-pcf_ship->rotation);
+                                                    pcf_lx = _dx * _cr - _dy * _sr;
+                                                    pcf_ly = _dx * _sr + _dy * _cr;
+                                                    /* Clamp to deck bounds (server deck bounds → client units) */
+                                                    float _dmnx = SERVER_TO_CLIENT(pcf_ship->deck_min_x);
+                                                    float _dmxx = SERVER_TO_CLIENT(pcf_ship->deck_max_x);
+                                                    float _dmny = SERVER_TO_CLIENT(pcf_ship->deck_min_y);
+                                                    float _dmxy = SERVER_TO_CLIENT(pcf_ship->deck_max_y);
+                                                    if (pcf_lx < _dmnx) pcf_lx = _dmnx;
+                                                    if (pcf_lx > _dmxx) pcf_lx = _dmxx;
+                                                    if (pcf_ly < _dmny) pcf_ly = _dmny;
+                                                    if (pcf_ly > _dmxy) pcf_ly = _dmxy;
+                                                }
+                                            }
+
                                             // Consume the item
                                             pcf_player->inventory.slots[pcf_inv_slot].quantity--;
                                             if (pcf_player->inventory.slots[pcf_inv_slot].quantity == 0)
                                                 pcf_player->inventory.slots[pcf_inv_slot].item = ITEM_NONE;
 
-                                            // Plant the flag at ship-local (0, -100) — near helm area
+                                            // Plant the flag at the specified (or default) ship-local position
                                             claim_flags[pcf_slot].active           = true;
                                             claim_flags[pcf_slot].ship_id          = pcf_ship_id;
                                             claim_flags[pcf_slot].planter_id       = pcf_player->player_id;
                                             claim_flags[pcf_slot].planter_company  = pcf_player->company_id;
                                             claim_flags[pcf_slot].progress_ms      = 0.0f;
                                             claim_flags[pcf_slot].contested        = false;
-                                            claim_flags[pcf_slot].local_x          = 0.0f;
-                                            claim_flags[pcf_slot].local_y          = -100.0f;
+                                            claim_flags[pcf_slot].local_x          = pcf_lx;
+                                            claim_flags[pcf_slot].local_y          = pcf_ly;
                                             if (claim_flag_count <= pcf_slot) claim_flag_count = pcf_slot + 1;
 
                                             log_info("🚩 Player %u planted claim flag on ship %u (company %u→%u)",
@@ -7850,7 +7882,11 @@ int websocket_server_set_player_company(uint32_t player_id, uint8_t company_id) 
                 WorldNpc *npc = &world_npcs[ni];
                 if (!npc->active) continue;
                 /* Match: previously owned by this player (solo) or same guild */
-                bool owned = (npc->owner_player_id == player_id) ||
+                /* Only SOLO-company NPCs (company_id == COMPANY_SOLO, personally
+                 * owned by this player) follow when the player changes company.
+                 * Guild NPCs — whether built-in factions (Navy, Pirates) or dynamic
+                 * companies — always remain with their guild. */
+                bool owned = (npc->company_id == COMPANY_SOLO && npc->owner_player_id == player_id) ||
                              (!npc->owner_player_id && npc->company_id == players[i].company_id
                               && players[i].company_id != COMPANY_SOLO);
                 if (!owned) continue;

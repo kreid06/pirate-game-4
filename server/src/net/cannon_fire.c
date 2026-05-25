@@ -7,6 +7,11 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+/* Clamp a company_id to the weapon_groups array bounds.
+ * Dynamic company IDs (>= MAX_COMPANIES) are mapped to slot 0
+ * to prevent out-of-bounds memory access. */
+#define WG_CID(cid)  ((uint8_t)((cid) < MAX_COMPANIES ? (cid) : 0u))
+
 /* Set to 1 to allow island cannons to fire without consuming ammo (testing). */
 #define ISLAND_CANNON_INFINITE_AMMO 1
 #include "net/structures.h"
@@ -186,7 +191,7 @@ void tick_ship_weapon_groups(void) {
         if (ship->is_sinking) continue; /* no auto-fire while sinking */
 
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            WeaponGroup* group = &ship->weapon_groups[ship->company_id][g];
+            WeaponGroup* group = &ship->weapon_groups[WG_CID(ship->company_id)][g];
             if (group->mode != WEAPON_GROUP_MODE_TARGETFIRE) continue;
             if (group->target_ship_id == 0 || group->weapon_count == 0) continue;
 
@@ -277,7 +282,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
      * ────────────────────────────────────────────────────────────────────── */
     bool player_has_groups = false;
     for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-        if (ship->weapon_groups[player->company_id][g].weapon_count > 0) {
+        if (ship->weapon_groups[WG_CID(player->company_id)][g].weapon_count > 0) {
             player_has_groups = true;
             break;
         }
@@ -315,7 +320,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 for (int ag = 0; ag < active_group_count && !in_active; ag++) {
                     uint32_t tg = active_group_indices[ag];
                     if (tg >= MAX_WEAPON_GROUPS) continue;
-                    WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                    WeaponGroup* chk = &ship->weapon_groups[WG_CID(player->company_id)][tg];
                     for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
                         if (chk->weapon_ids[ci] == cannon->id) in_active = true;
                     }
@@ -390,7 +395,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             for (int ag = 0; ag < active_group_count && !in_active_pass2; ag++) {
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
-                WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                WeaponGroup* chk = &ship->weapon_groups[WG_CID(player->company_id)][tg];
                 for (int ci = 0; ci < chk->weapon_count && !in_active_pass2; ci++) {
                     if (chk->weapon_ids[ci] == cannon->id) in_active_pass2 = true;
                 }
@@ -439,7 +444,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 }
             }
             int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == grp) { grp_idx = gg; break; } } }
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[WG_CID(player->company_id)][gg] == grp) { grp_idx = gg; break; } } }
             log_info("🔫 P2 c%u g%d: SKIP no_occupant (sim_occ=%d npc_id=%u npc_state=%d in_active=%d)",
                      cannon->id, grp_idx,
                      (cannon->state_bits & MODULE_STATE_OCCUPIED) ? 1 : 0,
@@ -454,7 +459,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         if (!in_active_pass2) {
             bool in_haltfire = false;
             for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-                WeaponGroup* wg = &ship->weapon_groups[player->company_id][g];
+                WeaponGroup* wg = &ship->weapon_groups[WG_CID(player->company_id)][g];
                 if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
                 for (int ci = 0; ci < wg->weapon_count; ci++) {
                     if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
@@ -468,7 +473,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
 
         {
             int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == grp) { grp_idx = gg; break; } } }
+            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[WG_CID(player->company_id)][gg] == grp) { grp_idx = gg; break; } } }
             log_info("🔫 P2 c%u g%d: AIM PROPAGATED (in_active=%d mode=%d)",
                      cannon->id, grp_idx, in_active_pass2 ? 1 : 0, grp ? grp->mode : -1);
         }
@@ -521,7 +526,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             int needed = (dm_mod->state_bits & MODULE_STATE_NEEDED) ? 1 : 0;
             WeaponGroup* dg = find_weapon_group(ship->ship_id, dm_mod->id, player->company_id);
             int gi = -1;
-            if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[player->company_id][gg] == dg) { gi = gg; break; } } }
+            if (dg) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[WG_CID(player->company_id)][gg] == dg) { gi = gg; break; } } }
             npos += snprintf(nbuf + npos, (size_t)(256 - npos), " c%u:g%d:%s",
                              dm_mod->id, gi, needed ? "NEED" : "----");
         }
@@ -551,7 +556,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 for (int ag = 0; ag < active_group_count && !in_active; ag++) {
                     uint32_t tg = active_group_indices[ag];
                     if (tg >= MAX_WEAPON_GROUPS) continue;
-                    WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                    WeaponGroup* chk = &ship->weapon_groups[WG_CID(player->company_id)][tg];
                     for (int ci = 0; ci < chk->weapon_count && !in_active; ci++) {
                         if (chk->weapon_ids[ci] == sw->id) in_active = true;
                     }
@@ -593,7 +598,7 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             for (int ag = 0; ag < active_group_count && !sw_in_active; ag++) {
                 uint32_t tg = active_group_indices[ag];
                 if (tg >= MAX_WEAPON_GROUPS) continue;
-                WeaponGroup* chk = &ship->weapon_groups[player->company_id][tg];
+                WeaponGroup* chk = &ship->weapon_groups[WG_CID(player->company_id)][tg];
                 for (int ci = 0; ci < chk->weapon_count && !sw_in_active; ci++) {
                     if (chk->weapon_ids[ci] == sw->id) sw_in_active = true;
                 }
