@@ -2121,9 +2121,18 @@ export class RenderSystem {
   }
 
   /** Update the cannonReloadMs of a single cannon structure in-place. */
-  updateStructureCannonReload(id: number, reloadMs: number): void {
+  updateStructureCannonReload(id: number, reloadMs: number, loadedAmmo?: number): void {
     const s = this.placedStructures.find(p => p.id === id);
-    if (s) s.cannonReloadMs = reloadMs;
+    if (s) {
+      s.cannonReloadMs = reloadMs;
+      if (loadedAmmo !== undefined) s.cannonLoadedAmmo = loadedAmmo;
+    }
+  }
+
+  /** Returns true if the island cannon at the given structure ID is currently reloading. */
+  isIslandCannonReloading(id: number): boolean {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'cannon');
+    return s !== undefined && (s.cannonReloadMs ?? 0) > 0;
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
@@ -3457,6 +3466,38 @@ export class RenderSystem {
       ctx.arc(screenPos.x, screenPos.y, RADIUS, 0, Math.PI * 2);
       ctx.stroke();
     }
+
+    ctx.restore();
+  }
+
+  /** Semi-transparent overlay drawn over the game while reconnecting. */
+  drawReconnectingOverlay(): void {
+    const { width, height } = this.canvas;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(0, 0, width, height);
+
+    const cx = width / 2;
+    const cy = height / 2;
+
+    // Spinner
+    const now = performance.now();
+    const angle = (now / 600) * Math.PI * 2;
+    const R = 28;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(cx, cy - 52, R, angle, angle + Math.PI * 1.4);
+    ctx.stroke();
+
+    // "Reconnecting..." text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Reconnecting…', cx, cy + 4);
 
     ctx.restore();
   }
@@ -7371,6 +7412,11 @@ export class RenderSystem {
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
       this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
     }
+
+    // Island cannon trajectory guide (same layer as ship cannon aim guides)
+    if (this.islandCannonId !== null && this.islandCannonAimAngle !== null && this.playerIsAiming) {
+      this.queueRenderItem(4, 'island-cannon-trajectory', () => this.drawIslandCannonTrajectory(camera), 1);
+    }
     
     // Queue sail fibers (layer 6)
     for (const ship of renderShips) {
@@ -9937,6 +9983,247 @@ export class RenderSystem {
     return tMin;
   }
 
+  // ── Cannon trajectory helpers ────────────────────────────────────────────────
+
+  /**
+   * Returns true when world-space point (px, py) lies inside island terrain.
+   * Mirrors server simulation.c over_land detection for overland range reduction.
+   */
+  private isPointOverIsland(px: number, py: number): boolean {
+    for (const isl of this.islands) {
+      if (isl.vertices && isl.vertices.length > 2) {
+        const verts = isl.vertices;
+        const n = verts.length;
+        // Broad-phase bounding circle
+        const boundR = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+        const dx2 = px - isl.x, dy2 = py - isl.y;
+        if (dx2 * dx2 + dy2 * dy2 > (boundR + 10) * (boundR + 10)) continue;
+        // Point-in-polygon (ray casting)
+        let inside = false;
+        for (let vi = 0, vj = n - 1; vi < n; vj = vi++) {
+          const xi = verts[vi].x, yi = verts[vi].y;
+          const xj = verts[vj].x, yj = verts[vj].y;
+          if ((yi > py) !== (yj > py) &&
+              px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside;
+        }
+        if (inside) return true;
+      } else {
+        const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+        const dx2 = px - isl.x, dy2 = py - isl.y;
+        const distSq = dx2 * dx2 + dy2 * dy2;
+        const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+        if (distSq < broadR * broadR) {
+          const angle = Math.atan2(dy2, dx2);
+          const bumps = preset.beachBumps;
+          let a = angle % (Math.PI * 2); if (a < 0) a += Math.PI * 2;
+          const t2 = (a / (Math.PI * 2)) * bumps.length;
+          const i0 = Math.floor(t2) % bumps.length;
+          const i1 = (i0 + 1) % bumps.length;
+          const narrowR = preset.beachRadius + bumps[i0] + (t2 - Math.floor(t2)) * (bumps[i1] - bumps[i0]);
+          if (distSq < narrowR * narrowR) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Compute the max range for a cannonball accounting for overland range reduction.
+   * Server rule: effective_age += dt * (over_land ? 2 : 1); expires at 5 000 ms.
+   * At sea the cannonball travels 500 px/s × 5 s = 2 500 px.
+   * Over land it ages 2× faster, halving effective reach proportionally.
+   */
+  private computeCannonMaxRange(ox: number, oy: number, dx: number, dy: number): number {
+    const CANNON_SPEED_PX_S = 500;
+    const LIFETIME_MS       = 5000;
+    const STEP              = 50;  // sample every 50 px — cheap and accurate enough
+    const SEA_MAX           = CANNON_SPEED_PX_S * (LIFETIME_MS / 1000); // 2 500 px
+    let effectiveAgeMs = 0;
+    let traveled = 0;
+    while (traveled < SEA_MAX) {
+      const step = Math.min(STEP, SEA_MAX - traveled);
+      const overLand = this.isPointOverIsland(ox + dx * traveled, oy + dy * traveled);
+      const ageIncrease = (step / CANNON_SPEED_PX_S) * 1000 * (overLand ? 2 : 1);
+      effectiveAgeMs += ageIncrease;
+      if (effectiveAgeMs >= LIFETIME_MS) {
+        const excess    = effectiveAgeMs - LIFETIME_MS;
+        const fraction  = (ageIncrease - excess) / ageIncrease;
+        return traveled + step * fraction;
+      }
+      traveled += step;
+    }
+    return SEA_MAX;
+  }
+
+  /**
+   * Find the first collision along a cannon trajectory ray and determine its faction color.
+   *
+   * Checks (in priority order):
+   *   1. Players on foot        → faction-colored (green/red)
+   *   2. Free-standing NPCs     → faction-colored
+   *   3. Ships — hull polygons and modules — → faction-colored by ship company
+   *   4. On-ship players & NPCs → faction-colored by their own company
+   *   5. Placed structures      → faction-colored (neutral structures: grey)
+   *   6. Resource nodes (boulders/rocks) → grey (no faction)
+   *
+   * Returns:
+   *   color '#44ff88' — friendly (same company as local player)
+   *   color '#ff4444' — enemy / opposing company
+   *   color '#888888' — no hit OR environment hit (resource, neutral structure)
+   *   t               — distance to first hit (Infinity = no hit within maxT)
+   */
+  private findCannonTrajectoryHit(
+    ox: number, oy: number,
+    dx: number, dy: number,
+    maxT: number,
+    excludeShipId: number,
+    ammoType: number = 0, // 0 = cannonball, 1 = bar shot
+  ): { t: number; color: string } {
+    const isBarShot = ammoType !== 0; // treat any non-cannonball ammo as bar shot
+    const myComp = this._localCompanyId;
+    let tMin = Infinity;
+    let hitColor = '#888888';
+
+    const tryHit = (t: number, companyId: number) => {
+      if (t < 0 || t >= tMin) return;
+      tMin = t;
+      if (myComp > 0 && companyId === myComp) {
+        hitColor = '#44ff88'; // green — friendly
+      } else if (companyId === 0) {
+        hitColor = '#888888'; // grey — neutral / environment
+      } else {
+        hitColor = '#ff4444'; // red — enemy
+      }
+    };
+
+    const tryEnv = (t: number) => {
+      if (t < 0 || t >= tMin) return;
+      tMin = t;
+      hitColor = '#888888'; // grey — terrain / resource
+    };
+
+    // ── 1. Players on foot ──────────────────────────────────────────────
+    const PLAYER_R = 16;
+    for (const p of (this._cachedWorldPlayers ?? [])) {
+      if (p.carrierId !== 0) continue;
+      const mx = p.position.x - ox, my = p.position.y - oy;
+      const tp = mx * dx + my * dy;
+      if (tp < 0 || tp > maxT) continue;
+      const perpSq = mx * mx + my * my - tp * tp;
+      if (perpSq > PLAYER_R * PLAYER_R) continue;
+      tryHit(tp - Math.sqrt(PLAYER_R * PLAYER_R - perpSq), p.companyId);
+    }
+
+    // ── 2. Free-standing NPCs ───────────────────────────────────────────
+    const NPC_R = 14;
+    for (const npc of (this._cachedWorldNpcs ?? [])) {
+      if (npc.shipId !== 0) continue;
+      const mx = npc.position.x - ox, my = npc.position.y - oy;
+      const tp = mx * dx + my * dy;
+      if (tp < 0 || tp > maxT) continue;
+      const perpSq = mx * mx + my * my - tp * tp;
+      if (perpSq > NPC_R * NPC_R) continue;
+      tryHit(tp - Math.sqrt(NPC_R * NPC_R - perpSq), npc.companyId);
+    }
+
+    // ── 3. Ships (hull + modules + on-ship entities) ────────────────────
+    const MOD_R      = 20;
+    const MAST_R     = 40; // matches server BAR_SHOT_SAIL_RADIUS = CLIENT_TO_SERVER(40) = 40 client px
+    // Bar shot sweeps a spinning arc: barHalfL(10) + ballR(4) = 14 world px from the trajectory centre.
+    // Added to non-mast targets so the guide matches the projectile's physical reach.
+    const BAR_PROJ_R = isBarShot ? 14 : 0;
+    for (const ship of (this._cachedWorldShips ?? [])) {
+      if (ship.id === excludeShipId) continue;
+      const sc = Math.cos(ship.rotation), ss = Math.sin(ship.rotation);
+
+      // Hull polygon — bar shot passes through the hull entirely
+      if (!isBarShot && ship.hull && ship.hull.length >= 3) {
+        const t2 = this.rayHullIntersect(
+          ox, oy, dx, dy, ship.hull,
+          ship.position.x, ship.position.y, ship.rotation, maxT);
+        tryHit(t2, ship.companyId);
+      }
+
+      // Ship modules — bar shot only hits masts; cannonball hits everything
+      for (const mod of ship.modules) {
+        if (isBarShot && mod.kind !== 'mast') continue;
+        const hitR = (isBarShot && mod.kind === 'mast') ? MAST_R : MOD_R;
+        const mwx = ship.position.x + mod.localPos.x * sc - mod.localPos.y * ss;
+        const mwy = ship.position.y + mod.localPos.x * ss + mod.localPos.y * sc;
+        const mx = mwx - ox, my = mwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > hitR * hitR) continue;
+        // Bar shot: use mast center (tp) so the reticle appears inside the hull at the mast,
+        // not at the near-edge of the sail circle which coincides with the hull boundary.
+        const hitT = (isBarShot && mod.kind === 'mast')
+          ? tp
+          : tp - Math.sqrt(hitR * hitR - perpSq);
+        tryHit(hitT, ship.companyId);
+      }
+
+      // Players on this ship — bar shot ignores crew
+      if (!isBarShot) for (const p of (this._cachedWorldPlayers ?? [])) {
+        if (p.carrierId !== ship.id || !p.localPosition) continue;
+        const pwx = ship.position.x + p.localPosition.x * sc - p.localPosition.y * ss;
+        const pwy = ship.position.y + p.localPosition.x * ss + p.localPosition.y * sc;
+        const mx = pwx - ox, my = pwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > PLAYER_R * PLAYER_R) continue;
+        tryHit(tp - Math.sqrt(PLAYER_R * PLAYER_R - perpSq), p.companyId);
+      }
+
+      // NPCs on this ship — bar shot ignores crew
+      if (!isBarShot) for (const npc of (this._cachedWorldNpcs ?? [])) {
+        if (npc.shipId !== ship.id || !npc.localPosition) continue;
+        const nwx = ship.position.x + npc.localPosition.x * sc - npc.localPosition.y * ss;
+        const nwy = ship.position.y + npc.localPosition.x * ss + npc.localPosition.y * sc;
+        const mx = nwx - ox, my = nwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > NPC_R * NPC_R) continue;
+        tryHit(tp - Math.sqrt(NPC_R * NPC_R - perpSq), npc.companyId);
+      }
+    }
+
+    // ── 4. Placed structures ────────────────────────────────────────────
+    const STRUCT_R = 22 + BAR_PROJ_R; // bar shot's spinning arms widen the effective hitbox
+    const nonSolid = new Set(['wood_ceiling', 'claim_flag']);
+    for (const s of this.placedStructures) {
+      if (nonSolid.has(s.type)) continue;
+      const mx = s.x - ox, my = s.y - oy;
+      const tp = mx * dx + my * dy;
+      if (tp < 0 || tp > maxT) continue;
+      const perpSq = mx * mx + my * my - tp * tp;
+      if (perpSq > STRUCT_R * STRUCT_R) continue;
+      const t2 = tp - Math.sqrt(STRUCT_R * STRUCT_R - perpSq);
+      if (s.companyId === 0) tryEnv(t2); else tryHit(t2, s.companyId);
+    }
+
+    // ── 5. Resource nodes (boulders and tree trunks block shots; small rocks/fiber do not) ──
+    for (const isl of this.islands) {
+      for (const res of (isl.resources ?? [])) {
+        if (res.hp <= 0) continue;
+        if (res.type !== 'boulder' && res.type !== 'wood') continue;
+        const rwx = isl.x + res.ox, rwy = isl.y + res.oy;
+        const hitR = (res.type === 'boulder' ? 28 : 18) * (res.size ?? 1.0) + BAR_PROJ_R;
+        const mx = rwx - ox, my = rwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > hitR * hitR) continue;
+        tryEnv(tp - Math.sqrt(hitR * hitR - perpSq));
+      }
+    }
+
+    return { t: tMin, color: hitColor };
+  }
+
   // ── Territory helpers ───────────────────────────────────────────────────────
 
   /** Returns a CSS color string for a given company id. */
@@ -11758,10 +12045,8 @@ export class RenderSystem {
       }
 
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
-      const cannonData = cannon.moduleData;
 
-      // Client-predicted aim direction — mirrors the server formula so the guide
-      // tracks the mouse instantly rather than waiting for a round-trip.
+      // Client-predicted aim direction — mirrors the server formula.
       // Formula: desired_offset = playerAimAngleRelative - localRot + PI/2
       const CANNON_LIMIT = 30 * Math.PI / 180;
       let predictedAimDir = this.playerAimAngleRelative - (cannon.localRot || 0) + Math.PI / 2;
@@ -11773,76 +12058,43 @@ export class RenderSystem {
       const cx = cannon.localPos.x;
       const cy = cannon.localPos.y;
 
+      // Barrel tip and fire direction in ship-local space
       const barrelTipX = cx + 40 * Math.sin(totalAngle);
       const barrelTipY = cy - 40 * Math.cos(totalAngle);
       const dirX = Math.sin(totalAngle);
       const dirY = -Math.cos(totalAngle);
-      const range = cannonData.fireRange || 2000;
 
-      // ── Impact detection in world space ──
-      // Convert barrel tip and direction into world space for the intersection test.
+      // Convert barrel tip and direction into world space for collision/range calculations.
+      // (world-space distance = ship-local distance because rotation preserves lengths)
       const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
       const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
       const wDirX = dirX * cosR - dirY * sinR;
       const wDirY = dirX * sinR + dirY * cosR;
 
-      let tHit = Infinity;
+      // Actual max range accounting for overland lifetime reduction
+      const maxRange = this.computeCannonMaxRange(wBarrelX, wBarrelY, wDirX, wDirY);
 
-      if (this.selectedAmmoType === 1) {
-        // ── Bar shot: stop at the nearest enemy mast (ray-circle intersection) ──
-        const MAST_HIT_RADIUS = 28; // world units; generous hit zone for mast cylinder
-        for (const other of worldState.ships) {
-          if (other.id === ship.id) continue;
-          const masts = other.modules.filter(m => m.kind === 'mast');
-          const cosO = Math.cos(other.rotation);
-          const sinO = Math.sin(other.rotation);
-          for (const mast of masts) {
-            // Mast world position
-            const mlx = mast.localPos.x;
-            const mly = mast.localPos.y;
-            const mwx = other.position.x + mlx * cosO - mly * sinO;
-            const mwy = other.position.y + mlx * sinO + mly * cosO;
-            // Ray–circle: M = mastCenter - rayOrigin
-            const mx = mwx - wBarrelX;
-            const my = mwy - wBarrelY;
-            const tProj = mx * wDirX + my * wDirY;
-            if (tProj < 0 || tProj > range) continue;
-            const distSq = mx * mx + my * my - tProj * tProj;
-            if (distSq <= MAST_HIT_RADIUS * MAST_HIT_RADIUS) {
-              const t = tProj - Math.sqrt(MAST_HIT_RADIUS * MAST_HIT_RADIUS - distSq);
-              if (t >= 0 && t < tHit) tHit = t;
-            }
-          }
-        }
-      } else {
-        // ── Cannonball: stop at nearest enemy ship hull ──
-        for (const other of worldState.ships) {
-          if (other.id === ship.id) continue;
-          if (!other.hull || other.hull.length < 3) continue;
-          const t = this.rayHullIntersect(
-            wBarrelX, wBarrelY, wDirX, wDirY,
-            other.hull, other.position.x, other.position.y, other.rotation,
-            range
-          );
-          if (t < tHit) tHit = t;
-        }
-      }
+      // Find first collision — ships, players, NPCs, structures, resources
+      const hit = this.findCannonTrajectoryHit(
+        wBarrelX, wBarrelY, wDirX, wDirY, maxRange, ship.id, this.selectedAmmoType);
 
-      const didHit     = tHit < Infinity;
-      // Trajectory ends at impact point, clamped to max range
-      const drawLength = didHit ? Math.min(tHit, range) : range;
-      // Bar shot uses orange-gold when targeting a mast; cannonball uses yellow/grey
-      const guideColor = didHit
-        ? (this.selectedAmmoType === 1 ? '#FF8C00' : '#FFD700')
-        : '#AAAAAA';
+      const drawLength = Number.isFinite(hit.t) ? hit.t : maxRange;
+      const guideColor = hit.color;
+      const didHit     = Number.isFinite(hit.t);
 
-      // ── Dashed trajectory line (stops at impact) ──
+      // ── Dashed trajectory line (stops at first collision) ──────────────
+      // Bar shot uses a shorter dash pattern to visually distinguish from cannonball.
+      // Color comes from the hit result (red=enemy, green=friendly, grey=terrain).
+      const isBarShotDraw = this.selectedAmmoType !== 0;
+      const drawColor  = guideColor;
+      const dashOn     = isBarShotDraw ? 6 : 10;
+      const dashOff    = isBarShotDraw ? 10 : 7;
       this.ctx.save();
       this.ctx.globalAlpha = 0.80 * fadeAlpha;
-      this.ctx.strokeStyle = guideColor;
+      this.ctx.strokeStyle = drawColor;
       this.ctx.lineWidth   = 3.5;
       this.ctx.lineCap     = 'round';
-      this.ctx.setLineDash([10, 7]);
+      this.ctx.setLineDash([dashOn, dashOff]);
       this.ctx.beginPath();
       this.ctx.moveTo(barrelTipX, barrelTipY);
       this.ctx.lineTo(barrelTipX + dirX * drawLength, barrelTipY + dirY * drawLength);
@@ -11850,16 +12102,16 @@ export class RenderSystem {
       this.ctx.restore();
       this.ctx.setLineDash([]);
 
-      // ── Range-bracket tick marks at 1/3 and 2/3 of max range (only if before impact) ──
+      // ── Range-bracket tick marks at 1/3 and 2/3 of max range ──────────
       const perpX = -dirY;
       const perpY =  dirX;
       for (const frac of [1 / 3, 2 / 3]) {
-        const tickDist = range * frac;
-        if (tickDist >= drawLength) continue; // past (or at) impact — skip
+        const tickDist = maxRange * frac;
+        if (tickDist >= drawLength) continue; // past impact — skip
         const bx = barrelTipX + dirX * tickDist;
         const by = barrelTipY + dirY * tickDist;
         this.ctx.save();
-        this.ctx.globalAlpha = 0.55 * fadeAlpha;
+        this.ctx.globalAlpha = 0.50 * fadeAlpha;
         this.ctx.strokeStyle = guideColor;
         this.ctx.lineWidth   = 3.5;
         this.ctx.lineCap     = 'round';
@@ -11870,10 +12122,9 @@ export class RenderSystem {
         this.ctx.restore();
       }
 
-      // ── Terminal reticle — 4 arcs, hollow centre (at impact or max range) ──
+      // ── Terminal reticle — 4 arcs at impact point or max range ─────────
       const termX    = barrelTipX + dirX * drawLength;
       const termY    = barrelTipY + dirY * drawLength;
-      // When hitting a ship the reticle is tighter to convey a direct hit
       const reticleR = didHit ? 10 : 13;
       const arcSpan  = Math.PI * 0.44;
       const gapHalf  = Math.PI * 0.06;
@@ -11894,11 +12145,105 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
-    // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
-      return;
+  /**
+   * Draw cannon trajectory guide for an island-placed cannon that the local player
+   * is currently mounted on. Draws directly in screen space (no ship-local ctx transform).
+   */
+  private drawIslandCannonTrajectory(camera: Camera): void {
+    if (!this.playerIsAiming) return;
+    if (this.islandCannonId === null || this.islandCannonAimAngle === null) return;
+
+    const s = this.placedStructures.find(
+      ps => ps.id === this.islandCannonId && ps.type === 'cannon');
+    if (!s) return;
+    if ((s.cannonReloadMs ?? 0) > 0) return; // reloading — no guide
+
+    const aimAngle = this.islandCannonAimAngle;
+    const BARREL_TIP = 40; // world px from cannon center to barrel tip
+
+    const wBarrelX = s.x + Math.cos(aimAngle) * BARREL_TIP;
+    const wBarrelY = s.y + Math.sin(aimAngle) * BARREL_TIP;
+    const wDirX    = Math.cos(aimAngle);
+    const wDirY    = Math.sin(aimAngle);
+
+    const maxRange  = this.computeCannonMaxRange(wBarrelX, wBarrelY, wDirX, wDirY);
+    const hit       = this.findCannonTrajectoryHit(
+      wBarrelX, wBarrelY, wDirX, wDirY, maxRange, 0 /* no ship to exclude */, this.selectedAmmoType);
+
+    const drawLength = Number.isFinite(hit.t) ? hit.t : maxRange;
+    const guideColor = hit.color;
+    const didHit     = Number.isFinite(hit.t);
+
+    // Convert world positions to screen positions for drawing
+    const tipSP = camera.worldToScreen(Vec2.from(wBarrelX, wBarrelY));
+    const endSP = camera.worldToScreen(Vec2.from(wBarrelX + wDirX * drawLength, wBarrelY + wDirY * drawLength));
+
+    // Screen-space direction and perpendicular (accounts for camera rotation)
+    const sdx = endSP.x - tipSP.x;
+    const sdy = endSP.y - tipSP.y;
+    const sLen = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
+    const snx = sdx / sLen, sny = sdy / sLen; // unit direction in screen space
+    const spx = -sny, spy = snx;              // perpendicular in screen space
+
+    const zoom = camera.getState().zoom;
+    const ctx  = this.ctx;
+
+    // ── Dashed trajectory line ──────────────────────────────────────────
+    // Color comes from hit result (red=enemy, green=friendly, grey=terrain).
+    // Bar shot uses a shorter dash pattern to visually distinguish from cannonball.
+    const islandBarShot = this.selectedAmmoType !== 0;
+    const islandDashOn  = islandBarShot ? 6 : 10;
+    const islandDashOff = islandBarShot ? 10 : 7;
+    ctx.save();
+    ctx.globalAlpha = 0.80;
+    ctx.strokeStyle = guideColor;
+    ctx.lineWidth   = 3.5;
+    ctx.lineCap     = 'round';
+    ctx.setLineDash([islandDashOn, islandDashOff]);
+    ctx.beginPath();
+    ctx.moveTo(tipSP.x, tipSP.y);
+    ctx.lineTo(endSP.x, endSP.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // ── Range-bracket tick marks at 1/3 and 2/3 of max range ───────────
+    const tickLen = 7 * zoom;
+    for (const frac of [1 / 3, 2 / 3]) {
+      const tickDist = maxRange * frac;
+      if (tickDist >= drawLength) continue;
+      const tsp = camera.worldToScreen(Vec2.from(wBarrelX + wDirX * tickDist, wBarrelY + wDirY * tickDist));
+      ctx.save();
+      ctx.globalAlpha = 0.50;
+      ctx.strokeStyle = guideColor;
+      ctx.lineWidth   = 3.5;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tsp.x - spx * tickLen, tsp.y - spy * tickLen);
+      ctx.lineTo(tsp.x + spx * tickLen, tsp.y + spy * tickLen);
+      ctx.stroke();
+      ctx.restore();
     }
+
+    // ── Terminal reticle — 4 arcs ───────────────────────────────────────
+    const reticleR = (didHit ? 10 : 13) * zoom;
+    const arcSpan  = Math.PI * 0.44;
+    const gapHalf  = Math.PI * 0.06;
+    ctx.save();
+    ctx.globalAlpha = 0.75;
+    ctx.strokeStyle = guideColor;
+    ctx.lineWidth   = 3.5;
+    ctx.lineCap     = 'round';
+    for (let i = 0; i < 4; i++) {
+      const centre = (Math.PI / 2) * i;
+      ctx.beginPath();
+      ctx.arc(endSP.x, endSP.y, reticleR, centre + gapHalf, centre + arcSpan - gapHalf);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
     
     this.ctx.save();
     

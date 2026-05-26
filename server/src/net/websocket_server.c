@@ -2354,9 +2354,10 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (hs_is_cannon) {
                                             snprintf(hs_cannon_extra, sizeof(hs_cannon_extra),
-                                                     ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u",
+                                                     ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u,\"cannon_loaded_ammo\":%u",
                                                      placed_structures[si].cannon_aim_angle,
-                                                     placed_structures[si].cannon_reload_ms);
+                                                     placed_structures[si].cannon_reload_ms,
+                                                     (unsigned)placed_structures[si].cannon_loaded_ammo);
                                         }
                                         if (hs_is_cfrt) {
                                             snprintf(hs_claim_extra, sizeof(hs_claim_extra),
@@ -3549,12 +3550,8 @@ int websocket_server_update(struct Sim* sim) {
                                                        freefire);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"cannons_fired\"}");
                                 } else if (player && player->mounted_cannon_structure_id != 0) {
-                                    /* Island cannon fire */
-                                    uint8_t ammo_type = PROJ_TYPE_CANNONBALL;
-                                    char* at = strstr(payload, "\"ammo_type\":");
-                                    if (at) ammo_type = (uint8_t)atoi(at + 12);
-                                    if (ammo_type > 1) ammo_type = PROJ_TYPE_CANNONBALL;
-                                    int fire_result = handle_island_cannon_fire(player, ammo_type);
+                                    /* Island cannon fire — server uses cannon_loaded_ammo authoritatively */
+                                    int fire_result = handle_island_cannon_fire(player);
                                     if (fire_result == 2)
                                         strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_ammo\"}");
                                     else
@@ -3566,16 +3563,20 @@ int websocket_server_update(struct Sim* sim) {
                             }
 
                         } else if (strcmp(msg_type, "cannon_force_reload") == 0) {
-                            // CANNON FORCE RELOAD — discard current round, restart reload
+                            // CANNON FORCE RELOAD — discard current round, restart reload with new ammo
                             if (client->player_id == 0) {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                             } else {
                                 WebSocketPlayer* player = find_player(client->player_id);
-                                if (player && player->parent_ship_id != 0) {
-                                    handle_cannon_force_reload(player);
+                                if (player) {
+                                    uint8_t new_ammo = 0;
+                                    char* at_ptr = strstr(payload, "\"ammo_type\":");
+                                    if (at_ptr) new_ammo = (uint8_t)atoi(at_ptr + 12);
+                                    if (new_ammo > 1) new_ammo = 0; /* only cannonball/bar shot for island cannons */
+                                    handle_cannon_force_reload(player, new_ammo);
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"force_reloaded\"}");
                                 } else {
-                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_mounted\"}");
                                 }
                             }
                             handled = true;
@@ -6854,9 +6855,10 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (is_cannon_s) {
                                             snprintf(cannon_extra_s, sizeof(cannon_extra_s),
-                                                     ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u",
+                                                     ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u,\"cannon_loaded_ammo\":%u",
                                                      placed_structures[si].cannon_aim_angle,
-                                                     placed_structures[si].cannon_reload_ms);
+                                                     placed_structures[si].cannon_reload_ms,
+                                                     (unsigned)placed_structures[si].cannon_loaded_ammo);
                                         }
                                         if (is_cfrt_s) {
                                             snprintf(claim_extra_s, sizeof(claim_extra_s),
@@ -6990,9 +6992,10 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                                                         if (gs_is_cannon) {
                                                                                 snprintf(gs_cannon_extra, sizeof(gs_cannon_extra),
-                                                                                                 ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u",
+                                                                                                 ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u,\"cannon_loaded_ammo\":%u",
                                                                                                  placed_structures[si].cannon_aim_angle,
-                                                                                                 placed_structures[si].cannon_reload_ms);
+                                                                                                 placed_structures[si].cannon_reload_ms,
+                                                                                                 (unsigned)placed_structures[si].cannon_loaded_ammo);
                                                                         }
                                     if (gs_is_cfrt) {
                                         snprintf(gs_claim_extra, sizeof(gs_claim_extra),
@@ -8660,10 +8663,10 @@ void websocket_server_tick(float dt) {
                 uint32_t prev_ms = _cs->cannon_reload_ms;
                 _cs->cannon_reload_ms = (prev_ms > tick_ms) ? prev_ms - tick_ms : 0;
                 if (_cs->cannon_reload_ms == 0) {
-                    char _done[80];
+                    char _done[128];
                     snprintf(_done, sizeof(_done),
-                             "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":0}",
-                             _cs->id);
+                             "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":0,\"loaded_ammo\":%u}",
+                             _cs->id, (unsigned)_cs->cannon_loaded_ammo);
                     broadcast_json_all(_done);
                 }
             }

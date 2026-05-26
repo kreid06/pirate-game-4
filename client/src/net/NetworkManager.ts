@@ -577,7 +577,7 @@ export class NetworkManager {
   /** Fired when server returns authoritative current island-cannon aim in message_ack. */
   public onIslandCannonAimSync: ((structureId: number, aimAngle: number) => void) | null = null;
   /** Fired when an island cannon starts or finishes reloading. */
-  public onStructureReload: ((structureId: number, reloadMs: number) => void) | null = null;
+  public onStructureReload: ((structureId: number, reloadMs: number, loadedAmmo: number) => void) | null = null;
   /** Fired when the player tries to fire an island cannon but has no cannonballs. */
   public onNoAmmo: (() => void) | null = null;
 
@@ -1251,10 +1251,10 @@ export class NetworkManager {
    * Tells the server to reset the reload timer so the cannon reloads immediately
    * into the newly-selected ammo type.
    */
-  sendForceReload(): void {
+  sendForceReload(ammoType: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: 'cannon_force_reload' as any, timestamp: Date.now() });
-    console.log('⚡ Force reload sent');
+    this.sendMessage({ type: 'cannon_force_reload' as any, timestamp: Date.now(), ammo_type: ammoType });
+    console.log(`⚡ Force reload sent (ammo_type=${ammoType})`);
   }
 
   /**
@@ -2661,7 +2661,7 @@ export class NetworkManager {
           rotation:  s.rotation ?? 0,
           cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
           cannonReloadMs: typeof s.cannon_reload_ms === 'number' ? s.cannon_reload_ms : undefined,
-          claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
+          cannonLoadedAmmo: typeof s.cannon_loaded_ammo === 'number' ? s.cannon_loaded_ammo : undefined,
           claimContested:        s.claim_contested        === true,
           claimTargetsFortress:  s.claim_targets_fortress  === true,
           claimLinkedFort:       typeof s.claim_linked_fort  === 'number' ? s.claim_linked_fort  : undefined,
@@ -2714,7 +2714,7 @@ export class NetworkManager {
           rotation:  message.rotation ?? 0,
           cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
           cannonReloadMs: typeof message.cannon_reload_ms === 'number' ? message.cannon_reload_ms : undefined,
-          claimContested:       message.claim_contested        === true,
+          cannonLoadedAmmo: typeof message.cannon_loaded_ammo === 'number' ? message.cannon_loaded_ammo : undefined,
           claimTargetsFortress: message.claim_targets_fortress  === true,
           claimLinkedFort:      typeof message.claim_linked_fort  === 'number' ? message.claim_linked_fort  : undefined,
           claimSourceEnemy:     typeof message.claim_source_enemy === 'number' ? message.claim_source_enemy : undefined,
@@ -3141,7 +3141,8 @@ export class NetworkManager {
 
       case 'structure_reload':
         if (typeof message.structure_id === 'number' && typeof message.reload_ms === 'number') {
-          this.onStructureReload?.(message.structure_id, message.reload_ms);
+          const loadedAmmo = typeof message.loaded_ammo === 'number' ? message.loaded_ammo : 0;
+          this.onStructureReload?.(message.structure_id, message.reload_ms, loadedAmmo);
         }
         break;
 

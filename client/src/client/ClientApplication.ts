@@ -391,8 +391,14 @@ export class ClientApplication {
         // always has the latest server-confirmed angle (important after dismount).
         this.renderSystem.updateStructureCannonAim(structureId, aimAngle);
       };
-      this.networkManager.onStructureReload = (structureId, reloadMs) => {
-        this.renderSystem.updateStructureCannonReload(structureId, reloadMs);
+      this.networkManager.onStructureReload = (structureId, reloadMs, loadedAmmo) => {
+        this.renderSystem.updateStructureCannonReload(structureId, reloadMs, loadedAmmo);
+        // When the server confirms reload is done, commit the loaded ammo type
+        // so the aim guide switches to the newly loaded ammo.
+        if (reloadMs === 0 && this.inputManager?.isOnIslandCannon &&
+            this.inputManager.mountedCannonModuleId === structureId) {
+          this.inputManager.loadedAmmoType = loadedAmmo;
+        }
       };
       this.networkManager.onNoAmmo = () => {
         // Show floating "No cannonballs!" warning at the player's current position
@@ -1194,7 +1200,15 @@ export class ClientApplication {
         this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
       };
       this.inputManager.onForceReload = () => {
-        this.networkManager.sendForceReload();
+        const ammoType = this.inputManager?.selectedAmmoType ?? 0;
+        this.networkManager.sendForceReload(ammoType);
+        // Optimistically mark the island cannon as reloading so the per-frame
+        // ammo-commit check doesn't instantly swap loadedAmmoType before the
+        // server's structure_reload echo arrives.
+        if (this.inputManager?.isOnIslandCannon) {
+          const sid = this.inputManager.mountedCannonModuleId;
+          if (sid !== null) this.renderSystem.updateStructureCannonReload(sid, 3000, ammoType);
+        }
       };
 
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
@@ -2651,6 +2665,38 @@ export class ClientApplication {
       this.renderSystem.islandCannonId = null;
       this.renderSystem.islandCannonAimAngle = null;
     }
+
+    // Commit pending ammo type once the cannon finishes reloading.
+    // loadedAmmoType stays at the old value during the reload cycle so the aim guide
+    // shows what's actually in the barrel, not the queued selection.
+    if (this.inputManager.selectedAmmoType !== this.inputManager.loadedAmmoType) {
+      const world = this.predictedWorldState ?? this.authoritativeWorldState;
+      const mountKind = this.inputManager.getMountKind();
+
+      if (this.inputManager.isOnIslandCannon) {
+        const cannonId = this.inputManager.mountedCannonModuleId;
+        if (cannonId !== null && !this.renderSystem.isIslandCannonReloading(cannonId)) {
+          this.inputManager.loadedAmmoType = this.inputManager.selectedAmmoType;
+        }
+      } else if (mountKind === 'cannon' || mountKind === 'helm') {
+        const playerId = this.networkManager.getAssignedPlayerId();
+        const player = world?.players.find(p => p.id === playerId);
+        const ship = player?.carrierId ? world?.ships.find(s => s.id === player.carrierId) : null;
+        if (ship) {
+          if (mountKind === 'cannon') {
+            // Single cannon: wait for this specific module's reload to clear
+            const mod = ship.modules.find(m => m.id === this.inputManager.mountedCannonModuleId);
+            const isReloading = ((mod?.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16;
+            if (!isReloading) this.inputManager.loadedAmmoType = this.inputManager.selectedAmmoType;
+          } else {
+            // Helm: all ship cannons were force-reloaded — wait until none are reloading
+            const anyReloading = ship.modules.some(
+              m => m.kind === 'cannon' && (((m.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16));
+            if (!anyReloading) this.inputManager.loadedAmmoType = this.inputManager.selectedAmmoType;
+          }
+        }
+      }
+    }
   }
   
   /**
@@ -2741,6 +2787,8 @@ export class ClientApplication {
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
       this.renderSystem.localPlayerId = assignedPlayerId;
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
+      // Use the loaded ammo type (physically in the barrel) so the aim guide shows
+      // the trajectory of what will actually fire, not the pending GUI selection.
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
@@ -2872,6 +2920,11 @@ export class ClientApplication {
 
       // Hover debug HUD — rendered last so it always appears above all UI layers
       this.renderSystem.renderHoverDebugHUD();
+
+      // Reconnecting overlay — sits above everything when disconnected mid-game
+      if (this.state === ClientState.DISCONNECTED) {
+        this.renderSystem.drawReconnectingOverlay();
+      }
     }
   }
   

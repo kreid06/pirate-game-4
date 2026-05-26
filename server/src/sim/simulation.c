@@ -2706,7 +2706,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                 const IslandDef *isl = &ISLAND_PRESETS[ii];
                 for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
                     const IslandResource *res = &isl->resources[ri];
-                    if (res->type_id != RES_BOULDER) continue;
+                    if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
                     if (res->health <= 0) continue;
 
                     float bx_cli = isl->x + res->ox;

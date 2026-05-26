@@ -942,8 +942,33 @@ void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShi
  * when at the helm) and marks them as RELOADING so they cannot fire immediately.
  * This lets a player discard the currently loaded round and reload a different ammo type.
  */
-void handle_cannon_force_reload(WebSocketPlayer* player) {
-    if (player->parent_ship_id == 0 || !player->is_mounted) return;
+void handle_cannon_force_reload(WebSocketPlayer* player, uint8_t new_ammo_type) {
+    if (!player->is_mounted) return;
+
+    /* ── Island cannon path ── */
+    if (player->parent_ship_id == 0 && player->mounted_cannon_structure_id != 0) {
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            PlacedStructure* str = &placed_structures[si];
+            if (!str->active) continue;
+            if (str->id != player->mounted_cannon_structure_id) continue;
+
+            str->cannon_loaded_ammo = new_ammo_type;
+            str->cannon_reload_ms   = (uint32_t)CANNON_RELOAD_TIME_MS;
+
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":%u,\"loaded_ammo\":%u}",
+                     str->id, str->cannon_reload_ms, (unsigned)str->cannon_loaded_ammo);
+            broadcast_json_all(msg);
+
+            log_info("⚡ Force-reload: player %u set island cannon %u ammo=%u, reloading",
+                     player->player_id, str->id, (unsigned)new_ammo_type);
+            return;
+        }
+        return;
+    }
+
+    if (player->parent_ship_id == 0) return;
 
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
@@ -1952,7 +1977,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
                 IslandDef* isl = &ISLAND_PRESETS[ii];
                 for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
                     IslandResource* res = &isl->resources[ri];
-                    if (res->type_id != RES_BOULDER) continue;
+                    if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
                     if (res->health <= 0) continue;
                     float bx = isl->x + res->ox;
                     float by = isl->y + res->oy;
@@ -2009,12 +2034,14 @@ extern uint32_t placed_structure_count;
  *   - player has at least 1 ITEM_CANNON_BALL in inventory
  * Spawns a projectile at the barrel tip and broadcasts CANNON_FIRE_EVENT.
  */
-void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t ammo_type) {
+void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player) {
     if (!str || !player) return;
     if (str->cannon_reload_ms > 0) {
         /* Still reloading — silently ignore */
         return;
     }
+
+    uint8_t ammo_type = str->cannon_loaded_ammo;
 
 #if !ISLAND_CANNON_INFINITE_AMMO
     /* Consume 1 cannonball from the player's inventory */
@@ -2038,10 +2065,10 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
     /* Set reload timer (matches ship cannon) */
     str->cannon_reload_ms = (uint32_t)CANNON_RELOAD_TIME_MS;
     {
-        char _rl_msg[96];
+        char _rl_msg[128];
         snprintf(_rl_msg, sizeof(_rl_msg),
-                 "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":%u}",
-                 str->id, str->cannon_reload_ms);
+                 "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":%u,\"loaded_ammo\":%u}",
+                 str->id, str->cannon_reload_ms, (unsigned)str->cannon_loaded_ammo);
         broadcast_json_all(_rl_msg);
     }
 
@@ -2128,13 +2155,13 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
  * sends a cannon_fire message.
  * Returns: 0 = fired OK, 1 = still reloading, 2 = no ammo.
  */
-int handle_island_cannon_fire(WebSocketPlayer* player, uint8_t ammo_type) {
+int handle_island_cannon_fire(WebSocketPlayer* player) {
     if (!player || player->mounted_cannon_structure_id == 0) return 1;
     for (uint32_t si = 0; si < placed_structure_count; si++) {
         if (!placed_structures[si].active) continue;
         if (placed_structures[si].id != player->mounted_cannon_structure_id) continue;
         placed_structures[si].no_ammo_flag = false;
-        fire_island_cannon(&placed_structures[si], player, ammo_type);
+        fire_island_cannon(&placed_structures[si], player);
         if (placed_structures[si].no_ammo_flag) return 2; /* no ammo */
         return 0; /* fired */
     }

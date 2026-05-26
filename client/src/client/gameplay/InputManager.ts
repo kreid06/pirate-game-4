@@ -1191,16 +1191,16 @@ export class InputManager {
                   const idx = swivelAmmos.indexOf(this.selectedAmmoType);
                   this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
                 }
-                this.loadedAmmoType = this.selectedAmmoType;
+                // loadedAmmoType updated by ClientApplication once the reload cycle completes
                 const swivelNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
-                console.log(`⚡ Helm swivel ammo force-loaded → ${swivelNames[this.loadedAmmoType]}`);
+                console.log(`⚡ Helm swivel ammo queued → ${swivelNames[this.selectedAmmoType]} (reloading…)`);
               } else {
                 if (this.selectedAmmoType === this.loadedAmmoType) {
                   this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
                 }
-                this.loadedAmmoType = this.selectedAmmoType;
+                // loadedAmmoType updated by ClientApplication once the reload cycle completes
                 const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-                console.log(`⚡ Ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+                console.log(`⚡ Ammo queued → ${ammoNames[this.selectedAmmoType]} (reloading…)`);
               }
               if (this.onForceReload) this.onForceReload();
             }, 500);
