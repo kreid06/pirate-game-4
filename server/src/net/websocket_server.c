@@ -245,6 +245,21 @@ typedef struct {
     int  projectiles_len;
     int  npcs_len;
     int  active_player_count;
+    /* Per-entity pre-built JSON entries for AOI-filtered per-client assembly.   *
+     * Worker fills these alongside the full blob; phase 1 uses them to skip     *
+     * entities outside the client's view radius without any re-serialisation.   */
+    char  player_entry[WS_MAX_CLIENTS][3200];
+    int   player_entry_len[WS_MAX_CLIENTS];
+    float player_world_x[WS_MAX_CLIENTS];
+    float player_world_y[WS_MAX_CLIENTS];
+    bool  player_entry_active[WS_MAX_CLIENTS];
+
+    char  npc_entry[MAX_WORLD_NPCS][640];
+    int   npc_entry_len[MAX_WORLD_NPCS];
+    float npc_world_x[MAX_WORLD_NPCS];
+    float npc_world_y[MAX_WORLD_NPCS];
+    bool  npc_entry_active[MAX_WORLD_NPCS];
+    int   npc_entry_count;
 } SharedBlobOutput;
 
 typedef struct {
@@ -270,6 +285,20 @@ static uint64_t g_ship_json_last_us = 0;
 static uint64_t g_ship_json_max_us = 0;
 static uint64_t g_send_loop_last_us = 0;
 static uint64_t g_send_loop_max_us = 0;
+static uint64_t g_send_build_last_us = 0;
+static uint64_t g_send_build_max_us = 0;
+static uint64_t g_send_dispatch_last_us = 0;
+static uint64_t g_send_dispatch_max_us = 0;
+/* Round-robin send budget: cap blocking sends per tick, carry over the rest. */
+#define SEND_BUDGET_PER_TICK 64
+static int      g_rr_next_ci = 0;          /* client-index watermark for next tick */
+static uint64_t g_rr_deferred_last = 0;    /* clients deferred on last tick (RR)    */
+static uint64_t g_rr_deferred_max  = 0;
+/* Per-tick send outcome counters (reset each tick). */
+static uint64_t g_send_eagain_last = 0;    /* frames dropped due to EAGAIN          */
+static uint64_t g_send_eagain_max  = 0;
+static uint64_t g_send_error_last  = 0;    /* hard send errors (client disconnected) */
+static uint64_t g_send_error_max   = 0;
 
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
@@ -888,6 +917,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "[");
     bool first_player = true;
     int active_count = 0;
+    memset(out->player_entry_active, 0, sizeof(out->player_entry_active));
     for (int p = 0; p < WS_MAX_CLIENTS; p++) {
         if (!snap->players[p].active) continue;
         if (!first_player) {
@@ -957,6 +987,25 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                          + snap->players[p].stat_stamina + snap->players[p].stat_weight)
                     : 0),
                 inv_buf);
+        /* Capture per-entry for AOI-filtered per-client assembly. */
+        {
+            int _pelen = (int)strlen(player_entry);
+            if (_pelen > (int)sizeof(out->player_entry[p]) - 1) _pelen = (int)sizeof(out->player_entry[p]) - 1;
+            memcpy(out->player_entry[p], player_entry, (size_t)_pelen);
+            out->player_entry[p][_pelen] = '\0';
+            out->player_entry_len[p] = _pelen;
+            float _pwx = snap->players[p].x, _pwy = snap->players[p].y;
+            if (snap->players[p].parent_ship_id != 0) {
+                for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
+                    if (out->aoi_ship_id[_asi] == (uint32_t)snap->players[p].parent_ship_id) {
+                        _pwx = out->aoi_ship_px[_asi]; _pwy = out->aoi_ship_py[_asi]; break;
+                    }
+                }
+            }
+            out->player_world_x[p] = _pwx;
+            out->player_world_y[p] = _pwy;
+            out->player_entry_active[p] = true;
+        }
         players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "%s", player_entry);
         first_player = false;
         active_count++;
@@ -995,11 +1044,14 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     int _wnc = snap->world_npc_count;
     if (_wnc < 0) _wnc = 0;
     if (_wnc > MAX_WORLD_NPCS) _wnc = MAX_WORLD_NPCS;
+    memset(out->npc_entry_active, 0, sizeof(out->npc_entry_active));
+    out->npc_entry_count = _wnc;
     for (int n = 0; n < _wnc; n++) {
         const WorldNpc* npc = &snap->world_npcs[n];
         if (!npc->active) continue;
         if (!first_npc)
             npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, ",");
+        int _ne_start = npcs_offset;
         npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset,
             "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
             "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
@@ -1021,6 +1073,30 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
                 (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
             (int)npc->task_locked);
+        /* Capture per-entry for AOI-filtered per-client assembly. */
+        {
+            int _nelen = npcs_offset - _ne_start;
+            if (_nelen > 0) {
+                int _ncap = (int)sizeof(out->npc_entry[n]) - 1;
+                if (_nelen > _ncap) _nelen = _ncap;
+                memcpy(out->npc_entry[n], out->npcs_json + _ne_start, (size_t)_nelen);
+                out->npc_entry[n][_nelen] = '\0';
+                out->npc_entry_len[n] = _nelen;
+            } else {
+                out->npc_entry_len[n] = 0;
+            }
+            float _nwx = npc->x, _nwy = npc->y;
+            if (npc->ship_id != 0) {
+                for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
+                    if (out->aoi_ship_id[_asi] == (uint32_t)npc->ship_id) {
+                        _nwx = out->aoi_ship_px[_asi]; _nwy = out->aoi_ship_py[_asi]; break;
+                    }
+                }
+            }
+            out->npc_world_x[n] = _nwx;
+            out->npc_world_y[n] = _nwy;
+            out->npc_entry_active[n] = true;
+        }
         first_npc = false;
     }
     npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "]");
@@ -7904,11 +7980,14 @@ int websocket_server_update(struct Sim* sim) {
     if (current_time - last_debug_time > 10000) {
         debug_player_state();
         blob_worker_log_stats();
-        log_info("⏱️ main-thread serialize stats: ships_last=%lluus ships_max=%lluus send_last=%lluus send_max=%lluus",
-                 (unsigned long long)g_ship_json_last_us,
-                 (unsigned long long)g_ship_json_max_us,
-                 (unsigned long long)g_send_loop_last_us,
-                 (unsigned long long)g_send_loop_max_us);
+        log_info("⏱️ send stats: ships=%llu/%lluus build=%llu/%lluus dispatch=%llu/%lluus loop=%llu/%lluus rr_defer=%llu/%llu eagain=%llu/%llu err=%llu/%llu",
+                 (unsigned long long)g_ship_json_last_us,  (unsigned long long)g_ship_json_max_us,
+                 (unsigned long long)g_send_build_last_us, (unsigned long long)g_send_build_max_us,
+                 (unsigned long long)g_send_dispatch_last_us, (unsigned long long)g_send_dispatch_max_us,
+                 (unsigned long long)g_send_loop_last_us,  (unsigned long long)g_send_loop_max_us,
+                 (unsigned long long)g_rr_deferred_last,   (unsigned long long)g_rr_deferred_max,
+                 (unsigned long long)g_send_eagain_last,   (unsigned long long)g_send_eagain_max,
+                 (unsigned long long)g_send_error_last,    (unsigned long long)g_send_error_max);
         last_debug_time = current_time;
     }
     
@@ -7996,11 +8075,17 @@ int websocket_server_update(struct Sim* sim) {
          *  2. Filter NPCs[]  by AOI (use ship position for on-ship NPCs).
          *  3. Use delta compression: only send changed fields, not full objects.
          */
-        static char per_ship_json[64000];
-        static char per_gs[131072];
+        static char per_ship_json_pool[WS_MAX_CLIENTS][64000];
+        static char per_gs_pool[WS_MAX_CLIENTS][131072];
+        static int  per_gs_len[WS_MAX_CLIENTS];
+        static int  send_client_idx[WS_MAX_CLIENTS];
         static char per_frame[131086];
         uint64_t _send_loop_t0_us = get_time_us();
+        uint64_t _send_build_t0_us = get_time_us();
 
+        int _send_count = 0;
+
+        /* Phase 1: precompute per-client ship slices and full JSON payloads. */
         for (int _ci = 0; _ci < WS_MAX_CLIENTS; _ci++) {
             struct WebSocketClient* _client = &ws_server.clients[_ci];
             if (!_client->connected || !_client->handshake_complete || _client->player_id == 0)
@@ -8008,8 +8093,6 @@ int websocket_server_update(struct Sim* sim) {
             WebSocketPlayer* _vp = find_player(_client->player_id);
             if (!_vp || !_vp->active) continue;
 
-            /* AOI centre — use carrier ship's live position when the player is on a ship,
-             * because ws_player->x/y is only written at board time, not each tick. */
             float _cx = _vp->x, _cy = _vp->y;
             if (_vp->parent_ship_id != 0) {
                 for (int _pi = 0; _pi < aoi_ship_count; _pi++) {
@@ -8021,20 +8104,18 @@ int websocket_server_update(struct Sim* sim) {
                 }
             }
 
-            /* Simple radius check matching the client MAX_VIEW_DIST (5000 client units).
-             * Ships inside the radius are sent; the client handles fog-based visual filtering. */
             const float _view_r  = 5000.0f;
             const float _view_r2 = _view_r * _view_r;
 
-            /* Build per-client ships_json ---------------------------------------- */
-            int _soff = snprintf(per_ship_json, sizeof(per_ship_json), "[");
+            char* per_ship_json = per_ship_json_pool[_send_count];
+            int _soff = snprintf(per_ship_json, 64000, "[");
             bool _sfirst = true;
             for (int _si = 0; _si < aoi_ship_count; _si++) {
                 float _dx = shared_blob_cache.aoi_ship_px[_si] - _cx, _dy = shared_blob_cache.aoi_ship_py[_si] - _cy;
                 if (_dx * _dx + _dy * _dy > _view_r2) continue;
-                if (!_sfirst && _soff < (int)sizeof(per_ship_json) - 1)
+                if (!_sfirst && _soff < 64000 - 1)
                     per_ship_json[_soff++] = ',';
-                int _room = (int)sizeof(per_ship_json) - _soff - 2;
+                int _room = 64000 - _soff - 2;
                 if (shared_blob_cache.aoi_ship_len[_si] > 0 && shared_blob_cache.aoi_ship_len[_si] <= _room) {
                     memcpy(per_ship_json + _soff,
                            ships_json + shared_blob_cache.aoi_ship_start[_si],
@@ -8043,39 +8124,139 @@ int websocket_server_update(struct Sim* sim) {
                 }
                 _sfirst = false;
             }
-            if (_soff < (int)sizeof(per_ship_json) - 1) per_ship_json[_soff++] = ']';
+            if (_soff < 64000 - 1) per_ship_json[_soff++] = ']';
             per_ship_json[_soff] = '\0';
 
-            /* Assemble per-player game_state via memcpy from pre-built blobs ------ */
+            char* per_gs = per_gs_pool[_send_count];
             int _goff = 0;
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff,
+            _goff += snprintf(per_gs + _goff, 131072 - _goff,
                               "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
                               current_time / 33, current_time);
-#define _MC(buf, len) do { if (_goff + (len) < (int)sizeof(per_gs) - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
-            _MC(per_ship_json,    _soff);
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"players\":");
-            _MC(shared_blob_cache.players_json,     shared_blob_cache.players_len);
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"projectiles\":");
-            _MC(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"npcs\":");
-            _MC(shared_blob_cache.npcs_json,        shared_blob_cache.npcs_len);
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"tombstones\":");
-            _MC(shared_blob_cache.tmb_json,   shared_blob_cache.tmb_len);
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"droppedItems\":");
-            _MC(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
-            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"companies\":");
-            _MC(shared_blob_cache.co_json,    shared_blob_cache.co_len);
-#undef _MC
-            if (_goff < (int)sizeof(per_gs) - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
-
-            /* Frame + send ------------------------------------------------------- */
-            size_t _flen = websocket_create_frame(WS_OPCODE_TEXT, per_gs, (size_t)_goff,
-                                                  per_frame, sizeof(per_frame));
-            if (_flen > 0) {
-                ssize_t _sent = send(_client->fd, per_frame, _flen, 0);
-                if (_sent > 0) ws_server.packets_sent++;
+#define _MC1(buf, len) do { if (_goff + (len) < 131072 - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
+            _MC1(per_ship_json, _soff);
+            /* Players: AOI-filtered per-client (skip players outside view radius). */
+            if (_goff + 12 < 131072) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
+            {
+                bool _ppf = true;
+                for (int _p = 0; _p < WS_MAX_CLIENTS; _p++) {
+                    if (!shared_blob_cache.player_entry_active[_p]) continue;
+                    float _pdx = shared_blob_cache.player_world_x[_p] - _cx;
+                    float _pdy = shared_blob_cache.player_world_y[_p] - _cy;
+                    if (_pdx*_pdx + _pdy*_pdy > _view_r2) continue;
+                    if (!_ppf && _goff < 131072 - 1) per_gs[_goff++] = ',';
+                    int _plen = shared_blob_cache.player_entry_len[_p];
+                    if (_plen > 0 && _goff + _plen < 131072 - 2) {
+                        memcpy(per_gs + _goff, shared_blob_cache.player_entry[_p], (size_t)_plen);
+                        _goff += _plen; _ppf = false;
+                    }
+                }
+                if (_goff < 131072 - 1) per_gs[_goff++] = ']';
             }
+            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"projectiles\":");
+            _MC1(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
+            /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
+            if (_goff + 9 < 131072) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
+            {
+                bool _npf = true;
+                int _ncount = shared_blob_cache.npc_entry_count;
+                if (_ncount < 0) _ncount = 0;
+                if (_ncount > MAX_WORLD_NPCS) _ncount = MAX_WORLD_NPCS;
+                for (int _n = 0; _n < _ncount; _n++) {
+                    if (!shared_blob_cache.npc_entry_active[_n]) continue;
+                    float _ndx = shared_blob_cache.npc_world_x[_n] - _cx;
+                    float _ndy = shared_blob_cache.npc_world_y[_n] - _cy;
+                    if (_ndx*_ndx + _ndy*_ndy > _view_r2) continue;
+                    if (!_npf && _goff < 131072 - 1) per_gs[_goff++] = ',';
+                    int _nlen = shared_blob_cache.npc_entry_len[_n];
+                    if (_nlen > 0 && _goff + _nlen < 131072 - 2) {
+                        memcpy(per_gs + _goff, shared_blob_cache.npc_entry[_n], (size_t)_nlen);
+                        _goff += _nlen; _npf = false;
+                    }
+                }
+                if (_goff < 131072 - 1) per_gs[_goff++] = ']';
+            }
+            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"tombstones\":");
+            _MC1(shared_blob_cache.tmb_json, shared_blob_cache.tmb_len);
+            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"droppedItems\":");
+            _MC1(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
+            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"companies\":");
+            _MC1(shared_blob_cache.co_json, shared_blob_cache.co_len);
+#undef _MC1
+            if (_goff < 131072 - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
+            per_gs_len[_send_count] = _goff;
+
+            send_client_idx[_send_count] = _ci;
+            _send_count++;
+            if (_send_count >= WS_MAX_CLIENTS) break;
         }
+        g_send_build_last_us = get_time_us() - _send_build_t0_us;
+        if (g_send_build_last_us > g_send_build_max_us) g_send_build_max_us = g_send_build_last_us;
+
+        /* Phase 2: round-robin bounded frame+send.
+         *
+         * send_client_idx[] is filled in ascending order of _ci (0..WS_MAX_CLIENTS-1)
+         * because phase 1 iterates clients forward.  We keep a watermark (g_rr_next_ci)
+         * pointing at the lowest _ci we haven't sent to yet.  Each tick we find that
+         * position and send up to SEND_BUDGET_PER_TICK clients from there, wrapping to
+         * the front when we reach the end.  Clients beyond the budget are deferred to
+         * the next tick — they skip at most one frame which is imperceptible at 20 Hz.
+         */
+        uint64_t _send_dispatch_t0_us = get_time_us();
+        int _rr_sent = 0;
+        if (_send_count > 0) {
+            /* Find the slot whose client index >= watermark (array is sorted ascending). */
+            int _rr_start = 0;
+            bool _rr_found = false;
+            for (int _i = 0; _i < _send_count; _i++) {
+                if (send_client_idx[_i] >= g_rr_next_ci) { _rr_start = _i; _rr_found = true; break; }
+            }
+            if (!_rr_found) { g_rr_next_ci = 0; _rr_start = 0; } /* all below watermark: wrap */
+
+            int _budget = (_send_count < SEND_BUDGET_PER_TICK) ? _send_count : SEND_BUDGET_PER_TICK;
+            uint64_t _tick_eagain = 0, _tick_errors = 0;
+            for (int _b = 0; _b < _budget; _b++) {
+                int _si = (_rr_start + _b) % _send_count;
+                int _ci = send_client_idx[_si];
+                struct WebSocketClient* _client = &ws_server.clients[_ci];
+                char* per_gs = per_gs_pool[_si];
+                int _goff = per_gs_len[_si];
+                size_t _flen = websocket_create_frame(WS_OPCODE_TEXT, per_gs, (size_t)_goff,
+                                                      per_frame, sizeof(per_frame));
+                if (_flen > 0) {
+                    ssize_t _sent = send(_client->fd, per_frame, _flen, 0);
+                    if (_sent > 0) {
+                        ws_server.packets_sent++;
+                        _rr_sent++;
+                    } else if (_sent < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            /* TCP send buffer full — frame skipped, client will get next tick. */
+                            _tick_eagain++;
+                        } else {
+                            /* Hard error (broken pipe, reset, etc.) — disconnect the client. */
+                            _tick_errors++;
+                            if (_client->player_id > 0) {
+                                remove_player(_client->player_id);
+                                _client->player_id = 0;
+                            }
+                            close(_client->fd);
+                            _client->connected = false;
+                        }
+                    }
+                }
+            }
+            g_send_eagain_last = _tick_eagain;
+            if (_tick_eagain > g_send_eagain_max) g_send_eagain_max = _tick_eagain;
+            g_send_error_last = _tick_errors;
+            if (_tick_errors > g_send_error_max) g_send_error_max = _tick_errors;
+            /* Advance watermark past the last client we sent to. */
+            int _next_slot = (_rr_start + _budget) % _send_count;
+            g_rr_next_ci = send_client_idx[_next_slot] + 1;
+            if (_budget >= _send_count) g_rr_next_ci = 0; /* sent everyone: restart */
+        }
+        g_rr_deferred_last = (uint64_t)(_send_count - _rr_sent);
+        if (g_rr_deferred_last > g_rr_deferred_max) g_rr_deferred_max = g_rr_deferred_last;
+        g_send_dispatch_last_us = get_time_us() - _send_dispatch_t0_us;
+        if (g_send_dispatch_last_us > g_send_dispatch_max_us) g_send_dispatch_max_us = g_send_dispatch_last_us;
         g_send_loop_last_us = get_time_us() - _send_loop_t0_us;
         if (g_send_loop_last_us > g_send_loop_max_us) g_send_loop_max_us = g_send_loop_last_us;
         last_game_state_time = current_time;
