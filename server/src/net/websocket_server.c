@@ -9102,6 +9102,69 @@ void websocket_server_tick(float dt) {
     tick_npc_agents(dt);
     tick_world_npcs(dt);
 
+    // ===== APPLY DESIRED SAIL STATE TO UNMANNED MASTS =====
+    /* Rigger NPCs handle masts they are explicitly assigned to.  Any mast that
+     * has no active rigger covering it must be driven directly so that helm
+     * commands work even on ships with no crew. */
+    {
+        const float MAX_UNMANNED_SAIL_TURN_RATE = 1.2f; /* rad/s — same as rigger */
+        for (int _us = 0; _us < ship_count; _us++) {
+            SimpleShip* _ship = &ships[_us];
+            if (!_ship->active) continue;
+            for (uint8_t _um = 0; _um < _ship->module_count; _um++) {
+                ShipModule* _mod = &_ship->modules[_um];
+                if (_mod->type_id != MODULE_TYPE_MAST) continue;
+
+                /* Check whether any active rigger NPC covers this mast. */
+                bool _has_rigger = false;
+                for (int _na = 0; _na < npc_count; _na++) {
+                    NpcAgent* _npc = &npc_agents[_na];
+                    if (_npc->active &&
+                        _npc->role      == NPC_ROLE_RIGGER &&
+                        _npc->ship_id   == _ship->ship_id  &&
+                        _npc->module_id == _mod->id) {
+                        _has_rigger = true;
+                        break;
+                    }
+                }
+                if (_has_rigger) continue; /* rigger will handle it this tick */
+
+                /* No rigger — apply desired state directly. */
+                uint8_t _openness = _ship->desired_sail_openness;
+                _mod->data.mast.openness = _openness;
+                if (_openness > 0)
+                    _mod->state_bits |=  MODULE_STATE_DEPLOYED;
+                else
+                    _mod->state_bits &= ~MODULE_STATE_DEPLOYED;
+
+                /* Slew mast angle toward desired angle (same rate as a rigger). */
+                float _cur = Q16_TO_FLOAT(_mod->data.mast.angle);
+                float _tgt = _ship->desired_sail_angle;
+                float _diff = _tgt - _cur;
+                while (_diff >  (float)M_PI) _diff -= 2.0f * (float)M_PI;
+                while (_diff < -(float)M_PI) _diff += 2.0f * (float)M_PI;
+                float _step = MAX_UNMANNED_SAIL_TURN_RATE * dt;
+                if (_diff >  _step) _diff =  _step;
+                if (_diff < -_step) _diff = -_step;
+                _cur += _diff;
+                _mod->data.mast.angle = Q16_FROM_FLOAT(_cur);
+
+                /* Mirror into the physics sim ship. */
+                struct Ship* _ss = find_sim_ship(_ship->ship_id);
+                if (_ss) {
+                    for (uint8_t _mi = 0; _mi < _ss->module_count; _mi++) {
+                        if (_ss->modules[_mi].id == _mod->id) {
+                            _ss->modules[_mi].data.mast.openness = _mod->data.mast.openness;
+                            _ss->modules[_mi].state_bits          = _mod->state_bits;
+                            _ss->modules[_mi].data.mast.angle     = _mod->data.mast.angle;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // ===== ASSIGN CREW TO WEAPON-GROUP CANNONS + SWIVELS =====
     // Mark swivels needed, expire stale NEEDED flags, then dispatch idle gunners.
     tick_cannon_needed_expiry();
