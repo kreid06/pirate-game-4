@@ -28,6 +28,7 @@
 #include <openssl/hmac.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <pthread.h>
 
 // Include shared ship definitions from protocol folder
 #include "../../protocol/ship_definitions.h"
@@ -199,6 +200,49 @@ typedef struct {
 
 static DroppedItem dropped_items[MAX_DROPPED_ITEMS];
 static uint32_t    next_dropped_item_id = 1;
+
+/* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
+ * Offloads serialization of tombstones/droppedItems/companies from the main
+ * tick thread. The authoritative simulation and send loop remain single-threaded.
+ */
+typedef struct {
+    uint32_t current_time;
+    Tombstone tombstones[MAX_TOMBSTONES];
+    DroppedItem dropped_items[MAX_DROPPED_ITEMS];
+    DynamicCompany dynamic_companies[MAX_DYNAMIC_COMPANIES];
+    int dynamic_company_count;
+    int ship_count;
+    SimpleShip ships[MAX_SIMPLE_SHIPS];
+} SharedBlobSnapshot;
+
+typedef struct {
+    char tmb_json[4096];
+    char ditem_json[4096];
+    char co_json[1024];
+    int  tmb_len;
+    int  ditem_len;
+    int  co_len;
+} SharedBlobOutput;
+
+typedef struct {
+    pthread_t thread;
+    pthread_mutex_t mtx;
+    pthread_cond_t cv;
+    bool running;
+    bool started;
+    bool has_job;
+    bool has_output;
+    SharedBlobSnapshot job;
+    SharedBlobOutput output;
+} SharedBlobWorker;
+
+static SharedBlobWorker g_blob_worker = {0};
+
+static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
+static void blob_worker_submit_snapshot(uint32_t current_time);
+static bool blob_worker_try_get_output(SharedBlobOutput* out);
+static int blob_worker_start(void);
+static void blob_worker_stop(void);
 
 int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
     if (!out_structs || !out_count) return -1;
@@ -728,6 +772,165 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
     }
     *wx = t->x;
     *wy = t->y;
+}
+
+static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
+    int _to = snprintf(out->tmb_json, sizeof(out->tmb_json), "[");
+    bool _tf = true;
+    for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
+        if (!snap->tombstones[_ti].active) continue;
+        uint32_t _age = snap->current_time - snap->tombstones[_ti].spawn_time_ms;
+        uint32_t _rem = (_age < TOMBSTONE_TTL_MS) ? (TOMBSTONE_TTL_MS - _age) : 0u;
+        float _tx = snap->tombstones[_ti].x;
+        float _ty = snap->tombstones[_ti].y;
+        if (snap->tombstones[_ti].ship_id != 0) {
+            const SimpleShip* _ship = NULL;
+            int _sc = snap->ship_count;
+            if (_sc < 0) _sc = 0;
+            if (_sc > MAX_SIMPLE_SHIPS) _sc = MAX_SIMPLE_SHIPS;
+            for (int _si = 0; _si < _sc; _si++) {
+                if (snap->ships[_si].active && snap->ships[_si].ship_id == snap->tombstones[_ti].ship_id) {
+                    _ship = &snap->ships[_si];
+                    break;
+                }
+            }
+            if (_ship) {
+                float _c = cosf(_ship->rotation), _s = sinf(_ship->rotation);
+                _tx = _ship->x + (snap->tombstones[_ti].local_x * _c - snap->tombstones[_ti].local_y * _s);
+                _ty = _ship->y + (snap->tombstones[_ti].local_x * _s + snap->tombstones[_ti].local_y * _c);
+            }
+        }
+        if (!_tf && _to < (int)sizeof(out->tmb_json) - 2) out->tmb_json[_to++] = ',';
+        _to += snprintf(out->tmb_json + _to, sizeof(out->tmb_json) - _to,
+            "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
+            snap->tombstones[_ti].id, _tx, _ty, snap->tombstones[_ti].owner_name, _rem);
+        _tf = false;
+    }
+    if (_to < (int)sizeof(out->tmb_json) - 1) out->tmb_json[_to++] = ']';
+    out->tmb_json[_to] = '\0';
+    out->tmb_len = (int)strlen(out->tmb_json);
+
+    int _do = snprintf(out->ditem_json, sizeof(out->ditem_json), "[");
+    bool _df = true;
+    for (int _di = 0; _di < (int)MAX_DROPPED_ITEMS; _di++) {
+        if (!snap->dropped_items[_di].active) continue;
+        if (!_df && _do < (int)sizeof(out->ditem_json) - 2) out->ditem_json[_do++] = ',';
+        uint32_t _dage = snap->current_time - snap->dropped_items[_di].spawn_time_ms;
+        uint32_t _drem = (_dage < DROPPED_ITEM_TTL_MS) ? (DROPPED_ITEM_TTL_MS - _dage) : 0u;
+        _do += snprintf(out->ditem_json + _do, sizeof(out->ditem_json) - _do,
+            "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f,\"remainingMs\":%u}",
+            snap->dropped_items[_di].id, (unsigned)snap->dropped_items[_di].item_kind,
+            (unsigned)snap->dropped_items[_di].quantity,
+            snap->dropped_items[_di].x, snap->dropped_items[_di].y, _drem);
+        _df = false;
+    }
+    if (_do < (int)sizeof(out->ditem_json) - 1) out->ditem_json[_do++] = ']';
+    out->ditem_json[_do] = '\0';
+    out->ditem_len = (int)strlen(out->ditem_json);
+
+    int _co = snprintf(out->co_json, sizeof(out->co_json), "[");
+    bool _cf = true;
+    int _dcc = snap->dynamic_company_count;
+    if (_dcc < 0) _dcc = 0;
+    if (_dcc > MAX_DYNAMIC_COMPANIES) _dcc = MAX_DYNAMIC_COMPANIES;
+    for (int _ci2 = 0; _ci2 < _dcc; _ci2++) {
+        if (!snap->dynamic_companies[_ci2].active) continue;
+        if (!_cf && _co < (int)sizeof(out->co_json) - 2) out->co_json[_co++] = ',';
+        _co += snprintf(out->co_json + _co, sizeof(out->co_json) - _co,
+            "{\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
+            snap->dynamic_companies[_ci2].id, snap->dynamic_companies[_ci2].name,
+            snap->dynamic_companies[_ci2].founder_id);
+        _cf = false;
+    }
+    if (_co < (int)sizeof(out->co_json) - 1) out->co_json[_co++] = ']';
+    out->co_json[_co] = '\0';
+    out->co_len = (int)strlen(out->co_json);
+}
+
+static void* blob_worker_main(void* arg) {
+    (void)arg;
+    SharedBlobSnapshot local_job;
+    SharedBlobOutput local_out;
+
+    pthread_mutex_lock(&g_blob_worker.mtx);
+    while (g_blob_worker.running) {
+        while (g_blob_worker.running && !g_blob_worker.has_job) {
+            pthread_cond_wait(&g_blob_worker.cv, &g_blob_worker.mtx);
+        }
+        if (!g_blob_worker.running) break;
+
+        local_job = g_blob_worker.job;
+        g_blob_worker.has_job = false;
+        pthread_mutex_unlock(&g_blob_worker.mtx);
+
+        build_shared_blobs_from_snapshot(&local_job, &local_out);
+
+        pthread_mutex_lock(&g_blob_worker.mtx);
+        g_blob_worker.output = local_out;
+        g_blob_worker.has_output = true;
+    }
+    pthread_mutex_unlock(&g_blob_worker.mtx);
+    return NULL;
+}
+
+static int blob_worker_start(void) {
+    if (g_blob_worker.started) return 0;
+    if (pthread_mutex_init(&g_blob_worker.mtx, NULL) != 0) return -1;
+    if (pthread_cond_init(&g_blob_worker.cv, NULL) != 0) {
+        pthread_mutex_destroy(&g_blob_worker.mtx);
+        return -1;
+    }
+    g_blob_worker.running = true;
+    g_blob_worker.started = true;
+    g_blob_worker.has_job = false;
+    g_blob_worker.has_output = false;
+    if (pthread_create(&g_blob_worker.thread, NULL, blob_worker_main, NULL) != 0) {
+        g_blob_worker.running = false;
+        g_blob_worker.started = false;
+        pthread_cond_destroy(&g_blob_worker.cv);
+        pthread_mutex_destroy(&g_blob_worker.mtx);
+        return -1;
+    }
+    return 0;
+}
+
+static void blob_worker_stop(void) {
+    if (!g_blob_worker.started) return;
+    pthread_mutex_lock(&g_blob_worker.mtx);
+    g_blob_worker.running = false;
+    pthread_cond_broadcast(&g_blob_worker.cv);
+    pthread_mutex_unlock(&g_blob_worker.mtx);
+    pthread_join(g_blob_worker.thread, NULL);
+    pthread_cond_destroy(&g_blob_worker.cv);
+    pthread_mutex_destroy(&g_blob_worker.mtx);
+    memset(&g_blob_worker, 0, sizeof(g_blob_worker));
+}
+
+static void blob_worker_submit_snapshot(uint32_t current_time) {
+    if (!g_blob_worker.started) return;
+    pthread_mutex_lock(&g_blob_worker.mtx);
+    g_blob_worker.job.current_time = current_time;
+    memcpy(g_blob_worker.job.tombstones, tombstones, sizeof(tombstones));
+    memcpy(g_blob_worker.job.dropped_items, dropped_items, sizeof(dropped_items));
+    memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies, sizeof(dynamic_companies));
+    g_blob_worker.job.dynamic_company_count = dynamic_company_count;
+    g_blob_worker.job.ship_count = ship_count;
+    memcpy(g_blob_worker.job.ships, ships, sizeof(ships));
+    g_blob_worker.has_job = true;
+    pthread_cond_signal(&g_blob_worker.cv);
+    pthread_mutex_unlock(&g_blob_worker.mtx);
+}
+
+static bool blob_worker_try_get_output(SharedBlobOutput* out) {
+    bool ok = false;
+    if (!g_blob_worker.started || !out) return false;
+    pthread_mutex_lock(&g_blob_worker.mtx);
+    if (g_blob_worker.has_output) {
+        *out = g_blob_worker.output;
+        ok = true;
+    }
+    pthread_mutex_unlock(&g_blob_worker.mtx);
+    return ok;
 }
 
 /**
@@ -1581,6 +1784,11 @@ int websocket_server_init(uint16_t port) {
     
     ws_server.running = true;
     log_info("WebSocket server initialized on port %u", port);
+    if (blob_worker_start() == 0) {
+        log_info("🧵 Shared blob serializer worker started");
+    } else {
+        log_warn("⚠️ Shared blob serializer worker failed to start; falling back to sync serialization");
+    }
     
     // Spawn two brigantine ships with fixed seq 1 and 2; advance counter past them
     init_brigantine_ship(0, 100.0f, 100.0f, 1, COMPANY_PIRATES, 0xFF);
@@ -1664,6 +1872,7 @@ void websocket_server_cleanup(void) {
 
     // Signal shutdown
     ws_server.running = false;
+    blob_worker_stop();
     
     // Close all client connections gracefully
     int closed_clients = 0;
@@ -7721,66 +7930,28 @@ int websocket_server_update(struct Sim* sim) {
         if (current_update_rate > 30) current_update_rate = 30;
         
         /* ── Pre-build shared blobs (tombstones, dropped items, companies) ─────────
-         * Small sections rebuilt once per tick; per-player loop memcpy's them in.
+         * First step of server multithreading: serialize these sections in a worker.
+         * We keep a synchronous fallback so behavior remains stable if no worker
+         * output is available yet (startup / transient stalls).
          */
-        static char tmb_json[4096];
-        {
-            int _to = snprintf(tmb_json, sizeof(tmb_json), "[");
-            bool _tf = true;
-            for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
-                if (!tombstones[_ti].active) continue;
-                uint32_t _age = current_time - tombstones[_ti].spawn_time_ms;
-                uint32_t _rem = (_age < TOMBSTONE_TTL_MS) ? (TOMBSTONE_TTL_MS - _age) : 0u;
-                float _tx, _ty;
-                tombstone_world_pos(&tombstones[_ti], &_tx, &_ty);
-                if (!_tf && _to < (int)sizeof(tmb_json) - 2) tmb_json[_to++] = ',';
-                _to += snprintf(tmb_json + _to, sizeof(tmb_json) - _to,
-                    "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
-                    tombstones[_ti].id, _tx, _ty, tombstones[_ti].owner_name, _rem);
-                _tf = false;
-            }
-            if (_to < (int)sizeof(tmb_json) - 1) tmb_json[_to++] = ']';
-            tmb_json[_to] = '\0';
+        static SharedBlobOutput shared_blob_cache;
+        static bool shared_blob_cache_valid = false;
+        blob_worker_submit_snapshot(current_time);
+        if (blob_worker_try_get_output(&shared_blob_cache)) {
+            shared_blob_cache_valid = true;
         }
-        static char ditem_json[4096];
-        {
-            int _do = snprintf(ditem_json, sizeof(ditem_json), "[");
-            bool _df = true;
-            for (int _di = 0; _di < (int)MAX_DROPPED_ITEMS; _di++) {
-                if (!dropped_items[_di].active) continue;
-                if (!_df && _do < (int)sizeof(ditem_json) - 2) ditem_json[_do++] = ',';
-                uint32_t _dnow = get_time_ms();
-                uint32_t _dage = _dnow - dropped_items[_di].spawn_time_ms;
-                uint32_t _drem = (_dage < DROPPED_ITEM_TTL_MS) ? (DROPPED_ITEM_TTL_MS - _dage) : 0u;
-                _do += snprintf(ditem_json + _do, sizeof(ditem_json) - _do,
-                    "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f,\"remainingMs\":%u}",
-                    dropped_items[_di].id, (unsigned)dropped_items[_di].item_kind,
-                    (unsigned)dropped_items[_di].quantity,
-                    dropped_items[_di].x, dropped_items[_di].y, _drem);
-                _df = false;
-            }
-            if (_do < (int)sizeof(ditem_json) - 1) ditem_json[_do++] = ']';
-            ditem_json[_do] = '\0';
+        if (!shared_blob_cache_valid) {
+            SharedBlobSnapshot _snap;
+            _snap.current_time = current_time;
+            memcpy(_snap.tombstones, tombstones, sizeof(tombstones));
+            memcpy(_snap.dropped_items, dropped_items, sizeof(dropped_items));
+            memcpy(_snap.dynamic_companies, dynamic_companies, sizeof(dynamic_companies));
+            _snap.dynamic_company_count = dynamic_company_count;
+            _snap.ship_count = ship_count;
+            memcpy(_snap.ships, ships, sizeof(ships));
+            build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache);
+            shared_blob_cache_valid = true;
         }
-        static char co_json[1024];
-        {
-            int _co = snprintf(co_json, sizeof(co_json), "[");
-            bool _cf = true;
-            for (int _ci2 = 0; _ci2 < dynamic_company_count; _ci2++) {
-                if (!dynamic_companies[_ci2].active) continue;
-                if (!_cf && _co < (int)sizeof(co_json) - 2) co_json[_co++] = ',';
-                _co += snprintf(co_json + _co, sizeof(co_json) - _co,
-                    "{\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
-                    dynamic_companies[_ci2].id, dynamic_companies[_ci2].name,
-                    dynamic_companies[_ci2].founder_id);
-                _cf = false;
-            }
-            if (_co < (int)sizeof(co_json) - 1) co_json[_co++] = ']';
-            co_json[_co] = '\0';
-        }
-        int tmb_len   = (int)strlen(tmb_json);
-        int ditem_len = (int)strlen(ditem_json);
-        int co_len    = (int)strlen(co_json);
 
         /* ── Per-player AOI filtered send ─────────────────────────────────────────
          * Each client receives a GAME_STATE whose ships[] array contains only ships
@@ -7856,11 +8027,11 @@ int websocket_server_update(struct Sim* sim) {
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"npcs\":");
             _MC(npcs_json,        npcs_offset);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"tombstones\":");
-            _MC(tmb_json,         tmb_len);
+            _MC(shared_blob_cache.tmb_json,   shared_blob_cache.tmb_len);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"droppedItems\":");
-            _MC(ditem_json,       ditem_len);
+            _MC(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"companies\":");
-            _MC(co_json,          co_len);
+            _MC(shared_blob_cache.co_json,    shared_blob_cache.co_len);
 #undef _MC
             if (_goff < (int)sizeof(per_gs) - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
 
