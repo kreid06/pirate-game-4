@@ -669,14 +669,17 @@ void tick_world_npcs(float dt) {
                                     // Repair main HP at 10%/s, capped at target_health
                                     {
                                         if (mod->health < (int32_t)mod->target_health) {
-                                            float heal = (float)mod->max_health * 0.10f * dt;
-                                            mod->health += (int32_t)heal;
+                                            int32_t iheal = (int32_t)((float)mod->max_health * 0.10f * dt);
+                                            if (iheal < 1) iheal = 1;
+                                            mod->health += iheal;
                                             if (mod->health >= (int32_t)mod->target_health) {
                                                 mod->health = (int32_t)mod->target_health;
-                                still_working = true;
-                            }
-                        }
-                    }
+                                                /* fully healed — still_working stays false → NPC finishes */
+                                            } else {
+                                                still_working = true;
+                                            }
+                                        }
+                                    }
 
                     // Repair mast sail fibers at 10%/s
                     if (mod->type_id == MODULE_TYPE_MAST) {

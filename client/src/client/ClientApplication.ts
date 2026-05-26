@@ -39,7 +39,7 @@ import { logout } from './auth/AuthService.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
@@ -859,7 +859,7 @@ export class ClientApplication {
               console.log(`🔨 [HAMMER] Module too far (${hammerDist.toFixed(1)}px) — get closer`);
               return;
             }
-            const shipId   = player.carrierId;
+            const shipId   = hoveredForHammer.ship.id;
             const moduleId = hoveredForHammer.module.id;
             // Don't start the minigame if the module is already at its repair ceiling
             const md = hoveredForHammer.module.moduleData as any;
@@ -4313,7 +4313,18 @@ export class ClientApplication {
               this._ladderHoldTimer = null;
               this.renderSystem.stopLadderHoldRing();
               const mp = this.inputManager.getMouseScreenPosition();
-              this._radialMenu.open(mp.x, mp.y, [{ id: 'mount', label: `Mount ${mountKindLabel}` }]);
+              const radialOpts: Array<{ id: string; label: string }> = [
+                { id: 'mount', label: `Mount ${mountKindLabel}` }
+              ];
+              // Offer "Dismiss NPC" if an NPC is stationed at this cannon/swivel
+              if (hov.module.kind === 'cannon' || hov.module.kind === 'swivel') {
+                const ws2 = this.authoritativeWorldState || this.predictedWorldState;
+                const npcAtGun = ws2?.npcs.find(n => n.assignedWeaponId === hov.module.id && n.state === NPC_STATE_AT_GUN);
+                if (npcAtGun) {
+                  radialOpts.push({ id: 'dismiss_npc', label: `Dismiss ${npcAtGun.name}` });
+                }
+              }
+              this._radialMenu.open(mp.x, mp.y, radialOpts);
             }, 300);
             break;
           }
@@ -4714,7 +4725,12 @@ export class ClientApplication {
           // Hold — execute selected option or cancel if centre dead zone
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();
-          if (selected) {
+          if (selected === 'dismiss_npc' && moduleId !== null) {
+            // Dismiss the NPC currently stationed at this cannon/swivel
+            this.networkManager.sendDismissNpc(moduleId);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`👋 dismiss NPC from module ${moduleId}`);
+          } else if (selected) {
             if (doMountAction()) {
               this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             } else {

@@ -8,6 +8,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "net/module_interactions.h"
+#include "net/npc_agents.h"
 #include "net/structures.h"
 
 // ============================================================================
@@ -180,16 +181,6 @@ static bool npc_blocks_module(uint32_t module_id, uint8_t player_company_id) {
 }
 
 /**
- * Return true if the player's company is incompatible with the ship's company
- * (i.e. the player cannot mount modules on this ship).
- */
-static bool player_company_conflicts(const WebSocketPlayer* player, const SimpleShip* ship) {
-    return ship->company_id != COMPANY_NEUTRAL &&
-           player->company_id != COMPANY_NEUTRAL &&
-           player->company_id != ship->company_id;
-}
-
-/**
  * Broadcast player mounted state to nearby players
  */
 static void broadcast_player_mounted(WebSocketPlayer* player, ShipModule* module, SimpleShip* ship) {
@@ -205,30 +196,32 @@ static void broadcast_player_mounted(WebSocketPlayer* player, ShipModule* module
 
 // Module-specific interaction handlers
 static void handle_cannon_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
-    // Check if cannon is already occupied by someone else
-    if (module->state_bits & MODULE_STATE_OCCUPIED) {
-        uint16_t occupier_id = 0; // TODO: Track which player occupies
-        if (occupier_id != 0 && occupier_id != player->player_id) {
-            log_info("Cannon %u already occupied by player %u", module->id, occupier_id);
-            send_interaction_failure(client, "module_occupied");
-            return;
-        }
-    }
-
-    // NPC occupancy check: block mounting if an enemy NPC is stationed here.
-    if (npc_blocks_module(module->id, player->company_id)) {
-        send_interaction_failure(client, "npc_occupied");
+    // Block if another PLAYER is already mounted here
+    if (module->player_mounted_id != 0 && module->player_mounted_id != player->player_id) {
+        send_interaction_failure(client, "module_occupied");
         return;
     }
 
-    /* Company check: cannot mount a cannon on an enemy ship */
-    if (player_company_conflicts(player, ship)) {
-        send_interaction_failure(client, "wrong_company");
-        return;
+    // Displace any NPC stationed at this cannon — player boarding always takes priority.
+    // Iterate all NPCs; the first one assigned here gets sent back to their idle position.
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active || _npc->assigned_weapon_id != module->id) continue;
+        SimpleShip* npc_ship = find_ship(_npc->ship_id);
+        _npc->assigned_weapon_id = 0;
+        _npc->state              = WORLD_NPC_STATE_MOVING;
+        _npc->target_local_x     = _npc->idle_local_x;
+        _npc->target_local_y     = _npc->idle_local_y;
+        if (npc_ship) update_npc_cannon_sector(npc_ship, npc_ship->active_aim_angle);
+        log_info("👋 Player %u displaced NPC %u (%s) from cannon %u",
+                 player->player_id, _npc->id, _npc->name, module->id);
+        break; // at most one NPC per cannon
     }
+    /* Company check removed — players may board and man any ship's cannons */
 
     // Mount player to cannon
     module->state_bits |= MODULE_STATE_OCCUPIED;
+    module->player_mounted_id = player->player_id;
     player->is_mounted = true;
     player->mounted_module_id = module->id;
 
@@ -441,25 +434,30 @@ static void handle_ladder_interact(WebSocketPlayer* player, struct WebSocketClie
 }
 
 static void handle_swivel_interact(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, ShipModule* module) {
-    // Reject if already occupied by another player
-    if (module->state_bits & MODULE_STATE_OCCUPIED) {
+    // Block if another PLAYER is already mounted here
+    if (module->player_mounted_id != 0 && module->player_mounted_id != player->player_id) {
         send_interaction_failure(client, "module_occupied");
         return;
     }
 
-    // NPC occupancy check: block mounting if an enemy NPC is stationed here.
-    if (npc_blocks_module(module->id, player->company_id)) {
-        send_interaction_failure(client, "npc_occupied");
-        return;
+    // Displace any NPC stationed here — player boarding always takes priority
+    for (int _ni = 0; _ni < world_npc_count; _ni++) {
+        WorldNpc* _npc = &world_npcs[_ni];
+        if (!_npc->active || _npc->assigned_weapon_id != module->id) continue;
+        SimpleShip* npc_ship = find_ship(_npc->ship_id);
+        _npc->assigned_weapon_id = 0;
+        _npc->state              = WORLD_NPC_STATE_MOVING;
+        _npc->target_local_x     = _npc->idle_local_x;
+        _npc->target_local_y     = _npc->idle_local_y;
+        if (npc_ship) update_npc_cannon_sector(npc_ship, npc_ship->active_aim_angle);
+        log_info("👋 Player %u displaced NPC %u (%s) from swivel %u",
+                 player->player_id, _npc->id, _npc->name, module->id);
+        break;
     }
-
-    /* Company check: cannot mount a swivel on an enemy ship */
-    if (player_company_conflicts(player, ship)) {
-        send_interaction_failure(client, "wrong_company");
-        return;
-    }
+    /* Company check removed — players may board and man any ship's swivels */
 
     module->state_bits |= MODULE_STATE_OCCUPIED;
+    module->player_mounted_id = player->player_id;
     player->is_mounted = true;
     player->mounted_module_id = module->id;
 
@@ -498,9 +496,6 @@ void handle_swivel_aim(WebSocketPlayer* player, float aim_angle) {
 
     SimpleShip* ship = find_ship(player->parent_ship_id);
     if (!ship) return;
-
-    /* Defense-in-depth: refuse aim if player company doesn't match ship company */
-    if (player_company_conflicts(player, ship)) return;
 
     ShipModule* module = find_module_by_id(ship, player->mounted_module_id);
     if (!module || module->type_id != MODULE_TYPE_SWIVEL) return;
@@ -608,8 +603,9 @@ void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClient* clie
         // Clear module occupation
         switch (module->type_id) {
             case MODULE_TYPE_CANNON:
-                // Cannons just use the OCCUPIED state bit
+            case MODULE_TYPE_SWIVEL:
                 module->state_bits &= ~MODULE_STATE_OCCUPIED;
+                module->player_mounted_id = 0;
                 break;
             case MODULE_TYPE_HELM:
             case MODULE_TYPE_STEERING_WHEEL:

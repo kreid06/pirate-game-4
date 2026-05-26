@@ -1604,6 +1604,15 @@ export class NetworkManager {
   }
 
   /**
+   * Dismiss whichever NPC is currently stationed at a cannon/swivel module,
+   * freeing the slot so the player can immediately mount it.
+   */
+  sendDismissNpc(moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'dismiss_npc', timestamp: Date.now(), moduleId }));
+  }
+
+  /**
    * Walk an NPC to a world position or board/walk on a specific ship.
    * shipId=0  → detach from current ship, walk to world coords.
    * shipId>0  → attach to that ship and walk to the clicked on-deck position.

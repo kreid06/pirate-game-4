@@ -4152,14 +4152,23 @@ int websocket_server_update(struct Sim* sim) {
                                 } else if (!global_sim) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                 } else {
-                                    // Parse moduleId from payload
+                                    // Parse moduleId and shipId from payload.
+                                    // shipId defaults to the player's own ship so on-board
+                                    // repairs continue to work without any client change.
                                     int req_module_id = -1;
                                     const char* p_mid = strstr(payload, "\"moduleId\":");
                                     if (p_mid) req_module_id = atoi(p_mid + 11);
 
+                                    uint32_t target_ship_id = player->parent_ship_id;
+                                    const char* p_sid = strstr(payload, "\"shipId\":");
+                                    if (p_sid) {
+                                        int parsed_sid = atoi(p_sid + 9);
+                                        if (parsed_sid > 0) target_ship_id = (uint32_t)parsed_sid;
+                                    }
+
                                     struct Ship* sim_ship = NULL;
                                     for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                        if (global_sim->ships[si].id == player->parent_ship_id) {
+                                        if (global_sim->ships[si].id == target_ship_id) {
                                             sim_ship = &global_sim->ships[si]; break;
                                         }
                                     }
@@ -4991,6 +5000,29 @@ int websocket_server_update(struct Sim* sim) {
                                         : "{\"type\":\"message_ack\",\"status\":\"npc_unlocked\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_lock_npc\"}");
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "dismiss_npc") == 0) {
+                            /* DISMISS NPC: kick whichever NPC is currently stationed at a module
+                             * so the player can immediately mount it.
+                             * {"type":"dismiss_npc","moduleId":N} */
+                            uint32_t dm_mod_id = 0;
+                            { const char* dp = strstr(payload, "\"moduleId\":"); if (dp) dm_mod_id = (uint32_t)atoi(dp + 11); }
+                            if (dm_mod_id != 0) {
+                                for (int _dmi = 0; _dmi < world_npc_count; _dmi++) {
+                                    WorldNpc* _dn = &world_npcs[_dmi];
+                                    if (!_dn->active || _dn->assigned_weapon_id != dm_mod_id) continue;
+                                    SimpleShip* dn_ship = find_ship(_dn->ship_id);
+                                    _dn->assigned_weapon_id = 0;
+                                    _dn->state              = WORLD_NPC_STATE_MOVING;
+                                    _dn->target_local_x     = _dn->idle_local_x;
+                                    _dn->target_local_y     = _dn->idle_local_y;
+                                    if (dn_ship) update_npc_cannon_sector(dn_ship, dn_ship->active_aim_angle);
+                                    log_info("👋 dismiss_npc: NPC %u (%s) dismissed from module %u",
+                                             _dn->id, _dn->name, dm_mod_id);
+                                    break;
                                 }
                             }
                             handled = true;
