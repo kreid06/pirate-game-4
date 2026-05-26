@@ -4210,6 +4210,8 @@ export class RenderSystem {
           const sp2 = camera.worldToScreen(Vec2.from(wx2, wy2));
           const maxR2 = 100 * zoom;
           if (sp2.x + maxR2 < 0 || sp2.x - maxR2 > cw || sp2.y + maxR2 < 0 || sp2.y - maxR2 > ch) continue;
+          // Fog cull — use canonical coords (strip wrap offset) for player-relative distance.
+          if (!this.fogVisibleAt(wx2 - off.dx, wy2 - off.dy, 80)) continue;
           // No hover, no interaction while dying
           visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, bushAlpha: 1.0, boulderAlpha: 1.0, deathAlpha });
           continue;
@@ -4222,14 +4224,16 @@ export class RenderSystem {
         const maxR = 100 * zoom;
         if (sp.x + maxR < 0 || sp.x - maxR > cw || sp.y + maxR < 0 || sp.y - maxR > ch) continue;
         if (maxR < 1) continue;
+        // Use canonical (non-wrap-offset) world coords for fog check and player distance.
+        const wxCanon = wx - off.dx;
+        const wyCanon = wy - off.dy;
+        // Fog cull — 80-unit clearance so the edge of a tree/bush is never clipped early.
+        if (!this.fogVisibleAt(wxCanon, wyCanon, 80)) continue;
 
         let isHovered = false;
         let inRange   = false;
         let playerNear = false;
-        // Use canonical (non-wrap-offset) world coords for player distance so
-        // the range check is correct even during wrap-render passes (off.dx ≠ 0).
-        const wxCanon = wx - off.dx;
-        const wyCanon = wy - off.dy;
+        // wxCanon/wyCanon already computed above.
         const pdx = localPlayer ? localPlayer.position.x - wxCanon : 0;
         const pdy = localPlayer ? localPlayer.position.y - wyCanon : 0;
         const pdSq = localPlayer ? (pdx * pdx + pdy * pdy) : Infinity;
