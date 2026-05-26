@@ -214,13 +214,24 @@ typedef struct {
     int ship_count;
     SimpleShip ships[MAX_SIMPLE_SHIPS];
     WebSocketPlayer players[WS_MAX_CLIENTS];
+    struct Ship sim_ships[MAX_SHIPS];
+    uint16_t sim_ship_count;
     struct Projectile projectiles[MAX_PROJECTILES];
     uint16_t projectile_count;
     WorldNpc world_npcs[MAX_WORLD_NPCS];
     int world_npc_count;
+    ClaimFlag claim_flags[MAX_CLAIM_FLAGS];
 } SharedBlobSnapshot;
 
 typedef struct {
+    char ships_json[64000];
+    int  ships_len;
+    float    aoi_ship_px[MAX_SHIPS];
+    float    aoi_ship_py[MAX_SHIPS];
+    uint32_t aoi_ship_id[MAX_SHIPS];
+    int      aoi_ship_start[MAX_SHIPS];
+    int      aoi_ship_len[MAX_SHIPS];
+    int      aoi_ship_count;
     char tmb_json[4096];
     char ditem_json[4096];
     char co_json[1024];
@@ -261,6 +272,7 @@ static uint64_t g_send_loop_last_us = 0;
 static uint64_t g_send_loop_max_us = 0;
 
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
+static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
 static void blob_worker_submit_snapshot(uint32_t current_time);
 static bool blob_worker_try_get_output(SharedBlobOutput* out);
 static int blob_worker_start(void);
@@ -799,6 +811,8 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
 }
 
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
+    build_ships_blob_from_snapshot(snap, out);
+
     int _to = snprintf(out->tmb_json, sizeof(out->tmb_json), "[");
     bool _tf = true;
     for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
@@ -1013,6 +1027,273 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     out->npcs_len = (int)strlen(out->npcs_json);
 }
 
+static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
+    int ships_offset = 0;
+    ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, "[");
+    bool first_ship = true;
+    out->aoi_ship_count = 0;
+
+    if (snap->sim_ship_count > 0) {
+        uint16_t _ssc = snap->sim_ship_count;
+        if (_ssc > MAX_SHIPS) _ssc = MAX_SHIPS;
+        for (uint16_t s = 0; s < _ssc; s++) {
+            const struct Ship* ship = &snap->sim_ships[s];
+            if (!first_ship) {
+                ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, ",");
+            }
+
+            float pos_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
+            float pos_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
+            float rotation = Q16_TO_FLOAT(ship->rotation);
+            float vel_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.x));
+            float vel_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.y));
+            float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
+            float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f);
+
+            const SimpleShip* simple_ship = NULL;
+            int _sc = snap->ship_count;
+            if (_sc < 0) _sc = 0;
+            if (_sc > MAX_SIMPLE_SHIPS) _sc = MAX_SIMPLE_SHIPS;
+            for (int _i = 0; _i < _sc; _i++) {
+                if (snap->ships[_i].active && snap->ships[_i].ship_id == ship->id) {
+                    simple_ship = &snap->ships[_i];
+                    break;
+                }
+            }
+
+            char ship_entry[6144];
+            float hull_health_pct = (ship->company_id == COMPANY_GHOST)
+                ? (float)ship->hull_health
+                : Q16_TO_FLOAT(ship->hull_health);
+            int offset = snprintf(ship_entry, sizeof(ship_entry),
+                    "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                    "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
+                    "\"rudder_angle\":%.3f,"
+                    "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
+                    "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
+                    ship->id, simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF),
+                    simple_ship ? simple_ship->ship_name : "",
+                    pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
+                    rudder_radians,
+                    hull_health_pct,
+                    simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
+                    simple_ship ? simple_ship->ship_type  : SHIP_TYPE_BRIGANTINE,
+                    simple_ship ? simple_ship->cannon_ammo : 0,
+                    (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
+
+            for (uint8_t m = 0; m < ship->module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
+                const ShipModule* module = &ship->modules[m];
+                if (module->type_id == MODULE_TYPE_PLANK) {
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        (int)module->health, (int)module->target_health, (int)module->max_health);
+                } else if (module->type_id == MODULE_TYPE_DECK) {
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d,\"targetHealth\":%d,\"stateBits\":%u}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        (int)module->health, (int)module->max_health, (int)module->target_health,
+                        (unsigned)module->state_bits);
+                } else {
+                    float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                    float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                    float module_rot = Q16_TO_FLOAT(module->local_rot);
+                    if (module->type_id == MODULE_TYPE_MAST) {
+                        float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                        float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
+                        float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
+                        float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
+                            fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
+                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                    } else if (module->type_id == MODULE_TYPE_CANNON) {
+                        float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, aim_direction,
+                            (unsigned)module->state_bits,
+                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                    } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                        float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, aim_dir,
+                            (unsigned)module->state_bits,
+                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                    } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                        float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, wheel_rot,
+                            (module->data.helm.occupied_by != 0) ? "true" : "false",
+                            (unsigned)module->state_bits,
+                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                    } else {
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, (unsigned)module->state_bits,
+                            (int)module->health, (int)module->max_health);
+                    }
+                }
+            }
+
+            uint32_t cur_xp = ship->level_stats.xp;
+            uint32_t cur_tp = (uint32_t)ship_level_total_points(&ship->level_stats);
+            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                "],\"levelStats\":{"
+                "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
+                "\"xp\":%u,\"maxCrew\":%u,"
+                "\"shipLevel\":%u,\"totalPoints\":%u,\"totalCap\":%u,"
+                "\"nextUpgradeCost\":%u,"
+                "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
+                "}}",
+                ship->level_stats.levels[SHIP_ATTR_WEIGHT],
+                ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
+                ship->level_stats.levels[SHIP_ATTR_DAMAGE],
+                ship->level_stats.levels[SHIP_ATTR_CREW],
+                ship->level_stats.levels[SHIP_ATTR_STURDINESS],
+                cur_xp,
+                (unsigned)ship_level_max_crew(&ship->level_stats),
+                cur_tp, cur_tp,
+                SHIP_LEVEL_TOTAL_POINT_CAP,
+                cur_tp < SHIP_LEVEL_TOTAL_POINT_CAP ? SHIP_LEVEL_XP_BASE * (cur_tp + 1u) : 0u,
+                ship_attr_point_cap(SHIP_ATTR_WEIGHT),
+                ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
+                ship_attr_point_cap(SHIP_ATTR_DAMAGE),
+                ship_attr_point_cap(SHIP_ATTR_CREW),
+                ship_attr_point_cap(SHIP_ATTR_STURDINESS));
+
+            const ClaimFlag* cf = NULL;
+            for (int _fi = 0; _fi < MAX_CLAIM_FLAGS; _fi++) {
+                if (snap->claim_flags[_fi].active && snap->claim_flags[_fi].ship_id == ship->id) {
+                    cf = &snap->claim_flags[_fi];
+                    break;
+                }
+            }
+            if (cf && offset < (int)sizeof(ship_entry) - 200) {
+                if (offset > 0 && ship_entry[offset - 1] == '}') offset--;
+                offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    ",\"claimFlag\":{\"planterId\":%u,\"planterCompany\":%u,"
+                    "\"progressMs\":%.0f,\"totalMs\":%u,\"contested\":%s,"
+                    "\"localX\":%.1f,\"localY\":%.1f}}",
+                    (unsigned)cf->planter_id, (unsigned)cf->planter_company,
+                    cf->progress_ms, FLAG_CLAIM_DURATION_MS,
+                    cf->contested ? "true" : "false",
+                    cf->local_x, cf->local_y);
+            }
+
+            int _aoi_s = ships_offset;
+            int n = snprintf(out->ships_json + ships_offset,
+                             sizeof(out->ships_json) - (size_t)(ships_offset < (int)sizeof(out->ships_json) ? ships_offset : (int)sizeof(out->ships_json)-1),
+                             "%s", ship_entry);
+            if (n > 0) ships_offset += n;
+            if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
+            if (out->aoi_ship_count < MAX_SHIPS && n > 0) {
+                int _idx = out->aoi_ship_count++;
+                out->aoi_ship_px[_idx] = pos_x;
+                out->aoi_ship_py[_idx] = pos_y;
+                out->aoi_ship_id[_idx] = ship->id;
+                out->aoi_ship_start[_idx] = _aoi_s;
+                out->aoi_ship_len[_idx] = n;
+            }
+            first_ship = false;
+        }
+    } else {
+        int _sc = snap->ship_count;
+        if (_sc < 0) _sc = 0;
+        if (_sc > MAX_SIMPLE_SHIPS) _sc = MAX_SIMPLE_SHIPS;
+        for (int s = 0; s < _sc; s++) {
+            if (!snap->ships[s].active) continue;
+            if (!first_ship) {
+                ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, ",");
+                if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
+            }
+            char ship_entry[6144];
+            int offset = snprintf(ship_entry, sizeof(ship_entry),
+                    "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                    "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
+                    "\"rudder_angle\":%.3f,"
+                    "\"company\":%u,\"shipType\":%u,"
+                    "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
+                    snap->ships[s].ship_id, snap->ships[s].ship_seq, snap->ships[s].ship_name,
+                    snap->ships[s].x, snap->ships[s].y, snap->ships[s].rotation,
+                    snap->ships[s].velocity_x, snap->ships[s].velocity_y, snap->ships[s].angular_velocity,
+                    0.0f,
+                    snap->ships[s].company_id, snap->ships[s].ship_type,
+                    snap->ships[s].cannon_ammo, snap->ships[s].infinite_ammo ? "true" : "false");
+            for (int m = 0; m < snap->ships[s].module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
+                const ShipModule* module = &snap->ships[s].modules[m];
+                float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
+                float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
+                float module_rot = Q16_TO_FLOAT(module->local_rot);
+                if (module->type_id == MODULE_TYPE_MAST) {
+                    float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                    float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
+                    float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
+                    float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
+                        fh, fhmax);
+                } else if (module->type_id == MODULE_TYPE_CANNON) {
+                    float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        module_x, module_y, module_rot, aim_direction,
+                        (unsigned)module->state_bits);
+                } else if (module->type_id == MODULE_TYPE_SWIVEL) {
+                    float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        module_x, module_y, module_rot, aim_dir,
+                        (unsigned)module->state_bits);
+                } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
+                    float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        module_x, module_y, module_rot, wheel_rot,
+                        (module->data.helm.occupied_by != 0) ? "true" : "false",
+                        (unsigned)module->state_bits);
+                } else {
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        module_x, module_y, module_rot, (unsigned)module->state_bits);
+                }
+            }
+            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
+            int _aoi_s2 = ships_offset;
+            int n2 = snprintf(out->ships_json + ships_offset,
+                              sizeof(out->ships_json) - (size_t)(ships_offset < (int)sizeof(out->ships_json) ? ships_offset : (int)sizeof(out->ships_json)-1),
+                              "%s", ship_entry);
+            if (n2 > 0) ships_offset += n2;
+            if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
+            if (out->aoi_ship_count < MAX_SHIPS && n2 > 0) {
+                int _idx = out->aoi_ship_count++;
+                out->aoi_ship_px[_idx] = snap->ships[s].x;
+                out->aoi_ship_py[_idx] = snap->ships[s].y;
+                out->aoi_ship_id[_idx] = snap->ships[s].ship_id;
+                out->aoi_ship_start[_idx] = _aoi_s2;
+                out->aoi_ship_len[_idx] = n2;
+            }
+            first_ship = false;
+        }
+    }
+    ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, "]");
+    out->ships_len = ships_offset;
+}
+
 static void* blob_worker_main(void* arg) {
     (void)arg;
     SharedBlobSnapshot local_job;
@@ -1088,6 +1369,14 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     g_blob_worker.job.ship_count = ship_count;
     memcpy(g_blob_worker.job.ships, ships, sizeof(ships));
     memcpy(g_blob_worker.job.players, players, sizeof(players));
+    g_blob_worker.job.sim_ship_count = 0;
+    if (global_sim) {
+        uint16_t _ss = global_sim->ship_count;
+        if (_ss > MAX_SHIPS) _ss = MAX_SHIPS;
+        g_blob_worker.job.sim_ship_count = _ss;
+        memcpy(g_blob_worker.job.sim_ships, global_sim->ships,
+               (size_t)_ss * sizeof(struct Ship));
+    }
     g_blob_worker.job.projectile_count = 0;
     if (global_sim) {
         uint16_t _pc = global_sim->projectile_count;
@@ -1098,6 +1387,7 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     }
     g_blob_worker.job.world_npc_count = world_npc_count;
     memcpy(g_blob_worker.job.world_npcs, world_npcs, sizeof(world_npcs));
+    memcpy(g_blob_worker.job.claim_flags, claim_flags, sizeof(claim_flags));
     g_blob_worker.has_job = true;
     g_blob_worker.jobs_submitted++;
     pthread_cond_signal(&g_blob_worker.cv);
@@ -7627,345 +7917,6 @@ int websocket_server_update(struct Sim* sim) {
     
     if (current_time - last_game_state_time > update_interval) {
         uint64_t _ship_build_t0_us = get_time_us();
-        // Build ships JSON array with physics properties and modules
-        // Each brigantine ship entry: ~2400 bytes (22 modules + levelStats).
-        // MAX_SIMPLE_SHIPS=50 → worst case ~120000 bytes. Use static to avoid stack overflow.
-        static char ships_json[64000];
-        int ships_offset = 0;
-        ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "[");
-        bool first_ship = true;
-        
-        // levelStats dirty tracking: only serialize when XP or total_points actually changes.
-        // Indexed by sim->ships[] loop position (stable across a single tick build).
-        static uint32_t last_levelstats_xp[MAX_SHIPS];
-        static uint32_t last_levelstats_tp[MAX_SHIPS];  // total_points
-        static bool levelstats_initialized = false;
-        if (!levelstats_initialized) {
-            memset(last_levelstats_xp, 0xFF, sizeof(last_levelstats_xp));
-            memset(last_levelstats_tp, 0xFF, sizeof(last_levelstats_tp));
-            levelstats_initialized = true;
-        }
-
-        /* ── Per-player AOI ship index — populated alongside ships_json each tick.
-         * Stores each ship's client-unit position + byte offset/length inside
-         * ships_json so the per-player send loop can slice out only in-range ships.
-         */
-        static float    aoi_ship_px[MAX_SHIPS];
-        static float    aoi_ship_py[MAX_SHIPS];
-        static uint32_t aoi_ship_id[MAX_SHIPS];
-        static int      aoi_ship_start[MAX_SHIPS];
-        static int      aoi_ship_len[MAX_SHIPS];
-        int aoi_ship_count = 0;
-
-        // Log which ship source we're using
-        static uint32_t last_ship_source_log = 0;
-        if (current_time - last_ship_source_log > 5000) {
-            // log_info("📦 Ship source: sim=%p, sim->ship_count=%d, simple_ship_count=%d",
-            //          (void*)sim, sim ? sim->ship_count : 0, ship_count);
-            if (ship_count > 0) {
-                // log_info("📦 Simple ship[0]: module_count=%d", ships[0].module_count);
-            }
-            last_ship_source_log = current_time;
-        }
-        
-        // Use actual simulation ships if available
-        if (sim && sim->ship_count > 0) {
-            for (uint32_t s = 0; s < sim->ship_count; s++) {
-                const struct Ship* ship = &sim->ships[s];
-                if (!first_ship) {
-                    ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, ",");
-                }
-                
-                // Convert ship physics to client units
-                float pos_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
-                float pos_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
-                float rotation = Q16_TO_FLOAT(ship->rotation);
-                float vel_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.x));
-                float vel_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->velocity.y));
-                float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
-                float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f); // Convert degrees to radians
-
-                // Look up matching SimpleShip for ammo data (O(1) via cache)
-                const SimpleShip* simple_ship = find_ship(ship->id);
-
-                char ship_entry[6144];
-                /* Ghost ships store hull_health as raw int32 (0–60000).
-                 * Normal ships use Q16 encoding (0.0–100.0). */
-                float hull_health_pct = (ship->company_id == COMPANY_GHOST)
-                    ? (float)ship->hull_health
-                    : Q16_TO_FLOAT(ship->hull_health);
-                int offset = snprintf(ship_entry, sizeof(ship_entry),
-                        "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                        "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
-                        "\"rudder_angle\":%.3f,"
-                        "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
-                        "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
-                        ship->id, simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF),
-                        simple_ship ? simple_ship->ship_name : "",
-                        pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
-                        rudder_radians,
-                        hull_health_pct,
-                        simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
-                        simple_ship ? simple_ship->ship_type  : SHIP_TYPE_BRIGANTINE,
-                        simple_ship ? simple_ship->cannon_ammo : 0,
-                        (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
-                
-                // Add modules array
-                // Planks (100-109) and deck (200): only send health/ID, client generates positions
-                // Gameplay modules (1000+): send full transform
-                for (uint8_t m = 0; m < ship->module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
-                    const ShipModule* module = &ship->modules[m];
-                    
-                    if (module->type_id == MODULE_TYPE_PLANK) {
-                        // Plank: only health data (client has hard-coded positions from hull)
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
-                            m > 0 ? "," : "", module->id, module->type_id,
-                            (int)module->health, (int)module->target_health, (int)module->max_health);
-                    } else if (module->type_id == MODULE_TYPE_DECK) {
-                        // Deck: ID, type, health, and fire zone state bits (client generates polygon from hull).
-                        // Including health lets the client hide the deck the tick it reaches 0 HP,
-                        // even if the server hasn't yet removed it from the sim ship's module list.
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d,\"targetHealth\":%d,\"stateBits\":%u}",
-                            m > 0 ? "," : "", module->id, module->type_id,
-                            (int)module->health, (int)module->max_health, (int)module->target_health,
-                            (unsigned)module->state_bits);
-                    } else {
-                        // Gameplay modules: full transform data
-                        float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
-                        float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
-                        float module_rot = Q16_TO_FLOAT(module->local_rot);
-                        
-                        // Add module-specific data based on type
-                        if (module->type_id == MODULE_TYPE_MAST) {
-                            // Mast: include openness, sail angle, wind efficiency, fiber HP, and health
-                            float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
-                            float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
-                            float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
-                            float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
-                                fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
-                                (int)module->health, (int)module->target_health, (int)module->max_health);
-                        } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include aim direction, state, and health
-                            float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, aim_direction,
-                                (unsigned)module->state_bits,
-                                (int)module->health, (int)module->target_health, (int)module->max_health);
-                        } else if (module->type_id == MODULE_TYPE_SWIVEL) {
-                            // Swivel: include current aim direction, state, and health
-                            float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, aim_dir,
-                                (unsigned)module->state_bits,
-                                (int)module->health, (int)module->target_health, (int)module->max_health);
-                        } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
-                            // Helm: include wheel rotation, occupied status, state, and health
-                            float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, wheel_rot,
-                                (module->data.helm.occupied_by != 0) ? "true" : "false",
-                                (unsigned)module->state_bits,
-                                (int)module->health, (int)module->target_health, (int)module->max_health);
-                        } else {
-                            // Generic module (ladder, etc.): transform + state + health
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, (unsigned)module->state_bits,
-                                (int)module->health, (int)module->max_health);
-                        }
-                    }
-                }
-                
-                uint32_t cur_xp = ship->level_stats.xp;
-                uint32_t cur_tp = (uint32_t)ship_level_total_points(&ship->level_stats);
-                bool lvl_dirty = (s >= MAX_SHIPS) ||
-                                 (cur_xp != last_levelstats_xp[s]) ||
-                                 (cur_tp != last_levelstats_tp[s]);
-
-                if (lvl_dirty) {
-                    if (s < MAX_SHIPS) {
-                        last_levelstats_xp[s] = cur_xp;
-                        last_levelstats_tp[s] = cur_tp;
-                    }
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                        "],\"levelStats\":{"
-                        "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
-                        "\"xp\":%u,\"maxCrew\":%u,"
-                        "\"shipLevel\":%u,\"totalPoints\":%u,\"totalCap\":%u,"
-                        "\"nextUpgradeCost\":%u,"
-                        "\"attrCaps\":{\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u}"
-                        "}}",
-                        ship->level_stats.levels[SHIP_ATTR_WEIGHT],
-                        ship->level_stats.levels[SHIP_ATTR_RESISTANCE],
-                        ship->level_stats.levels[SHIP_ATTR_DAMAGE],
-                        ship->level_stats.levels[SHIP_ATTR_CREW],
-                        ship->level_stats.levels[SHIP_ATTR_STURDINESS],
-                        cur_xp,
-                        (unsigned)ship_level_max_crew(&ship->level_stats),
-                        cur_tp, cur_tp,
-                        SHIP_LEVEL_TOTAL_POINT_CAP,
-                        cur_tp < SHIP_LEVEL_TOTAL_POINT_CAP
-                            ? SHIP_LEVEL_XP_BASE * (cur_tp + 1u)
-                            : 0u,
-                        ship_attr_point_cap(SHIP_ATTR_WEIGHT),
-                        ship_attr_point_cap(SHIP_ATTR_RESISTANCE),
-                        ship_attr_point_cap(SHIP_ATTR_DAMAGE),
-                        ship_attr_point_cap(SHIP_ATTR_CREW),
-                        ship_attr_point_cap(SHIP_ATTR_STURDINESS));
-                } else {
-                    // levelStats unchanged — close the modules array and ship object
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
-                }
-
-                /* Append claimFlag field if a flag is planted on this ship */
-                {
-                    ClaimFlag* cf = NULL;
-                    for (int _fi = 0; _fi < MAX_CLAIM_FLAGS; _fi++) {
-                        if (claim_flags[_fi].active && claim_flags[_fi].ship_id == ship->id) {
-                            cf = &claim_flags[_fi]; break;
-                        }
-                    }
-                    if (cf && offset < (int)sizeof(ship_entry) - 200) {
-                        /* Remove trailing '}' and append claimFlag then re-close */
-                        if (offset > 0 && ship_entry[offset - 1] == '}') offset--;
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            ",\"claimFlag\":{\"planterId\":%u,\"planterCompany\":%u,"
-                            "\"progressMs\":%.0f,\"totalMs\":%u,\"contested\":%s,"
-                            "\"localX\":%.1f,\"localY\":%.1f}}",
-                            (unsigned)cf->planter_id, (unsigned)cf->planter_company,
-                            cf->progress_ms, FLAG_CLAIM_DURATION_MS,
-                            cf->contested ? "true" : "false",
-                            cf->local_x, cf->local_y);
-                    }
-                }
-                {
-                    int _aoi_s = ships_offset; /* byte start of this entry in ships_json */
-                    int n = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
-                    if (n > 0) ships_offset += n;
-                    if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
-                    if (aoi_ship_count < MAX_SHIPS && n > 0) {
-                        aoi_ship_px[aoi_ship_count]    = pos_x;
-                        aoi_ship_py[aoi_ship_count]    = pos_y;
-                        aoi_ship_id[aoi_ship_count]    = ship->id;
-                        aoi_ship_start[aoi_ship_count] = _aoi_s;
-                        aoi_ship_len[aoi_ship_count]   = n;
-                        aoi_ship_count++;
-                    }
-                }
-                first_ship = false;
-            }
-        } else {
-            // Fallback to simple ships array (backward compatibility)
-            for (int s = 0; s < ship_count; s++) {
-                if (ships[s].active) {
-                    if (!first_ship) {
-                        ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, ",");
-                        if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
-                    }
-                    
-                    // Build ship entry with modules
-                    char ship_entry[6144];
-                    int offset = snprintf(ship_entry, sizeof(ship_entry),
-                            "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                            "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
-                            "\"rudder_angle\":%.3f,"
-                            "\"company\":%u,\"shipType\":%u,"
-                            "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
-                            ships[s].ship_id, ships[s].ship_seq, ships[s].ship_name,
-                            ships[s].x, ships[s].y, ships[s].rotation,
-                            ships[s].velocity_x, ships[s].velocity_y, ships[s].angular_velocity,
-                            0.0f,
-                            ships[s].company_id, ships[s].ship_type,
-                            ships[s].cannon_ammo, ships[s].infinite_ammo ? "true" : "false");
-                    
-                    // Add modules from simple ships
-                    for (int m = 0; m < ships[s].module_count && offset < (int)sizeof(ship_entry) - 200; m++) {
-                        const ShipModule* module = &ships[s].modules[m];
-                        float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
-                        float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
-                        float module_rot = Q16_TO_FLOAT(module->local_rot);
-                        
-                        // Add module-specific data based on type
-                        if (module->type_id == MODULE_TYPE_MAST) {
-                            // Mast: include openness, sail angle, wind efficiency, fiber HP
-                            float sail_angle = Q16_TO_FLOAT(module->data.mast.angle);
-                            float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
-                            float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
-                            float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f}",
-                                m > 0 ? "," : "", module->id, module->type_id, 
-                                module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
-                                fh, fhmax);
-                        } else if (module->type_id == MODULE_TYPE_CANNON) {
-                            // Cannon: include aim direction, state (ammo is ship-level)
-                            float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, aim_direction,
-                                (unsigned)module->state_bits);
-                        } else if (module->type_id == MODULE_TYPE_SWIVEL) {
-                            // Swivel: include current aim direction and state
-                            float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, aim_dir,
-                                (unsigned)module->state_bits);
-                        } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
-                            // Helm: include wheel rotation, occupied status, state
-                            float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, wheel_rot,
-                                (module->data.helm.occupied_by != 0) ? "true" : "false",
-                                (unsigned)module->state_bits);
-                        } else {
-                            // Generic module (mast, ladder, etc.): transform + state
-                            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                                "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
-                                m > 0 ? "," : "", module->id, module->type_id,
-                                module_x, module_y, module_rot, (unsigned)module->state_bits);
-                        }
-                    }
-                    
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
-                    {
-                        int _aoi_s2 = ships_offset;
-                        int n2 = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
-                        if (n2 > 0) ships_offset += n2;
-                        if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
-                        if (aoi_ship_count < MAX_SHIPS && n2 > 0) {
-                            aoi_ship_px[aoi_ship_count]    = ships[s].x;
-                            aoi_ship_py[aoi_ship_count]    = ships[s].y;
-                            aoi_ship_id[aoi_ship_count]    = ships[s].ship_id;
-                            aoi_ship_start[aoi_ship_count] = _aoi_s2;
-                            aoi_ship_len[aoi_ship_count]   = n2;
-                            aoi_ship_count++;
-                        }
-                    }
-                    first_ship = false;
-                }
-            }
-        }
-        ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "]");
-        g_ship_json_last_us = get_time_us() - _ship_build_t0_us;
-        if (g_ship_json_last_us > g_ship_json_max_us) g_ship_json_max_us = g_ship_json_last_us;
         
         /* ── Pre-build shared blobs (players, projectiles, NPCs, tombstones,
          * dropped items, companies) in worker with synchronous fallback.
@@ -7986,6 +7937,14 @@ int websocket_server_update(struct Sim* sim) {
             _snap.ship_count = ship_count;
             memcpy(_snap.ships, ships, sizeof(ships));
             memcpy(_snap.players, players, sizeof(players));
+            _snap.sim_ship_count = 0;
+            if (global_sim) {
+                uint16_t _ss = global_sim->ship_count;
+                if (_ss > MAX_SHIPS) _ss = MAX_SHIPS;
+                _snap.sim_ship_count = _ss;
+                memcpy(_snap.sim_ships, global_sim->ships,
+                       (size_t)_ss * sizeof(struct Ship));
+            }
             _snap.projectile_count = 0;
             if (global_sim) {
                 uint16_t _pc = global_sim->projectile_count;
@@ -7996,10 +7955,17 @@ int websocket_server_update(struct Sim* sim) {
             }
             _snap.world_npc_count = world_npc_count;
             memcpy(_snap.world_npcs, world_npcs, sizeof(world_npcs));
+            memcpy(_snap.claim_flags, claim_flags, sizeof(claim_flags));
             build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache);
             blob_worker_note_fallback_build();
             shared_blob_cache_valid = true;
         }
+
+        g_ship_json_last_us = get_time_us() - _ship_build_t0_us;
+        if (g_ship_json_last_us > g_ship_json_max_us) g_ship_json_max_us = g_ship_json_last_us;
+
+        const char* ships_json = shared_blob_cache.ships_json;
+        int aoi_ship_count = shared_blob_cache.aoi_ship_count;
 
         // Adaptive tick rate based on activity
         int active_count = shared_blob_cache.active_player_count;
@@ -8047,9 +8013,9 @@ int websocket_server_update(struct Sim* sim) {
             float _cx = _vp->x, _cy = _vp->y;
             if (_vp->parent_ship_id != 0) {
                 for (int _pi = 0; _pi < aoi_ship_count; _pi++) {
-                    if (aoi_ship_id[_pi] == (uint32_t)_vp->parent_ship_id) {
-                        _cx = aoi_ship_px[_pi];
-                        _cy = aoi_ship_py[_pi];
+                    if (shared_blob_cache.aoi_ship_id[_pi] == (uint32_t)_vp->parent_ship_id) {
+                        _cx = shared_blob_cache.aoi_ship_px[_pi];
+                        _cy = shared_blob_cache.aoi_ship_py[_pi];
                         break;
                     }
                 }
@@ -8064,16 +8030,16 @@ int websocket_server_update(struct Sim* sim) {
             int _soff = snprintf(per_ship_json, sizeof(per_ship_json), "[");
             bool _sfirst = true;
             for (int _si = 0; _si < aoi_ship_count; _si++) {
-                float _dx = aoi_ship_px[_si] - _cx, _dy = aoi_ship_py[_si] - _cy;
+                float _dx = shared_blob_cache.aoi_ship_px[_si] - _cx, _dy = shared_blob_cache.aoi_ship_py[_si] - _cy;
                 if (_dx * _dx + _dy * _dy > _view_r2) continue;
                 if (!_sfirst && _soff < (int)sizeof(per_ship_json) - 1)
                     per_ship_json[_soff++] = ',';
                 int _room = (int)sizeof(per_ship_json) - _soff - 2;
-                if (aoi_ship_len[_si] > 0 && aoi_ship_len[_si] <= _room) {
+                if (shared_blob_cache.aoi_ship_len[_si] > 0 && shared_blob_cache.aoi_ship_len[_si] <= _room) {
                     memcpy(per_ship_json + _soff,
-                           ships_json + aoi_ship_start[_si],
-                           (size_t)aoi_ship_len[_si]);
-                    _soff += aoi_ship_len[_si];
+                           ships_json + shared_blob_cache.aoi_ship_start[_si],
+                           (size_t)shared_blob_cache.aoi_ship_len[_si]);
+                    _soff += shared_blob_cache.aoi_ship_len[_si];
                 }
                 _sfirst = false;
             }
