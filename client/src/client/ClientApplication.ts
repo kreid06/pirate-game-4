@@ -175,6 +175,9 @@ export class ClientApplication {
   /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
   private lastSwordSwingMs = 0;
   private readonly SWORD_COOLDOWN_MS = 1000; // matches server SWORD_COOLDOWN_MS
+  /** Timestamp (ms) of the last punch sent to the server — enforces client-side cooldown. */
+  private lastPunchMs = 0;
+  private readonly PUNCH_COOLDOWN_MS = 800; // matches server PUNCH_COOLDOWN_MS
   // ── Ship debug panel ────────────────────────────────────────────────────
   private _shipDebugPanel: HTMLDivElement | null = null;
   private _shipDebugTableBody: HTMLTableSectionElement | null = null;
@@ -921,7 +924,25 @@ export class ClientApplication {
             this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
             return;
           }
-          // Not a hammer or sword click — pass to server
+          // Not a hammer or sword click — punch if unarmed or holding non-weapon/tool/building item
+          const punchAllowed =
+            activeItem === 'none' ||
+            (ITEM_DEFS[activeItem]?.category !== 'weapon' &&
+             ITEM_DEFS[activeItem]?.category !== 'tool' &&
+             ITEM_DEFS[activeItem]?.category !== 'building');
+          if (punchAllowed && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastPunchMs < this.PUNCH_COOLDOWN_MS) return;
+            this.lastPunchMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 25);
+            this.renderSystem.notifySwordSwing(this.PUNCH_COOLDOWN_MS);
+            return;
+          }
+          // Tool/weapon/building item active — pass action to server
           this.networkManager.sendAction(action, target);
           return;
         }

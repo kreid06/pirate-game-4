@@ -4071,13 +4071,130 @@ int websocket_server_update(struct Sim* sim) {
                                                 websocket_server_broadcast(swing_msg);
 
                                             } else {
-                                                // Unarmed / generic attack broadcast
-                                                char attack_msg[256];
-                                                snprintf(attack_msg, sizeof(attack_msg),
-                                                    "{\"type\":\"player_attack\",\"player_id\":%u,"
-                                                    "\"target_x\":%.2f,\"target_y\":%.2f}",
-                                                    player->player_id, target_x, target_y);
-                                                websocket_server_broadcast(attack_msg);
+                                                // ── Punch attack (unarmed or non-weapon/tool item) ──
+                                                // Tools with dedicated actions don't punch
+                                                ItemKind cur_item = (aslot < INVENTORY_SLOTS)
+                                                    ? player->inventory.slots[aslot].item
+                                                    : ITEM_NONE;
+                                                if (cur_item == ITEM_AXE || cur_item == ITEM_PICKAXE
+                                                    || cur_item == ITEM_PISTOL) {
+                                                    goto sword_attack_done;
+                                                }
+
+                                                const uint32_t PUNCH_COOLDOWN_MS = 800u;
+                                                uint32_t now_ms = get_time_ms();
+                                                if (now_ms - player->sword_last_attack_ms < PUNCH_COOLDOWN_MS) {
+                                                    goto sword_attack_done;
+                                                }
+                                                const uint16_t PUNCH_STAMINA_COST = 10u;
+                                                if (player->stamina < PUNCH_STAMINA_COST) {
+                                                    goto sword_attack_done;
+                                                }
+                                                player->stamina -= PUNCH_STAMINA_COST;
+                                                player->stamina_last_used_ms = now_ms;
+                                                player->sword_last_attack_ms = now_ms;
+
+                                                const float PUNCH_RANGE  = 25.0f;
+                                                const float PUNCH_RANGE2 = PUNCH_RANGE * PUNCH_RANGE;
+                                                const float PUNCH_DAMAGE = 15.0f * (1.0f + 0.1f * (float)player->stat_damage);
+
+                                                float atk_dx = target_x - player->x;
+                                                float atk_dy = target_y - player->y;
+                                                float atk_len = sqrtf(atk_dx*atk_dx + atk_dy*atk_dy);
+                                                if (atk_len < 0.1f) { atk_dx = 1.0f; atk_dy = 0.0f; }
+                                                else { atk_dx /= atk_len; atk_dy /= atk_len; }
+                                                float atk_angle = atan2f(atk_dy, atk_dx);
+
+                                                // Hit NPCs
+                                                for (int ni = 0; ni < world_npc_count; ni++) {
+                                                    WorldNpc* tnpc = &world_npcs[ni];
+                                                    if (!tnpc->active) continue;
+                                                    if (player->company_id != 0 &&
+                                                        tnpc->company_id == player->company_id) continue;
+                                                    float nx = tnpc->x - player->x;
+                                                    float ny = tnpc->y - player->y;
+                                                    if (nx*nx + ny*ny > PUNCH_RANGE2) continue;
+                                                    float npc_angle = atan2f(ny, nx);
+                                                    float diff = npc_angle - atk_angle;
+                                                    while (diff >  (float)M_PI) diff -= 2.0f*(float)M_PI;
+                                                    while (diff < -(float)M_PI) diff += 2.0f*(float)M_PI;
+                                                    if (fabsf(diff) > (float)M_PI / 3.0f * 2.0f) continue;
+
+                                                    uint16_t dmg16 = (uint16_t)PUNCH_DAMAGE;
+                                                    bool killed_npc = false;
+                                                    if (tnpc->health <= dmg16) {
+                                                        tnpc->health = 0;
+                                                        tnpc->active = false;
+                                                        killed_npc = true;
+                                                        player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
+                                                    } else {
+                                                        tnpc->health -= dmg16;
+                                                    }
+                                                    float dist = sqrtf(nx*nx + ny*ny);
+                                                    float kx = (dist > 0.1f) ? (nx/dist) : atk_dx;
+                                                    float ky = (dist > 0.1f) ? (ny/dist) : atk_dy;
+                                                    tnpc->velocity_x += kx * 15.0f;
+                                                    tnpc->velocity_y += ky * 15.0f;
+
+                                                    char hit_msg[256];
+                                                    snprintf(hit_msg, sizeof(hit_msg),
+                                                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
+                                                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                                                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                                                        tnpc->id, tnpc->x, tnpc->y, PUNCH_DAMAGE,
+                                                        (unsigned)tnpc->health, (unsigned)tnpc->max_health,
+                                                        killed_npc ? "true" : "false");
+                                                    websocket_server_broadcast(hit_msg);
+                                                    log_info("👊 Player %u punch hit NPC %u (HP %u/%u)%s",
+                                                             player->player_id, tnpc->id,
+                                                             (unsigned)tnpc->health, (unsigned)tnpc->max_health,
+                                                             killed_npc ? " KILLED" : "");
+                                                }
+
+                                                // Hit players (PvP)
+                                                for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
+                                                    WebSocketPlayer* tp = &players[wpi];
+                                                    if (!tp->active || tp->player_id == player->player_id) continue;
+                                                    if (player->company_id != 0 &&
+                                                        tp->company_id == player->company_id) continue;
+                                                    float px2 = tp->x - player->x;
+                                                    float py2 = tp->y - player->y;
+                                                    if (px2*px2 + py2*py2 > PUNCH_RANGE2) continue;
+                                                    float p_angle = atan2f(py2, px2);
+                                                    float pdiff = p_angle - atk_angle;
+                                                    while (pdiff >  (float)M_PI) pdiff -= 2.0f*(float)M_PI;
+                                                    while (pdiff < -(float)M_PI) pdiff += 2.0f*(float)M_PI;
+                                                    if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
+
+                                                    int _raw_dmg = (int)PUNCH_DAMAGE;
+                                                    int _arm_val = player_armor_value(tp);
+                                                    uint16_t pdmg16 = (uint16_t)(_raw_dmg - _arm_val > 1 ? _raw_dmg - _arm_val : 1);
+                                                    bool killed_player = (tp->health <= pdmg16);
+                                                    if (killed_player) tp->health = 0;
+                                                    else tp->health -= pdmg16;
+                                                    if (killed_player) {
+                                                        player_apply_xp(player, PLAYER_XP_PER_PLAYER_KILL);
+                                                        player_die(tp);
+                                                    }
+                                                    char phit_msg[256];
+                                                    snprintf(phit_msg, sizeof(phit_msg),
+                                                        "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                                                        "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
+                                                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
+                                                        tp->player_id, tp->x, tp->y, PUNCH_DAMAGE,
+                                                        (unsigned)tp->health, (unsigned)tp->max_health,
+                                                        killed_player ? "true" : "false");
+                                                    websocket_server_broadcast(phit_msg);
+                                                }
+
+                                                // Broadcast punch swing for client arc (reuse SWORD_SWING with punch range)
+                                                char swing_msg[256];
+                                                snprintf(swing_msg, sizeof(swing_msg),
+                                                    "{\"type\":\"SWORD_SWING\",\"playerId\":%u,"
+                                                    "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"range\":%.0f}",
+                                                    player->player_id, player->x, player->y,
+                                                    atk_angle, PUNCH_RANGE);
+                                                websocket_server_broadcast(swing_msg);
                                             }
                                         }
                                         sword_attack_done:;

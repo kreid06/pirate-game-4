@@ -1309,8 +1309,8 @@ export class RenderSystem {
    * @param worldPos  Attacker's world position.
    * @param direction Attack angle in radians.
    */
-  spawnSwordArc(worldPos: Vec2, direction: number): void {
-    this.effectRenderer.createSwordArc(worldPos, direction);
+  spawnSwordArc(worldPos: Vec2, direction: number, radius: number = 30): void {
+    this.effectRenderer.createSwordArc(worldPos, direction, radius);
   }
 
   /**
