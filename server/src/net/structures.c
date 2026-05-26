@@ -730,6 +730,62 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
+    /* Wooden floor: must not intersect a boulder (RES_BOULDER or RES_STONE_BOULDER).
+       Uses a rotated-ellipse vs OBB test: find the closest point on the floor OBB to
+       the boulder centre, transform it into the boulder's ellipse local frame, and test
+       (lx/ax)²+(ly/ay)² < 1.  Shape parameters must match BOULDER_SHAPES in RenderSystem.ts
+       and BOULDER_SX/SY/ROT in simulation.c exactly. */
+    if (stype_enum == STRUCT_WOODEN_FLOOR) {
+        static const float BOULDER_BASE_R = 38.0f;
+        static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+        static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+        static const float BSR[5] = { 0.00f, 0.40f, -0.20f,  1.20f, 0.15f };
+        const float HALF = 25.0f;
+        /* Inverse rotation to bring world points into floor local frame */
+        float frc = cosf(-place_rad), frs = sinf(-place_rad);
+        /* Forward rotation to bring floor-local points back to world */
+        float frc_f = cosf(place_rad), frs_f = sinf(place_rad);
+        bool blocked = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !blocked; ii++) {
+            const IslandDef *isl = &ISLAND_PRESETS[ii];
+            for (int ri = 0; ri < isl->resource_count && !blocked; ri++) {
+                const IslandResource *res = &isl->resources[ri];
+                if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
+                if (res->health <= 0) continue;
+                float bx = isl->x + res->ox, by = isl->y + res->oy;
+                /* Boulder centre in floor local frame */
+                float dx = bx - px, dy = by - py;
+                float lx = dx * frc - dy * frs;
+                float ly = dx * frs + dy * frc;
+                /* Closest point on floor OBB (floor-local) */
+                float cx_f = lx < -HALF ? -HALF : (lx > HALF ? HALF : lx);
+                float cy_f = ly < -HALF ? -HALF : (ly > HALF ? HALF : ly);
+                /* Transform closest point back to world, then into boulder-relative coords */
+                float cpx_w = cx_f * frc_f - cy_f * frs_f + px - bx;
+                float cpy_w = cx_f * frs_f + cy_f * frc_f + py - by;
+                /* Boulder ellipse shape + rotation (same hash as renderer and sim) */
+                float sz = res->size > 0.0f ? res->size : 1.0f;
+                uint32_t bseed = ((uint32_t)((int)res->ox * 73856093))
+                               ^ ((uint32_t)((int)res->oy * 19349663));
+                int bsi = (int)((bseed >> 4) % 5u);
+                float ax = BOULDER_BASE_R * sz * BSX[bsi];
+                float ay = BOULDER_BASE_R * sz * BSY[bsi];
+                float theta = BSR[bsi] + ((float)((bseed >> 8) & 0xFFu) / 256.0f)
+                              * (2.0f * 3.14159265f);
+                float ec = cosf(theta), es = sinf(theta);
+                /* Rotate closest-point delta into ellipse local frame */
+                float elx = cpx_w * ec + cpy_w * es;
+                float ely = -cpx_w * es + cpy_w * ec;
+                if ((elx/ax)*(elx/ax) + (ely/ay)*(ely/ay) < 1.0f) blocked = true;
+            }
+        }
+        if (blocked) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"blocked_by_boulder\"}");
+            goto ps_send;
+        }
+    }
+
     /* Workbench: centre point must fall inside the rotated floor tile (50x50 px)
        AND that floor tile must belong to the same company as the placing player. */
     if (stype_enum == STRUCT_WORKBENCH) {

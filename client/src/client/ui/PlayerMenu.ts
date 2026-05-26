@@ -116,12 +116,12 @@ const HAND_RECIPES: HandRecipe[] = [
   { output: 'cloth_gloves',  outputQty: 1, cost: [{ item: 'fiber', qty: 10 }],                                    category: 'ARMOR'        },
   { output: 'wooden_shield', outputQty: 1, cost: [{ item: 'wood',  qty: 6  }],                                    category: 'ARMOR'        },
   // Tools
-  { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 2 }],         category: 'TOOLS'        },
-  { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 2  }, { item: 'stone', qty: 4 }],         category: 'TOOLS'        },
+  { output: 'axe',           outputQty: 1, cost: [{ item: 'wood',  qty: 2  }, { item: 'stone', qty: 5 }],         category: 'TOOLS'        },
+  { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 4 }],         category: 'TOOLS'        },
   { output: 'hammer',        outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'TOOLS'        },
   { output: 'claim_flag',    outputQty: 1, cost: [{ item: 'wood',  qty: 5  }],                                    category: 'TOOLS'        },
   // Construction
-  { output: 'wooden_floor',  outputQty: 2, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'CONSTRUCTION' },
+  { output: 'wooden_floor',  outputQty: 1, cost: [{ item: 'wood',  qty: 20 }],                                    category: 'CONSTRUCTION' },
   { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
 ];
 

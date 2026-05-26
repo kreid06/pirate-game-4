@@ -172,7 +172,9 @@ export interface PlacedStructure {
   doorOpen?: boolean;  // doors only: true = open (passable)
   doorLocked?: boolean; // doors only: true = locked (only company members can open)
   rotation?: number;   // rotation in degrees (default 0); applies to wooden_floor and workbench
-  cannonAimAngle?: number; // cannons only: world-space aim angle in radians
+  cannonAimAngle?: number;   // cannons only: world-space aim angle in radians
+  cannonReloadMs?: number;   // cannons only: ms remaining until reload complete (0 = ready)
+  cannonLoadedAmmo?: number; // cannons only: ammo type currently loaded (0=cannonball, 1=bar shot)
   /** Shipyard only — current ship under construction. Absent when empty. */
   construction?: ShipConstruction;
   /** Claiming flag: countdown progress in ms (starts at FLAG_CLAIM_DURATION_MS=300000, reaches 0 to capture) */

@@ -140,6 +140,8 @@ export class InputManager {
   public explicitBuildMode: boolean = false;
   public islandBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
+  /** Called when Z is pressed — toggles combat mode. */
+  public onCombatModeToggle: (() => void) | null = null;
   public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
@@ -1164,6 +1166,12 @@ export class InputManager {
         if (this.onBuildModeToggle) this.onBuildModeToggle();
         event.preventDefault();
         break;
+      case 'KeyZ':
+        if (!event.repeat) {
+          if (this.onCombatModeToggle) this.onCombatModeToggle();
+        }
+        event.preventDefault();
+        break;
       case 'KeyR':
         // In explicit build mode, plan mode, or island build mode: rotate the placement ghost.
         // Otherwise: repair sail fibers on the hovered damaged mast.
@@ -1191,16 +1199,16 @@ export class InputManager {
                   const idx = swivelAmmos.indexOf(this.selectedAmmoType);
                   this.selectedAmmoType = swivelAmmos[(idx < 0 ? 0 : (idx + 1)) % 3];
                 }
-                this.loadedAmmoType = this.selectedAmmoType;
+                // loadedAmmoType updated by ClientApplication once the reload cycle completes
                 const swivelNames: Record<number, string> = { 10: 'GRAPESHOT', 11: 'LIQUID FLAME', 12: 'CANISTER SHOT' };
-                console.log(`⚡ Helm swivel ammo force-loaded → ${swivelNames[this.loadedAmmoType]}`);
+                console.log(`⚡ Helm swivel ammo queued → ${swivelNames[this.selectedAmmoType]} (reloading…)`);
               } else {
                 if (this.selectedAmmoType === this.loadedAmmoType) {
                   this.selectedAmmoType = this.selectedAmmoType === 0 ? 1 : 0;
                 }
-                this.loadedAmmoType = this.selectedAmmoType;
+                // loadedAmmoType updated by ClientApplication once the reload cycle completes
                 const ammoNames = ['CANNONBALL', 'BAR SHOT'];
-                console.log(`⚡ Ammo force-loaded → ${ammoNames[this.loadedAmmoType]}`);
+                console.log(`⚡ Ammo queued → ${ammoNames[this.selectedAmmoType]} (reloading…)`);
               }
               if (this.onForceReload) this.onForceReload();
             }, 500);

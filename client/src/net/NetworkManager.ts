@@ -171,6 +171,8 @@ interface InputMessage extends NetworkMessage {
   };
   actions: number;
   is_sprinting?: boolean;
+  /** Average AOI view distance (client world units). Server uses this to tune per-player AOI radius. */
+  view_radius?: number;
 }
 
 /**
@@ -529,6 +531,10 @@ export class NetworkManager {
 
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
+  /** Current world wind direction (radians, 0=North, clockwise). Updated from GAME_STATE. */
+  public windAngle: number = 0;
+  /** Current world wind strength (0–1). Updated from GAME_STATE. */
+  public windStrength: number = 0.5;
   public onCompanyCreated: ((company: Company) => void) | null = null;
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
@@ -576,6 +582,8 @@ export class NetworkManager {
   public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number, facingAngle: number) => void) | null = null;
   /** Fired when server returns authoritative current island-cannon aim in message_ack. */
   public onIslandCannonAimSync: ((structureId: number, aimAngle: number) => void) | null = null;
+  /** Fired when an island cannon starts or finishes reloading. */
+  public onStructureReload: ((structureId: number, reloadMs: number, loadedAmmo: number) => void) | null = null;
   /** Fired when the player tries to fire an island cannon but has no cannonballs. */
   public onNoAmmo: (() => void) | null = null;
 
@@ -621,6 +629,8 @@ export class NetworkManager {
   public mapCenterX: number = 45000;
   public mapCenterY: number = 45000;
   public mapWrap: boolean = true;
+  /** Average AOI view radius (client world units) from the latest ray cast. Set by ClientApplication each frame. */
+  public viewRadius: number = 0;
   /** Fired when the server broadcasts a resource_damaged event. */
   public onResourceDamaged: ((islandId: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
   /** Fired when a depleted resource respawns (resource_respawned event). */
@@ -1000,7 +1010,8 @@ export class NetworkManager {
           y: inputFrame.movement.y
         },
         actions: inputFrame.actions,
-        is_sprinting: (inputFrame.actions & PlayerActions.SPRINT) !== 0
+        is_sprinting: (inputFrame.actions & PlayerActions.SPRINT) !== 0,
+        view_radius: this.viewRadius > 0 ? Math.round(this.viewRadius) : undefined
       };
       
       this.sendMessage(message);
@@ -1249,10 +1260,10 @@ export class NetworkManager {
    * Tells the server to reset the reload timer so the cannon reloads immediately
    * into the newly-selected ammo type.
    */
-  sendForceReload(): void {
+  sendForceReload(ammoType: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: 'cannon_force_reload' as any, timestamp: Date.now() });
-    console.log('⚡ Force reload sent');
+    this.sendMessage({ type: 'cannon_force_reload' as any, timestamp: Date.now(), ammo_type: ammoType });
+    console.log(`⚡ Force reload sent (ammo_type=${ammoType})`);
   }
 
   /**
@@ -1601,6 +1612,15 @@ export class NetworkManager {
   sendNpcGotoModule(npcId: number, moduleId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: MessageType.NPC_GOTO_MODULE, timestamp: Date.now(), npcId, moduleId }));
+  }
+
+  /**
+   * Dismiss whichever NPC is currently stationed at a cannon/swivel module,
+   * freeing the slot so the player can immediately mount it.
+   */
+  sendDismissNpc(moduleId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'dismiss_npc', timestamp: Date.now(), moduleId }));
   }
 
   /**
@@ -2234,10 +2254,18 @@ export class NetworkManager {
         };
         
         this.onWorldStateReceived?.(worldState);
+        // Parse world wind fields attached to GAME_STATE
+        if (typeof message.windAngle    === 'number') this.windAngle    = message.windAngle;
+        if (typeof message.windStrength === 'number') this.windStrength = message.windStrength;
         break;
         
       case MessageType.PONG: // Handles both 'pong' enum and text response
         this.handlePong(message);
+        break;
+
+      case 'WORLD_STATE' as any: // Server broadcast (uppercase); carries windPower + windDirection
+        if (typeof message.windDirection === 'number') this.windAngle    = message.windDirection;
+        if (typeof message.windPower     === 'number') this.windStrength = message.windPower;
         break;
 
       case 'company_created' as any:
@@ -2649,7 +2677,8 @@ export class NetworkManager {
           doorLocked: s.locked === true,
           rotation:  s.rotation ?? 0,
           cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
-          claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
+          cannonReloadMs: typeof s.cannon_reload_ms === 'number' ? s.cannon_reload_ms : undefined,
+          cannonLoadedAmmo: typeof s.cannon_loaded_ammo === 'number' ? s.cannon_loaded_ammo : undefined,
           claimContested:        s.claim_contested        === true,
           claimTargetsFortress:  s.claim_targets_fortress  === true,
           claimLinkedFort:       typeof s.claim_linked_fort  === 'number' ? s.claim_linked_fort  : undefined,
@@ -2701,8 +2730,8 @@ export class NetworkManager {
           doorLocked: message.locked === true,
           rotation:  message.rotation ?? 0,
           cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
-          claimProgress:        typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
-          claimContested:       message.claim_contested        === true,
+          cannonReloadMs: typeof message.cannon_reload_ms === 'number' ? message.cannon_reload_ms : undefined,
+          cannonLoadedAmmo: typeof message.cannon_loaded_ammo === 'number' ? message.cannon_loaded_ammo : undefined,
           claimTargetsFortress: message.claim_targets_fortress  === true,
           claimLinkedFort:      typeof message.claim_linked_fort  === 'number' ? message.claim_linked_fort  : undefined,
           claimSourceEnemy:     typeof message.claim_source_enemy === 'number' ? message.claim_source_enemy : undefined,
@@ -3125,6 +3154,13 @@ export class NetworkManager {
           message.slots ?? [],
           message.equip ?? {}
         );
+        break;
+
+      case 'structure_reload':
+        if (typeof message.structure_id === 'number' && typeof message.reload_ms === 'number') {
+          const loadedAmmo = typeof message.loaded_ammo === 'number' ? message.loaded_ammo : 0;
+          this.onStructureReload?.(message.structure_id, message.reload_ms, loadedAmmo);
+        }
         break;
 
       case 'tombstone_collect_fail':

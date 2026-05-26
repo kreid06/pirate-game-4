@@ -143,6 +143,12 @@ typedef struct {
 
     // Status effects (separate from type-specific data)
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
+
+    /* player_id of the player currently mounted here (0 = none).
+     * Set by handle_cannon_interact / handle_swivel_interact and cleared on
+     * dismount.  NPCs check this so they never attempt to occupy a cannon
+     * that a player is already manning. */
+    uint32_t player_mounted_id;
 } ShipModule;
 
 /**

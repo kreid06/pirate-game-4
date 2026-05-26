@@ -53,6 +53,12 @@ export interface UIRenderContext {
   controlGroups?: Map<number, WeaponGroupState>;
   /** Active ammo group on helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 2-4). */
   activeAmmoGroup?: 'cannon' | 'swivel';
+  /** Current world wind direction (radians, 0=North, clockwise). */
+  windAngle?: number;
+  /** True when the debug overlay is active (L key). */
+  debugMode?: boolean;
+  /** True when the player has combat mode enabled (Z key). */
+  combatMode?: boolean;
 }
 
 /**
@@ -133,6 +139,9 @@ export class UIManager {
 
   // UI State
   private showDebugOverlay = false;
+
+  /** True when the debug overlay is currently visible. */
+  get isDebugMode(): boolean { return this.showDebugOverlay; }
   private showNetworkStats = false;
   private showControlHints = true;
 
@@ -2213,7 +2222,9 @@ class HUDElement implements UIElement {
         deckRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
       }
       const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? []);
+      const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
+                                       (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed);
     }
 
     // Health / stamina bars above hotbar
@@ -2223,7 +2234,7 @@ class HUDElement implements UIElement {
     const _xp  = player.xp ?? 0;
     this._cachedPlayerLevel = _lvl;
     this._cachedPlayerXp    = _xp;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0);
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -2245,6 +2256,7 @@ class HUDElement implements UIElement {
     level = 1,
     xp = 0,
     statPoints = 0,
+    combatMode = false,
   ): void {
     const PLAYER_MAX_LEVEL = 120;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
@@ -2361,6 +2373,37 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
     ctx.fillText(`${Math.ceil(stamina)}/${maxStamina}`, barX + barW - 4, stY + BAR_H / 2);
+
+    // ── Combat mode indicator ──────────────────────────────────────────────
+    const indicatorW = 114;
+    const indicatorH = 18;
+    const indicatorX = startX + totalW - indicatorW;
+    const indicatorY = panelY - indicatorH - 4;
+
+    if (combatMode) {
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 380);
+      ctx.fillStyle = 'rgba(110, 15, 15, 0.92)';
+      ctx.fillRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.strokeStyle = `rgba(255, 70, 70, ${pulse.toFixed(2)})`;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.font = 'bold 10px Georgia, serif';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff9090';
+      ctx.fillText('\u2694  COMBAT', indicatorX + indicatorW / 2, indicatorY + indicatorH / 2);
+    } else {
+      ctx.fillStyle = 'rgba(15, 15, 22, 0.55)';
+      ctx.fillRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.strokeStyle = 'rgba(70, 70, 95, 0.40)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.font = '9px Georgia, serif';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(130, 130, 155, 0.50)';
+      ctx.fillText('[Z] Combat Mode', indicatorX + indicatorW / 2, indicatorY + indicatorH / 2);
+    }
 
     ctx.restore();
   }
@@ -2751,7 +2794,10 @@ class HUDElement implements UIElement {
     plankRatio: number = 1,
     shipRotation: number = 0,
     mastModules: import('../../sim/modules.js').ShipModule[] = [],
-    shipHull: import('../../common/Vec2.js').Vec2[] = []
+    shipHull: import('../../common/Vec2.js').Vec2[] = [],
+    windAngle: number = 0,
+    debugMode: boolean = false,
+    shipSpeed: number = 0
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
@@ -2878,19 +2924,37 @@ class HUDElement implements UIElement {
     for (const mast of sortedMasts) {
       const my = toIconY(mast.localPos.x);
 
-      // Mast dot — skip, sail arc already marks the position
-
       // Sail arc + openness indicator line
       const md = mast.moduleData as { kind: string; angle?: number; openness?: number } | undefined;
-      const sailAngle = md?.angle ?? 0;   // radians
+      const sailAngle = md?.angle ?? 0;   // radians, ship-local
       const openness  = (md?.openness ?? 100) / 100;
+
+      // ── Wind-effectiveness colour ──────────────────────────────────────
+      // sailAngle is ship-local; windAngle is world-space (same CW-from-N convention).
+      // ±15° of wind → full green (#39ff14); beyond ±90° → full red (#ff3214).
+      // Linearly blends between the two limits.
+      {
+        // nothing here yet — colour computed just below
+      }
+      const _sailWorld = sailAngle + shipRotation + Math.PI / 2;
+      let   _diff      = _sailWorld - windAngle;
+      while (_diff >  Math.PI) _diff -= 2 * Math.PI;
+      while (_diff < -Math.PI) _diff += 2 * Math.PI;
+      const _absD     = Math.abs(_diff);
+      const _FULL_EFF = 15 * Math.PI / 180;  // ±15° → 100%
+      const _NO_EFF   = 90 * Math.PI / 180;  // ±90° → min
+      const _t        = Math.max(0, Math.min(1, (_absD - _FULL_EFF) / (_NO_EFF - _FULL_EFF)));
+      // Green (57,255,20) → Red (255,50,20)
+      const _cr = Math.round(57  + _t * (255 - 57));
+      const _cg = Math.round(255 + _t * (50  - 255));
+      const sailColor = `rgb(${_cr},${_cg},20)`;
 
       ctx.save();
       ctx.translate(cx, my);
       ctx.rotate(sailAngle);
 
-      ctx.strokeStyle = '#39ff14';
-      ctx.shadowColor = '#39ff14';
+      ctx.strokeStyle = sailColor;
+      ctx.shadowColor = sailColor;
       ctx.shadowBlur  = 4;
 
       // Arc — always full size, full opacity
@@ -2917,6 +2981,47 @@ class HUDElement implements UIElement {
     ctx.stroke(shipPath);
 
     ctx.restore(); // OUTER — removes rotation; labels drawn below in screen space
+
+    // ── Wind direction arrow (screen-space, always world-aligned) ─────────
+    // windAngle = 0 → North (screen up), increases clockwise.
+    // Tail is pinned to the icon centre; length scales with wind strength.
+    // windStrength raw range 0.30–1.00 is normalised to 0–1 so the visual
+    // span is as wide as possible: ~8 px at weakest, ~52 px at strongest.
+    {
+      const headLen   = 9;    // arrowhead triangle height (fixed)
+      const headW     = 6;    // arrowhead triangle half-width (fixed)
+      const windStrength = 0.3 + 0.7 * Math.abs(Math.cos(windAngle)); // matches server formula
+      const normStr   = (windStrength - 0.3) / 0.7;  // 0 = weakest (E/W), 1 = strongest (N/S)
+      const shaftLen  = 8 + normStr * 44;             // 8 px weak → 52 px strong
+      const totalLen  = shaftLen + headLen; // tip offset from tail (origin)
+
+      ctx.save();
+      ctx.translate(cx, cy);  // tail = icon centre
+      ctx.rotate(windAngle);
+
+      ctx.shadowColor = 'rgba(255, 235, 80, 0.85)';
+      ctx.shadowBlur  = 6;
+
+      // Shaft — tail at (0,0), tip at (0, -totalLen)
+      ctx.strokeStyle = 'rgba(255, 235, 80, 0.92)';
+      ctx.lineWidth   = 3;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);           // tail (icon centre)
+      ctx.lineTo(0, -shaftLen);   // tip of shaft
+      ctx.stroke();
+
+      // Arrowhead sits beyond the shaft tip
+      ctx.fillStyle = 'rgba(255, 235, 80, 0.88)';
+      ctx.beginPath();
+      ctx.moveTo(0,      -totalLen);            // point
+      ctx.lineTo(-headW, -totalLen + headLen);
+      ctx.lineTo( headW, -totalLen + headLen);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.shadowBlur = 0;
+      ctx.restore();
+    }
 
     // ── Water % label + "WATER" tag ───────────────────────────────────────
     const pct        = Math.round(waterFill * 100);
@@ -2962,6 +3067,85 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillStyle = plankCrit ? '#ff5555' : '#aabbaa';
     ctx.fillText(`${hullPct}%`, ix + barW, barY + barH + 3);
+
+    // ── Wind / force debug panel (left of silhouette, debug mode only) ────
+    if (debugMode) {
+      const panelW = 142;
+      const panelX = ix - 10 - panelW;  // 10px gap left of icon
+      const panelY = iy;
+
+      // Derived stats
+      const windDeg  = ((windAngle * 180 / Math.PI) % 360 + 360) % 360;
+      const CARDS    = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+      const cardinal = CARDS[Math.round(windDeg / 22.5) % 16];
+      const windStr  = 0.3 + 0.7 * Math.abs(Math.cos(windAngle));
+
+      let sumOpen = 0, sumAlign = 0;
+      const mc = mastModules.length;
+      for (const mast of mastModules) {
+        const md = mast.moduleData as { openness?: number; angle?: number } | undefined;
+        sumOpen += md?.openness ?? 100;
+        const sw = (md?.angle ?? 0) + shipRotation + Math.PI / 2;
+        let d = sw - windAngle;
+        while (d >  Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        const ad = Math.abs(d);
+        const FULL = 15 * Math.PI / 180;
+        const NO   = 90 * Math.PI / 180;
+        sumAlign += ad <= FULL ? 1 : ad >= NO ? 0.15
+                                  : 1 - 0.85 * (ad - FULL) / (NO - FULL);
+      }
+      const avgOpen  = mc > 0 ? sumOpen  / mc : 0;
+      const avgAlign = mc > 0 ? sumAlign / mc : 1;
+      const force    = windStr * avgOpen / 100 * avgAlign;
+
+      const LH = 14;
+      const panelH = 8 + 14 + 5 + LH * 6 + 8;  // pad + header + div + 6 rows + pad
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.72)';
+      ctx.fillRect(panelX, panelY, panelW, panelH);
+      ctx.strokeStyle = 'rgba(255,255,255,0.20)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(panelX, panelY, panelW, panelH);
+
+      const LX = panelX + 7;
+      const VX = panelX + panelW - 7;
+      let ly   = panelY + 6;
+
+      ctx.textBaseline = 'top';
+      ctx.font = 'bold 10px Georgia, serif';
+      ctx.fillStyle = '#ffcc44';
+      ctx.textAlign = 'left';
+      ctx.fillText('Wind / Force', LX, ly);
+      ly += 15;
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.beginPath(); ctx.moveTo(LX, ly); ctx.lineTo(VX, ly); ctx.stroke();
+      ly += 5;
+
+      ctx.font = '10px Georgia, serif';
+      const row = (label: string, value: string, vc: string) => {
+        ctx.fillStyle = '#777777';
+        ctx.textAlign = 'left';
+        ctx.fillText(label, LX, ly);
+        ctx.fillStyle = vc;
+        ctx.textAlign = 'right';
+        ctx.fillText(value, VX, ly);
+        ly += LH;
+      };
+
+      row('Wind dir', `${windDeg.toFixed(0)}° ${cardinal}`, '#88ddff');
+      row('Wind str', windStr.toFixed(2), '#ffee88');
+      row('Sail open', `${avgOpen.toFixed(0)}%`, '#cccccc');
+      const alignHue = Math.round(avgAlign * 120);  // 0=red, 120=green
+      row('Align', avgAlign.toFixed(2), `hsl(${alignHue},100%,65%)`);
+      const forceHue = Math.round(Math.min(1, force / 0.6) * 120);
+      row('Force', force.toFixed(3), `hsl(${forceHue},100%,65%)`);
+      row('Speed', `${shipSpeed.toFixed(0)} px/s`, '#aaaaaa');
+
+      ctx.restore();
+    }
 
     ctx.restore();
   }

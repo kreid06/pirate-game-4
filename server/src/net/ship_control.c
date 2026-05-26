@@ -132,32 +132,9 @@ void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSocketCli
 
     // log_info("🌀 Player %u adjusting sail angle on ship %u: %.1f° (manned masts only)", player->player_id, ship->ship_id, desired_angle);
 
-    // Convert to radians for Q16 storage
+    // Convert to radians and persist as target angle.  Rigger NPCs will steer
+    // manned masts toward this value gradually in tick_npc_agents().
     float angle_radians = desired_angle * (3.14159f / 180.0f);
-    q16_t angle_q16 = Q16_FROM_FLOAT(angle_radians);
-
-    // Update simulation ship masts — only those with a rigger stationed at them
-    {
-        struct Ship* sim_ship = find_sim_ship(ship->ship_id);
-        if (sim_ship) {
-            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                if (sim_ship->modules[m].type_id == MODULE_TYPE_MAST &&
-                    is_mast_manned_by_friendly(ship->ship_id, sim_ship->modules[m].id, player->company_id)) {
-                    sim_ship->modules[m].data.mast.angle = angle_q16;
-                }
-            }
-        }
-    }
-
-    // Also update SimpleShip for compatibility (manned masts only)
-    for (int i = 0; i < ship->module_count; i++) {
-        if (ship->modules[i].type_id == MODULE_TYPE_MAST &&
-            is_mast_manned_by_friendly(ship->ship_id, ship->modules[i].id, player->company_id)) {
-            ship->modules[i].data.mast.angle = angle_q16;
-        }
-    }
-
-    // Persist desired angle so rigger NPCs can apply it when they arrive at a mast
     ship->desired_sail_angle = angle_radians;
     
     // Send acknowledgment

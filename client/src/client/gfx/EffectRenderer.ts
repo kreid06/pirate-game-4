@@ -440,25 +440,62 @@ export class EffectRenderer {
   
   private renderMuzzleFlash(effect: MuzzleFlashEffect, camera: Camera): void {
     const screenPos = camera.worldToScreen(effect.position);
-    const cameraState = camera.getState();
-    const scaledSize = effect.size * cameraState.zoom;
-    
-    // Calculate alpha based on age (quick fade)
-    const alpha = 1.0 - (effect.age / effect.maxAge);
-    
+    const { zoom, rotation } = camera.getState();
+    const t  = effect.age / effect.maxAge;            // 0 = just spawned, 1 = expired
+    const a  = Math.pow(1.0 - t, 0.45);              // quick bright start, fast falloff
+    const sz = effect.size * zoom;                    // base radius in screen px
+
     this.ctx.save();
     this.ctx.translate(screenPos.x, screenPos.y);
-    this.ctx.rotate(effect.direction - cameraState.rotation);
-    
-    // Draw muzzle flash as bright white/yellow oval
-    const gradient = this.ctx.createRadialGradient(0, 0, 0, 0, 0, scaledSize);
-    gradient.addColorStop(0, `rgba(255, 255, 255, ${alpha})`);
-    gradient.addColorStop(0.5, `rgba(255, 200, 0, ${alpha * 0.8})`);
-    gradient.addColorStop(1, `rgba(255, 100, 0, 0)`);
-    
-    this.ctx.fillStyle = gradient;
-    this.ctx.fillRect(-scaledSize, -scaledSize * 0.3, scaledSize * 2, scaledSize * 0.6);
-    
+    this.ctx.rotate(effect.direction - rotation);     // +X local axis = barrel/fire direction
+
+    // Additive blending so overlapping flashes glow brighter
+    this.ctx.globalCompositeOperation = 'lighter';
+
+    // 1. Forward plume — elongated ellipse along +X (fire direction)
+    {
+      const plumeLen = sz * 1.6;
+      const plumeW   = sz * 0.48;
+      const cx       = plumeLen * 0.4;
+      const grad = this.ctx.createRadialGradient(cx, 0, 0, cx, 0, plumeLen);
+      grad.addColorStop(0,    `rgba(255, 255, 200, ${a * 0.95})`);
+      grad.addColorStop(0.30, `rgba(255, 180, 30,  ${a * 0.75})`);
+      grad.addColorStop(1,    `rgba(255, 60,  0,   0)`);
+      this.ctx.fillStyle = grad;
+      this.ctx.beginPath();
+      this.ctx.ellipse(cx, 0, plumeLen, plumeW, 0, 0, Math.PI * 2);
+      this.ctx.fill();
+    }
+
+    // 2. Spherical bloom centred at barrel tip
+    {
+      const bloomR = sz * 0.68;
+      const grad = this.ctx.createRadialGradient(0, 0, 0, 0, 0, bloomR);
+      grad.addColorStop(0,    `rgba(255, 255, 255, ${a * 0.95})`);
+      grad.addColorStop(0.38, `rgba(255, 220, 70,  ${a * 0.55})`);
+      grad.addColorStop(1,    `rgba(255, 70,  0,   0)`);
+      this.ctx.fillStyle = grad;
+      this.ctx.beginPath();
+      this.ctx.arc(0, 0, bloomR, 0, Math.PI * 2);
+      this.ctx.fill();
+    }
+
+    // 3. Short spark streaks — only in the first ~40 % of the animation
+    if (t < 0.4) {
+      const sa = ((1 - t / 0.4) * a) * 0.9;
+      this.ctx.strokeStyle = `rgba(255, 245, 130, ${sa})`;
+      this.ctx.lineWidth   = Math.max(0.8, 1.4 * zoom);
+      this.ctx.lineCap     = 'round';
+      for (const off of [0.55, -0.55, 1.1, -1.1]) {
+        const ex = Math.cos(off) * sz * 0.95;
+        const ey = Math.sin(off) * sz * 0.95;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, 0);
+        this.ctx.lineTo(ex, ey);
+        this.ctx.stroke();
+      }
+    }
+
     this.ctx.restore();
   }
   

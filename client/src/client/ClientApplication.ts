@@ -39,7 +39,7 @@ import { logout } from './auth/AuthService.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef } from '../sim/Types.js';
+import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
@@ -124,7 +124,21 @@ export class ClientApplication {
   private static readonly HELM_ZOOM    = 0.60; // Zoomed-out level while at the helm
   private static readonly DEFAULT_ZOOM = 1.00; // Normal gameplay zoom
 
-  // Explicit build mode (B key) — independent of hotbar item build modes
+  // Dynamic view-range / AOI
+  private static readonly VIEW_RAY_COUNT = 32;    // Angular ray samples per frame
+  private static readonly MAX_VIEW_DIST  = 5000;  // World-unit radius for open sea
+  private static readonly BEACH_DEPTH    = 50;    // World-unit coastal strip treated same as ocean (1:1)
+  private static readonly COAST_ZOOM     = 1.25;  // Zoom when fully surrounded by land
+  private static readonly SEA_ZOOM       = 0.82;  // Zoom when fully in open sea
+  private _userZoomMul  = 1.0;  // Accumulated scroll-wheel multiplier
+  private _aoiBaseZoom  = 1.0;  // AOI-driven base zoom (not including user multiplier)
+  private _viewOpenness = 1.0;  // 0=coast, 1=open sea (exponentially smoothed)
+  private _rayHitDist   = new Float32Array(ClientApplication.VIEW_RAY_COUNT); // per-ray hit distance (world units)
+
+  // Fog ray Web Worker — runs computeViewRays off the main thread.
+  // Result arrives async (1-frame lag) which is imperceptible for fog.
+  private _fogWorker: Worker | null = null;
+  private _fogWorkerReady = false; // true once INIT has been sent
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
@@ -161,6 +175,21 @@ export class ClientApplication {
   /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
   private lastSwordSwingMs = 0;
   private readonly SWORD_COOLDOWN_MS = 1000; // matches server SWORD_COOLDOWN_MS
+  /** Timestamp (ms) of the last punch sent to the server — enforces client-side cooldown. */
+  private lastPunchMs = 0;
+  private readonly PUNCH_COOLDOWN_MS = 800; // matches server PUNCH_COOLDOWN_MS
+  private lastAxeMs = 0;
+  private readonly AXE_COOLDOWN_MS = 1000; // matches server AXE_COOLDOWN_MS
+  private lastPickaxeMs = 0;
+  private readonly PICKAXE_COOLDOWN_MS = 1200; // matches server PICKAXE_COOLDOWN_MS
+  /** True when combat mode is active (toggled with Z, or auto-enabled on first attack). */
+  private combatMode = false;
+  /** Timestamp of last combat action — used for the 10 s auto-disable timer. */
+  private lastCombatActionMs = 0;
+  // ── Ship debug panel ────────────────────────────────────────────────────
+  private _shipDebugPanel: HTMLDivElement | null = null;
+  private _shipDebugTableBody: HTMLTableSectionElement | null = null;
+
   /** E-hold interaction state — covers ladders and mountable modules. */
   private _ladderHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private _suppressLadderInteract = false;
@@ -387,6 +416,18 @@ export class ClientApplication {
       };
       this.networkManager.onIslandCannonAimSync = (structureId, aimAngle) => {
         this.inputManager?.syncIslandCannonAim(structureId, aimAngle);
+        // Keep the world-state structure in sync so the fallback renderer
+        // always has the latest server-confirmed angle (important after dismount).
+        this.renderSystem.updateStructureCannonAim(structureId, aimAngle);
+      };
+      this.networkManager.onStructureReload = (structureId, reloadMs, loadedAmmo) => {
+        this.renderSystem.updateStructureCannonReload(structureId, reloadMs, loadedAmmo);
+        // When the server confirms reload is done, commit the loaded ammo type
+        // so the aim guide switches to the newly loaded ammo.
+        if (reloadMs === 0 && this.inputManager?.isOnIslandCannon &&
+            this.inputManager.mountedCannonModuleId === structureId) {
+          this.inputManager.loadedAmmoType = loadedAmmo;
+        }
       };
       this.networkManager.onNoAmmo = () => {
         // Show floating "No cannonballs!" warning at the player's current position
@@ -859,7 +900,7 @@ export class ClientApplication {
               console.log(`🔨 [HAMMER] Module too far (${hammerDist.toFixed(1)}px) — get closer`);
               return;
             }
-            const shipId   = player.carrierId;
+            const shipId   = hoveredForHammer.ship.id;
             const moduleId = hoveredForHammer.module.id;
             // Don't start the minigame if the module is already at its repair ceiling
             const md = hoveredForHammer.module.moduleData as any;
@@ -880,7 +921,13 @@ export class ClientApplication {
           if (activeItem === 'sword' && player && !player.isMounted) {
             const now = performance.now();
             if (now - this.swordLastAttackMs < this.SWORD_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return; // enable combat mode; the next click will swing
+            }
             this.swordLastAttackMs = now;
+            this.lastCombatActionMs = now;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -891,7 +938,69 @@ export class ClientApplication {
             this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
             return;
           }
-          // Not a hammer or sword click — pass to server
+          // Axe attack
+          if (activeItem === 'axe' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastAxeMs < this.AXE_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
+            this.lastAxeMs = now;
+            this.lastCombatActionMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 35);
+            this.renderSystem.notifySwordSwing(this.AXE_COOLDOWN_MS);
+            return;
+          }
+          // Pickaxe attack
+          if (activeItem === 'pickaxe' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastPickaxeMs < this.PICKAXE_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
+            this.lastPickaxeMs = now;
+            this.lastCombatActionMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 35);
+            this.renderSystem.notifySwordSwing(this.PICKAXE_COOLDOWN_MS);
+            return;
+          }
+          // Not a hammer or sword click — punch if unarmed or holding non-weapon/tool/building item
+          const punchAllowed =
+            activeItem === 'none' ||
+            (ITEM_DEFS[activeItem]?.category !== 'weapon' &&
+             ITEM_DEFS[activeItem]?.category !== 'tool' &&
+             ITEM_DEFS[activeItem]?.category !== 'building');
+          if (punchAllowed && player && !player.isMounted) {
+            const now = performance.now();
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
+            if (now - this.lastPunchMs < this.PUNCH_COOLDOWN_MS) return;
+            this.lastPunchMs = now;
+            this.lastCombatActionMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 25);
+            this.renderSystem.notifySwordSwing(this.PUNCH_COOLDOWN_MS);
+            return;
+          }
+          // Tool/weapon/building item active — pass action to server
           this.networkManager.sendAction(action, target);
           return;
         }
@@ -1188,7 +1297,15 @@ export class ClientApplication {
         this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
       };
       this.inputManager.onForceReload = () => {
-        this.networkManager.sendForceReload();
+        const ammoType = this.inputManager?.selectedAmmoType ?? 0;
+        this.networkManager.sendForceReload(ammoType);
+        // Optimistically mark the island cannon as reloading so the per-frame
+        // ammo-commit check doesn't instantly swap loadedAmmoType before the
+        // server's structure_reload echo arrives.
+        if (this.inputManager?.isOnIslandCannon) {
+          const sid = this.inputManager.mountedCannonModuleId;
+          if (sid !== null) this.renderSystem.updateStructureCannonReload(sid, 3000, ammoType);
+        }
       };
 
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
@@ -1230,6 +1347,16 @@ export class ClientApplication {
           }
         }
         this.networkManager.sendSlotSelect(slot);
+        // Deactivate combat mode when a building item is selected
+        if (this.combatMode) {
+          const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          const pid = this.networkManager.getAssignedPlayerId();
+          const p = ws?.players.find(pl => pl.id === pid);
+          const selectedItem = p?.inventory?.slots[slot]?.item ?? 'none';
+          if (ITEM_DEFS[selectedItem]?.category === 'building') {
+            this.combatMode = false;
+          }
+        }
         // Selecting a hotbar item deselects any build panel ghost kind
         if (this.pendingGhostKind !== null) {
           this.pendingGhostKind = null;
@@ -1331,6 +1458,9 @@ export class ClientApplication {
       // Build menu toggle (B key) — opens/closes the left-panel build menu.
       // Works anytime the player is on a ship deck.
       // If a cannon or sail item is active in the hotbar, also enters free-placement mode.
+      this.inputManager.onCombatModeToggle = () => {
+        this.combatMode = !this.combatMode;
+      };
       this.inputManager.onBuildModeToggle = () => {
         if (this.buildMenuOpen || this.explicitBuildMode) {
           // Close everything via the single exit helper
@@ -1383,9 +1513,11 @@ export class ClientApplication {
         }
       };
       
-      // Set up scroll-wheel zoom (also update targetZoom so animation doesn't fight the user)
+      // Set up scroll-wheel zoom — accumulate into _userZoomMul so AOI base zoom
+      // remains separate and the two combine correctly.
       this.inputManager.onZoom = (factor, _screenPoint) => {
-        this.targetZoom = Math.max(0.1, Math.min(10.0, this.targetZoom * factor));
+        this._userZoomMul = Math.max(0.1, Math.min(4.0, this._userZoomMul * factor));
+        this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
         this.camera.setZoom(this.targetZoom);
       };
 
@@ -2034,6 +2166,28 @@ export class ClientApplication {
         // Expose islands on world states so client-side collision prediction can use them
         if (this.authoritativeWorldState) this.authoritativeWorldState.islands = islands;
         if (this.predictedWorldState) this.predictedWorldState.islands = islands;
+
+        // (Re-)initialise the fog worker with the new island set.
+        // Strip resources from the island data — the worker only needs geometry.
+        this._fogWorker?.terminate();
+        this._fogWorker = new Worker(
+          new URL('../workers/FogWorker.ts', import.meta.url),
+          { type: 'module' },
+        );
+        this._fogWorker.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+          // Swap in the worker's result buffer directly — zero copy on the main thread.
+          this._rayHitDist = new Float32Array(e.data);
+        };
+        this._fogWorker.postMessage({
+          type: 'INIT',
+          islands: islands.map(isl => ({
+            x: isl.x, y: isl.y,
+            vertices:      isl.vertices,
+            grassVertices: isl.grassVertices,
+            stonePolys:    isl.stonePolys,
+          })),
+        });
+        this._fogWorkerReady = true;
       };
 
       // Update a resource's HP when the server broadcasts resource_damaged
@@ -2211,6 +2365,7 @@ export class ClientApplication {
         const REASONS: Record<string, string> = {
           occupied:          'Space already occupied',
           blocked_by_tree:   'Blocked by a tree',
+          blocked_by_boulder: 'Blocked by a boulder',
           needs_floor:       'Must be placed on a floor',
           needs_floor_edge:  'Must snap to a floor edge',
           needs_door_frame:  'Requires a door frame',
@@ -2323,8 +2478,10 @@ export class ClientApplication {
         this.renderSystem.updateFlameWave(cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead);
       };
 
-      // Handle CANNON_FIRE_EVENT: render hit-scan tracers for grapeshot / canister
+      // Handle CANNON_FIRE_EVENT: muzzle flash + hit-scan tracers for grapeshot / canister
       this.networkManager.onCannonFireEvent = (_cannonId, _shipId, x, y, angle, projectileId, ammoType) => {
+        // Muzzle flash for every cannon fire
+        this.renderSystem.spawnMuzzleFlash(x, y, angle);
         // Only spawn tracers for hit-scan ammo types (no real projectile, id=0)
         if (projectileId === 0 && (ammoType === 10 || ammoType === 12)) {
           this.renderSystem.spawnGrapeshotTracers(x, y, angle, ammoType);
@@ -2624,6 +2781,32 @@ export class ClientApplication {
             localPos: player.localPosition ?? null,
             carrierId: player.carrierId ?? null,
           };
+
+          // --- Dynamic view-range / AOI ---
+          // Cast rays against island coastlines to compute per-direction visibility
+          // distances. Used for the fog mask (RenderSystem) and server AOI hint.
+          if (this._fogWorkerReady && this._fogWorker) {
+            // Off-thread: dispatch position to worker, use previous frame's result now.
+            this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
+          } else {
+            // Fallback: synchronous (before first ISLANDS message, or if worker unavailable).
+            const islands = this.renderSystem.getIslands();
+            this.computeViewRays(player.position, islands);
+          }
+
+          // Smooth openness so the fog/zoom doesn't jitter when near a polygon edge
+          const N = ClientApplication.VIEW_RAY_COUNT;
+          const MAX_D = ClientApplication.MAX_VIEW_DIST;
+          let raySum = 0;
+          for (let _i = 0; _i < N; _i++) raySum += this._rayHitDist[_i];
+          const rawOpenness = raySum / (N * MAX_D);
+          this._viewOpenness += (rawOpenness - this._viewOpenness) * (1 - Math.pow(0.05, dt));
+
+          // Pass ray data to render system so it can draw the fog mask this frame
+          this.renderSystem.fogRayHitDist = this._rayHitDist;
+
+          // Expose average view distance for server AOI hint (client units)
+          this.networkManager.viewRadius = raySum / N;
         }
       }
       
@@ -2636,8 +2819,45 @@ export class ClientApplication {
       this.renderSystem.islandCannonId = this.inputManager.mountedCannonModuleId;
       this.renderSystem.islandCannonAimAngle = this.inputManager.getLastCannonAimAngle();
     } else {
+      // On the frame we transition from mounted→unmounted, persist the last live aim
+      // into placedStructures so the fallback renderer shows the correct angle.
+      if (this.renderSystem.islandCannonId !== null && this.renderSystem.islandCannonAimAngle !== null) {
+        this.renderSystem.updateStructureCannonAim(this.renderSystem.islandCannonId, this.renderSystem.islandCannonAimAngle);
+      }
       this.renderSystem.islandCannonId = null;
       this.renderSystem.islandCannonAimAngle = null;
+    }
+
+    // Commit pending ammo type once the cannon finishes reloading.
+    // loadedAmmoType stays at the old value during the reload cycle so the aim guide
+    // shows what's actually in the barrel, not the queued selection.
+    if (this.inputManager.selectedAmmoType !== this.inputManager.loadedAmmoType) {
+      const world = this.predictedWorldState ?? this.authoritativeWorldState;
+      const mountKind = this.inputManager.getMountKind();
+
+      if (this.inputManager.isOnIslandCannon) {
+        const cannonId = this.inputManager.mountedCannonModuleId;
+        if (cannonId !== null && !this.renderSystem.isIslandCannonReloading(cannonId)) {
+          this.inputManager.loadedAmmoType = this.inputManager.selectedAmmoType;
+        }
+      } else if (mountKind === 'cannon' || mountKind === 'helm') {
+        const playerId = this.networkManager.getAssignedPlayerId();
+        const player = world?.players.find(p => p.id === playerId);
+        const ship = player?.carrierId ? world?.ships.find(s => s.id === player.carrierId) : null;
+        if (ship) {
+          if (mountKind === 'cannon') {
+            // Single cannon: wait for this specific module's reload to clear
+            const mod = ship.modules.find(m => m.id === this.inputManager.mountedCannonModuleId);
+            const isReloading = ((mod?.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16;
+            if (!isReloading) this.inputManager.loadedAmmoType = this.inputManager.selectedAmmoType;
+          } else {
+            // Helm: all ship cannons were force-reloaded — wait until none are reloading
+            const anyReloading = ship.modules.some(
+              m => m.kind === 'cannon' && (((m.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16));
+            if (!anyReloading) this.inputManager.loadedAmmoType = this.inputManager.selectedAmmoType;
+          }
+        }
+      }
     }
   }
   
@@ -2646,7 +2866,12 @@ export class ClientApplication {
    */
   private updateVariableTimestep(deltaTime: number): void {
     const dt = deltaTime / 1000;
-    
+
+    // Auto-disable combat mode after 10 s of no combat actions
+    if (this.combatMode && performance.now() - this.lastCombatActionMs > 10_000) {
+      this.combatMode = false;
+    }
+
     // Update UI system
     this.uiManager.update(dt);
     
@@ -2729,6 +2954,8 @@ export class ClientApplication {
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
       this.renderSystem.localPlayerId = assignedPlayerId;
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
+      // Use the loaded ammo type (physically in the barrel) so the aim guide shows
+      // the trajectory of what will actually fire, not the pending GUI selection.
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
@@ -2830,6 +3057,9 @@ export class ClientApplication {
         activeWeaponGroups: this.inputManager?.activeWeaponGroups,
         playerShip,
         controlGroups: this.controlGroups,
+        windAngle: this.networkManager.windAngle,
+        debugMode: this.uiManager.isDebugMode,
+        combatMode: this.combatMode,
       });
 
       // Crafting menu (rendered on top of all other UI)
@@ -2860,12 +3090,180 @@ export class ClientApplication {
 
       // Hover debug HUD — rendered last so it always appears above all UI layers
       this.renderSystem.renderHoverDebugHUD();
+
+      // Ship debug panel — DOM overlay, updated every frame when visible
+      this._updateShipDebugPanel();
+
+      // Reconnecting overlay — sits above everything when disconnected mid-game
+      if (this.state === ClientState.DISCONNECTED) {
+        this.renderSystem.drawReconnectingOverlay();
+      }
     }
   }
   
   /**
    * Update camera based on world state
    */
+  /**
+   * Cast VIEW_RAY_COUNT rays from `pos` in all directions and record the nearest
+   * island-polygon edge hit distance for each ray (world units).
+   * Ocean costs 1 budget-unit/world-unit; land costs 2 (half range through land).
+   * Results are written into this._rayHitDist in-place.
+   */
+
+  /** Ray-cast point-in-polygon test (winding / crossing number). */
+  private static pointInPolygon(p: {x: number; y: number}, verts: {x: number; y: number}[]): boolean {
+    let inside = false;
+    const n = verts.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = verts[i].x, yi = verts[i].y;
+      const xj = verts[j].x, yj = verts[j].y;
+      if (((yi > p.y) !== (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  private computeViewRays(pos: {x: number; y: number}, islands: ReturnType<typeof this.renderSystem.getIslands>): void {
+    const N      = ClientApplication.VIEW_RAY_COUNT;
+    const MAX_D  = ClientApplication.MAX_VIEW_DIST;
+    const TWO_PI = Math.PI * 2;
+    const result = this._rayHitDist;
+
+    // Pre-filter islands within range; compute per-island player-inside flags (coast, grass, stone)
+    const nearIslands:  ReturnType<typeof this.renderSystem.getIslands> = [];
+    const insideCoast:  boolean[] = [];
+    const insideGrass:  boolean[] = [];
+    const insideStone:  boolean[] = [];
+    for (const isl of islands) {
+      if (!isl.vertices || isl.vertices.length < 3) continue;
+      const cdx = isl.x - pos.x, cdy = isl.y - pos.y;
+      if (cdx * cdx + cdy * cdy > MAX_D * MAX_D * 4) continue;
+      nearIslands.push(isl);
+      const pip = ClientApplication.pointInPolygon(pos, isl.vertices);
+      insideCoast.push(pip);
+      insideGrass.push(
+        pip && !!isl.grassVertices && isl.grassVertices.length >= 3
+          && ClientApplication.pointInPolygon(pos, isl.grassVertices)
+      );
+      insideStone.push(
+        !!(isl.stonePolys?.some(sp => sp.length >= 3 && ClientApplication.pointInPolygon(pos, sp)))
+      );
+    }
+
+    // For fallback islands (no grassVertices), the outer coast IS the grass boundary —
+    // the whole interior is treated as the grass zone.  This ensures rays going deeper
+    // into such islands correctly use cost 3, not cost 1.
+    const fallbackInlandPlayer = nearIslands.some((isl, ni) =>
+      insideCoast[ni] && (!isl.grassVertices || isl.grassVertices.length < 3)
+    );
+    const playerInGrass = insideGrass.some(Boolean) || fallbackInlandPlayer;
+    const playerInStone = insideStone.some(Boolean);
+
+    // Event kinds (coast events for hasGrass islands are omitted — beach cost === ocean cost = 1):
+    //   1 = grassVertices boundary  → toggles inGrass  (cost 3 inside)
+    //   2 = stone polygon boundary  → toggles inStone  (cost 2 inside, overrides grass)
+    //   3 = fallback coast boundary → toggles inGrass  (entire interior = grass for these islands)
+    const evDist: number[] = [];
+    const evKind: number[] = [];
+
+    for (let i = 0; i < N; i++) {
+      const angle = i * TWO_PI / N;
+      const dx    = Math.cos(angle);
+      const dy    = Math.sin(angle);
+
+      evDist.length = 0;
+      evKind.length = 0;
+
+      for (let ni = 0; ni < nearIslands.length; ni++) {
+        const isl      = nearIslands[ni];
+        const verts    = isl.vertices!;
+        const nv       = verts.length;
+        const gverts   = isl.grassVertices;
+        const hasGrass = !!(gverts && gverts.length >= 3);
+
+        if (hasGrass) {
+          // --- grassVertices crossings (kind 1) — beach between coast and here costs 1 ---
+          const ngv = gverts!.length;
+          for (let j = 0; j < ngv; j++) {
+            const ax = gverts![j].x          - pos.x,  ay = gverts![j].y          - pos.y;
+            const bx = gverts![(j+1)%ngv].x  - pos.x,  by = gverts![(j+1)%ngv].y  - pos.y;
+            const denom = dx * (by - ay) - dy * (bx - ax);
+            if (Math.abs(denom) < 1e-6) continue;
+            const t = (ax * (by - ay) - ay * (bx - ax)) / denom;
+            const u = (ax * dy        - ay * dx)         / denom;
+            if (t > 0.01 && u >= 0 && u <= 1) { evDist.push(t); evKind.push(1); }
+          }
+        } else {
+          // --- Fallback: outer coast is the grass boundary (kind 3) ---
+          for (let j = 0; j < nv; j++) {
+            const ax = verts[j].x          - pos.x,  ay = verts[j].y          - pos.y;
+            const bx = verts[(j+1)%nv].x   - pos.x,  by = verts[(j+1)%nv].y   - pos.y;
+            const denom = dx * (by - ay) - dy * (bx - ax);
+            if (Math.abs(denom) < 1e-6) continue;
+            const t = (ax * (by - ay) - ay * (bx - ax)) / denom;
+            const u = (ax * dy        - ay * dx)         / denom;
+            if (t > 0.01 && u >= 0 && u <= 1) { evDist.push(t); evKind.push(3); }
+          }
+        }
+
+        // --- Stone polygon crossings (kind 2) ---
+        if (isl.stonePolys) {
+          for (const sp of isl.stonePolys) {
+            if (sp.length < 3) continue;
+            const ns = sp.length;
+            for (let j = 0; j < ns; j++) {
+              const ax = sp[j].x          - pos.x,  ay = sp[j].y          - pos.y;
+              const bx = sp[(j+1)%ns].x   - pos.x,  by = sp[(j+1)%ns].y   - pos.y;
+              const denom = dx * (by - ay) - dy * (bx - ax);
+              if (Math.abs(denom) < 1e-6) continue;
+              const t = (ax * (by - ay) - ay * (bx - ax)) / denom;
+              const u = (ax * dy        - ay * dx)         / denom;
+              if (t > 0.01 && u >= 0 && u <= 1) { evDist.push(t); evKind.push(2); }
+            }
+          }
+        }
+      }
+
+      // Sort events by ascending distance
+      const order = Array.from({length: evDist.length}, (_, k) => k)
+        .sort((a, b) => evDist[a] !== evDist[b] ? evDist[a] - evDist[b] : evKind[a] - evKind[b]);
+
+      // Walk the ray with a 4-zone visibility budget:
+      //   ocean / beach → cost 1/unit  (full range)
+      //   grass zone    → cost 3/unit  (dense vegetation)
+      //   rocky stone   → cost 2/unit  (open rock; overrides grass)
+      let inGrass   = playerInGrass;
+      let inStone   = playerInStone;
+      let budget    = MAX_D;
+      let worldDist = 0;
+      let exhausted = false;
+
+      for (const ei of order) {
+        const segLen = evDist[ei] - worldDist;
+        if (segLen <= 0) continue;
+        const cost           = inStone ? 2.0 : inGrass ? 5.0 : 1.0;
+        const maxTraversable = budget / cost;
+        if (segLen >= maxTraversable) {
+          worldDist += maxTraversable;
+          exhausted  = true;
+          break;
+        }
+        budget    -= segLen * cost;
+        worldDist  = evDist[ei];
+        if (evKind[ei] === 2) inStone = !inStone; // stone boundary
+        else                  inGrass = !inGrass;  // grass or fallback coast
+      }
+
+      if (!exhausted) {
+        worldDist += budget / (inStone ? 2.0 : inGrass ? 5.0 : 1.0);
+      }
+
+      result[i] = worldDist;
+    }
+  }
+
   private updateCamera(worldState: WorldState, dt: number): void {
     // Find our player using the server-assigned player ID
     const assignedPlayerId = this.networkManager.getAssignedPlayerId();
@@ -2903,6 +3301,17 @@ export class ClientApplication {
       const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
       const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
       this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    }
+
+    // Dynamic AOI zoom: only applied when the player is NOT at the helm.
+    // Helm mount/dismount manages targetZoom separately (HELM_ZOOM / preHelmZoom).
+    if (this.inputManager.getMountKind() !== 'helm') {
+      const aoiZoom = ClientApplication.COAST_ZOOM +
+        (ClientApplication.SEA_ZOOM - ClientApplication.COAST_ZOOM) * this._viewOpenness;
+      if (Math.abs(aoiZoom - this._aoiBaseZoom) > 0.003) {
+        this._aoiBaseZoom = aoiZoom;
+        this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
+      }
     }
 
     // Smooth zoom toward targetZoom (ease-out, ~0.6 s to settle)
@@ -4313,7 +4722,18 @@ export class ClientApplication {
               this._ladderHoldTimer = null;
               this.renderSystem.stopLadderHoldRing();
               const mp = this.inputManager.getMouseScreenPosition();
-              this._radialMenu.open(mp.x, mp.y, [{ id: 'mount', label: `Mount ${mountKindLabel}` }]);
+              const radialOpts: Array<{ id: string; label: string }> = [
+                { id: 'mount', label: `Mount ${mountKindLabel}` }
+              ];
+              // Offer "Dismiss NPC" if an NPC is stationed at this cannon/swivel
+              if (hov.module.kind === 'cannon' || hov.module.kind === 'swivel') {
+                const ws2 = this.authoritativeWorldState || this.predictedWorldState;
+                const npcAtGun = ws2?.npcs.find(n => n.assignedWeaponId === hov.module.id && n.state === NPC_STATE_AT_GUN);
+                if (npcAtGun) {
+                  radialOpts.push({ id: 'dismiss_npc', label: `Dismiss ${npcAtGun.name}` });
+                }
+              }
+              this._radialMenu.open(mp.x, mp.y, radialOpts);
             }, 300);
             break;
           }
@@ -4358,12 +4778,17 @@ export class ClientApplication {
           break;
         }
         case ']':
-          this.renderSystem.toggleHoverBoundaries();
+          this.toggleShipDebugPanel();
           e.preventDefault();
           break;
 
         case '[':
           this.renderSystem.toggleHoverDebugHUD();
+          e.preventDefault();
+          break;
+
+        case '\\':
+          this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
 
@@ -4403,18 +4828,20 @@ export class ClientApplication {
       }
     });
 
-    // Alt key — show territory claim overlay while held
+    // Alt key — show territory claim overlay + all ally NPC names while held
     window.addEventListener('keydown', (ev) => {
       if (ev.key === 'Alt') {
         ev.preventDefault(); // suppress browser menu activation
         this.showTerritoryOverlay = true;
         this.renderSystem.setTerritoryOverlay(true);
+        this.renderSystem.setNpcNamesVisible(true);
       }
     });
     window.addEventListener('keyup', (ev) => {
       if (ev.key === 'Alt') {
         this.showTerritoryOverlay = false;
         this.renderSystem.setTerritoryOverlay(false);
+        this.renderSystem.setNpcNamesVisible(false);
       }
     });
 
@@ -4714,7 +5141,12 @@ export class ClientApplication {
           // Hold — execute selected option or cancel if centre dead zone
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();
-          if (selected) {
+          if (selected === 'dismiss_npc' && moduleId !== null) {
+            // Dismiss the NPC currently stationed at this cannon/swivel
+            this.networkManager.sendDismissNpc(moduleId);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`👋 dismiss NPC from module ${moduleId}`);
+          } else if (selected) {
             if (doMountAction()) {
               this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             } else {
@@ -4792,6 +5224,130 @@ export class ClientApplication {
     });
 
     console.log('⌨️ Debug keys initialized (] = toggle hover boundaries)');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Ship debug panel
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private _createShipDebugPanel(): HTMLDivElement {
+    const panel = document.createElement('div');
+    panel.id = 'ship-debug-panel';
+    Object.assign(panel.style, {
+      position: 'fixed',
+      top: '8px',
+      right: '8px',
+      zIndex: '9999',
+      background: 'rgba(0,0,0,0.75)',
+      color: '#e8e8e8',
+      fontFamily: 'monospace',
+      fontSize: '11px',
+      padding: '6px 8px',
+      borderRadius: '4px',
+      border: '1px solid rgba(255,255,255,0.2)',
+      minWidth: '380px',
+      maxHeight: '320px',
+      overflowY: 'auto',
+      userSelect: 'none',
+      cursor: 'move',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.5)',
+    });
+
+    // Title bar
+    const title = document.createElement('div');
+    Object.assign(title.style, {
+      fontWeight: 'bold',
+      marginBottom: '4px',
+      color: '#ffcc44',
+      fontSize: '11px',
+    });
+    title.textContent = '🚢 Ships received';
+    panel.appendChild(title);
+
+    // Table
+    const table = document.createElement('table');
+    Object.assign(table.style, { borderCollapse: 'collapse', width: '100%' });
+    const thead = table.createTHead();
+    const hrow = thead.insertRow();
+    for (const col of ['ID', 'Name', 'X', 'Y', 'Spd', 'Hull', 'Co', 'Vis']) {
+      const th = document.createElement('th');
+      Object.assign(th.style, {
+        textAlign: 'left', padding: '1px 5px 1px 0',
+        color: '#aac4ff', borderBottom: '1px solid rgba(255,255,255,0.15)',
+      });
+      th.textContent = col;
+      hrow.appendChild(th);
+    }
+    this._shipDebugTableBody = table.createTBody();
+    panel.appendChild(table);
+
+    // Drag support
+    let dragOffX = 0, dragOffY = 0, dragging = false;
+    panel.addEventListener('mousedown', (e) => {
+      dragging = true;
+      dragOffX = e.clientX - panel.getBoundingClientRect().left;
+      dragOffY = e.clientY - panel.getBoundingClientRect().top;
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const left = e.clientX - dragOffX;
+      const top  = e.clientY - dragOffY;
+      panel.style.left  = `${left}px`;
+      panel.style.top   = `${top}px`;
+      panel.style.right = 'auto';
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  public toggleShipDebugPanel(): void {
+    if (this._shipDebugPanel) {
+      this._shipDebugPanel.remove();
+      this._shipDebugPanel = null;
+      this._shipDebugTableBody = null;
+    } else {
+      this._shipDebugPanel = this._createShipDebugPanel();
+    }
+  }
+
+  private _updateShipDebugPanel(): void {
+    if (!this._shipDebugPanel || !this._shipDebugTableBody) return;
+    const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+    const ships = ws?.ships ?? [];
+    const tbody = this._shipDebugTableBody;
+    tbody.innerHTML = '';
+    for (const s of ships) {
+      const spd = Math.sqrt(s.velocity.x * s.velocity.x + s.velocity.y * s.velocity.y);
+      const fogVis = this.renderSystem.fogVisibleAt(s.position.x, s.position.y, 200);
+      const tr = tbody.insertRow();
+      const cells = [
+        String(s.id),
+        s.shipName ?? '—',
+        s.position.x.toFixed(0),
+        s.position.y.toFixed(0),
+        spd.toFixed(1),
+        (s.hullHealth ?? 100).toFixed(0),
+        String(s.companyId ?? 0),
+        fogVis ? '✓' : '✗',
+      ];
+      for (let i = 0; i < cells.length; i++) {
+        const td = tr.insertCell();
+        Object.assign(td.style, { padding: '1px 5px 1px 0', whiteSpace: 'nowrap' });
+        if (i === 5) {
+          const hp = parseFloat(cells[i]);
+          td.style.color = hp < 30 ? '#ff5555' : hp < 60 ? '#ffaa44' : '#88ff88';
+        } else if (i === 7) {
+          td.style.color = fogVis ? '#88ff88' : '#ff5555';
+        }
+        td.textContent = cells[i];
+      }
+    }
+    // Update title count
+    const title = this._shipDebugPanel.firstElementChild as HTMLElement;
+    if (title) title.textContent = `🚢 Ships received (${ships.length})`;
   }
   
   /**

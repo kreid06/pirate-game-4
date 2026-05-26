@@ -460,6 +460,7 @@ typedef struct {
     float    cannon_aim_angle;    /* current aim direction (radians, world space) */
         float    cannon_desired_aim_angle; /* desired aim direction (radians, world space) */
     uint32_t cannon_reload_ms;    /* ms remaining until cannon can fire again (0 = ready) */
+    uint8_t  cannon_loaded_ammo;  /* ammo type currently loaded (PROJ_TYPE_*); default 0 = CANNONBALL */
     uint32_t cannon_mounted_player_id; /* player_id currently mounted to this cannon (0 = none) */
     bool     no_ammo_flag;        /* transient: set by fire_island_cannon when ammo was lacking */
     /* ── Territory claim fields (STRUCT_FLAG_FORT / STRUCT_CLAIM_FLAG / STRUCT_COMPANY_FORTRESS) ── */
@@ -596,6 +597,9 @@ typedef struct WebSocketPlayer {
     uint32_t on_island_id;
     /* Dock walking — 0 = not on shipyard dock, >0 = structure id of the dock */
     uint32_t on_dock_id;
+    /* Dynamic AOI view radius (server units). Updated from client input each frame.
+     * Used to tune what entities are relevant to this player. 0 = unknown/default. */
+    float view_radius;
 } WebSocketPlayer;
 
 struct WebSocketStats {

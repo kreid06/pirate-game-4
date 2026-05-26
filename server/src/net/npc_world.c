@@ -237,12 +237,62 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
     /* NOTE: sail openness is NOT changed here; it is player-controlled only. */
 }
 
+/* ─────────────────────────────────────────────────────────────────────────────
+ * Pirate name generator.
+ * Produces a unique name in one of two formats, seeded by the NPC's sequential
+ * ID so each pirate always gets the same name (deterministic, survives saves):
+ *
+ *   Format A: "[Adj] [First]"          e.g. "Mad Jack", "Silver Sam"
+ *   Format B: "[First] the [Epithet]"  e.g. "Sam the Bold", "Jack the Grim"
+ *
+ * Pool sizes: 12 adj × 16 first  +  16 first × 16 epithets  =  448 distinct names.
+ * ──────────────────────────────────────────────────────────────────────────── */
+static void generate_pirate_name(uint32_t seed, char* out, size_t out_size) {
+    static const char* const FIRST_NAMES[] = {
+        "Jack",       "Sam",       "Finn",   "Morgan", "Billy",    "Tom",
+        "Ned",        "Rafe",      "Sven",   "Drake",  "Davy",     "Walt",
+        "Mack",       "Bo",        "Cole",   "Hank",
+        "xFerocityz", "Anesthyl",  "Raes"
+    };
+    static const char* const EPITHETS[] = {
+        "Bold",  "Red",   "Grim",  "Swift",  "Black", "Salt",
+        "Storm", "Gale",  "Dread", "Scar",   "Grin",  "Haul",
+        "Tide",  "Hawk",  "Rum",   "Fang"
+    };
+    static const char* const ADJ_PREFIXES[] = {
+        "Mad",    "Black",  "Silver", "Iron",   "Salty",  "Dead",
+        "Wild",   "Grim",   "Red",    "Rusty",  "Blind",  "Stormy"
+    };
+    const int N_FIRST   = (int)(sizeof(FIRST_NAMES)  / sizeof(FIRST_NAMES[0]));
+    const int N_EPITHET = (int)(sizeof(EPITHETS)      / sizeof(EPITHETS[0]));
+    const int N_ADJ     = (int)(sizeof(ADJ_PREFIXES)  / sizeof(ADJ_PREFIXES[0]));
+
+    /* Xorshift32 — fast, deterministic */
+    uint32_t r = seed * 2654435761u;
+    r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+
+    if ((r % 2) == 0) {
+        /* Format A: "[Adj] [First]" */
+        const char* adj = ADJ_PREFIXES[r % (uint32_t)N_ADJ];
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        const char* first = FIRST_NAMES[r % (uint32_t)N_FIRST];
+        snprintf(out, out_size, "%s %s", adj, first);
+    } else {
+        /* Format B: "[First] the [Epithet]" */
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        const char* first = FIRST_NAMES[r % (uint32_t)N_FIRST];
+        r ^= r << 13; r ^= r >> 17; r ^= r << 5;
+        const char* epithet = EPITHETS[r % (uint32_t)N_EPITHET];
+        snprintf(out, out_size, "%s the %s", first, epithet);
+    }
+}
+
 /**
  * Spawn a generic crew member.  Role is set at runtime by the manning panel
  * (Sails → RIGGER, Cannons → GUNNER, Idle → NONE).
  * Returns the new NPC id, or 0 on failure.
  */
-uint32_t spawn_ship_crew(uint16_t ship_id, const char* name) {
+uint32_t spawn_ship_crew(uint16_t ship_id) {
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) {
         log_warn("spawn_ship_crew: ship %u not found", ship_id);
@@ -280,7 +330,8 @@ uint32_t spawn_ship_crew(uint16_t ship_id, const char* name) {
     npc->interact_radius= 40.0f;
     npc->state          = WORLD_NPC_STATE_IDLE;
     npc->assigned_weapon_id = 0;
-    strncpy(npc->name,     name,              sizeof(npc->name)     - 1);
+    /* Generate a unique pirate name seeded by this NPC's ID */
+    generate_pirate_name(npc->id, npc->name, sizeof(npc->name));
     strncpy(npc->dialogue, "Aye aye, Captain!", sizeof(npc->dialogue) - 1);
 
     /* Crew levelling — fresh recruit */
@@ -318,11 +369,6 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
         log_warn("spawn_unclaimed_npc: MAX_WORLD_NPCS reached");
         return 0;
     }
-    static const char* const SURVIVOR_NAMES[] = {
-        "Phantom Sailor", "Ghost Deckhand", "Spectre Mariner",
-        "Wraith Jackal",  "Haunt Gunner",  "Moor Spirit",
-    };
-    const int NAME_COUNT = (int)(sizeof(SURVIVOR_NAMES) / sizeof(SURVIVOR_NAMES[0]));
     /* Scatter: each survivor drifts slightly away from the wreck */
     static const float OFFSETS_X[3] = {  20.0f, -30.0f,  10.0f };
     static const float OFFSETS_Y[3] = { -20.0f,  10.0f,  40.0f };
@@ -343,8 +389,7 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
     npc->local_x         = 0.0f;
     npc->local_y         = 0.0f;
 
-    const char* chosen = SURVIVOR_NAMES[(npc->id) % NAME_COUNT];
-    strncpy(npc->name,     chosen,       sizeof(npc->name)     - 1);
+    generate_pirate_name(npc->id, npc->name, sizeof(npc->name));
     strncpy(npc->dialogue, "Help me...", sizeof(npc->dialogue) - 1);
 
     npc->npc_level   = 1;
@@ -522,13 +567,13 @@ void tick_world_npcs(float dt) {
                                 mast->data.mast.openness = tgt_open;
                                 if (tgt_open > 0) mast->state_bits |=  MODULE_STATE_DEPLOYED;
                                 else              mast->state_bits &= ~MODULE_STATE_DEPLOYED;
-                                mast->data.mast.angle = Q16_FROM_FLOAT(rship->desired_sail_angle);
                                 {
                                     struct Ship* _ss = find_sim_ship(rship->ship_id);
                                     if (_ss) {
                                         for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
                                             if (_ss->modules[mi].id == mast->id) {
-                                                _ss->modules[mi].data.mast.angle = mast->data.mast.angle;
+                                                _ss->modules[mi].data.mast.openness = mast->data.mast.openness;
+                                                _ss->modules[mi].state_bits = mast->state_bits;
                                                 break;
                                             }
                                         }
@@ -666,17 +711,26 @@ void tick_world_npcs(float dt) {
                     // Initiate passive regen
                     mod->state_bits |= MODULE_STATE_REPAIRING;
 
+                    // NPC crew restore the repair ceiling as part of active work.
+                    // (damage lowers target_health; NPCs bypass that ceiling so
+                    //  they can bring the module back to full health.)
+                    if (mod->target_health < (int32_t)mod->max_health)
+                        mod->target_health = mod->max_health;
+
                                     // Repair main HP at 10%/s, capped at target_health
                                     {
                                         if (mod->health < (int32_t)mod->target_health) {
-                                            float heal = (float)mod->max_health * 0.10f * dt;
-                                            mod->health += (int32_t)heal;
+                                            int32_t iheal = (int32_t)((float)mod->max_health * 0.10f * dt);
+                                            if (iheal < 1) iheal = 1;
+                                            mod->health += iheal;
                                             if (mod->health >= (int32_t)mod->target_health) {
                                                 mod->health = (int32_t)mod->target_health;
-                                still_working = true;
-                            }
-                        }
-                    }
+                                                /* fully healed — still_working stays false → NPC finishes */
+                                            } else {
+                                                still_working = true;
+                                            }
+                                        }
+                                    }
 
                     // Repair mast sail fibers at 10%/s
                     if (mod->type_id == MODULE_TYPE_MAST) {

@@ -152,6 +152,11 @@ export class RenderSystem {
   public islandCannonId: number | null = null;
   /** Live aim angle (world radians) for the mounted island cannon barrel. Null when not mounted. */
   public islandCannonAimAngle: number | null = null;
+  /** Per-direction hit distances (world units) from the latest AOI ray cast.
+   *  Set by ClientApplication each frame when the local player is in-game. */
+  public fogRayHitDist: Float32Array | null = null;
+  /** Off-screen canvas reused for fog-mask compositing. */
+  private _fogCanvas: HTMLCanvasElement | null = null;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
@@ -162,6 +167,8 @@ export class RenderSystem {
   private _islandClaims: Map<number, { companyId: number; fortX: number; fortY: number; fortRadius: number; isCompanyFortress: boolean }> = new Map();
   /** When true, draws the territory overlay (Alt held). */
   private _showTerritoryOverlay = false;
+  /** When true, shows names above all allied NPCs (Alt held). */
+  private _showNpcNames = false;
   /**
    * Cached offscreen bitmaps for the territory claim overlay.
    * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
@@ -1039,6 +1046,18 @@ export class RenderSystem {
   }
 
   /**
+   * Spawn a muzzle flash at the cannon-centre world position.
+   * The barrel-tip offset (30 px) is applied here so callers can pass the
+   * raw cannon position received from the server.
+   */
+  spawnMuzzleFlash(x: number, y: number, angle: number): void {
+    const BARREL_TIP = 40; // barrel drawn 40 px from cannon centre in local space
+    const tipX = x + Math.cos(angle) * BARREL_TIP;
+    const tipY = y + Math.sin(angle) * BARREL_TIP;
+    this.effectRenderer.createMuzzleFlash(Vec2.from(tipX, tipY), angle);
+  }
+
+  /**
    * Record a damage hit on an entity so the next ~300 ms of frames
    * render a red flash overlay on that entity's circle.
    */
@@ -1290,8 +1309,8 @@ export class RenderSystem {
    * @param worldPos  Attacker's world position.
    * @param direction Attack angle in radians.
    */
-  spawnSwordArc(worldPos: Vec2, direction: number): void {
-    this.effectRenderer.createSwordArc(worldPos, direction);
+  spawnSwordArc(worldPos: Vec2, direction: number, radius: number = 30): void {
+    this.effectRenderer.createSwordArc(worldPos, direction, radius);
   }
 
   /**
@@ -1912,6 +1931,11 @@ export class RenderSystem {
     this._showTerritoryOverlay = on;
   }
 
+  /** Toggle allied NPC names visibility (Alt held = true, released = false). */
+  setNpcNamesVisible(on: boolean): void {
+    this._showNpcNames = on;
+  }
+
   setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600, isCompanyFortress = false): void {
     this._islandClaims.set(islandId, { companyId, fortX, fortY, fortRadius, isCompanyFortress });
     this._claimOverlayDirty = true;
@@ -2112,6 +2136,27 @@ export class RenderSystem {
     this.placedStructures = [...arr];
     this._rebuildWallSegs();
     this._claimOverlayDirty = true;
+  }
+
+  /** Update the cannonAimAngle of a single cannon structure in-place (no full rebuild needed). */
+  updateStructureCannonAim(id: number, aimAngle: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) s.cannonAimAngle = aimAngle;
+  }
+
+  /** Update the cannonReloadMs of a single cannon structure in-place. */
+  updateStructureCannonReload(id: number, reloadMs: number, loadedAmmo?: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) {
+      s.cannonReloadMs = reloadMs;
+      if (loadedAmmo !== undefined) s.cannonLoadedAmmo = loadedAmmo;
+    }
+  }
+
+  /** Returns true if the island cannon at the given structure ID is currently reloading. */
+  isIslandCannonReloading(id: number): boolean {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'cannon');
+    return s !== undefined && (s.cannonReloadMs ?? 0) > 0;
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
@@ -3374,6 +3419,8 @@ export class RenderSystem {
     this.drawFlameCones(camera);
     // Grapeshot / canister hit-scan tracers
     this.drawGrapeshotTracers(camera);
+    // Directional fog mask (after world geometry and effects, before HUD)
+    this.drawFogMask(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
@@ -3445,6 +3492,138 @@ export class RenderSystem {
       ctx.arc(screenPos.x, screenPos.y, RADIUS, 0, Math.PI * 2);
       ctx.stroke();
     }
+
+    ctx.restore();
+  }
+
+  /** Semi-transparent overlay drawn over the game while reconnecting. */
+  /**
+   * Render a directional fog mask based on per-ray hit distances from the AOI ray cast.
+   *
+   * The mask uses an off-screen canvas for compositing:
+   *  1. Fill with a dark sea-fog color.
+   *  2. Hard-erase the visibility polygon (interior fully clear).
+   *  3. Blurred-erase the polygon again so the boundary fades softly into fog.
+   *  4. Blit onto the main canvas at reduced opacity.
+   */
+  /**
+   * Returns true if a world position falls within the current fog visibility radius.
+   * Uses the per-direction ray hit distances; always returns true when fog data is unavailable.
+   */
+  public fogVisibleAt(wx: number, wy: number, radius = 0): boolean {
+    const hitDist = this.fogRayHitDist;
+    if (!hitDist) return true;
+    const player = this._cachedLocalPlayer;
+    if (!player) return true;
+    const N = hitDist.length;
+    if (N === 0) return true;
+    const dx = wx - player.position.x;
+    const dy = wy - player.position.y;
+    if (dx * dx + dy * dy < 1) return true;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    let angle = Math.atan2(dy, dx);
+    if (angle < 0) angle += Math.PI * 2;
+    const frac = angle / (Math.PI * 2 / N);
+    const i0 = Math.floor(frac) % N;
+    const i1 = (i0 + 1) % N;
+    const t  = frac - Math.floor(frac);
+    const fogDist = hitDist[i0] * (1 - t) + hitDist[i1] * t;
+    return dist <= fogDist * 1.05 + radius;
+  }
+
+  private drawFogMask(camera: Camera): void {
+    const hitDist = this.fogRayHitDist;
+    if (!hitDist) return;
+
+    const localPlayer = this._cachedLocalPlayer;
+    if (!localPlayer) return;
+
+    const N      = hitDist.length;
+    if (N === 0) return;
+
+    const screenPos = camera.worldToScreen(localPlayer.position);
+    const cx   = screenPos.x;
+    const cy   = screenPos.y;
+    const zoom = camera.getState().zoom;
+    const TWO_PI = Math.PI * 2;
+    const { width, height } = this.canvas;
+
+    // Ensure the off-screen fog canvas matches the current resolution
+    if (!this._fogCanvas || this._fogCanvas.width !== width || this._fogCanvas.height !== height) {
+      this._fogCanvas = document.createElement('canvas');
+      this._fogCanvas.width  = width;
+      this._fogCanvas.height = height;
+    }
+    const fc   = this._fogCanvas;
+    const fctx = fc.getContext('2d')!;
+
+    // --- Step 1: Fill with opaque dark fog ---
+    fctx.globalCompositeOperation = 'source-over';
+    fctx.clearRect(0, 0, width, height);
+    fctx.fillStyle = '#000612'; // deep navy-black
+    fctx.fillRect(0, 0, width, height);
+
+    // Helper: trace the visibility fan polygon on the fog canvas
+    const tracePolygon = (scale: number) => {
+      fctx.beginPath();
+      fctx.moveTo(cx, cy);
+      for (let i = 0; i <= N; i++) {
+        const idx   = i % N;
+        const angle = idx * TWO_PI / N;
+        const dist  = hitDist[idx] * zoom * scale;
+        fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
+      }
+      fctx.closePath();
+    };
+
+    // --- Step 2: Hard-erase visibility interior ---
+    fctx.globalCompositeOperation = 'destination-out';
+    fctx.fillStyle = 'rgba(0,0,0,1)';
+    tracePolygon(1.0);
+    fctx.fill();
+
+    // --- Step 3: Soft feather — blurred erase extends the clear zone outward ---
+    fctx.filter = 'blur(48px)';
+    tracePolygon(1.0);
+    fctx.fill();
+    fctx.filter = 'none';
+
+    fctx.globalCompositeOperation = 'source-over';
+
+    // --- Step 4: Blit onto main canvas at 68% opacity ---
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.68;
+    this.ctx.drawImage(fc, 0, 0);
+    this.ctx.restore();
+  }
+
+  drawReconnectingOverlay(): void {
+    const { width, height } = this.canvas;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.fillRect(0, 0, width, height);
+
+    const cx = width / 2;
+    const cy = height / 2;
+
+    // Spinner
+    const now = performance.now();
+    const angle = (now / 600) * Math.PI * 2;
+    const R = 28;
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(cx, cy - 52, R, angle, angle + Math.PI * 1.4);
+    ctx.stroke();
+
+    // "Reconnecting..." text
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 26px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Reconnecting…', cx, cy + 4);
 
     ctx.restore();
   }
@@ -3774,6 +3953,7 @@ export class RenderSystem {
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE = 50; // base range (px) — matches server HARVEST_RANGE
+    const BOULDER_HARVEST_RANGE = HARVEST_RANGE * 1.25; // 25% larger reach for boulders — matches server BOULDER_HARVEST_RANGE
     // Effective range per node = HARVEST_RANGE * Math.max(1.0, size) — larger nodes extend reach
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
@@ -4049,6 +4229,8 @@ export class RenderSystem {
           const sp2 = camera.worldToScreen(Vec2.from(wx2, wy2));
           const maxR2 = 100 * zoom;
           if (sp2.x + maxR2 < 0 || sp2.x - maxR2 > cw || sp2.y + maxR2 < 0 || sp2.y - maxR2 > ch) continue;
+          // Fog cull — use canonical coords (strip wrap offset) for player-relative distance.
+          if (!this.fogVisibleAt(wx2 - off.dx, wy2 - off.dy, 80)) continue;
           // No hover, no interaction while dying
           visibleRes.push({ res, wx: wx2, wy: wy2, sp: sp2, isHovered: false, inRange: false, playerNear: false, leafAlpha: 1.0, bushAlpha: 1.0, boulderAlpha: 1.0, deathAlpha });
           continue;
@@ -4061,14 +4243,16 @@ export class RenderSystem {
         const maxR = 100 * zoom;
         if (sp.x + maxR < 0 || sp.x - maxR > cw || sp.y + maxR < 0 || sp.y - maxR > ch) continue;
         if (maxR < 1) continue;
+        // Use canonical (non-wrap-offset) world coords for fog check and player distance.
+        const wxCanon = wx - off.dx;
+        const wyCanon = wy - off.dy;
+        // Fog cull — 80-unit clearance so the edge of a tree/bush is never clipped early.
+        if (!this.fogVisibleAt(wxCanon, wyCanon, 80)) continue;
 
         let isHovered = false;
         let inRange   = false;
         let playerNear = false;
-        // Use canonical (non-wrap-offset) world coords for player distance so
-        // the range check is correct even during wrap-render passes (off.dx ≠ 0).
-        const wxCanon = wx - off.dx;
-        const wyCanon = wy - off.dy;
+        // wxCanon/wyCanon already computed above.
         const pdx = localPlayer ? localPlayer.position.x - wxCanon : 0;
         const pdy = localPlayer ? localPlayer.position.y - wyCanon : 0;
         const pdSq = localPlayer ? (pdx * pdx + pdy * pdy) : Infinity;
@@ -4095,7 +4279,7 @@ export class RenderSystem {
         } else if (res.type === 'boulder') {
           const bHoverR = 44 * (res.size ?? 1.0) * zoom;
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
-          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          const effR = BOULDER_HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(pickaxeEquipped && localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
           if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon };
         }
@@ -4311,12 +4495,13 @@ export class RenderSystem {
     // with the server-side ellipse collision pushout.
     const r        = 38 * zoom * size;
     const drawSize = SIZE * (r / R);
-    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    // Math.trunc matches server (int) cast; >>> 0 gives unsigned uint32 — both must match server bseed formula
+    const hash     = ((Math.trunc(ox) * 73856093) ^ (Math.trunc(oy) * 19349663)) >>> 0;
     const toneCount = 3; // 3 variants within stone or metal range
     const tiBase   = metal ? RenderSystem.BOULDER_METAL_TONE_OFFSET : 0;
     const ti       = tiBase + (hash % toneCount);
-    const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
-    const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
+    const si       = (hash >>> 4) % RenderSystem.BOULDER_SHAPES.length;
+    const drawRot  = ((hash >>> 8) & 0xFF) / 256 * Math.PI * 2;
     const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
     const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
     ctx.save();
@@ -4557,6 +4742,8 @@ export class RenderSystem {
       // Cull structures that are entirely off-screen
       if (ssp.x + sz < 0 || ssp.x - sz > this.canvas.width ||
           ssp.y + sz < 0 || ssp.y - sz > this.canvas.height) continue;
+      // Fog culling — don't render structures outside the player's view range
+      if (!this.fogVisibleAt(s.x, s.y)) continue;
       const isHovered  = this._hoveredStructure?.id === s.id;
       const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
@@ -6486,6 +6673,50 @@ export class RenderSystem {
       }
     }
 
+    // Boulder obstacle: rotated-ellipse vs OBB — mirrors server structures.c and simulation.c
+    // Shape/hash formula matches BOULDER_SHAPES + drawRot used in drawBoulderSprite.
+    let blockedByBoulder = false;
+    if (this.islandBuildKind === 'wooden_floor') {
+      const BOULDER_BASE_R = 38;
+      const half = TILE / 2;
+      const boulderRad = effectiveRotDeg * Math.PI / 180;
+      // Inverse rotation: world → floor local frame
+      const frc = Math.cos(-boulderRad), frs = Math.sin(-boulderRad);
+      // Forward rotation: floor local → world frame
+      const frc_f = Math.cos(boulderRad), frs_f = Math.sin(boulderRad);
+      outer2:
+      for (const isl of this.islands) {
+        for (const res of isl.resources) {
+          if (res.type !== 'boulder') continue;
+          if (res.hp <= 0) continue; // depleted — no longer an obstacle
+          const bx = isl.x + res.ox, by = isl.y + res.oy;
+          // Boulder centre in floor local frame
+          const dx = bx - mx, dy = by - my;
+          const lx = dx * frc - dy * frs;
+          const ly = dx * frs + dy * frc;
+          // Closest point on floor OBB (floor-local coords)
+          const cx_f = Math.max(-half, Math.min(lx, half));
+          const cy_f = Math.max(-half, Math.min(ly, half));
+          // Transform closest point back to world, then into boulder-relative coords
+          const cpx_w = cx_f * frc_f - cy_f * frs_f + mx - bx;
+          const cpy_w = cx_f * frs_f + cy_f * frc_f + my - by;
+          // Boulder ellipse shape from hash (must match drawBoulderSprite & server BSX/BSY/BSR)
+          const size = res.size ?? 1.0;
+          const hash = ((Math.trunc(res.ox) * 73856093) ^ (Math.trunc(res.oy) * 19349663)) >>> 0;  // matches server (int) cast + uint32_t
+          const bsi = (hash >>> 4) % RenderSystem.BOULDER_SHAPES.length;
+          const [shapeX, shapeY, shapeRot] = RenderSystem.BOULDER_SHAPES[bsi];
+          const ax = BOULDER_BASE_R * size * shapeX;
+          const ay = BOULDER_BASE_R * size * shapeY;
+          const theta = shapeRot + ((hash >>> 8) & 0xFF) / 256 * Math.PI * 2;
+          const ec = Math.cos(theta), es = Math.sin(theta);
+          // Rotate closest-OBB-point delta into ellipse local frame
+          const elx = cpx_w * ec + cpy_w * es;
+          const ely = -cpx_w * es + cpy_w * ec;
+          if ((elx / ax) * (elx / ax) + (ely / ay) * (ely / ay) < 1.0) { blockedByBoulder = true; break outer2; }
+        }
+      }
+    }
+
     // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
     if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
@@ -6666,7 +6897,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -6988,7 +7219,7 @@ export class RenderSystem {
     } else if (enemyTerritory) {
       ctx.fillStyle = '#ff3333';
       ctx.fillText('ENEMY TERRITORY', msp.x, labelY);
-    } else if (blockedByTree) {
+    } else if (blockedByTree || blockedByBoulder) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
     } else if (blockedByStructure) {
@@ -7177,7 +7408,13 @@ export class RenderSystem {
 
     // Visual-only wrap ghosts for seam visibility.
     // Canonical world objects remain unchanged for collisions and gameplay.
-    const renderShips = this.buildWrappedRenderCopies(worldState.ships, camera, 320);
+    const _localCarrierId = this._cachedLocalPlayer?.carrierId ?? 0;
+    // Filter ships by fog visibility. The carrier ship (if any) is always included
+    // so the player never loses their own ship when at the fog boundary.
+    const renderShips = this.buildWrappedRenderCopies(
+      worldState.ships.filter(s => s.id === _localCarrierId || this.fogVisibleAt(s.position.x, s.position.y, 200)),
+      camera, 320
+    );
     const renderPlayers = this.buildWrappedRenderCopies(
       // Dead players (health ≤ 0) are hidden from the world — they're either
       // awaiting respawn or are stale zombie entries (e.g. from a page reload).
@@ -7187,7 +7424,7 @@ export class RenderSystem {
       camera,
       80,
       (p) => p.id === this.localPlayerId,
-    );
+    ).filter(p => p.id === this.localPlayerId || this.fogVisibleAt(p.position.x, p.position.y));
     const renderCannonballs = this.buildWrappedRenderCopies(worldState.cannonballs, camera, 40);
     
     // Render order (from lowest to highest):
@@ -7313,12 +7550,22 @@ export class RenderSystem {
       this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
       this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
     }
+
+    // Island cannon trajectory guide (same layer as ship cannon aim guides)
+    if (this.islandCannonId !== null && this.islandCannonAimAngle !== null && this.playerIsAiming) {
+      this.queueRenderItem(4, 'island-cannon-trajectory', () => this.drawIslandCannonTrajectory(camera), 1);
+    }
     
     // Queue sail fibers (layer 6)
     for (const ship of renderShips) {
       this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
     }
-    
+
+    // Queue island cannon reload indicators at layer 6 — same z-level as ship cannon reload
+    if (this.placedStructures.some(s => s.type === 'cannon' && (s.cannonReloadMs ?? 0) > 0)) {
+      this.queueRenderItem(6, 'island-cannon-reload', () => this.drawIslandCannonReloadIndicators(camera));
+    }
+
     // Queue sail masts (layer 7)
     for (const ship of renderShips) {
       this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
@@ -7473,6 +7720,9 @@ export class RenderSystem {
 
     // Queue NPCs (layer 2 - same as players)
     for (const npc of (worldState.npcs || [])) {
+      const _npcShip = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
+      const _npcCheckPos = _npcShip?.position ?? npc.position;
+      if (!this.fogVisibleAt(_npcCheckPos.x, _npcCheckPos.y)) continue;
       this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, worldState, camera));
     }
 
@@ -9874,6 +10124,247 @@ export class RenderSystem {
     return tMin;
   }
 
+  // ── Cannon trajectory helpers ────────────────────────────────────────────────
+
+  /**
+   * Returns true when world-space point (px, py) lies inside island terrain.
+   * Mirrors server simulation.c over_land detection for overland range reduction.
+   */
+  private isPointOverIsland(px: number, py: number): boolean {
+    for (const isl of this.islands) {
+      if (isl.vertices && isl.vertices.length > 2) {
+        const verts = isl.vertices;
+        const n = verts.length;
+        // Broad-phase bounding circle
+        const boundR = Math.max(...verts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y)));
+        const dx2 = px - isl.x, dy2 = py - isl.y;
+        if (dx2 * dx2 + dy2 * dy2 > (boundR + 10) * (boundR + 10)) continue;
+        // Point-in-polygon (ray casting)
+        let inside = false;
+        for (let vi = 0, vj = n - 1; vi < n; vj = vi++) {
+          const xi = verts[vi].x, yi = verts[vi].y;
+          const xj = verts[vj].x, yj = verts[vj].y;
+          if ((yi > py) !== (yj > py) &&
+              px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside;
+        }
+        if (inside) return true;
+      } else {
+        const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+        const dx2 = px - isl.x, dy2 = py - isl.y;
+        const distSq = dx2 * dx2 + dy2 * dy2;
+        const broadR = preset.beachRadius + Math.max(...preset.beachBumps.map(Math.abs));
+        if (distSq < broadR * broadR) {
+          const angle = Math.atan2(dy2, dx2);
+          const bumps = preset.beachBumps;
+          let a = angle % (Math.PI * 2); if (a < 0) a += Math.PI * 2;
+          const t2 = (a / (Math.PI * 2)) * bumps.length;
+          const i0 = Math.floor(t2) % bumps.length;
+          const i1 = (i0 + 1) % bumps.length;
+          const narrowR = preset.beachRadius + bumps[i0] + (t2 - Math.floor(t2)) * (bumps[i1] - bumps[i0]);
+          if (distSq < narrowR * narrowR) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Compute the max range for a cannonball accounting for overland range reduction.
+   * Server rule: effective_age += dt * (over_land ? 2 : 1); expires at 5 000 ms.
+   * At sea the cannonball travels 500 px/s × 5 s = 2 500 px.
+   * Over land it ages 2× faster, halving effective reach proportionally.
+   */
+  private computeCannonMaxRange(ox: number, oy: number, dx: number, dy: number): number {
+    const CANNON_SPEED_PX_S = 500;
+    const LIFETIME_MS       = 5000;
+    const STEP              = 50;  // sample every 50 px — cheap and accurate enough
+    const SEA_MAX           = CANNON_SPEED_PX_S * (LIFETIME_MS / 1000); // 2 500 px
+    let effectiveAgeMs = 0;
+    let traveled = 0;
+    while (traveled < SEA_MAX) {
+      const step = Math.min(STEP, SEA_MAX - traveled);
+      const overLand = this.isPointOverIsland(ox + dx * traveled, oy + dy * traveled);
+      const ageIncrease = (step / CANNON_SPEED_PX_S) * 1000 * (overLand ? 2 : 1);
+      effectiveAgeMs += ageIncrease;
+      if (effectiveAgeMs >= LIFETIME_MS) {
+        const excess    = effectiveAgeMs - LIFETIME_MS;
+        const fraction  = (ageIncrease - excess) / ageIncrease;
+        return traveled + step * fraction;
+      }
+      traveled += step;
+    }
+    return SEA_MAX;
+  }
+
+  /**
+   * Find the first collision along a cannon trajectory ray and determine its faction color.
+   *
+   * Checks (in priority order):
+   *   1. Players on foot        → faction-colored (green/red)
+   *   2. Free-standing NPCs     → faction-colored
+   *   3. Ships — hull polygons and modules — → faction-colored by ship company
+   *   4. On-ship players & NPCs → faction-colored by their own company
+   *   5. Placed structures      → faction-colored (neutral structures: grey)
+   *   6. Resource nodes (boulders/rocks) → grey (no faction)
+   *
+   * Returns:
+   *   color '#44ff88' — friendly (same company as local player)
+   *   color '#ff4444' — enemy / opposing company
+   *   color '#888888' — no hit OR environment hit (resource, neutral structure)
+   *   t               — distance to first hit (Infinity = no hit within maxT)
+   */
+  private findCannonTrajectoryHit(
+    ox: number, oy: number,
+    dx: number, dy: number,
+    maxT: number,
+    excludeShipId: number,
+    ammoType: number = 0, // 0 = cannonball, 1 = bar shot
+  ): { t: number; color: string } {
+    const isBarShot = ammoType !== 0; // treat any non-cannonball ammo as bar shot
+    const myComp = this._localCompanyId;
+    let tMin = Infinity;
+    let hitColor = '#888888';
+
+    const tryHit = (t: number, companyId: number) => {
+      if (t < 0 || t >= tMin) return;
+      tMin = t;
+      if (myComp > 0 && companyId === myComp) {
+        hitColor = '#44ff88'; // green — friendly
+      } else if (companyId === 0) {
+        hitColor = '#888888'; // grey — neutral / environment
+      } else {
+        hitColor = '#ff4444'; // red — enemy
+      }
+    };
+
+    const tryEnv = (t: number) => {
+      if (t < 0 || t >= tMin) return;
+      tMin = t;
+      hitColor = '#888888'; // grey — terrain / resource
+    };
+
+    // ── 1. Players on foot ──────────────────────────────────────────────
+    const PLAYER_R = 16;
+    for (const p of (this._cachedWorldPlayers ?? [])) {
+      if (p.carrierId !== 0) continue;
+      const mx = p.position.x - ox, my = p.position.y - oy;
+      const tp = mx * dx + my * dy;
+      if (tp < 0 || tp > maxT) continue;
+      const perpSq = mx * mx + my * my - tp * tp;
+      if (perpSq > PLAYER_R * PLAYER_R) continue;
+      tryHit(tp - Math.sqrt(PLAYER_R * PLAYER_R - perpSq), p.companyId);
+    }
+
+    // ── 2. Free-standing NPCs ───────────────────────────────────────────
+    const NPC_R = 14;
+    for (const npc of (this._cachedWorldNpcs ?? [])) {
+      if (npc.shipId !== 0) continue;
+      const mx = npc.position.x - ox, my = npc.position.y - oy;
+      const tp = mx * dx + my * dy;
+      if (tp < 0 || tp > maxT) continue;
+      const perpSq = mx * mx + my * my - tp * tp;
+      if (perpSq > NPC_R * NPC_R) continue;
+      tryHit(tp - Math.sqrt(NPC_R * NPC_R - perpSq), npc.companyId);
+    }
+
+    // ── 3. Ships (hull + modules + on-ship entities) ────────────────────
+    const MOD_R      = 20;
+    const MAST_R     = 40; // matches server BAR_SHOT_SAIL_RADIUS = CLIENT_TO_SERVER(40) = 40 client px
+    // Bar shot sweeps a spinning arc: barHalfL(10) + ballR(4) = 14 world px from the trajectory centre.
+    // Added to non-mast targets so the guide matches the projectile's physical reach.
+    const BAR_PROJ_R = isBarShot ? 14 : 0;
+    for (const ship of (this._cachedWorldShips ?? [])) {
+      if (ship.id === excludeShipId) continue;
+      const sc = Math.cos(ship.rotation), ss = Math.sin(ship.rotation);
+
+      // Hull polygon — bar shot passes through the hull entirely
+      if (!isBarShot && ship.hull && ship.hull.length >= 3) {
+        const t2 = this.rayHullIntersect(
+          ox, oy, dx, dy, ship.hull,
+          ship.position.x, ship.position.y, ship.rotation, maxT);
+        tryHit(t2, ship.companyId);
+      }
+
+      // Ship modules — bar shot only hits masts; cannonball hits everything
+      for (const mod of ship.modules) {
+        if (isBarShot && mod.kind !== 'mast') continue;
+        const hitR = (isBarShot && mod.kind === 'mast') ? MAST_R : MOD_R;
+        const mwx = ship.position.x + mod.localPos.x * sc - mod.localPos.y * ss;
+        const mwy = ship.position.y + mod.localPos.x * ss + mod.localPos.y * sc;
+        const mx = mwx - ox, my = mwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > hitR * hitR) continue;
+        // Bar shot: use mast center (tp) so the reticle appears inside the hull at the mast,
+        // not at the near-edge of the sail circle which coincides with the hull boundary.
+        const hitT = (isBarShot && mod.kind === 'mast')
+          ? tp
+          : tp - Math.sqrt(hitR * hitR - perpSq);
+        tryHit(hitT, ship.companyId);
+      }
+
+      // Players on this ship — bar shot ignores crew
+      if (!isBarShot) for (const p of (this._cachedWorldPlayers ?? [])) {
+        if (p.carrierId !== ship.id || !p.localPosition) continue;
+        const pwx = ship.position.x + p.localPosition.x * sc - p.localPosition.y * ss;
+        const pwy = ship.position.y + p.localPosition.x * ss + p.localPosition.y * sc;
+        const mx = pwx - ox, my = pwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > PLAYER_R * PLAYER_R) continue;
+        tryHit(tp - Math.sqrt(PLAYER_R * PLAYER_R - perpSq), p.companyId);
+      }
+
+      // NPCs on this ship — bar shot ignores crew
+      if (!isBarShot) for (const npc of (this._cachedWorldNpcs ?? [])) {
+        if (npc.shipId !== ship.id || !npc.localPosition) continue;
+        const nwx = ship.position.x + npc.localPosition.x * sc - npc.localPosition.y * ss;
+        const nwy = ship.position.y + npc.localPosition.x * ss + npc.localPosition.y * sc;
+        const mx = nwx - ox, my = nwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > NPC_R * NPC_R) continue;
+        tryHit(tp - Math.sqrt(NPC_R * NPC_R - perpSq), npc.companyId);
+      }
+    }
+
+    // ── 4. Placed structures ────────────────────────────────────────────
+    const STRUCT_R = 22 + BAR_PROJ_R; // bar shot's spinning arms widen the effective hitbox
+    const nonSolid = new Set(['wood_ceiling', 'claim_flag']);
+    for (const s of this.placedStructures) {
+      if (nonSolid.has(s.type)) continue;
+      const mx = s.x - ox, my = s.y - oy;
+      const tp = mx * dx + my * dy;
+      if (tp < 0 || tp > maxT) continue;
+      const perpSq = mx * mx + my * my - tp * tp;
+      if (perpSq > STRUCT_R * STRUCT_R) continue;
+      const t2 = tp - Math.sqrt(STRUCT_R * STRUCT_R - perpSq);
+      if (s.companyId === 0) tryEnv(t2); else tryHit(t2, s.companyId);
+    }
+
+    // ── 5. Resource nodes (boulders and tree trunks block shots; small rocks/fiber do not) ──
+    for (const isl of this.islands) {
+      for (const res of (isl.resources ?? [])) {
+        if (res.hp <= 0) continue;
+        if (res.type !== 'boulder' && res.type !== 'wood') continue;
+        const rwx = isl.x + res.ox, rwy = isl.y + res.oy;
+        const hitR = (res.type === 'boulder' ? 28 : 18) * (res.size ?? 1.0) + BAR_PROJ_R;
+        const mx = rwx - ox, my = rwy - oy;
+        const tp = mx * dx + my * dy;
+        if (tp < 0 || tp > maxT) continue;
+        const perpSq = mx * mx + my * my - tp * tp;
+        if (perpSq > hitR * hitR) continue;
+        tryEnv(tp - Math.sqrt(hitR * hitR - perpSq));
+      }
+    }
+
+    return { t: tMin, color: hitColor };
+  }
+
   // ── Territory helpers ───────────────────────────────────────────────────────
 
   /** Returns a CSS color string for a given company id. */
@@ -11416,6 +11907,58 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
+  private drawIslandCannonReloadIndicators(camera: Camera): void {
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+    const t          = performance.now() / 1000;
+    const spinAngle  = t * 2.5;
+    const iconR      = 9 * zoom;
+    const arcSpan    = (5 * Math.PI) / 6;
+    const arrowSz    = 3 * zoom;
+    const lw         = 1.5 * zoom;
+
+    for (const s of this.placedStructures) {
+      if (s.type !== 'cannon' || (s.cannonReloadMs ?? 0) === 0) continue;
+      const wp  = Vec2.from(s.x, s.y);
+      if (!camera.isWorldPositionVisible(wp, 50)) continue;
+      const ssp = camera.worldToScreen(wp);
+
+      ctx.save();
+      ctx.translate(ssp.x, ssp.y);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.90)';
+      ctx.fillStyle   = 'rgba(255, 255, 255, 0.90)';
+      ctx.lineWidth   = lw;
+      ctx.lineCap     = 'round';
+
+      for (let i = 0; i < 2; i++) {
+        const startAngle = spinAngle + i * Math.PI;
+        const endAngle   = startAngle + arcSpan;
+
+        ctx.beginPath();
+        ctx.arc(0, 0, iconR, startAngle, endAngle);
+        ctx.stroke();
+
+        const tipX = Math.cos(endAngle) * iconR;
+        const tipY = Math.sin(endAngle) * iconR;
+        const tx   = -Math.sin(endAngle);
+        const ty   =  Math.cos(endAngle);
+        const rx   =  Math.cos(endAngle);
+        const ry   =  Math.sin(endAngle);
+
+        ctx.beginPath();
+        ctx.moveTo(tipX + tx * arrowSz,              tipY + ty * arrowSz);
+        ctx.lineTo(tipX - tx * arrowSz * 0.5 + rx * arrowSz * 0.9,
+                   tipY - ty * arrowSz * 0.5 + ry * arrowSz * 0.9);
+        ctx.lineTo(tipX - tx * arrowSz * 0.5 - rx * arrowSz * 0.9,
+                   tipY - ty * arrowSz * 0.5 - ry * arrowSz * 0.9);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+  }
+
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
     if (!this.playerIsAiming) return;
@@ -11643,10 +12186,8 @@ export class RenderSystem {
       }
 
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
-      const cannonData = cannon.moduleData;
 
-      // Client-predicted aim direction — mirrors the server formula so the guide
-      // tracks the mouse instantly rather than waiting for a round-trip.
+      // Client-predicted aim direction — mirrors the server formula.
       // Formula: desired_offset = playerAimAngleRelative - localRot + PI/2
       const CANNON_LIMIT = 30 * Math.PI / 180;
       let predictedAimDir = this.playerAimAngleRelative - (cannon.localRot || 0) + Math.PI / 2;
@@ -11658,76 +12199,43 @@ export class RenderSystem {
       const cx = cannon.localPos.x;
       const cy = cannon.localPos.y;
 
+      // Barrel tip and fire direction in ship-local space
       const barrelTipX = cx + 40 * Math.sin(totalAngle);
       const barrelTipY = cy - 40 * Math.cos(totalAngle);
       const dirX = Math.sin(totalAngle);
       const dirY = -Math.cos(totalAngle);
-      const range = cannonData.fireRange || 2000;
 
-      // ── Impact detection in world space ──
-      // Convert barrel tip and direction into world space for the intersection test.
+      // Convert barrel tip and direction into world space for collision/range calculations.
+      // (world-space distance = ship-local distance because rotation preserves lengths)
       const wBarrelX = ship.position.x + barrelTipX * cosR - barrelTipY * sinR;
       const wBarrelY = ship.position.y + barrelTipX * sinR + barrelTipY * cosR;
       const wDirX = dirX * cosR - dirY * sinR;
       const wDirY = dirX * sinR + dirY * cosR;
 
-      let tHit = Infinity;
+      // Actual max range accounting for overland lifetime reduction
+      const maxRange = this.computeCannonMaxRange(wBarrelX, wBarrelY, wDirX, wDirY);
 
-      if (this.selectedAmmoType === 1) {
-        // ── Bar shot: stop at the nearest enemy mast (ray-circle intersection) ──
-        const MAST_HIT_RADIUS = 28; // world units; generous hit zone for mast cylinder
-        for (const other of worldState.ships) {
-          if (other.id === ship.id) continue;
-          const masts = other.modules.filter(m => m.kind === 'mast');
-          const cosO = Math.cos(other.rotation);
-          const sinO = Math.sin(other.rotation);
-          for (const mast of masts) {
-            // Mast world position
-            const mlx = mast.localPos.x;
-            const mly = mast.localPos.y;
-            const mwx = other.position.x + mlx * cosO - mly * sinO;
-            const mwy = other.position.y + mlx * sinO + mly * cosO;
-            // Ray–circle: M = mastCenter - rayOrigin
-            const mx = mwx - wBarrelX;
-            const my = mwy - wBarrelY;
-            const tProj = mx * wDirX + my * wDirY;
-            if (tProj < 0 || tProj > range) continue;
-            const distSq = mx * mx + my * my - tProj * tProj;
-            if (distSq <= MAST_HIT_RADIUS * MAST_HIT_RADIUS) {
-              const t = tProj - Math.sqrt(MAST_HIT_RADIUS * MAST_HIT_RADIUS - distSq);
-              if (t >= 0 && t < tHit) tHit = t;
-            }
-          }
-        }
-      } else {
-        // ── Cannonball: stop at nearest enemy ship hull ──
-        for (const other of worldState.ships) {
-          if (other.id === ship.id) continue;
-          if (!other.hull || other.hull.length < 3) continue;
-          const t = this.rayHullIntersect(
-            wBarrelX, wBarrelY, wDirX, wDirY,
-            other.hull, other.position.x, other.position.y, other.rotation,
-            range
-          );
-          if (t < tHit) tHit = t;
-        }
-      }
+      // Find first collision — ships, players, NPCs, structures, resources
+      const hit = this.findCannonTrajectoryHit(
+        wBarrelX, wBarrelY, wDirX, wDirY, maxRange, ship.id, this.selectedAmmoType);
 
-      const didHit     = tHit < Infinity;
-      // Trajectory ends at impact point, clamped to max range
-      const drawLength = didHit ? Math.min(tHit, range) : range;
-      // Bar shot uses orange-gold when targeting a mast; cannonball uses yellow/grey
-      const guideColor = didHit
-        ? (this.selectedAmmoType === 1 ? '#FF8C00' : '#FFD700')
-        : '#AAAAAA';
+      const drawLength = Number.isFinite(hit.t) ? hit.t : maxRange;
+      const guideColor = hit.color;
+      const didHit     = Number.isFinite(hit.t);
 
-      // ── Dashed trajectory line (stops at impact) ──
+      // ── Dashed trajectory line (stops at first collision) ──────────────
+      // Bar shot uses a shorter dash pattern to visually distinguish from cannonball.
+      // Color comes from the hit result (red=enemy, green=friendly, grey=terrain).
+      const isBarShotDraw = this.selectedAmmoType !== 0;
+      const drawColor  = guideColor;
+      const dashOn     = isBarShotDraw ? 6 : 10;
+      const dashOff    = isBarShotDraw ? 10 : 7;
       this.ctx.save();
       this.ctx.globalAlpha = 0.80 * fadeAlpha;
-      this.ctx.strokeStyle = guideColor;
+      this.ctx.strokeStyle = drawColor;
       this.ctx.lineWidth   = 3.5;
       this.ctx.lineCap     = 'round';
-      this.ctx.setLineDash([10, 7]);
+      this.ctx.setLineDash([dashOn, dashOff]);
       this.ctx.beginPath();
       this.ctx.moveTo(barrelTipX, barrelTipY);
       this.ctx.lineTo(barrelTipX + dirX * drawLength, barrelTipY + dirY * drawLength);
@@ -11735,16 +12243,16 @@ export class RenderSystem {
       this.ctx.restore();
       this.ctx.setLineDash([]);
 
-      // ── Range-bracket tick marks at 1/3 and 2/3 of max range (only if before impact) ──
+      // ── Range-bracket tick marks at 1/3 and 2/3 of max range ──────────
       const perpX = -dirY;
       const perpY =  dirX;
       for (const frac of [1 / 3, 2 / 3]) {
-        const tickDist = range * frac;
-        if (tickDist >= drawLength) continue; // past (or at) impact — skip
+        const tickDist = maxRange * frac;
+        if (tickDist >= drawLength) continue; // past impact — skip
         const bx = barrelTipX + dirX * tickDist;
         const by = barrelTipY + dirY * tickDist;
         this.ctx.save();
-        this.ctx.globalAlpha = 0.55 * fadeAlpha;
+        this.ctx.globalAlpha = 0.50 * fadeAlpha;
         this.ctx.strokeStyle = guideColor;
         this.ctx.lineWidth   = 3.5;
         this.ctx.lineCap     = 'round';
@@ -11755,10 +12263,9 @@ export class RenderSystem {
         this.ctx.restore();
       }
 
-      // ── Terminal reticle — 4 arcs, hollow centre (at impact or max range) ──
+      // ── Terminal reticle — 4 arcs at impact point or max range ─────────
       const termX    = barrelTipX + dirX * drawLength;
       const termY    = barrelTipY + dirY * drawLength;
-      // When hitting a ship the reticle is tighter to convey a direct hit
       const reticleR = didHit ? 10 : 13;
       const arcSpan  = Math.PI * 0.44;
       const gapHalf  = Math.PI * 0.06;
@@ -11779,11 +12286,105 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
-    // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
-      return;
+  /**
+   * Draw cannon trajectory guide for an island-placed cannon that the local player
+   * is currently mounted on. Draws directly in screen space (no ship-local ctx transform).
+   */
+  private drawIslandCannonTrajectory(camera: Camera): void {
+    if (!this.playerIsAiming) return;
+    if (this.islandCannonId === null || this.islandCannonAimAngle === null) return;
+
+    const s = this.placedStructures.find(
+      ps => ps.id === this.islandCannonId && ps.type === 'cannon');
+    if (!s) return;
+    if ((s.cannonReloadMs ?? 0) > 0) return; // reloading — no guide
+
+    const aimAngle = this.islandCannonAimAngle;
+    const BARREL_TIP = 40; // world px from cannon center to barrel tip
+
+    const wBarrelX = s.x + Math.cos(aimAngle) * BARREL_TIP;
+    const wBarrelY = s.y + Math.sin(aimAngle) * BARREL_TIP;
+    const wDirX    = Math.cos(aimAngle);
+    const wDirY    = Math.sin(aimAngle);
+
+    const maxRange  = this.computeCannonMaxRange(wBarrelX, wBarrelY, wDirX, wDirY);
+    const hit       = this.findCannonTrajectoryHit(
+      wBarrelX, wBarrelY, wDirX, wDirY, maxRange, 0 /* no ship to exclude */, this.selectedAmmoType);
+
+    const drawLength = Number.isFinite(hit.t) ? hit.t : maxRange;
+    const guideColor = hit.color;
+    const didHit     = Number.isFinite(hit.t);
+
+    // Convert world positions to screen positions for drawing
+    const tipSP = camera.worldToScreen(Vec2.from(wBarrelX, wBarrelY));
+    const endSP = camera.worldToScreen(Vec2.from(wBarrelX + wDirX * drawLength, wBarrelY + wDirY * drawLength));
+
+    // Screen-space direction and perpendicular (accounts for camera rotation)
+    const sdx = endSP.x - tipSP.x;
+    const sdy = endSP.y - tipSP.y;
+    const sLen = Math.sqrt(sdx * sdx + sdy * sdy) || 1;
+    const snx = sdx / sLen, sny = sdy / sLen; // unit direction in screen space
+    const spx = -sny, spy = snx;              // perpendicular in screen space
+
+    const zoom = camera.getState().zoom;
+    const ctx  = this.ctx;
+
+    // ── Dashed trajectory line ──────────────────────────────────────────
+    // Color comes from hit result (red=enemy, green=friendly, grey=terrain).
+    // Bar shot uses a shorter dash pattern to visually distinguish from cannonball.
+    const islandBarShot = this.selectedAmmoType !== 0;
+    const islandDashOn  = islandBarShot ? 6 : 10;
+    const islandDashOff = islandBarShot ? 10 : 7;
+    ctx.save();
+    ctx.globalAlpha = 0.80;
+    ctx.strokeStyle = guideColor;
+    ctx.lineWidth   = 3.5;
+    ctx.lineCap     = 'round';
+    ctx.setLineDash([islandDashOn, islandDashOff]);
+    ctx.beginPath();
+    ctx.moveTo(tipSP.x, tipSP.y);
+    ctx.lineTo(endSP.x, endSP.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+
+    // ── Range-bracket tick marks at 1/3 and 2/3 of max range ───────────
+    const tickLen = 7 * zoom;
+    for (const frac of [1 / 3, 2 / 3]) {
+      const tickDist = maxRange * frac;
+      if (tickDist >= drawLength) continue;
+      const tsp = camera.worldToScreen(Vec2.from(wBarrelX + wDirX * tickDist, wBarrelY + wDirY * tickDist));
+      ctx.save();
+      ctx.globalAlpha = 0.50;
+      ctx.strokeStyle = guideColor;
+      ctx.lineWidth   = 3.5;
+      ctx.lineCap     = 'round';
+      ctx.beginPath();
+      ctx.moveTo(tsp.x - spx * tickLen, tsp.y - spy * tickLen);
+      ctx.lineTo(tsp.x + spx * tickLen, tsp.y + spy * tickLen);
+      ctx.stroke();
+      ctx.restore();
     }
+
+    // ── Terminal reticle — 4 arcs ───────────────────────────────────────
+    const reticleR = (didHit ? 10 : 13) * zoom;
+    const arcSpan  = Math.PI * 0.44;
+    const gapHalf  = Math.PI * 0.06;
+    ctx.save();
+    ctx.globalAlpha = 0.75;
+    ctx.strokeStyle = guideColor;
+    ctx.lineWidth   = 3.5;
+    ctx.lineCap     = 'round';
+    for (let i = 0; i < 4; i++) {
+      const centre = (Math.PI / 2) * i;
+      ctx.beginPath();
+      ctx.arc(endSP.x, endSP.y, reticleR, centre + gapHalf, centre + arcSpan - gapHalf);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawShipSteeringWheels(ship: Ship, camera: Camera): void {
     
     this.ctx.save();
     
@@ -12345,17 +12946,24 @@ export class RenderSystem {
 
     const { phase3Alpha } = this.computeSinkState(ship);
     if (phase3Alpha <= 0) return;
-    
+
+    // Fade sails when the local player is walking on this ship's deck so they
+    // don't obstruct the view of modules/NPCs below them.
+    const _localOnDeck = this._cachedLocalPlayer !== null
+      && this._cachedLocalPlayer.carrierId === ship.id
+      && !this._cachedLocalPlayer.isMounted;
+    const sailAlpha = _localOnDeck ? 0.30 * phase3Alpha : phase3Alpha;
+
     this.ctx.save();
-    if (phase3Alpha < 1) this.ctx.globalAlpha = phase3Alpha;
-    
+    this.ctx.globalAlpha = sailAlpha;
+
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
-    
+
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
-    
+
     // Find all mast modules
     const masts = ship.modules.filter(m => m.kind === 'mast');
     
@@ -13352,8 +13960,11 @@ export class RenderSystem {
 
     this.ctx.restore();
 
-    // Name label only when standing still (avoid visual noise during movement)
-    if (!isMoving) {
+    // Name label: show when this NPC is hovered, or when Alt is held for allied NPCs.
+    // (Role/state/weapon debug info is in the hover debug HUD instead.)
+    const _showName = this.hoveredNpc?.id === npc.id
+      || (this._showNpcNames && !_npcIsEnemy && !_npcIsNeutral);
+    if (_showName) {
       const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
       this.ctx.font = `${fontSize}px Georgia, serif`;
       this.ctx.textAlign = 'center';
@@ -13377,23 +13988,6 @@ export class RenderSystem {
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'bottom';
         this.ctx.fillText('🔒', lx, ly);
-      }
-
-      // Debug: show assigned cannon/module ID and state below name
-      if (npc.assignedWeaponId || npc.state !== 0) {
-        const STATE_SHORT: Record<number, string> = { 0: 'IDL', 1: 'MOV', 2: 'MAN', 3: 'REP' };
-        const ROLE_SHORT: Record<number, string> = { 0: '-', 1: 'G', 2: 'H', 3: 'R', 4: 'P' };
-        const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
-          + (npc.assignedWeaponId ? ` c${npc.assignedWeaponId}` : '');
-        const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
-        this.ctx.font = `${debugFontSize}px Georgia, serif`;
-        const dtw = this.ctx.measureText(debugLabel).width;
-        const debugY = screenPos.y + radius + debugFontSize + 2;
-        this.ctx.textBaseline = 'bottom';
-        this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        this.ctx.fillRect(screenPos.x - dtw / 2 - 2, debugY - debugFontSize, dtw + 4, debugFontSize + 2);
-        this.ctx.fillStyle = '#aaddff';
-        this.ctx.fillText(debugLabel, screenPos.x, debugY);
       }
     }
   }
