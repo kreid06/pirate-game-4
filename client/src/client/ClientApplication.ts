@@ -135,7 +135,10 @@ export class ClientApplication {
   private _viewOpenness = 1.0;  // 0=coast, 1=open sea (exponentially smoothed)
   private _rayHitDist   = new Float32Array(ClientApplication.VIEW_RAY_COUNT); // per-ray hit distance (world units)
 
-  // Explicit build mode (B key) — independent of hotbar item build modes
+  // Fog ray Web Worker — runs computeViewRays off the main thread.
+  // Result arrives async (1-frame lag) which is imperceptible for fog.
+  private _fogWorker: Worker | null = null;
+  private _fogWorkerReady = false; // true once INIT has been sent
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
@@ -2071,6 +2074,28 @@ export class ClientApplication {
         // Expose islands on world states so client-side collision prediction can use them
         if (this.authoritativeWorldState) this.authoritativeWorldState.islands = islands;
         if (this.predictedWorldState) this.predictedWorldState.islands = islands;
+
+        // (Re-)initialise the fog worker with the new island set.
+        // Strip resources from the island data — the worker only needs geometry.
+        this._fogWorker?.terminate();
+        this._fogWorker = new Worker(
+          new URL('../workers/FogWorker.ts', import.meta.url),
+          { type: 'module' },
+        );
+        this._fogWorker.onmessage = (e: MessageEvent<ArrayBuffer>) => {
+          // Swap in the worker's result buffer directly — zero copy on the main thread.
+          this._rayHitDist = new Float32Array(e.data);
+        };
+        this._fogWorker.postMessage({
+          type: 'INIT',
+          islands: islands.map(isl => ({
+            x: isl.x, y: isl.y,
+            vertices:      isl.vertices,
+            grassVertices: isl.grassVertices,
+            stonePolys:    isl.stonePolys,
+          })),
+        });
+        this._fogWorkerReady = true;
       };
 
       // Update a resource's HP when the server broadcasts resource_damaged
@@ -2666,8 +2691,14 @@ export class ClientApplication {
           // --- Dynamic view-range / AOI ---
           // Cast rays against island coastlines to compute per-direction visibility
           // distances. Used for the fog mask (RenderSystem) and server AOI hint.
-          const islands = this.renderSystem.getIslands();
-          this.computeViewRays(player.position, islands);
+          if (this._fogWorkerReady && this._fogWorker) {
+            // Off-thread: dispatch position to worker, use previous frame's result now.
+            this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
+          } else {
+            // Fallback: synchronous (before first ISLANDS message, or if worker unavailable).
+            const islands = this.renderSystem.getIslands();
+            this.computeViewRays(player.position, islands);
+          }
 
           // Smooth openness so the fog/zoom doesn't jitter when near a polygon edge
           const N = ClientApplication.VIEW_RAY_COUNT;

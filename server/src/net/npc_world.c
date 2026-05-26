@@ -522,13 +522,13 @@ void tick_world_npcs(float dt) {
                                 mast->data.mast.openness = tgt_open;
                                 if (tgt_open > 0) mast->state_bits |=  MODULE_STATE_DEPLOYED;
                                 else              mast->state_bits &= ~MODULE_STATE_DEPLOYED;
-                                mast->data.mast.angle = Q16_FROM_FLOAT(rship->desired_sail_angle);
                                 {
                                     struct Ship* _ss = find_sim_ship(rship->ship_id);
                                     if (_ss) {
                                         for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
                                             if (_ss->modules[mi].id == mast->id) {
-                                                _ss->modules[mi].data.mast.angle = mast->data.mast.angle;
+                                                _ss->modules[mi].data.mast.openness = mast->data.mast.openness;
+                                                _ss->modules[mi].state_bits = mast->state_bits;
                                                 break;
                                             }
                                         }

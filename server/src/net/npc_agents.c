@@ -248,14 +248,29 @@ void tick_npc_agents(float dt) {
                     else
                         module->state_bits &= ~MODULE_STATE_DEPLOYED;
 
-                    // Apply desired sail angle
-                    module->data.mast.angle = Q16_FROM_FLOAT(ship->desired_sail_angle);
+                    // Slew current mast angle toward desired sail angle.
+                    // This prevents snapping when helm commands a new target angle.
+                    {
+                        const float MAX_SAIL_TURN_RATE = 1.2f; // rad/s (~69 deg/s)
+                        float current_angle = Q16_TO_FLOAT(module->data.mast.angle);
+                        float target_angle  = ship->desired_sail_angle;
+                        float diff = target_angle - current_angle;
+                        while (diff >  (float)M_PI) diff -= 2.0f * (float)M_PI;
+                        while (diff < -(float)M_PI) diff += 2.0f * (float)M_PI;
+                        float max_step = MAX_SAIL_TURN_RATE * dt;
+                        if (diff >  max_step) diff =  max_step;
+                        if (diff < -max_step) diff = -max_step;
+                        current_angle += diff;
+                        module->data.mast.angle = Q16_FROM_FLOAT(current_angle);
+                    }
                     // Mirror into sim-ship
                     {
                         struct Ship* _ss = find_sim_ship(ship->ship_id);
                         if (_ss) {
                             for (uint8_t mi = 0; mi < _ss->module_count; mi++) {
                                 if (_ss->modules[mi].id == module->id) {
+                                    _ss->modules[mi].data.mast.openness = module->data.mast.openness;
+                                    _ss->modules[mi].state_bits = module->state_bits;
                                     _ss->modules[mi].data.mast.angle = module->data.mast.angle;
                                     break;
                                 }
