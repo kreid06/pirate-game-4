@@ -57,6 +57,8 @@ export interface UIRenderContext {
   windAngle?: number;
   /** True when the debug overlay is active (L key). */
   debugMode?: boolean;
+  /** True when the player has combat mode enabled (Z key). */
+  combatMode?: boolean;
 }
 
 /**
@@ -2232,7 +2234,7 @@ class HUDElement implements UIElement {
     const _xp  = player.xp ?? 0;
     this._cachedPlayerLevel = _lvl;
     this._cachedPlayerXp    = _xp;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0);
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     const helmMode = context.mountKind === 'helm'
@@ -2254,6 +2256,7 @@ class HUDElement implements UIElement {
     level = 1,
     xp = 0,
     statPoints = 0,
+    combatMode = false,
   ): void {
     const PLAYER_MAX_LEVEL = 120;
     const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
@@ -2370,6 +2373,37 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
     ctx.fillText(`${Math.ceil(stamina)}/${maxStamina}`, barX + barW - 4, stY + BAR_H / 2);
+
+    // ── Combat mode indicator ──────────────────────────────────────────────
+    const indicatorW = 114;
+    const indicatorH = 18;
+    const indicatorX = startX + totalW - indicatorW;
+    const indicatorY = panelY - indicatorH - 4;
+
+    if (combatMode) {
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 380);
+      ctx.fillStyle = 'rgba(110, 15, 15, 0.92)';
+      ctx.fillRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.strokeStyle = `rgba(255, 70, 70, ${pulse.toFixed(2)})`;
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.font = 'bold 10px Georgia, serif';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = '#ff9090';
+      ctx.fillText('\u2694  COMBAT', indicatorX + indicatorW / 2, indicatorY + indicatorH / 2);
+    } else {
+      ctx.fillStyle = 'rgba(15, 15, 22, 0.55)';
+      ctx.fillRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.strokeStyle = 'rgba(70, 70, 95, 0.40)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(indicatorX, indicatorY, indicatorW, indicatorH);
+      ctx.font = '9px Georgia, serif';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'center';
+      ctx.fillStyle = 'rgba(130, 130, 155, 0.50)';
+      ctx.fillText('[Z] Combat Mode', indicatorX + indicatorW / 2, indicatorY + indicatorH / 2);
+    }
 
     ctx.restore();
   }

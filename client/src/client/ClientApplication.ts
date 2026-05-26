@@ -178,6 +178,8 @@ export class ClientApplication {
   /** Timestamp (ms) of the last punch sent to the server — enforces client-side cooldown. */
   private lastPunchMs = 0;
   private readonly PUNCH_COOLDOWN_MS = 800; // matches server PUNCH_COOLDOWN_MS
+  /** True when combat mode is active (toggled with Z, or auto-enabled on first attack). */
+  private combatMode = false;
   // ── Ship debug panel ────────────────────────────────────────────────────
   private _shipDebugPanel: HTMLDivElement | null = null;
   private _shipDebugTableBody: HTMLTableSectionElement | null = null;
@@ -914,6 +916,7 @@ export class ClientApplication {
             const now = performance.now();
             if (now - this.swordLastAttackMs < this.SWORD_COOLDOWN_MS) return;
             this.swordLastAttackMs = now;
+            if (!this.combatMode) this.combatMode = true;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -931,6 +934,7 @@ export class ClientApplication {
              ITEM_DEFS[activeItem]?.category !== 'tool' &&
              ITEM_DEFS[activeItem]?.category !== 'building');
           if (punchAllowed && player && !player.isMounted) {
+            if (!this.combatMode) this.combatMode = true;
             const now = performance.now();
             if (now - this.lastPunchMs < this.PUNCH_COOLDOWN_MS) return;
             this.lastPunchMs = now;
@@ -1390,6 +1394,9 @@ export class ClientApplication {
       // Build menu toggle (B key) — opens/closes the left-panel build menu.
       // Works anytime the player is on a ship deck.
       // If a cannon or sail item is active in the hotbar, also enters free-placement mode.
+      this.inputManager.onCombatModeToggle = () => {
+        this.combatMode = !this.combatMode;
+      };
       this.inputManager.onBuildModeToggle = () => {
         if (this.buildMenuOpen || this.explicitBuildMode) {
           // Close everything via the single exit helper
@@ -2983,6 +2990,7 @@ export class ClientApplication {
         controlGroups: this.controlGroups,
         windAngle: this.networkManager.windAngle,
         debugMode: this.uiManager.isDebugMode,
+        combatMode: this.combatMode,
       });
 
       // Crafting menu (rendered on top of all other UI)
