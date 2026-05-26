@@ -124,6 +124,17 @@ export class ClientApplication {
   private static readonly HELM_ZOOM    = 0.60; // Zoomed-out level while at the helm
   private static readonly DEFAULT_ZOOM = 1.00; // Normal gameplay zoom
 
+  // Dynamic view-range / AOI
+  private static readonly VIEW_RAY_COUNT = 32;    // Angular ray samples per frame
+  private static readonly MAX_VIEW_DIST  = 5000;  // World-unit radius for open sea
+  private static readonly BEACH_DEPTH    = 50;    // World-unit coastal strip treated same as ocean (1:1)
+  private static readonly COAST_ZOOM     = 1.25;  // Zoom when fully surrounded by land
+  private static readonly SEA_ZOOM       = 0.82;  // Zoom when fully in open sea
+  private _userZoomMul  = 1.0;  // Accumulated scroll-wheel multiplier
+  private _aoiBaseZoom  = 1.0;  // AOI-driven base zoom (not including user multiplier)
+  private _viewOpenness = 1.0;  // 0=coast, 1=open sea (exponentially smoothed)
+  private _rayHitDist   = new Float32Array(ClientApplication.VIEW_RAY_COUNT); // per-ray hit distance (world units)
+
   // Explicit build mode (B key) — independent of hotbar item build modes
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
@@ -161,6 +172,10 @@ export class ClientApplication {
   /** Timestamp (ms) of the last sword attack sent to the server — enforces client-side cooldown matching the server's 600ms. */
   private lastSwordSwingMs = 0;
   private readonly SWORD_COOLDOWN_MS = 1000; // matches server SWORD_COOLDOWN_MS
+  // ── Ship debug panel ────────────────────────────────────────────────────
+  private _shipDebugPanel: HTMLDivElement | null = null;
+  private _shipDebugTableBody: HTMLTableSectionElement | null = null;
+
   /** E-hold interaction state — covers ladders and mountable modules. */
   private _ladderHoldTimer: ReturnType<typeof setTimeout> | null = null;
   private _suppressLadderInteract = false;
@@ -1403,9 +1418,11 @@ export class ClientApplication {
         }
       };
       
-      // Set up scroll-wheel zoom (also update targetZoom so animation doesn't fight the user)
+      // Set up scroll-wheel zoom — accumulate into _userZoomMul so AOI base zoom
+      // remains separate and the two combine correctly.
       this.inputManager.onZoom = (factor, _screenPoint) => {
-        this.targetZoom = Math.max(0.1, Math.min(10.0, this.targetZoom * factor));
+        this._userZoomMul = Math.max(0.1, Math.min(4.0, this._userZoomMul * factor));
+        this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
         this.camera.setZoom(this.targetZoom);
       };
 
@@ -2645,6 +2662,26 @@ export class ClientApplication {
             localPos: player.localPosition ?? null,
             carrierId: player.carrierId ?? null,
           };
+
+          // --- Dynamic view-range / AOI ---
+          // Cast rays against island coastlines to compute per-direction visibility
+          // distances. Used for the fog mask (RenderSystem) and server AOI hint.
+          const islands = this.renderSystem.getIslands();
+          this.computeViewRays(player.position, islands);
+
+          // Smooth openness so the fog/zoom doesn't jitter when near a polygon edge
+          const N = ClientApplication.VIEW_RAY_COUNT;
+          const MAX_D = ClientApplication.MAX_VIEW_DIST;
+          let raySum = 0;
+          for (let _i = 0; _i < N; _i++) raySum += this._rayHitDist[_i];
+          const rawOpenness = raySum / (N * MAX_D);
+          this._viewOpenness += (rawOpenness - this._viewOpenness) * (1 - Math.pow(0.05, dt));
+
+          // Pass ray data to render system so it can draw the fog mask this frame
+          this.renderSystem.fogRayHitDist = this._rayHitDist;
+
+          // Expose average view distance for server AOI hint (client units)
+          this.networkManager.viewRadius = raySum / N;
         }
       }
       
@@ -2921,6 +2958,9 @@ export class ClientApplication {
       // Hover debug HUD — rendered last so it always appears above all UI layers
       this.renderSystem.renderHoverDebugHUD();
 
+      // Ship debug panel — DOM overlay, updated every frame when visible
+      this._updateShipDebugPanel();
+
       // Reconnecting overlay — sits above everything when disconnected mid-game
       if (this.state === ClientState.DISCONNECTED) {
         this.renderSystem.drawReconnectingOverlay();
@@ -2931,6 +2971,166 @@ export class ClientApplication {
   /**
    * Update camera based on world state
    */
+  /**
+   * Cast VIEW_RAY_COUNT rays from `pos` in all directions and record the nearest
+   * island-polygon edge hit distance for each ray (world units).
+   * Ocean costs 1 budget-unit/world-unit; land costs 2 (half range through land).
+   * Results are written into this._rayHitDist in-place.
+   */
+
+  /** Ray-cast point-in-polygon test (winding / crossing number). */
+  private static pointInPolygon(p: {x: number; y: number}, verts: {x: number; y: number}[]): boolean {
+    let inside = false;
+    const n = verts.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = verts[i].x, yi = verts[i].y;
+      const xj = verts[j].x, yj = verts[j].y;
+      if (((yi > p.y) !== (yj > p.y)) && (p.x < (xj - xi) * (p.y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  private computeViewRays(pos: {x: number; y: number}, islands: ReturnType<typeof this.renderSystem.getIslands>): void {
+    const N      = ClientApplication.VIEW_RAY_COUNT;
+    const MAX_D  = ClientApplication.MAX_VIEW_DIST;
+    const TWO_PI = Math.PI * 2;
+    const result = this._rayHitDist;
+
+    // Pre-filter islands within range; compute per-island player-inside flags (coast, grass, stone)
+    const nearIslands:  ReturnType<typeof this.renderSystem.getIslands> = [];
+    const insideCoast:  boolean[] = [];
+    const insideGrass:  boolean[] = [];
+    const insideStone:  boolean[] = [];
+    for (const isl of islands) {
+      if (!isl.vertices || isl.vertices.length < 3) continue;
+      const cdx = isl.x - pos.x, cdy = isl.y - pos.y;
+      if (cdx * cdx + cdy * cdy > MAX_D * MAX_D * 4) continue;
+      nearIslands.push(isl);
+      const pip = ClientApplication.pointInPolygon(pos, isl.vertices);
+      insideCoast.push(pip);
+      insideGrass.push(
+        pip && !!isl.grassVertices && isl.grassVertices.length >= 3
+          && ClientApplication.pointInPolygon(pos, isl.grassVertices)
+      );
+      insideStone.push(
+        !!(isl.stonePolys?.some(sp => sp.length >= 3 && ClientApplication.pointInPolygon(pos, sp)))
+      );
+    }
+
+    // For fallback islands (no grassVertices), the outer coast IS the grass boundary —
+    // the whole interior is treated as the grass zone.  This ensures rays going deeper
+    // into such islands correctly use cost 3, not cost 1.
+    const fallbackInlandPlayer = nearIslands.some((isl, ni) =>
+      insideCoast[ni] && (!isl.grassVertices || isl.grassVertices.length < 3)
+    );
+    const playerInGrass = insideGrass.some(Boolean) || fallbackInlandPlayer;
+    const playerInStone = insideStone.some(Boolean);
+
+    // Event kinds (coast events for hasGrass islands are omitted — beach cost === ocean cost = 1):
+    //   1 = grassVertices boundary  → toggles inGrass  (cost 3 inside)
+    //   2 = stone polygon boundary  → toggles inStone  (cost 2 inside, overrides grass)
+    //   3 = fallback coast boundary → toggles inGrass  (entire interior = grass for these islands)
+    const evDist: number[] = [];
+    const evKind: number[] = [];
+
+    for (let i = 0; i < N; i++) {
+      const angle = i * TWO_PI / N;
+      const dx    = Math.cos(angle);
+      const dy    = Math.sin(angle);
+
+      evDist.length = 0;
+      evKind.length = 0;
+
+      for (let ni = 0; ni < nearIslands.length; ni++) {
+        const isl      = nearIslands[ni];
+        const verts    = isl.vertices!;
+        const nv       = verts.length;
+        const gverts   = isl.grassVertices;
+        const hasGrass = !!(gverts && gverts.length >= 3);
+
+        if (hasGrass) {
+          // --- grassVertices crossings (kind 1) — beach between coast and here costs 1 ---
+          const ngv = gverts!.length;
+          for (let j = 0; j < ngv; j++) {
+            const ax = gverts![j].x          - pos.x,  ay = gverts![j].y          - pos.y;
+            const bx = gverts![(j+1)%ngv].x  - pos.x,  by = gverts![(j+1)%ngv].y  - pos.y;
+            const denom = dx * (by - ay) - dy * (bx - ax);
+            if (Math.abs(denom) < 1e-6) continue;
+            const t = (ax * (by - ay) - ay * (bx - ax)) / denom;
+            const u = (ax * dy        - ay * dx)         / denom;
+            if (t > 0.01 && u >= 0 && u <= 1) { evDist.push(t); evKind.push(1); }
+          }
+        } else {
+          // --- Fallback: outer coast is the grass boundary (kind 3) ---
+          for (let j = 0; j < nv; j++) {
+            const ax = verts[j].x          - pos.x,  ay = verts[j].y          - pos.y;
+            const bx = verts[(j+1)%nv].x   - pos.x,  by = verts[(j+1)%nv].y   - pos.y;
+            const denom = dx * (by - ay) - dy * (bx - ax);
+            if (Math.abs(denom) < 1e-6) continue;
+            const t = (ax * (by - ay) - ay * (bx - ax)) / denom;
+            const u = (ax * dy        - ay * dx)         / denom;
+            if (t > 0.01 && u >= 0 && u <= 1) { evDist.push(t); evKind.push(3); }
+          }
+        }
+
+        // --- Stone polygon crossings (kind 2) ---
+        if (isl.stonePolys) {
+          for (const sp of isl.stonePolys) {
+            if (sp.length < 3) continue;
+            const ns = sp.length;
+            for (let j = 0; j < ns; j++) {
+              const ax = sp[j].x          - pos.x,  ay = sp[j].y          - pos.y;
+              const bx = sp[(j+1)%ns].x   - pos.x,  by = sp[(j+1)%ns].y   - pos.y;
+              const denom = dx * (by - ay) - dy * (bx - ax);
+              if (Math.abs(denom) < 1e-6) continue;
+              const t = (ax * (by - ay) - ay * (bx - ax)) / denom;
+              const u = (ax * dy        - ay * dx)         / denom;
+              if (t > 0.01 && u >= 0 && u <= 1) { evDist.push(t); evKind.push(2); }
+            }
+          }
+        }
+      }
+
+      // Sort events by ascending distance
+      const order = Array.from({length: evDist.length}, (_, k) => k)
+        .sort((a, b) => evDist[a] !== evDist[b] ? evDist[a] - evDist[b] : evKind[a] - evKind[b]);
+
+      // Walk the ray with a 4-zone visibility budget:
+      //   ocean / beach → cost 1/unit  (full range)
+      //   grass zone    → cost 3/unit  (dense vegetation)
+      //   rocky stone   → cost 2/unit  (open rock; overrides grass)
+      let inGrass   = playerInGrass;
+      let inStone   = playerInStone;
+      let budget    = MAX_D;
+      let worldDist = 0;
+      let exhausted = false;
+
+      for (const ei of order) {
+        const segLen = evDist[ei] - worldDist;
+        if (segLen <= 0) continue;
+        const cost           = inStone ? 2.0 : inGrass ? 5.0 : 1.0;
+        const maxTraversable = budget / cost;
+        if (segLen >= maxTraversable) {
+          worldDist += maxTraversable;
+          exhausted  = true;
+          break;
+        }
+        budget    -= segLen * cost;
+        worldDist  = evDist[ei];
+        if (evKind[ei] === 2) inStone = !inStone; // stone boundary
+        else                  inGrass = !inGrass;  // grass or fallback coast
+      }
+
+      if (!exhausted) {
+        worldDist += budget / (inStone ? 2.0 : inGrass ? 5.0 : 1.0);
+      }
+
+      result[i] = worldDist;
+    }
+  }
+
   private updateCamera(worldState: WorldState, dt: number): void {
     // Find our player using the server-assigned player ID
     const assignedPlayerId = this.networkManager.getAssignedPlayerId();
@@ -2968,6 +3168,17 @@ export class ClientApplication {
       const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
       const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
       this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    }
+
+    // Dynamic AOI zoom: only applied when the player is NOT at the helm.
+    // Helm mount/dismount manages targetZoom separately (HELM_ZOOM / preHelmZoom).
+    if (this.inputManager.getMountKind() !== 'helm') {
+      const aoiZoom = ClientApplication.COAST_ZOOM +
+        (ClientApplication.SEA_ZOOM - ClientApplication.COAST_ZOOM) * this._viewOpenness;
+      if (Math.abs(aoiZoom - this._aoiBaseZoom) > 0.003) {
+        this._aoiBaseZoom = aoiZoom;
+        this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
+      }
     }
 
     // Smooth zoom toward targetZoom (ease-out, ~0.6 s to settle)
@@ -4434,12 +4645,17 @@ export class ClientApplication {
           break;
         }
         case ']':
-          this.renderSystem.toggleHoverBoundaries();
+          this.toggleShipDebugPanel();
           e.preventDefault();
           break;
 
         case '[':
           this.renderSystem.toggleHoverDebugHUD();
+          e.preventDefault();
+          break;
+
+        case '\\':
+          this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
 
@@ -4873,6 +5089,130 @@ export class ClientApplication {
     });
 
     console.log('⌨️ Debug keys initialized (] = toggle hover boundaries)');
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Ship debug panel
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private _createShipDebugPanel(): HTMLDivElement {
+    const panel = document.createElement('div');
+    panel.id = 'ship-debug-panel';
+    Object.assign(panel.style, {
+      position: 'fixed',
+      top: '8px',
+      right: '8px',
+      zIndex: '9999',
+      background: 'rgba(0,0,0,0.75)',
+      color: '#e8e8e8',
+      fontFamily: 'monospace',
+      fontSize: '11px',
+      padding: '6px 8px',
+      borderRadius: '4px',
+      border: '1px solid rgba(255,255,255,0.2)',
+      minWidth: '380px',
+      maxHeight: '320px',
+      overflowY: 'auto',
+      userSelect: 'none',
+      cursor: 'move',
+      boxShadow: '0 2px 8px rgba(0,0,0,0.5)',
+    });
+
+    // Title bar
+    const title = document.createElement('div');
+    Object.assign(title.style, {
+      fontWeight: 'bold',
+      marginBottom: '4px',
+      color: '#ffcc44',
+      fontSize: '11px',
+    });
+    title.textContent = '🚢 Ships received';
+    panel.appendChild(title);
+
+    // Table
+    const table = document.createElement('table');
+    Object.assign(table.style, { borderCollapse: 'collapse', width: '100%' });
+    const thead = table.createTHead();
+    const hrow = thead.insertRow();
+    for (const col of ['ID', 'Name', 'X', 'Y', 'Spd', 'Hull', 'Co', 'Vis']) {
+      const th = document.createElement('th');
+      Object.assign(th.style, {
+        textAlign: 'left', padding: '1px 5px 1px 0',
+        color: '#aac4ff', borderBottom: '1px solid rgba(255,255,255,0.15)',
+      });
+      th.textContent = col;
+      hrow.appendChild(th);
+    }
+    this._shipDebugTableBody = table.createTBody();
+    panel.appendChild(table);
+
+    // Drag support
+    let dragOffX = 0, dragOffY = 0, dragging = false;
+    panel.addEventListener('mousedown', (e) => {
+      dragging = true;
+      dragOffX = e.clientX - panel.getBoundingClientRect().left;
+      dragOffY = e.clientY - panel.getBoundingClientRect().top;
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const left = e.clientX - dragOffX;
+      const top  = e.clientY - dragOffY;
+      panel.style.left  = `${left}px`;
+      panel.style.top   = `${top}px`;
+      panel.style.right = 'auto';
+    });
+    window.addEventListener('mouseup', () => { dragging = false; });
+
+    document.body.appendChild(panel);
+    return panel;
+  }
+
+  public toggleShipDebugPanel(): void {
+    if (this._shipDebugPanel) {
+      this._shipDebugPanel.remove();
+      this._shipDebugPanel = null;
+      this._shipDebugTableBody = null;
+    } else {
+      this._shipDebugPanel = this._createShipDebugPanel();
+    }
+  }
+
+  private _updateShipDebugPanel(): void {
+    if (!this._shipDebugPanel || !this._shipDebugTableBody) return;
+    const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+    const ships = ws?.ships ?? [];
+    const tbody = this._shipDebugTableBody;
+    tbody.innerHTML = '';
+    for (const s of ships) {
+      const spd = Math.sqrt(s.velocity.x * s.velocity.x + s.velocity.y * s.velocity.y);
+      const fogVis = this.renderSystem.fogVisibleAt(s.position.x, s.position.y, 200);
+      const tr = tbody.insertRow();
+      const cells = [
+        String(s.id),
+        s.shipName ?? '—',
+        s.position.x.toFixed(0),
+        s.position.y.toFixed(0),
+        spd.toFixed(1),
+        (s.hullHealth ?? 100).toFixed(0),
+        String(s.companyId ?? 0),
+        fogVis ? '✓' : '✗',
+      ];
+      for (let i = 0; i < cells.length; i++) {
+        const td = tr.insertCell();
+        Object.assign(td.style, { padding: '1px 5px 1px 0', whiteSpace: 'nowrap' });
+        if (i === 5) {
+          const hp = parseFloat(cells[i]);
+          td.style.color = hp < 30 ? '#ff5555' : hp < 60 ? '#ffaa44' : '#88ff88';
+        } else if (i === 7) {
+          td.style.color = fogVis ? '#88ff88' : '#ff5555';
+        }
+        td.textContent = cells[i];
+      }
+    }
+    // Update title count
+    const title = this._shipDebugPanel.firstElementChild as HTMLElement;
+    if (title) title.textContent = `🚢 Ships received (${ships.length})`;
   }
   
   /**

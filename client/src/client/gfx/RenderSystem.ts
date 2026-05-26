@@ -152,6 +152,11 @@ export class RenderSystem {
   public islandCannonId: number | null = null;
   /** Live aim angle (world radians) for the mounted island cannon barrel. Null when not mounted. */
   public islandCannonAimAngle: number | null = null;
+  /** Per-direction hit distances (world units) from the latest AOI ray cast.
+   *  Set by ClientApplication each frame when the local player is in-game. */
+  public fogRayHitDist: Float32Array | null = null;
+  /** Off-screen canvas reused for fog-mask compositing. */
+  private _fogCanvas: HTMLCanvasElement | null = null;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
@@ -3395,6 +3400,8 @@ export class RenderSystem {
     this.drawFlameCones(camera);
     // Grapeshot / canister hit-scan tracers
     this.drawGrapeshotTracers(camera);
+    // Directional fog mask (after world geometry and effects, before HUD)
+    this.drawFogMask(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
@@ -3471,6 +3478,106 @@ export class RenderSystem {
   }
 
   /** Semi-transparent overlay drawn over the game while reconnecting. */
+  /**
+   * Render a directional fog mask based on per-ray hit distances from the AOI ray cast.
+   *
+   * The mask uses an off-screen canvas for compositing:
+   *  1. Fill with a dark sea-fog color.
+   *  2. Hard-erase the visibility polygon (interior fully clear).
+   *  3. Blurred-erase the polygon again so the boundary fades softly into fog.
+   *  4. Blit onto the main canvas at reduced opacity.
+   */
+  /**
+   * Returns true if a world position falls within the current fog visibility radius.
+   * Uses the per-direction ray hit distances; always returns true when fog data is unavailable.
+   */
+  public fogVisibleAt(wx: number, wy: number, radius = 0): boolean {
+    const hitDist = this.fogRayHitDist;
+    if (!hitDist) return true;
+    const player = this._cachedLocalPlayer;
+    if (!player) return true;
+    const N = hitDist.length;
+    if (N === 0) return true;
+    const dx = wx - player.position.x;
+    const dy = wy - player.position.y;
+    if (dx * dx + dy * dy < 1) return true;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    let angle = Math.atan2(dy, dx);
+    if (angle < 0) angle += Math.PI * 2;
+    const frac = angle / (Math.PI * 2 / N);
+    const i0 = Math.floor(frac) % N;
+    const i1 = (i0 + 1) % N;
+    const t  = frac - Math.floor(frac);
+    const fogDist = hitDist[i0] * (1 - t) + hitDist[i1] * t;
+    return dist <= fogDist * 1.05 + radius;
+  }
+
+  private drawFogMask(camera: Camera): void {
+    const hitDist = this.fogRayHitDist;
+    if (!hitDist) return;
+
+    const localPlayer = this._cachedLocalPlayer;
+    if (!localPlayer) return;
+
+    const N      = hitDist.length;
+    if (N === 0) return;
+
+    const screenPos = camera.worldToScreen(localPlayer.position);
+    const cx   = screenPos.x;
+    const cy   = screenPos.y;
+    const zoom = camera.getState().zoom;
+    const TWO_PI = Math.PI * 2;
+    const { width, height } = this.canvas;
+
+    // Ensure the off-screen fog canvas matches the current resolution
+    if (!this._fogCanvas || this._fogCanvas.width !== width || this._fogCanvas.height !== height) {
+      this._fogCanvas = document.createElement('canvas');
+      this._fogCanvas.width  = width;
+      this._fogCanvas.height = height;
+    }
+    const fc   = this._fogCanvas;
+    const fctx = fc.getContext('2d')!;
+
+    // --- Step 1: Fill with opaque dark fog ---
+    fctx.globalCompositeOperation = 'source-over';
+    fctx.clearRect(0, 0, width, height);
+    fctx.fillStyle = '#000612'; // deep navy-black
+    fctx.fillRect(0, 0, width, height);
+
+    // Helper: trace the visibility fan polygon on the fog canvas
+    const tracePolygon = (scale: number) => {
+      fctx.beginPath();
+      fctx.moveTo(cx, cy);
+      for (let i = 0; i <= N; i++) {
+        const idx   = i % N;
+        const angle = idx * TWO_PI / N;
+        const dist  = hitDist[idx] * zoom * scale;
+        fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
+      }
+      fctx.closePath();
+    };
+
+    // --- Step 2: Hard-erase visibility interior ---
+    fctx.globalCompositeOperation = 'destination-out';
+    fctx.fillStyle = 'rgba(0,0,0,1)';
+    tracePolygon(1.0);
+    fctx.fill();
+
+    // --- Step 3: Soft feather — blurred erase extends the clear zone outward ---
+    fctx.filter = 'blur(48px)';
+    tracePolygon(1.0);
+    fctx.fill();
+    fctx.filter = 'none';
+
+    fctx.globalCompositeOperation = 'source-over';
+
+    // --- Step 4: Blit onto main canvas at 68% opacity ---
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.68;
+    this.ctx.drawImage(fc, 0, 0);
+    this.ctx.restore();
+  }
+
   drawReconnectingOverlay(): void {
     const { width, height } = this.canvas;
     const ctx = this.ctx;
@@ -4612,6 +4719,8 @@ export class RenderSystem {
       // Cull structures that are entirely off-screen
       if (ssp.x + sz < 0 || ssp.x - sz > this.canvas.width ||
           ssp.y + sz < 0 || ssp.y - sz > this.canvas.height) continue;
+      // Fog culling — don't render structures outside the player's view range
+      if (!this.fogVisibleAt(s.x, s.y)) continue;
       const isHovered  = this._hoveredStructure?.id === s.id;
       const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
@@ -7276,7 +7385,13 @@ export class RenderSystem {
 
     // Visual-only wrap ghosts for seam visibility.
     // Canonical world objects remain unchanged for collisions and gameplay.
-    const renderShips = this.buildWrappedRenderCopies(worldState.ships, camera, 320);
+    const _localCarrierId = this._cachedLocalPlayer?.carrierId ?? 0;
+    // Filter ships by fog visibility. The carrier ship (if any) is always included
+    // so the player never loses their own ship when at the fog boundary.
+    const renderShips = this.buildWrappedRenderCopies(
+      worldState.ships.filter(s => s.id === _localCarrierId || this.fogVisibleAt(s.position.x, s.position.y, 200)),
+      camera, 320
+    );
     const renderPlayers = this.buildWrappedRenderCopies(
       // Dead players (health ≤ 0) are hidden from the world — they're either
       // awaiting respawn or are stale zombie entries (e.g. from a page reload).
@@ -7286,7 +7401,7 @@ export class RenderSystem {
       camera,
       80,
       (p) => p.id === this.localPlayerId,
-    );
+    ).filter(p => p.id === this.localPlayerId || this.fogVisibleAt(p.position.x, p.position.y));
     const renderCannonballs = this.buildWrappedRenderCopies(worldState.cannonballs, camera, 40);
     
     // Render order (from lowest to highest):
@@ -7582,6 +7697,9 @@ export class RenderSystem {
 
     // Queue NPCs (layer 2 - same as players)
     for (const npc of (worldState.npcs || [])) {
+      const _npcShip = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
+      const _npcCheckPos = _npcShip?.position ?? npc.position;
+      if (!this.fogVisibleAt(_npcCheckPos.x, _npcCheckPos.y)) continue;
       this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, worldState, camera));
     }
 

@@ -597,6 +597,9 @@ typedef struct WebSocketPlayer {
     uint32_t on_island_id;
     /* Dock walking — 0 = not on shipyard dock, >0 = structure id of the dock */
     uint32_t on_dock_id;
+    /* Dynamic AOI view radius (server units). Updated from client input each frame.
+     * Used to tune what entities are relevant to this player. 0 = unknown/default. */
+    float view_radius;
 } WebSocketPlayer;
 
 struct WebSocketStats {

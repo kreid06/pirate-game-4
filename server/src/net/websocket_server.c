@@ -2508,6 +2508,17 @@ int websocket_server_update(struct Sim* sim) {
                                         player->is_sprinting = (strstr(payload, "\"is_sprinting\":true") != NULL);
                                         player->rotation = rotation;
                                         player->last_input_time = get_time_ms();
+                                        /* Dynamic AOI: update per-player view radius from client hint */
+                                        {
+                                            const char* vr_p = strstr(payload, "\"view_radius\":");
+                                            if (vr_p) {
+                                                float vr = 0.0f;
+                                                sscanf(vr_p + 14, "%f", &vr);
+                                                /* Convert client units → server units and cap at a safe maximum */
+                                                if (vr > 0.0f)
+                                                    player->view_radius = CLIENT_TO_SERVER(fminf(vr, 5500.0f));
+                                            }
+                                        }
                                         
                                         // Log player input (silenced for debugging)
                                         // log_info("🎮 INPUT[P%u]: movement(%.2f, %.2f) rotation=%.2f° moving=%d",
@@ -2575,6 +2586,16 @@ int websocket_server_update(struct Sim* sim) {
                                     player->is_moving = is_moving;
                                     player->is_sprinting = (strstr(payload, "\"is_sprinting\":true") != NULL);
                                     player->last_input_time = get_time_ms();
+                                    /* Dynamic AOI: update per-player view radius from client hint */
+                                    {
+                                        const char* vr_p = strstr(payload, "\"view_radius\":");
+                                        if (vr_p) {
+                                            float vr = 0.0f;
+                                            sscanf(vr_p + 14, "%f", &vr);
+                                            if (vr > 0.0f)
+                                                player->view_radius = CLIENT_TO_SERVER(fminf(vr, 5500.0f));
+                                        }
+                                    }
                                     
                                     // Log movement state change (silenced for debugging)
                                     // log_info("🚶 MOVEMENT_STATE[P%u]: direction(%.2f, %.2f) is_moving=%d",
@@ -7199,7 +7220,18 @@ int websocket_server_update(struct Sim* sim) {
             memset(last_levelstats_tp, 0xFF, sizeof(last_levelstats_tp));
             levelstats_initialized = true;
         }
-        
+
+        /* ── Per-player AOI ship index — populated alongside ships_json each tick.
+         * Stores each ship's client-unit position + byte offset/length inside
+         * ships_json so the per-player send loop can slice out only in-range ships.
+         */
+        static float    aoi_ship_px[MAX_SHIPS];
+        static float    aoi_ship_py[MAX_SHIPS];
+        static uint32_t aoi_ship_id[MAX_SHIPS];
+        static int      aoi_ship_start[MAX_SHIPS];
+        static int      aoi_ship_len[MAX_SHIPS];
+        int aoi_ship_count = 0;
+
         // Log which ship source we're using
         static uint32_t last_ship_source_log = 0;
         if (current_time - last_ship_source_log > 5000) {
@@ -7395,9 +7427,18 @@ int websocket_server_update(struct Sim* sim) {
                     }
                 }
                 {
+                    int _aoi_s = ships_offset; /* byte start of this entry in ships_json */
                     int n = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
                     if (n > 0) ships_offset += n;
                     if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
+                    if (aoi_ship_count < MAX_SHIPS && n > 0) {
+                        aoi_ship_px[aoi_ship_count]    = pos_x;
+                        aoi_ship_py[aoi_ship_count]    = pos_y;
+                        aoi_ship_id[aoi_ship_count]    = ship->id;
+                        aoi_ship_start[aoi_ship_count] = _aoi_s;
+                        aoi_ship_len[aoi_ship_count]   = n;
+                        aoi_ship_count++;
+                    }
                 }
                 first_ship = false;
             }
@@ -7480,9 +7521,18 @@ int websocket_server_update(struct Sim* sim) {
                     
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
                     {
+                        int _aoi_s2 = ships_offset;
                         int n2 = snprintf(ships_json + ships_offset, sizeof(ships_json) - (size_t)(ships_offset < (int)sizeof(ships_json) ? ships_offset : (int)sizeof(ships_json)-1), "%s", ship_entry);
                         if (n2 > 0) ships_offset += n2;
                         if (ships_offset >= (int)sizeof(ships_json) - 1) ships_offset = (int)sizeof(ships_json) - 1;
+                        if (aoi_ship_count < MAX_SHIPS && n2 > 0) {
+                            aoi_ship_px[aoi_ship_count]    = ships[s].x;
+                            aoi_ship_py[aoi_ship_count]    = ships[s].y;
+                            aoi_ship_id[aoi_ship_count]    = ships[s].ship_id;
+                            aoi_ship_start[aoi_ship_count] = _aoi_s2;
+                            aoi_ship_len[aoi_ship_count]   = n2;
+                            aoi_ship_count++;
+                        }
                     }
                     first_ship = false;
                 }
@@ -7670,120 +7720,156 @@ int websocket_server_update(struct Sim* sim) {
         // Cap at maximum rate
         if (current_update_rate > 30) current_update_rate = 30;
         
-        // ── Assemble GAME_STATE directly — no intermediate copy ────────────────────
-        // Builds the JSON by memcpy-ing the already-serialised sub-blobs directly
-        // into the output buffer.  Avoids a second full-size snprintf that would
-        // scan and copy up to 100 KB purely to concatenate strings.
-        static char game_state[131072];
-        int gs_off = 0;
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
-                current_time / 33, current_time);
-        if (gs_off + ships_offset < (int)sizeof(game_state) - 1) {
-            memcpy(game_state + gs_off, ships_json, (size_t)ships_offset);
-            gs_off += ships_offset;
-        }
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"players\":");
-        if (gs_off + players_offset < (int)sizeof(game_state) - 1) {
-            memcpy(game_state + gs_off, players_json, (size_t)players_offset);
-            gs_off += players_offset;
-        }
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"projectiles\":");
-        if (gs_off + projectiles_offset < (int)sizeof(game_state) - 1) {
-            memcpy(game_state + gs_off, projectiles_json, (size_t)projectiles_offset);
-            gs_off += projectiles_offset;
-        }
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off, ",\"npcs\":");
-        if (gs_off + npcs_offset < (int)sizeof(game_state) - 1) {
-            memcpy(game_state + gs_off, npcs_json, (size_t)npcs_offset);
-            gs_off += npcs_offset;
-        }
-        /* ── Tombstones ───────────────────────────────────────────────────── */
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                           ",\"tombstones\":[");
+        /* ── Pre-build shared blobs (tombstones, dropped items, companies) ─────────
+         * Small sections rebuilt once per tick; per-player loop memcpy's them in.
+         */
+        static char tmb_json[4096];
         {
-            bool first_tomb = true;
-            for (int ti = 0; ti < (int)MAX_TOMBSTONES; ti++) {
-                if (!tombstones[ti].active) continue;
-                uint32_t age = current_time - tombstones[ti].spawn_time_ms;
-                uint32_t rem = (age < TOMBSTONE_TTL_MS) ? (TOMBSTONE_TTL_MS - age) : 0u;
-                float tx, ty;
-                tombstone_world_pos(&tombstones[ti], &tx, &ty);
-                if (!first_tomb && gs_off < (int)sizeof(game_state) - 2)
-                    game_state[gs_off++] = ',';
-                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+            int _to = snprintf(tmb_json, sizeof(tmb_json), "[");
+            bool _tf = true;
+            for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
+                if (!tombstones[_ti].active) continue;
+                uint32_t _age = current_time - tombstones[_ti].spawn_time_ms;
+                uint32_t _rem = (_age < TOMBSTONE_TTL_MS) ? (TOMBSTONE_TTL_MS - _age) : 0u;
+                float _tx, _ty;
+                tombstone_world_pos(&tombstones[_ti], &_tx, &_ty);
+                if (!_tf && _to < (int)sizeof(tmb_json) - 2) tmb_json[_to++] = ',';
+                _to += snprintf(tmb_json + _to, sizeof(tmb_json) - _to,
                     "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
-                    tombstones[ti].id, tx, ty,
-                    tombstones[ti].owner_name, rem);
-                first_tomb = false;
+                    tombstones[_ti].id, _tx, _ty, tombstones[_ti].owner_name, _rem);
+                _tf = false;
             }
+            if (_to < (int)sizeof(tmb_json) - 1) tmb_json[_to++] = ']';
+            tmb_json[_to] = '\0';
         }
-        if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
-        /* ── Dropped Items ────────────────────────────────────────────────── */
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                           ",\"droppedItems\":[");
+        static char ditem_json[4096];
         {
-            bool first_drop = true;
-            for (int di = 0; di < (int)MAX_DROPPED_ITEMS; di++) {
-                if (!dropped_items[di].active) continue;
-                if (!first_drop && gs_off < (int)sizeof(game_state) - 2)
-                    game_state[gs_off++] = ',';
-                {
-                    uint32_t _now  = get_time_ms();
-                    uint32_t _age  = _now - dropped_items[di].spawn_time_ms;
-                    uint32_t _rem  = (_age < DROPPED_ITEM_TTL_MS) ? (DROPPED_ITEM_TTL_MS - _age) : 0u;
-                    gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                        "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f,\"remainingMs\":%u}",
-                        dropped_items[di].id,
-                        (unsigned)dropped_items[di].item_kind,
-                        (unsigned)dropped_items[di].quantity,
-                        dropped_items[di].x, dropped_items[di].y,
-                        _rem);
-                }
-                first_drop = false;
+            int _do = snprintf(ditem_json, sizeof(ditem_json), "[");
+            bool _df = true;
+            for (int _di = 0; _di < (int)MAX_DROPPED_ITEMS; _di++) {
+                if (!dropped_items[_di].active) continue;
+                if (!_df && _do < (int)sizeof(ditem_json) - 2) ditem_json[_do++] = ',';
+                uint32_t _dnow = get_time_ms();
+                uint32_t _dage = _dnow - dropped_items[_di].spawn_time_ms;
+                uint32_t _drem = (_dage < DROPPED_ITEM_TTL_MS) ? (DROPPED_ITEM_TTL_MS - _dage) : 0u;
+                _do += snprintf(ditem_json + _do, sizeof(ditem_json) - _do,
+                    "{\"id\":%u,\"itemKind\":%u,\"quantity\":%u,\"x\":%.1f,\"y\":%.1f,\"remainingMs\":%u}",
+                    dropped_items[_di].id, (unsigned)dropped_items[_di].item_kind,
+                    (unsigned)dropped_items[_di].quantity,
+                    dropped_items[_di].x, dropped_items[_di].y, _drem);
+                _df = false;
             }
+            if (_do < (int)sizeof(ditem_json) - 1) ditem_json[_do++] = ']';
+            ditem_json[_do] = '\0';
         }
-        if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
-
-        /* ── Dynamic Companies ──────────────────────────────────────────── */
-        gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
-                           ",\"companies\":[");
+        static char co_json[1024];
         {
-            bool first_co = true;
-            for (int ci = 0; ci < dynamic_company_count; ci++) {
-                if (!dynamic_companies[ci].active) continue;
-                if (!first_co && gs_off < (int)sizeof(game_state) - 2)
-                    game_state[gs_off++] = ',';
-                gs_off += snprintf(game_state + gs_off, (int)sizeof(game_state) - gs_off,
+            int _co = snprintf(co_json, sizeof(co_json), "[");
+            bool _cf = true;
+            for (int _ci2 = 0; _ci2 < dynamic_company_count; _ci2++) {
+                if (!dynamic_companies[_ci2].active) continue;
+                if (!_cf && _co < (int)sizeof(co_json) - 2) co_json[_co++] = ',';
+                _co += snprintf(co_json + _co, sizeof(co_json) - _co,
                     "{\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
-                    dynamic_companies[ci].id,
-                    dynamic_companies[ci].name,
-                    dynamic_companies[ci].founder_id);
-                first_co = false;
+                    dynamic_companies[_ci2].id, dynamic_companies[_ci2].name,
+                    dynamic_companies[_ci2].founder_id);
+                _cf = false;
             }
+            if (_co < (int)sizeof(co_json) - 1) co_json[_co++] = ']';
+            co_json[_co] = '\0';
         }
-        if (gs_off < (int)sizeof(game_state) - 1) game_state[gs_off++] = ']';
+        int tmb_len   = (int)strlen(tmb_json);
+        int ditem_len = (int)strlen(ditem_json);
+        int co_len    = (int)strlen(co_json);
 
-        if (gs_off < (int)sizeof(game_state) - 1) {
-            game_state[gs_off++] = '}';
-            game_state[gs_off]   = '\0';
-        }
+        /* ── Per-player AOI filtered send ─────────────────────────────────────────
+         * Each client receives a GAME_STATE whose ships[] array contains only ships
+         * within their view_radius (plus the ship they are riding).  All other
+         * sections (players, projectiles, NPCs, tombstones, items, companies) are
+         * sent in full — future work can add per-player filtering there too.
+         *
+         * Optimisation notes for the future:
+         *  1. Filter players[] by AOI (pre-build per-player player entries).
+         *  2. Filter NPCs[]  by AOI (use ship position for on-ship NPCs).
+         *  3. Use delta compression: only send changed fields, not full objects.
+         */
+        static char per_ship_json[64000];
+        static char per_gs[131072];
+        static char per_frame[131086];
 
-        // ── Frame once, broadcast to every client ──────────────────────────────
-        // strlen + websocket_create_frame computed once outside the loop.
-        // All clients receive the identical pre-built frame buffer.
-        static char broadcast_frame[131086];
-        size_t gs_payload_len = (size_t)gs_off;
-        size_t broadcast_frame_len = websocket_create_frame(
-            WS_OPCODE_TEXT, game_state, gs_payload_len,
-            broadcast_frame, sizeof(broadcast_frame));
-        if (broadcast_frame_len > 0) {
-            for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-                struct WebSocketClient* client = &ws_server.clients[i];
-                if (client->connected && client->handshake_complete) {
-                    ssize_t sent = send(client->fd, broadcast_frame, broadcast_frame_len, 0);
-                    if (sent > 0) ws_server.packets_sent++;
+        for (int _ci = 0; _ci < WS_MAX_CLIENTS; _ci++) {
+            struct WebSocketClient* _client = &ws_server.clients[_ci];
+            if (!_client->connected || !_client->handshake_complete || _client->player_id == 0)
+                continue;
+            WebSocketPlayer* _vp = find_player(_client->player_id);
+            if (!_vp || !_vp->active) continue;
+
+            /* AOI centre — use carrier ship's live position when the player is on a ship,
+             * because ws_player->x/y is only written at board time, not each tick. */
+            float _cx = _vp->x, _cy = _vp->y;
+            if (_vp->parent_ship_id != 0) {
+                for (int _pi = 0; _pi < aoi_ship_count; _pi++) {
+                    if (aoi_ship_id[_pi] == (uint32_t)_vp->parent_ship_id) {
+                        _cx = aoi_ship_px[_pi];
+                        _cy = aoi_ship_py[_pi];
+                        break;
+                    }
                 }
+            }
+
+            /* Simple radius check matching the client MAX_VIEW_DIST (5000 client units).
+             * Ships inside the radius are sent; the client handles fog-based visual filtering. */
+            const float _view_r  = 5000.0f;
+            const float _view_r2 = _view_r * _view_r;
+
+            /* Build per-client ships_json ---------------------------------------- */
+            int _soff = snprintf(per_ship_json, sizeof(per_ship_json), "[");
+            bool _sfirst = true;
+            for (int _si = 0; _si < aoi_ship_count; _si++) {
+                float _dx = aoi_ship_px[_si] - _cx, _dy = aoi_ship_py[_si] - _cy;
+                if (_dx * _dx + _dy * _dy > _view_r2) continue;
+                if (!_sfirst && _soff < (int)sizeof(per_ship_json) - 1)
+                    per_ship_json[_soff++] = ',';
+                int _room = (int)sizeof(per_ship_json) - _soff - 2;
+                if (aoi_ship_len[_si] > 0 && aoi_ship_len[_si] <= _room) {
+                    memcpy(per_ship_json + _soff,
+                           ships_json + aoi_ship_start[_si],
+                           (size_t)aoi_ship_len[_si]);
+                    _soff += aoi_ship_len[_si];
+                }
+                _sfirst = false;
+            }
+            if (_soff < (int)sizeof(per_ship_json) - 1) per_ship_json[_soff++] = ']';
+            per_ship_json[_soff] = '\0';
+
+            /* Assemble per-player game_state via memcpy from pre-built blobs ------ */
+            int _goff = 0;
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff,
+                              "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
+                              current_time / 33, current_time);
+#define _MC(buf, len) do { if (_goff + (len) < (int)sizeof(per_gs) - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
+            _MC(per_ship_json,    _soff);
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"players\":");
+            _MC(players_json,     players_offset);
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"projectiles\":");
+            _MC(projectiles_json, projectiles_offset);
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"npcs\":");
+            _MC(npcs_json,        npcs_offset);
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"tombstones\":");
+            _MC(tmb_json,         tmb_len);
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"droppedItems\":");
+            _MC(ditem_json,       ditem_len);
+            _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"companies\":");
+            _MC(co_json,          co_len);
+#undef _MC
+            if (_goff < (int)sizeof(per_gs) - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
+
+            /* Frame + send ------------------------------------------------------- */
+            size_t _flen = websocket_create_frame(WS_OPCODE_TEXT, per_gs, (size_t)_goff,
+                                                  per_frame, sizeof(per_frame));
+            if (_flen > 0) {
+                ssize_t _sent = send(_client->fd, per_frame, _flen, 0);
+                if (_sent > 0) ws_server.packets_sent++;
             }
         }
         last_game_state_time = current_time;

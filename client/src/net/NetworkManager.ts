@@ -171,6 +171,8 @@ interface InputMessage extends NetworkMessage {
   };
   actions: number;
   is_sprinting?: boolean;
+  /** Average AOI view distance (client world units). Server uses this to tune per-player AOI radius. */
+  view_radius?: number;
 }
 
 /**
@@ -623,6 +625,8 @@ export class NetworkManager {
   public mapCenterX: number = 45000;
   public mapCenterY: number = 45000;
   public mapWrap: boolean = true;
+  /** Average AOI view radius (client world units) from the latest ray cast. Set by ClientApplication each frame. */
+  public viewRadius: number = 0;
   /** Fired when the server broadcasts a resource_damaged event. */
   public onResourceDamaged: ((islandId: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
   /** Fired when a depleted resource respawns (resource_respawned event). */
@@ -1002,7 +1006,8 @@ export class NetworkManager {
           y: inputFrame.movement.y
         },
         actions: inputFrame.actions,
-        is_sprinting: (inputFrame.actions & PlayerActions.SPRINT) !== 0
+        is_sprinting: (inputFrame.actions & PlayerActions.SPRINT) !== 0,
+        view_radius: this.viewRadius > 0 ? Math.round(this.viewRadius) : undefined
       };
       
       this.sendMessage(message);
