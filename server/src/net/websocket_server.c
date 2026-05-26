@@ -246,15 +246,27 @@ typedef struct {
     bool has_output;
     SharedBlobSnapshot job;
     SharedBlobOutput output;
+    uint64_t jobs_submitted;
+    uint64_t jobs_completed;
+    uint64_t fallback_sync_builds;
+    uint64_t last_build_us;
+    uint64_t max_build_us;
 } SharedBlobWorker;
 
 static SharedBlobWorker g_blob_worker = {0};
+
+static uint64_t g_ship_json_last_us = 0;
+static uint64_t g_ship_json_max_us = 0;
+static uint64_t g_send_loop_last_us = 0;
+static uint64_t g_send_loop_max_us = 0;
 
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
 static void blob_worker_submit_snapshot(uint32_t current_time);
 static bool blob_worker_try_get_output(SharedBlobOutput* out);
 static int blob_worker_start(void);
 static void blob_worker_stop(void);
+static void blob_worker_note_fallback_build(void);
+static void blob_worker_log_stats(void);
 
 int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32_t *out_count) {
     if (!out_structs || !out_count) return -1;
@@ -1017,11 +1029,16 @@ static void* blob_worker_main(void* arg) {
         g_blob_worker.has_job = false;
         pthread_mutex_unlock(&g_blob_worker.mtx);
 
+        uint64_t _t0 = get_time_us();
         build_shared_blobs_from_snapshot(&local_job, &local_out);
+        uint64_t _dt = get_time_us() - _t0;
 
         pthread_mutex_lock(&g_blob_worker.mtx);
         g_blob_worker.output = local_out;
         g_blob_worker.has_output = true;
+        g_blob_worker.jobs_completed++;
+        g_blob_worker.last_build_us = _dt;
+        if (_dt > g_blob_worker.max_build_us) g_blob_worker.max_build_us = _dt;
     }
     pthread_mutex_unlock(&g_blob_worker.mtx);
     return NULL;
@@ -1082,6 +1099,7 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     g_blob_worker.job.world_npc_count = world_npc_count;
     memcpy(g_blob_worker.job.world_npcs, world_npcs, sizeof(world_npcs));
     g_blob_worker.has_job = true;
+    g_blob_worker.jobs_submitted++;
     pthread_cond_signal(&g_blob_worker.cv);
     pthread_mutex_unlock(&g_blob_worker.mtx);
 }
@@ -1096,6 +1114,32 @@ static bool blob_worker_try_get_output(SharedBlobOutput* out) {
     }
     pthread_mutex_unlock(&g_blob_worker.mtx);
     return ok;
+}
+
+static void blob_worker_note_fallback_build(void) {
+    if (!g_blob_worker.started) return;
+    pthread_mutex_lock(&g_blob_worker.mtx);
+    g_blob_worker.fallback_sync_builds++;
+    pthread_mutex_unlock(&g_blob_worker.mtx);
+}
+
+static void blob_worker_log_stats(void) {
+    if (!g_blob_worker.started) return;
+    pthread_mutex_lock(&g_blob_worker.mtx);
+    uint64_t _submitted = g_blob_worker.jobs_submitted;
+    uint64_t _completed = g_blob_worker.jobs_completed;
+    uint64_t _fallbacks = g_blob_worker.fallback_sync_builds;
+    uint64_t _last_us   = g_blob_worker.last_build_us;
+    uint64_t _max_us    = g_blob_worker.max_build_us;
+    pthread_mutex_unlock(&g_blob_worker.mtx);
+    uint64_t _lag = (_submitted >= _completed) ? (_submitted - _completed) : 0;
+    log_info("🧵 blob-worker stats: submitted=%llu completed=%llu lag=%llu fallback_sync=%llu last_build=%lluus max_build=%lluus",
+             (unsigned long long)_submitted,
+             (unsigned long long)_completed,
+             (unsigned long long)_lag,
+             (unsigned long long)_fallbacks,
+             (unsigned long long)_last_us,
+             (unsigned long long)_max_us);
 }
 
 /**
@@ -7569,6 +7613,12 @@ int websocket_server_update(struct Sim* sim) {
     // Debug player state every 10 seconds
     if (current_time - last_debug_time > 10000) {
         debug_player_state();
+        blob_worker_log_stats();
+        log_info("⏱️ main-thread serialize stats: ships_last=%lluus ships_max=%lluus send_last=%lluus send_max=%lluus",
+                 (unsigned long long)g_ship_json_last_us,
+                 (unsigned long long)g_ship_json_max_us,
+                 (unsigned long long)g_send_loop_last_us,
+                 (unsigned long long)g_send_loop_max_us);
         last_debug_time = current_time;
     }
     
@@ -7576,6 +7626,7 @@ int websocket_server_update(struct Sim* sim) {
     uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
     
     if (current_time - last_game_state_time > update_interval) {
+        uint64_t _ship_build_t0_us = get_time_us();
         // Build ships JSON array with physics properties and modules
         // Each brigantine ship entry: ~2400 bytes (22 modules + levelStats).
         // MAX_SIMPLE_SHIPS=50 → worst case ~120000 bytes. Use static to avoid stack overflow.
@@ -7913,6 +7964,8 @@ int websocket_server_update(struct Sim* sim) {
             }
         }
         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "]");
+        g_ship_json_last_us = get_time_us() - _ship_build_t0_us;
+        if (g_ship_json_last_us > g_ship_json_max_us) g_ship_json_max_us = g_ship_json_last_us;
         
         /* ── Pre-build shared blobs (players, projectiles, NPCs, tombstones,
          * dropped items, companies) in worker with synchronous fallback.
@@ -7944,6 +7997,7 @@ int websocket_server_update(struct Sim* sim) {
             _snap.world_npc_count = world_npc_count;
             memcpy(_snap.world_npcs, world_npcs, sizeof(world_npcs));
             build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache);
+            blob_worker_note_fallback_build();
             shared_blob_cache_valid = true;
         }
 
@@ -7979,6 +8033,7 @@ int websocket_server_update(struct Sim* sim) {
         static char per_ship_json[64000];
         static char per_gs[131072];
         static char per_frame[131086];
+        uint64_t _send_loop_t0_us = get_time_us();
 
         for (int _ci = 0; _ci < WS_MAX_CLIENTS; _ci++) {
             struct WebSocketClient* _client = &ws_server.clients[_ci];
@@ -8055,6 +8110,8 @@ int websocket_server_update(struct Sim* sim) {
                 if (_sent > 0) ws_server.packets_sent++;
             }
         }
+        g_send_loop_last_us = get_time_us() - _send_loop_t0_us;
+        if (g_send_loop_last_us > g_send_loop_max_us) g_send_loop_max_us = g_send_loop_last_us;
         last_game_state_time = current_time;
     }
     
