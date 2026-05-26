@@ -2959,6 +2959,7 @@ export class ClientApplication {
         playerShip,
         controlGroups: this.controlGroups,
         windAngle: this.networkManager.windAngle,
+        debugMode: this.uiManager.isDebugMode,
       });
 
       // Crafting menu (rendered on top of all other UI)
