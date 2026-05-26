@@ -202,8 +202,8 @@ static DroppedItem dropped_items[MAX_DROPPED_ITEMS];
 static uint32_t    next_dropped_item_id = 1;
 
 /* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
- * Offloads serialization of tombstones/droppedItems/companies from the main
- * tick thread. The authoritative simulation and send loop remain single-threaded.
+ * Offloads non-authoritative JSON serialization from the main tick thread.
+ * The authoritative simulation and send loop remain single-threaded.
  */
 typedef struct {
     uint32_t current_time;
@@ -213,15 +213,27 @@ typedef struct {
     int dynamic_company_count;
     int ship_count;
     SimpleShip ships[MAX_SIMPLE_SHIPS];
+    WebSocketPlayer players[WS_MAX_CLIENTS];
+    struct Projectile projectiles[MAX_PROJECTILES];
+    uint16_t projectile_count;
+    WorldNpc world_npcs[MAX_WORLD_NPCS];
+    int world_npc_count;
 } SharedBlobSnapshot;
 
 typedef struct {
     char tmb_json[4096];
     char ditem_json[4096];
     char co_json[1024];
+    char players_json[65536];
+    char projectiles_json[32768];
+    char npcs_json[32768];
     int  tmb_len;
     int  ditem_len;
     int  co_len;
+    int  players_len;
+    int  projectiles_len;
+    int  npcs_len;
+    int  active_player_count;
 } SharedBlobOutput;
 
 typedef struct {
@@ -845,6 +857,148 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     if (_co < (int)sizeof(out->co_json) - 1) out->co_json[_co++] = ']';
     out->co_json[_co] = '\0';
     out->co_len = (int)strlen(out->co_json);
+
+    int players_offset = 0;
+    players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "[");
+    bool first_player = true;
+    int active_count = 0;
+    for (int p = 0; p < WS_MAX_CLIENTS; p++) {
+        if (!snap->players[p].active) continue;
+        if (!first_player) {
+            players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, ",");
+        }
+
+        char inv_buf[1024];
+        int inv_off = 0;
+        inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                            ",\"inventory\":{\"slots\":[");
+        for (int s = 0; s < INVENTORY_SLOTS; s++) {
+            if (s > 0 && inv_off < (int)sizeof(inv_buf) - 1)
+                inv_buf[inv_off++] = ',';
+            inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                                "[%d,%d]",
+                                (int)snap->players[p].inventory.slots[s].item,
+                                (int)snap->players[p].inventory.slots[s].quantity);
+        }
+        inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                            "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
+                            "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
+                            "\"activeSlot\":%d}",
+                            (int)snap->players[p].inventory.equipment.helm,
+                            (int)snap->players[p].inventory.equipment.torso,
+                            (int)snap->players[p].inventory.equipment.legs,
+                            (int)snap->players[p].inventory.equipment.feet,
+                            (int)snap->players[p].inventory.equipment.hands,
+                            (int)snap->players[p].inventory.equipment.shield,
+                            (int)snap->players[p].inventory.active_slot);
+
+        char player_entry[3072];
+        snprintf(player_entry, sizeof(player_entry),
+                "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
+                "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
+                "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
+                "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
+                "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
+                "\"company\":%u,\"health\":%u,\"max_health\":%u,"
+                "\"stamina\":%u,\"max_stamina\":%u,"
+                "\"on_island\":%u,"
+                "\"player_level\":%u,\"player_xp\":%u,"
+                "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                "\"stat_points\":%u%s}",
+                snap->players[p].player_id, snap->players[p].name[0] ? snap->players[p].name : "Player",
+                snap->players[p].x, snap->players[p].y, snap->players[p].rotation,
+                snap->players[p].velocity_x, snap->players[p].velocity_y,
+                snap->players[p].is_moving ? "true" : "false",
+                snap->players[p].movement_direction_x, snap->players[p].movement_direction_y,
+                snap->players[p].parent_ship_id, snap->players[p].local_x, snap->players[p].local_y,
+                get_state_string(snap->players[p].movement_state),
+                snap->players[p].is_mounted ? "true" : "false",
+                snap->players[p].mounted_module_id,
+                snap->players[p].controlling_ship_id,
+                snap->players[p].company_id,
+                snap->players[p].health, snap->players[p].max_health,
+                snap->players[p].stamina, snap->players[p].max_stamina,
+                snap->players[p].on_island_id,
+                (unsigned)snap->players[p].player_level,
+                (unsigned)snap->players[p].player_xp,
+                (unsigned)snap->players[p].stat_health,
+                (unsigned)snap->players[p].stat_damage,
+                (unsigned)snap->players[p].stat_stamina,
+                (unsigned)snap->players[p].stat_weight,
+                (unsigned)((snap->players[p].player_level > 1)
+                    ? (snap->players[p].player_level - 1)
+                      - (snap->players[p].stat_health + snap->players[p].stat_damage
+                         + snap->players[p].stat_stamina + snap->players[p].stat_weight)
+                    : 0),
+                inv_buf);
+        players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "%s", player_entry);
+        first_player = false;
+        active_count++;
+    }
+    players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "]");
+    out->players_len = (int)strlen(out->players_json);
+    out->active_player_count = active_count;
+
+    int projectiles_offset = 0;
+    projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "[");
+    bool first_projectile = true;
+    uint16_t _pc = snap->projectile_count;
+    if (_pc > MAX_PROJECTILES) _pc = MAX_PROJECTILES;
+    for (uint16_t p = 0; p < _pc; p++) {
+        const struct Projectile* proj = &snap->projectiles[p];
+        if (!first_projectile) {
+            projectiles_offset += snprintf(out->projectiles_json + projectiles_offset,
+                                           sizeof(out->projectiles_json) - projectiles_offset, ",");
+        }
+        float proj_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+        float proj_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+        float proj_vx = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.x));
+        float proj_vy = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.y));
+        projectiles_offset += snprintf(out->projectiles_json + projectiles_offset,
+                                       sizeof(out->projectiles_json) - projectiles_offset,
+                                       "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"vy\":%.1f,\"type\":%u,\"owner\":%u}",
+                                       proj->id, proj_x, proj_y, proj_vx, proj_vy, proj->type, proj->owner_id);
+        first_projectile = false;
+    }
+    projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "]");
+    out->projectiles_len = (int)strlen(out->projectiles_json);
+
+    int npcs_offset = 0;
+    npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "[");
+    bool first_npc = true;
+    int _wnc = snap->world_npc_count;
+    if (_wnc < 0) _wnc = 0;
+    if (_wnc > MAX_WORLD_NPCS) _wnc = MAX_WORLD_NPCS;
+    for (int n = 0; n < _wnc; n++) {
+        const WorldNpc* npc = &snap->world_npcs[n];
+        if (!npc->active) continue;
+        if (!first_npc)
+            npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, ",");
+        npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset,
+            "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
+            "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+            "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
+            "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
+            "\"owner_id\":%u,"
+            "\"assigned_weapon_id\":%u,"
+            "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
+            "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+            "\"stat_points\":%u,\"locked\":%d}",
+            npc->id, npc->name,
+            npc->x, npc->y, npc->rotation,
+            npc->ship_id, npc->local_x, npc->local_y,
+            npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
+            npc->owner_player_id,
+            npc->assigned_weapon_id,
+            (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
+            (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
+            (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
+                (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
+            (int)npc->task_locked);
+        first_npc = false;
+    }
+    npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "]");
+    out->npcs_len = (int)strlen(out->npcs_json);
 }
 
 static void* blob_worker_main(void* arg) {
@@ -916,6 +1070,17 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     g_blob_worker.job.dynamic_company_count = dynamic_company_count;
     g_blob_worker.job.ship_count = ship_count;
     memcpy(g_blob_worker.job.ships, ships, sizeof(ships));
+    memcpy(g_blob_worker.job.players, players, sizeof(players));
+    g_blob_worker.job.projectile_count = 0;
+    if (global_sim) {
+        uint16_t _pc = global_sim->projectile_count;
+        if (_pc > MAX_PROJECTILES) _pc = MAX_PROJECTILES;
+        g_blob_worker.job.projectile_count = _pc;
+        memcpy(g_blob_worker.job.projectiles, global_sim->projectiles,
+               (size_t)_pc * sizeof(struct Projectile));
+    }
+    g_blob_worker.job.world_npc_count = world_npc_count;
+    memcpy(g_blob_worker.job.world_npcs, world_npcs, sizeof(world_npcs));
     g_blob_worker.has_job = true;
     pthread_cond_signal(&g_blob_worker.cv);
     pthread_mutex_unlock(&g_blob_worker.mtx);
@@ -7749,190 +7914,8 @@ int websocket_server_update(struct Sim* sim) {
         }
         ships_offset += snprintf(ships_json + ships_offset, sizeof(ships_json) - ships_offset, "]");
         
-        // Build players JSON array with ship relationship data
-        // Static: each entry is ~900 bytes; 64 KB handles up to ~70 active players.
-        static char players_json[65536];
-        int players_offset = 0;
-        players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "[");
-        bool first_player = true;
-        int active_count = 0;
-        
-        for (int p = 0; p < WS_MAX_CLIENTS; p++) {
-            if (players[p].active) {
-                if (!first_player) {
-                    players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, ",");
-                }
-
-                // Build inventory JSON
-                char inv_buf[1024];
-                int inv_off = 0;
-                inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                                    ",\"inventory\":{\"slots\":[");
-                for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                    if (s > 0 && inv_off < (int)sizeof(inv_buf) - 1)
-                        inv_buf[inv_off++] = ',';
-                    inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                                        "[%d,%d]",
-                                        (int)players[p].inventory.slots[s].item,
-                                        (int)players[p].inventory.slots[s].quantity);
-                }
-                inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                                    "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
-                                    "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
-                                    "\"activeSlot\":%d}",
-                                    (int)players[p].inventory.equipment.helm,
-                                    (int)players[p].inventory.equipment.torso,
-                                    (int)players[p].inventory.equipment.legs,
-                                    (int)players[p].inventory.equipment.feet,
-                                    (int)players[p].inventory.equipment.hands,
-                                    (int)players[p].inventory.equipment.shield,
-                                    (int)players[p].inventory.active_slot);
-
-                char player_entry[3072];
-                snprintf(player_entry, sizeof(player_entry),
-                        "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
-                        "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
-                        "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
-                        "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
-                        "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                        "\"company\":%u,\"health\":%u,\"max_health\":%u,"
-                        "\"stamina\":%u,\"max_stamina\":%u,"
-                        "\"on_island\":%u,"
-                        "\"player_level\":%u,\"player_xp\":%u,"
-                        "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-                        "\"stat_points\":%u%s}",
-                        players[p].player_id, players[p].name[0] ? players[p].name : "Player",
-                        players[p].x, players[p].y, players[p].rotation,
-                        players[p].velocity_x, players[p].velocity_y,
-                        players[p].is_moving ? "true" : "false",
-                        players[p].movement_direction_x, players[p].movement_direction_y,
-                        players[p].parent_ship_id, players[p].local_x, players[p].local_y,
-                        get_state_string(players[p].movement_state),
-                        players[p].is_mounted ? "true" : "false",
-                        players[p].mounted_module_id,
-                        players[p].controlling_ship_id,
-                        players[p].company_id,
-                        players[p].health, players[p].max_health,
-                        players[p].stamina, players[p].max_stamina,
-                        players[p].on_island_id,
-                        (unsigned)players[p].player_level,
-                        (unsigned)players[p].player_xp,
-                        (unsigned)players[p].stat_health,
-                        (unsigned)players[p].stat_damage,
-                        (unsigned)players[p].stat_stamina,
-                        (unsigned)players[p].stat_weight,
-                        (unsigned)((players[p].player_level > 1)
-                            ? (players[p].player_level - 1)
-                              - (players[p].stat_health + players[p].stat_damage
-                                 + players[p].stat_stamina + players[p].stat_weight)
-                            : 0),
-                        inv_buf);
-                players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "%s", player_entry);
-                first_player = false;
-                active_count++;
-            }
-        }
-        players_offset += snprintf(players_json + players_offset, sizeof(players_json) - players_offset, "]");
-        
-        // Build projectiles JSON array
-        char projectiles_json[2048];
-        int projectiles_offset = 0;
-        projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "[");
-        bool first_projectile = true;
-        
-        // Debug: Log projectile count
-        static uint32_t last_projectile_log = 0;
-        if (current_time - last_projectile_log > 2000 && global_sim) {
-            // log_info("🎯 Projectile count: %u", global_sim->projectile_count);
-            last_projectile_log = current_time;
-        }
-        
-        if (global_sim && global_sim->projectile_count > 0) {
-            for (uint16_t p = 0; p < global_sim->projectile_count; p++) {
-                struct Projectile* proj = &global_sim->projectiles[p];
-                
-                if (!first_projectile) {
-                    projectiles_offset += snprintf(projectiles_json + projectiles_offset, 
-                                                  sizeof(projectiles_json) - projectiles_offset, ",");
-                }
-                
-                float proj_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
-                float proj_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
-                float proj_vx = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.x));
-                float proj_vy = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.y));
-                
-                projectiles_offset += snprintf(projectiles_json + projectiles_offset, 
-                                              sizeof(projectiles_json) - projectiles_offset,
-                                              "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"vy\":%.1f,\"type\":%u,\"owner\":%u}",
-                                              proj->id, proj_x, proj_y, proj_vx, proj_vy, proj->type, proj->owner_id);
-                first_projectile = false;
-            }
-        }
-        projectiles_offset += snprintf(projectiles_json + projectiles_offset, sizeof(projectiles_json) - projectiles_offset, "]");
-
-        // Build world NPCs JSON array — only rebuilt when g_npcs_dirty is set.
-        // tick_world_npcs() marks it dirty every tick; on idle (no NPC tick) we reuse
-        // the previous buffer, saving ~32 KB of snprintf work per broadcast.
-        static char npcs_json[32768];
-        static int  npcs_offset = 2; // starts valid: "[]" written at init
-        if (npcs_offset < 2) { npcs_json[0] = '['; npcs_json[1] = ']'; npcs_json[2] = '\0'; }
-        if (g_npcs_dirty) {
-            npcs_offset = 0;
-            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "[");
-            bool first_npc = true;
-            for (int n = 0; n < world_npc_count; n++) {
-                const WorldNpc* npc = &world_npcs[n];
-                if (!npc->active) continue;
-                if (!first_npc)
-                    npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, ",");
-                npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset,
-                    "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
-                    "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                    "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-                    "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
-                    "\"owner_id\":%u,"
-                    "\"assigned_weapon_id\":%u,"
-                    "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
-                    "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-                    "\"stat_points\":%u,\"locked\":%d}",
-                    npc->id, npc->name,
-                    npc->x, npc->y, npc->rotation,
-                    npc->ship_id, npc->local_x, npc->local_y,
-                    npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
-                    npc->owner_player_id,
-                    npc->assigned_weapon_id,
-                    (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
-                    (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
-                    (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
-                        (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
-                    (int)npc->task_locked);
-                first_npc = false;
-            }
-            npcs_offset += snprintf(npcs_json + npcs_offset, sizeof(npcs_json) - npcs_offset, "]");
-            g_npcs_dirty = false;
-        }
-        
-        // Adaptive tick rate based on activity
-        bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
-        
-        // Determine optimal update rate
-        if (active_count == 0) {
-            current_update_rate = 5; // 5Hz when no players
-        } else if (has_recent_movement && active_count > 1) {
-            current_update_rate = 30; // 30Hz during multiplayer action
-        } else if (has_recent_movement) {
-            current_update_rate = 25; // 25Hz during single player movement
-        } else {
-            current_update_rate = 20; // 20Hz baseline
-        }
-        
-        // Cap at maximum rate
-        if (current_update_rate > 30) current_update_rate = 30;
-        
-        /* ── Pre-build shared blobs (tombstones, dropped items, companies) ─────────
-         * First step of server multithreading: serialize these sections in a worker.
-         * We keep a synchronous fallback so behavior remains stable if no worker
-         * output is available yet (startup / transient stalls).
+        /* ── Pre-build shared blobs (players, projectiles, NPCs, tombstones,
+         * dropped items, companies) in worker with synchronous fallback.
          */
         static SharedBlobOutput shared_blob_cache;
         static bool shared_blob_cache_valid = false;
@@ -7949,9 +7932,38 @@ int websocket_server_update(struct Sim* sim) {
             _snap.dynamic_company_count = dynamic_company_count;
             _snap.ship_count = ship_count;
             memcpy(_snap.ships, ships, sizeof(ships));
+            memcpy(_snap.players, players, sizeof(players));
+            _snap.projectile_count = 0;
+            if (global_sim) {
+                uint16_t _pc = global_sim->projectile_count;
+                if (_pc > MAX_PROJECTILES) _pc = MAX_PROJECTILES;
+                _snap.projectile_count = _pc;
+                memcpy(_snap.projectiles, global_sim->projectiles,
+                       (size_t)_pc * sizeof(struct Projectile));
+            }
+            _snap.world_npc_count = world_npc_count;
+            memcpy(_snap.world_npcs, world_npcs, sizeof(world_npcs));
             build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache);
             shared_blob_cache_valid = true;
         }
+
+        // Adaptive tick rate based on activity
+        int active_count = shared_blob_cache.active_player_count;
+        bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
+
+        // Determine optimal update rate
+        if (active_count == 0) {
+            current_update_rate = 5; // 5Hz when no players
+        } else if (has_recent_movement && active_count > 1) {
+            current_update_rate = 30; // 30Hz during multiplayer action
+        } else if (has_recent_movement) {
+            current_update_rate = 25; // 25Hz during single player movement
+        } else {
+            current_update_rate = 20; // 20Hz baseline
+        }
+
+        // Cap at maximum rate
+        if (current_update_rate > 30) current_update_rate = 30;
 
         /* ── Per-player AOI filtered send ─────────────────────────────────────────
          * Each client receives a GAME_STATE whose ships[] array contains only ships
@@ -8021,11 +8033,11 @@ int websocket_server_update(struct Sim* sim) {
 #define _MC(buf, len) do { if (_goff + (len) < (int)sizeof(per_gs) - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
             _MC(per_ship_json,    _soff);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"players\":");
-            _MC(players_json,     players_offset);
+            _MC(shared_blob_cache.players_json,     shared_blob_cache.players_len);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"projectiles\":");
-            _MC(projectiles_json, projectiles_offset);
+            _MC(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"npcs\":");
-            _MC(npcs_json,        npcs_offset);
+            _MC(shared_blob_cache.npcs_json,        shared_blob_cache.npcs_len);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"tombstones\":");
             _MC(shared_blob_cache.tmb_json,   shared_blob_cache.tmb_len);
             _goff += snprintf(per_gs + _goff, (int)sizeof(per_gs) - _goff, ",\"droppedItems\":");
