@@ -10,7 +10,8 @@
 
 import { Npc } from '../../sim/Types.js';
 
-export type ManningTask = 'Sails' | 'Gunners' | 'Repairs' | 'Combat';
+export type ManningTask   = 'Sails' | 'Gunners' | 'Repairs' | 'Combat';
+export type RepairTarget  = 'Deck' | 'Planks' | 'Sails' | 'Weapons' | 'Steering' | 'Misc';
 
 /** NPC state constants (mirror server WorldNpcState) */
 const NPC_STATE_AT_GUN = 2;
@@ -21,6 +22,15 @@ const TASK_COLORS: Record<ManningTask, string> = {
   Gunners: '#ffaa44',
   Repairs: '#55dd66',
   Combat:  '#aa44ff',
+};
+
+const REPAIR_COLORS: Record<RepairTarget, string> = {
+  Deck:     '#7fd4c8',
+  Planks:   '#c8963c',
+  Sails:    '#c8d888',
+  Weapons:  '#dd6666',
+  Steering: '#88aaee',
+  Misc:     '#999999',
 };
 
 interface HitArea {
@@ -60,6 +70,9 @@ export class ManningPriorityPanel {
 
   /** Returns the most-recently-computed npcId → task name map (read-only). */
   getTaskMap(): ReadonlyMap<number, string> { return this.lastTaskMap; }
+
+  /** Returns the current repair priority order (read-only). */
+  getRepairOrder(): readonly RepairTarget[] { return this.repairOrder; }
 
   /**
    * Called when the local player boards a new ship.
@@ -120,6 +133,16 @@ export class ManningPriorityPanel {
   // Minimize state
   private _minimized = false;
 
+  // Active tab
+  private activeTab: 'crew' | 'repair' = 'crew';
+  // Repair priority order (index 0 = highest priority)
+  private repairOrder: RepairTarget[] = ['Deck', 'Planks', 'Sails', 'Weapons', 'Steering', 'Misc'];
+
+  // Row drag-to-reorder state
+  private _rowDragTab: 'crew' | 'repair' | null = null;
+  private _rowDragFromIndex = -1;
+  private _rowDragCurrentY = 0;
+
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
@@ -157,17 +180,59 @@ export class ManningPriorityPanel {
         return true;
       }
     }
+
+    // Row drag — clicked inside panel content below the tab strip but not on any button
+    {
+      const { panelX: px, panelY: py, PW: pw, HEADER_H, ROW_H } = this;
+      const TAB_H = 20;
+      const REPAIR_ROW_H = 30;
+      const rowH = this.activeTab === 'crew' ? ROW_H : REPAIR_ROW_H;
+      const contentStartY = py + HEADER_H + TAB_H + 3;
+      const orderLen = this.activeTab === 'crew' ? this.priorityOrder.length : this.repairOrder.length;
+      const ri = Math.floor((cy - contentStartY) / rowH);
+      if (cx >= px && cx < px + pw && ri >= 0 && ri < orderLen) {
+        this._rowDragTab      = this.activeTab;
+        this._rowDragFromIndex = ri;
+        this._rowDragCurrentY  = cy;
+        return true;
+      }
+    }
     return false;
   }
 
   handleMouseMove(cx: number, cy: number): void {
-    if (!this._dragging) return;
-    this.panelX = cx - this._dragOffX;
-    this.panelY = cy - this._dragOffY;
+    if (this._dragging) {
+      this.panelX = cx - this._dragOffX;
+      this.panelY = cy - this._dragOffY;
+      return;
+    }
+    if (this._rowDragFromIndex >= 0) {
+      this._rowDragCurrentY = cy;
+    }
   }
 
   handleMouseUp(): void {
     this._dragging = false;
+    if (this._rowDragFromIndex >= 0 && this._rowDragTab !== null) {
+      const TAB_H = 20;
+      const REPAIR_ROW_H = 30;
+      const { panelY: py, HEADER_H, ROW_H } = this;
+      const contentStartY = py + HEADER_H + TAB_H + 3;
+      const from = this._rowDragFromIndex;
+      if (this._rowDragTab === 'crew') {
+        const order = this.priorityOrder;
+        const to = Math.max(0, Math.min(order.length - 1,
+          Math.floor((this._rowDragCurrentY - contentStartY) / ROW_H)));
+        if (to !== from) { const [item] = order.splice(from, 1); order.splice(to, 0, item); }
+      } else {
+        const order = this.repairOrder;
+        const to = Math.max(0, Math.min(order.length - 1,
+          Math.floor((this._rowDragCurrentY - contentStartY) / REPAIR_ROW_H)));
+        if (to !== from) { const [item] = order.splice(from, 1); order.splice(to, 0, item); }
+      }
+      this._rowDragTab       = null;
+      this._rowDragFromIndex  = -1;
+    }
   }
 
   /**
@@ -191,7 +256,11 @@ export class ManningPriorityPanel {
 
     const tasks = this.priorityOrder;
     const { panelX: px, panelY: py, PW: pw, HEADER_H, ROW_H } = this;
-    const panelH = HEADER_H + tasks.length * ROW_H + 6;
+    const REPAIR_ROW_H = 30;
+    const TAB_H = 20;
+    const rowCount = this.activeTab === 'crew' ? tasks.length : this.repairOrder.length;
+    const rowH    = this.activeTab === 'crew' ? ROW_H : REPAIR_ROW_H;
+    const panelH  = HEADER_H + TAB_H + rowCount * rowH + 6;
 
     ctx.save();
 
@@ -212,7 +281,7 @@ export class ManningPriorityPanel {
     ctx.font = 'bold 11px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('CREW PRIORITY', px + pw / 2, py + HEADER_H / 2);
+    ctx.fillText(this.activeTab === 'crew' ? 'CREW PRIORITY' : 'REPAIR PRIORITY', px + pw / 2, py + HEADER_H / 2);
 
     // Minimize toggle button (top-right of header)
     const minLabel = this._minimized ? '▶' : '▼';
@@ -225,6 +294,45 @@ export class ManningPriorityPanel {
     ctx.fillText(minLabel, px + pw - 11, py + HEADER_H / 2);
 
     if (this._minimized) {
+      ctx.restore();
+      return;
+    }
+
+    // ---- Tab strip ----
+    const tabW = pw / 2;
+    const tabY = py + HEADER_H;
+    const tabDefs: Array<{ label: string; value: 'crew' | 'repair' }> = [
+      { label: 'CREW',   value: 'crew'   },
+      { label: 'REPAIR', value: 'repair' },
+    ];
+    for (let t = 0; t < tabDefs.length; t++) {
+      const tab = tabDefs[t];
+      const tx = px + t * tabW;
+      const tabActive = this.activeTab === tab.value;
+      ctx.fillStyle = tabActive ? 'rgba(80,140,220,0.30)' : 'rgba(255,255,255,0.05)';
+      ctx.fillRect(tx, tabY, tabW, TAB_H);
+      ctx.strokeStyle = tabActive ? 'rgba(100,160,255,0.50)' : 'rgba(255,255,255,0.10)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, tabY, tabW, TAB_H);
+      ctx.fillStyle = tabActive ? '#aac8ff' : 'rgba(180,200,255,0.45)';
+      ctx.font = 'bold 9px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tab.label, tx + tabW / 2, tabY + TAB_H / 2);
+      const capturedValue = tab.value;
+      this.hitAreas.push({ x: tx, y: tabY, w: tabW, h: TAB_H, action: () => { this.activeTab = capturedValue; } });
+    }
+    // Separator line below tab strip
+    ctx.strokeStyle = 'rgba(80,140,220,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px, tabY + TAB_H);
+    ctx.lineTo(px + pw, tabY + TAB_H);
+    ctx.stroke();
+
+    // ---- Route to repair tab if active ----
+    if (this.activeTab === 'repair') {
+      this.renderRepairTab(ctx, px, py, pw, REPAIR_ROW_H, TAB_H);
       ctx.restore();
       return;
     }
@@ -299,13 +407,16 @@ export class ManningPriorityPanel {
     const assignedIdSet = new Set(Array.from(this.taskNpcs.values()).flat());
     const canIncrement = shipNpcs.some(n => !assignedIdSet.has(n.id));
 
-    let rowY = py + HEADER_H + 3;
+    let rowY = py + HEADER_H + TAB_H + 3;
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i];
       const count = this.taskNpcs.get(task)?.length ?? 0;
       const assignedNpcs = assignments.get(task) ?? [];
       const color = TASK_COLORS[task];
+      // Dim this row while it is being dragged
+      const _crewRowDragging = this._rowDragTab === 'crew' && this._rowDragFromIndex === i;
+      if (_crewRowDragging) { ctx.save(); ctx.globalAlpha *= 0.3; }
 
       // Divider between rows
       if (i > 0) {
@@ -378,7 +489,41 @@ export class ManningPriorityPanel {
         this.hitAreas.push({ ...minusBtn, action: () => this.decrement(task) });
       }
 
+      if (_crewRowDragging) ctx.restore();
       rowY += ROW_H;
+    }
+
+    // ---- Row drag overlay (drop indicator + ghost) ----
+    if (this._rowDragTab === 'crew' && this._rowDragFromIndex >= 0) {
+      const contentStartY = py + HEADER_H + TAB_H + 3;
+      const dropIdx = Math.max(0, Math.min(tasks.length - 1,
+        Math.floor((this._rowDragCurrentY - contentStartY) / ROW_H)));
+      // Highlight target row background
+      ctx.fillStyle = 'rgba(80,140,220,0.18)';
+      ctx.fillRect(px + 2, contentStartY + dropIdx * ROW_H, pw - 4, ROW_H - 1);
+      // Drop indicator line at top of target row
+      ctx.strokeStyle = '#aac8ff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(px + 4, contentStartY + dropIdx * ROW_H);
+      ctx.lineTo(px + pw - 4, contentStartY + dropIdx * ROW_H);
+      ctx.stroke();
+      // Ghost row following the cursor
+      const ghostLabel = tasks[this._rowDragFromIndex];
+      const ghostY = Math.max(contentStartY,
+        Math.min(contentStartY + (tasks.length - 1) * ROW_H, this._rowDragCurrentY - ROW_H / 2));
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = 'rgba(20,50,120,0.90)';
+      ctx.strokeStyle = '#aac8ff';
+      ctx.lineWidth = 1;
+      ctx.fillRect(px + 4, ghostY, pw - 8, ROW_H - 4);
+      ctx.strokeRect(px + 4, ghostY, pw - 8, ROW_H - 4);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = TASK_COLORS[ghostLabel];
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⣿ ' + ghostLabel.toUpperCase(), px + 14, ghostY + (ROW_H - 4) / 2);
     }
 
     ctx.restore();
@@ -499,6 +644,95 @@ export class ManningPriorityPanel {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillText(label, btn.x + btn.w / 2, btn.y + btn.h / 2);
+  }
+
+  private renderRepairTab(
+    ctx: CanvasRenderingContext2D,
+    px: number, py: number, pw: number,
+    rowH: number, tabH: number
+  ): void {
+    let rowY = py + this.HEADER_H + tabH + 3;
+    const items = this.repairOrder;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const color = REPAIR_COLORS[item];
+      // Dim this row while it is being dragged
+      const _repairRowDragging = this._rowDragTab === 'repair' && this._rowDragFromIndex === i;
+      if (_repairRowDragging) { ctx.save(); ctx.globalAlpha *= 0.3; }
+      // Divider between rows
+      if (i > 0) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px + 4, rowY);
+        ctx.lineTo(px + pw - 4, rowY);
+        ctx.stroke();
+      }
+      const rowMidY = rowY + rowH / 2;
+      // ▲ / ▼ arrows
+      const upBtn = { x: px + 4, y: rowY + 2,  w: 15, h: 12 };
+      const dnBtn = { x: px + 4, y: rowY + 16, w: 15, h: 12 };
+      this.drawArrowBtn(ctx, upBtn, '▲', i > 0);
+      this.drawArrowBtn(ctx, dnBtn, '▼', i < items.length - 1);
+      if (i > 0)                this.hitAreas.push({ ...upBtn, action: () => this.moveRepairUp(i) });
+      if (i < items.length - 1) this.hitAreas.push({ ...dnBtn, action: () => this.moveRepairDown(i) });
+      // Priority number badge
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(px + 24, rowMidY - 8, 14, 16);
+      ctx.fillStyle = '#e8f0ff';
+      ctx.font = 'bold 9px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(i + 1), px + 31, rowMidY);
+      // Item label
+      ctx.fillStyle = color;
+      ctx.font = 'bold 11px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(item.toUpperCase(), px + 42, rowMidY);
+      if (_repairRowDragging) ctx.restore();
+      rowY += rowH;
+    }
+
+    // ---- Row drag overlay (drop indicator + ghost) ----
+    if (this._rowDragTab === 'repair' && this._rowDragFromIndex >= 0) {
+      const contentStartY = py + this.HEADER_H + tabH + 3;
+      const dropIdx = Math.max(0, Math.min(items.length - 1,
+        Math.floor((this._rowDragCurrentY - contentStartY) / rowH)));
+      ctx.fillStyle = 'rgba(80,140,220,0.18)';
+      ctx.fillRect(px + 2, contentStartY + dropIdx * rowH, pw - 4, rowH - 1);
+      ctx.strokeStyle = '#aac8ff';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(px + 4, contentStartY + dropIdx * rowH);
+      ctx.lineTo(px + pw - 4, contentStartY + dropIdx * rowH);
+      ctx.stroke();
+      const ghostItem = items[this._rowDragFromIndex];
+      const ghostY = Math.max(contentStartY,
+        Math.min(contentStartY + (items.length - 1) * rowH, this._rowDragCurrentY - rowH / 2));
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = 'rgba(20,50,120,0.90)';
+      ctx.strokeStyle = '#aac8ff';
+      ctx.lineWidth = 1;
+      ctx.fillRect(px + 4, ghostY, pw - 8, rowH - 4);
+      ctx.strokeRect(px + 4, ghostY, pw - 8, rowH - 4);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = REPAIR_COLORS[ghostItem];
+      ctx.font = 'bold 11px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('⣿ ' + ghostItem.toUpperCase(), px + 14, ghostY + (rowH - 4) / 2);
+    }
+  }
+
+  private moveRepairUp(i: number): void {
+    if (i <= 0) return;
+    [this.repairOrder[i - 1], this.repairOrder[i]] = [this.repairOrder[i], this.repairOrder[i - 1]];
+  }
+
+  private moveRepairDown(i: number): void {
+    if (i >= this.repairOrder.length - 1) return;
+    [this.repairOrder[i], this.repairOrder[i + 1]] = [this.repairOrder[i + 1], this.repairOrder[i]];
   }
 
   private roundRect(

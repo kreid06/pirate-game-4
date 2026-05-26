@@ -184,6 +184,8 @@ export class ClientApplication {
   private readonly PICKAXE_COOLDOWN_MS = 1200; // matches server PICKAXE_COOLDOWN_MS
   /** True when combat mode is active (toggled with Z, or auto-enabled on first attack). */
   private combatMode = false;
+  /** Timestamp of last combat action — used for the 10 s auto-disable timer. */
+  private lastCombatActionMs = 0;
   // ── Ship debug panel ────────────────────────────────────────────────────
   private _shipDebugPanel: HTMLDivElement | null = null;
   private _shipDebugTableBody: HTMLTableSectionElement | null = null;
@@ -919,8 +921,13 @@ export class ClientApplication {
           if (activeItem === 'sword' && player && !player.isMounted) {
             const now = performance.now();
             if (now - this.swordLastAttackMs < this.SWORD_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return; // enable combat mode; the next click will swing
+            }
             this.swordLastAttackMs = now;
-            if (!this.combatMode) this.combatMode = true;
+            this.lastCombatActionMs = now;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -935,8 +942,13 @@ export class ClientApplication {
           if (activeItem === 'axe' && player && !player.isMounted) {
             const now = performance.now();
             if (now - this.lastAxeMs < this.AXE_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
             this.lastAxeMs = now;
-            if (!this.combatMode) this.combatMode = true;
+            this.lastCombatActionMs = now;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -949,8 +961,13 @@ export class ClientApplication {
           if (activeItem === 'pickaxe' && player && !player.isMounted) {
             const now = performance.now();
             if (now - this.lastPickaxeMs < this.PICKAXE_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
             this.lastPickaxeMs = now;
-            if (!this.combatMode) this.combatMode = true;
+            this.lastCombatActionMs = now;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -966,10 +983,15 @@ export class ClientApplication {
              ITEM_DEFS[activeItem]?.category !== 'tool' &&
              ITEM_DEFS[activeItem]?.category !== 'building');
           if (punchAllowed && player && !player.isMounted) {
-            if (!this.combatMode) this.combatMode = true;
             const now = performance.now();
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
             if (now - this.lastPunchMs < this.PUNCH_COOLDOWN_MS) return;
             this.lastPunchMs = now;
+            this.lastCombatActionMs = now;
             const dir = target
               ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
               : player.rotation;
@@ -2844,7 +2866,12 @@ export class ClientApplication {
    */
   private updateVariableTimestep(deltaTime: number): void {
     const dt = deltaTime / 1000;
-    
+
+    // Auto-disable combat mode after 10 s of no combat actions
+    if (this.combatMode && performance.now() - this.lastCombatActionMs > 10_000) {
+      this.combatMode = false;
+    }
+
     // Update UI system
     this.uiManager.update(dt);
     
