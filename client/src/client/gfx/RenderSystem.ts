@@ -4323,12 +4323,13 @@ export class RenderSystem {
     // with the server-side ellipse collision pushout.
     const r        = 38 * zoom * size;
     const drawSize = SIZE * (r / R);
-    const hash     = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
+    // Math.trunc matches server (int) cast; >>> 0 gives unsigned uint32 — both must match server bseed formula
+    const hash     = ((Math.trunc(ox) * 73856093) ^ (Math.trunc(oy) * 19349663)) >>> 0;
     const toneCount = 3; // 3 variants within stone or metal range
     const tiBase   = metal ? RenderSystem.BOULDER_METAL_TONE_OFFSET : 0;
     const ti       = tiBase + (hash % toneCount);
-    const si       = (hash >> 4) % RenderSystem.BOULDER_SHAPES.length;
-    const drawRot  = ((hash >> 8) & 0xFF) / 256 * Math.PI * 2;
+    const si       = (hash >>> 4) % RenderSystem.BOULDER_SHAPES.length;
+    const drawRot  = ((hash >>> 8) & 0xFF) / 256 * Math.PI * 2;
     const key      = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
     const sprite   = RenderSystem._ensureBoulderSprites().get(key)!;
     ctx.save();
@@ -6498,6 +6499,50 @@ export class RenderSystem {
       }
     }
 
+    // Boulder obstacle: rotated-ellipse vs OBB — mirrors server structures.c and simulation.c
+    // Shape/hash formula matches BOULDER_SHAPES + drawRot used in drawBoulderSprite.
+    let blockedByBoulder = false;
+    if (this.islandBuildKind === 'wooden_floor') {
+      const BOULDER_BASE_R = 38;
+      const half = TILE / 2;
+      const boulderRad = effectiveRotDeg * Math.PI / 180;
+      // Inverse rotation: world → floor local frame
+      const frc = Math.cos(-boulderRad), frs = Math.sin(-boulderRad);
+      // Forward rotation: floor local → world frame
+      const frc_f = Math.cos(boulderRad), frs_f = Math.sin(boulderRad);
+      outer2:
+      for (const isl of this.islands) {
+        for (const res of isl.resources) {
+          if (res.type !== 'boulder') continue;
+          if (res.hp <= 0) continue; // depleted — no longer an obstacle
+          const bx = isl.x + res.ox, by = isl.y + res.oy;
+          // Boulder centre in floor local frame
+          const dx = bx - mx, dy = by - my;
+          const lx = dx * frc - dy * frs;
+          const ly = dx * frs + dy * frc;
+          // Closest point on floor OBB (floor-local coords)
+          const cx_f = Math.max(-half, Math.min(lx, half));
+          const cy_f = Math.max(-half, Math.min(ly, half));
+          // Transform closest point back to world, then into boulder-relative coords
+          const cpx_w = cx_f * frc_f - cy_f * frs_f + mx - bx;
+          const cpy_w = cx_f * frs_f + cy_f * frc_f + my - by;
+          // Boulder ellipse shape from hash (must match drawBoulderSprite & server BSX/BSY/BSR)
+          const size = res.size ?? 1.0;
+          const hash = ((Math.trunc(res.ox) * 73856093) ^ (Math.trunc(res.oy) * 19349663)) >>> 0;  // matches server (int) cast + uint32_t
+          const bsi = (hash >>> 4) % RenderSystem.BOULDER_SHAPES.length;
+          const [shapeX, shapeY, shapeRot] = RenderSystem.BOULDER_SHAPES[bsi];
+          const ax = BOULDER_BASE_R * size * shapeX;
+          const ay = BOULDER_BASE_R * size * shapeY;
+          const theta = shapeRot + ((hash >>> 8) & 0xFF) / 256 * Math.PI * 2;
+          const ec = Math.cos(theta), es = Math.sin(theta);
+          // Rotate closest-OBB-point delta into ellipse local frame
+          const elx = cpx_w * ec + cpy_w * es;
+          const ely = -cpx_w * es + cpy_w * ec;
+          if ((elx / ax) * (elx / ax) + (ely / ay) * (ely / ay) < 1.0) { blockedByBoulder = true; break outer2; }
+        }
+      }
+    }
+
     // Workbench needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
     if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
@@ -6678,7 +6723,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
+    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
@@ -7000,7 +7045,7 @@ export class RenderSystem {
     } else if (enemyTerritory) {
       ctx.fillStyle = '#ff3333';
       ctx.fillText('ENEMY TERRITORY', msp.x, labelY);
-    } else if (blockedByTree) {
+    } else if (blockedByTree || blockedByBoulder) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED', msp.x, labelY);
     } else if (blockedByStructure) {

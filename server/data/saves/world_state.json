@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1779759887,
+    "timestamp": 1779763613,
     "ship_count": 3,
     "npc_count": 28,
     "structure_count": 33
@@ -668,7 +668,7 @@
       "role": 4,
       "company": 3,
       "x": 16843.018,
-      "y": 14726.468,
+      "y": 14726.469,
       "rot": -2.201319,
       "ship_id": 5,
       "lx": -35.000,
@@ -11029,7 +11029,7 @@
         {"idx":3447,"health":320,"alive":true,"respawn_at":0},
         {"idx":3448,"health":400,"alive":true,"respawn_at":0},
         {"idx":3449,"health":400,"alive":true,"respawn_at":0},
-        {"idx":3450,"health":400,"alive":true,"respawn_at":0},
+        {"idx":3450,"health":360,"alive":true,"respawn_at":0},
         {"idx":3451,"health":400,"alive":true,"respawn_at":0},
         {"idx":3452,"health":400,"alive":true,"respawn_at":0},
         {"idx":3453,"health":400,"alive":true,"respawn_at":0},

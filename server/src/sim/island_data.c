@@ -715,8 +715,9 @@ void islands_generate_trees(void)
                 if (!inside_sand_poly(isl, bx, by)) continue;
 
                 IslandResource *r = &isl->resources[isl->resource_count];
-                r->ox         = bx - isl->x;
-                r->oy         = by - isl->y;
+                /* Round to nearest integer so (int)r->ox == client Math.trunc(received_ox) always */
+                r->ox         = (float)((int)roundf(bx - isl->x));
+                r->oy         = (float)((int)roundf(by - isl->y));
                 r->type_id    = RES_STONE_BOULDER;
                 r->size       = 0.8f + ((float)((seed >> 8) & 0xFFu) / 255.0f) * 0.8f; /* 0.8–1.6 */
                 r->max_health = resource_max_health(RES_STONE_BOULDER);
