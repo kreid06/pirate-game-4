@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1779763613,
+    "timestamp": 1779764939,
     "ship_count": 3,
     "npc_count": 28,
     "structure_count": 33
@@ -8468,7 +8468,7 @@
         {"idx":886,"health":100,"alive":true,"respawn_at":0},
         {"idx":887,"health":100,"alive":true,"respawn_at":0},
         {"idx":888,"health":100,"alive":true,"respawn_at":0},
-        {"idx":889,"health":100,"alive":true,"respawn_at":0},
+        {"idx":889,"health":80,"alive":true,"respawn_at":0},
         {"idx":890,"health":100,"alive":true,"respawn_at":0},
         {"idx":891,"health":100,"alive":true,"respawn_at":0},
         {"idx":892,"health":100,"alive":true,"respawn_at":0},
@@ -8495,7 +8495,7 @@
         {"idx":913,"health":100,"alive":true,"respawn_at":0},
         {"idx":914,"health":100,"alive":true,"respawn_at":0},
         {"idx":915,"health":100,"alive":true,"respawn_at":0},
-        {"idx":916,"health":100,"alive":true,"respawn_at":0},
+        {"idx":916,"health":70,"alive":true,"respawn_at":0},
         {"idx":917,"health":100,"alive":true,"respawn_at":0},
         {"idx":918,"health":100,"alive":true,"respawn_at":0},
         {"idx":919,"health":100,"alive":true,"respawn_at":0},
@@ -11059,7 +11059,7 @@
         {"idx":3477,"health":350,"alive":true,"respawn_at":0},
         {"idx":3478,"health":400,"alive":true,"respawn_at":0},
         {"idx":3479,"health":400,"alive":true,"respawn_at":0},
-        {"idx":3480,"health":400,"alive":true,"respawn_at":0},
+        {"idx":3480,"health":320,"alive":true,"respawn_at":0},
         {"idx":3481,"health":100,"alive":true,"respawn_at":0},
         {"idx":3482,"health":400,"alive":true,"respawn_at":0},
         {"idx":3483,"health":400,"alive":true,"respawn_at":0},

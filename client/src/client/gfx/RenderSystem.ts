@@ -3786,6 +3786,7 @@ export class RenderSystem {
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE = 50; // base range (px) — matches server HARVEST_RANGE
+    const BOULDER_HARVEST_RANGE = HARVEST_RANGE * 1.25; // 25% larger reach for boulders — matches server BOULDER_HARVEST_RANGE
     // Effective range per node = HARVEST_RANGE * Math.max(1.0, size) — larger nodes extend reach
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
@@ -4107,7 +4108,7 @@ export class RenderSystem {
         } else if (res.type === 'boulder') {
           const bHoverR = 44 * (res.size ?? 1.0) * zoom;
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
-          const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
+          const effR = BOULDER_HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(pickaxeEquipped && localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
           if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon };
         }

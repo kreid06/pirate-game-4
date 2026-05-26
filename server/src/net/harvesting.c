@@ -9,6 +9,7 @@
 
 /* Players must be within one full floor-tile (50px) to harvest a resource. */
 #define HARVEST_RANGE 50.0f
+#define BOULDER_HARVEST_RANGE (HARVEST_RANGE * 1.25f)  /* 25% larger reach for boulders */
 #define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
 
 /* Respawn delays per resource type (milliseconds) */
@@ -442,11 +443,11 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
 
         /* Find the nearest boulder — check stone boulders first, then metal */
         int best_ri = find_nearest_resource(isl, player->x, player->y,
-                                            RES_STONE_BOULDER, HARVEST_RANGE);
+                                            RES_STONE_BOULDER, BOULDER_HARVEST_RANGE);
         int best_type = RES_STONE_BOULDER;
         if (best_ri < 0) {
             best_ri   = find_nearest_resource(isl, player->x, player->y,
-                                              RES_BOULDER, HARVEST_RANGE);
+                                              RES_BOULDER, BOULDER_HARVEST_RANGE);
             best_type = RES_BOULDER;
         }
         if (best_ri < 0) {
