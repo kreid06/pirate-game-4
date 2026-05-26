@@ -4071,32 +4071,53 @@ int websocket_server_update(struct Sim* sim) {
                                                 websocket_server_broadcast(swing_msg);
 
                                             } else {
-                                                // ── Punch attack (unarmed or non-weapon/tool item) ──
-                                                // Tools with dedicated actions don't punch
+                                                // ── Melee attack: axe, pickaxe, or punch ──
                                                 ItemKind cur_item = (aslot < INVENTORY_SLOTS)
                                                     ? player->inventory.slots[aslot].item
                                                     : ITEM_NONE;
-                                                if (cur_item == ITEM_AXE || cur_item == ITEM_PICKAXE
-                                                    || cur_item == ITEM_PISTOL) {
+                                                // Pistol has no melee attack
+                                                if (cur_item == ITEM_PISTOL) {
                                                     goto sword_attack_done;
                                                 }
 
-                                                const uint32_t PUNCH_COOLDOWN_MS = 800u;
+                                                // Per-weapon constants
+                                                float    melee_damage;
+                                                float    melee_range;
+                                                uint32_t melee_cooldown_ms;
+                                                uint16_t melee_stamina;
+                                                const char *melee_label;
+
+                                                if (cur_item == ITEM_AXE) {
+                                                    melee_damage      = 25.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                    melee_range       = 35.0f;
+                                                    melee_cooldown_ms = 1000u;
+                                                    melee_stamina     = 20u;
+                                                    melee_label       = "axe";
+                                                } else if (cur_item == ITEM_PICKAXE) {
+                                                    melee_damage      = 20.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                    melee_range       = 35.0f;
+                                                    melee_cooldown_ms = 1200u;
+                                                    melee_stamina     = 15u;
+                                                    melee_label       = "pickaxe";
+                                                } else {
+                                                    melee_damage      = 15.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                    melee_range       = 25.0f;
+                                                    melee_cooldown_ms = 800u;
+                                                    melee_stamina     = 10u;
+                                                    melee_label       = "punch";
+                                                }
+                                                float melee_range2 = melee_range * melee_range;
+
                                                 uint32_t now_ms = get_time_ms();
-                                                if (now_ms - player->sword_last_attack_ms < PUNCH_COOLDOWN_MS) {
+                                                if (now_ms - player->sword_last_attack_ms < melee_cooldown_ms) {
                                                     goto sword_attack_done;
                                                 }
-                                                const uint16_t PUNCH_STAMINA_COST = 10u;
-                                                if (player->stamina < PUNCH_STAMINA_COST) {
+                                                if (player->stamina < melee_stamina) {
                                                     goto sword_attack_done;
                                                 }
-                                                player->stamina -= PUNCH_STAMINA_COST;
+                                                player->stamina -= melee_stamina;
                                                 player->stamina_last_used_ms = now_ms;
                                                 player->sword_last_attack_ms = now_ms;
-
-                                                const float PUNCH_RANGE  = 25.0f;
-                                                const float PUNCH_RANGE2 = PUNCH_RANGE * PUNCH_RANGE;
-                                                const float PUNCH_DAMAGE = 15.0f * (1.0f + 0.1f * (float)player->stat_damage);
 
                                                 float atk_dx = target_x - player->x;
                                                 float atk_dy = target_y - player->y;
@@ -4113,14 +4134,14 @@ int websocket_server_update(struct Sim* sim) {
                                                         tnpc->company_id == player->company_id) continue;
                                                     float nx = tnpc->x - player->x;
                                                     float ny = tnpc->y - player->y;
-                                                    if (nx*nx + ny*ny > PUNCH_RANGE2) continue;
+                                                    if (nx*nx + ny*ny > melee_range2) continue;
                                                     float npc_angle = atan2f(ny, nx);
                                                     float diff = npc_angle - atk_angle;
                                                     while (diff >  (float)M_PI) diff -= 2.0f*(float)M_PI;
                                                     while (diff < -(float)M_PI) diff += 2.0f*(float)M_PI;
                                                     if (fabsf(diff) > (float)M_PI / 3.0f * 2.0f) continue;
 
-                                                    uint16_t dmg16 = (uint16_t)PUNCH_DAMAGE;
+                                                    uint16_t dmg16 = (uint16_t)melee_damage;
                                                     bool killed_npc = false;
                                                     if (tnpc->health <= dmg16) {
                                                         tnpc->health = 0;
@@ -4141,12 +4162,12 @@ int websocket_server_update(struct Sim* sim) {
                                                         "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
                                                         "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
                                                         "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
-                                                        tnpc->id, tnpc->x, tnpc->y, PUNCH_DAMAGE,
+                                                        tnpc->id, tnpc->x, tnpc->y, melee_damage,
                                                         (unsigned)tnpc->health, (unsigned)tnpc->max_health,
                                                         killed_npc ? "true" : "false");
                                                     websocket_server_broadcast(hit_msg);
-                                                    log_info("👊 Player %u punch hit NPC %u (HP %u/%u)%s",
-                                                             player->player_id, tnpc->id,
+                                                    log_info("\u2694 Player %u %s hit NPC %u (HP %u/%u)%s",
+                                                             player->player_id, melee_label, tnpc->id,
                                                              (unsigned)tnpc->health, (unsigned)tnpc->max_health,
                                                              killed_npc ? " KILLED" : "");
                                                 }
@@ -4159,14 +4180,14 @@ int websocket_server_update(struct Sim* sim) {
                                                         tp->company_id == player->company_id) continue;
                                                     float px2 = tp->x - player->x;
                                                     float py2 = tp->y - player->y;
-                                                    if (px2*px2 + py2*py2 > PUNCH_RANGE2) continue;
+                                                    if (px2*px2 + py2*py2 > melee_range2) continue;
                                                     float p_angle = atan2f(py2, px2);
                                                     float pdiff = p_angle - atk_angle;
                                                     while (pdiff >  (float)M_PI) pdiff -= 2.0f*(float)M_PI;
                                                     while (pdiff < -(float)M_PI) pdiff += 2.0f*(float)M_PI;
                                                     if (fabsf(pdiff) > (float)M_PI / 3.0f * 2.0f) continue;
 
-                                                    int _raw_dmg = (int)PUNCH_DAMAGE;
+                                                    int _raw_dmg = (int)melee_damage;
                                                     int _arm_val = player_armor_value(tp);
                                                     uint16_t pdmg16 = (uint16_t)(_raw_dmg - _arm_val > 1 ? _raw_dmg - _arm_val : 1);
                                                     bool killed_player = (tp->health <= pdmg16);
@@ -4181,19 +4202,19 @@ int websocket_server_update(struct Sim* sim) {
                                                         "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
                                                         "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
                                                         "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
-                                                        tp->player_id, tp->x, tp->y, PUNCH_DAMAGE,
+                                                        tp->player_id, tp->x, tp->y, melee_damage,
                                                         (unsigned)tp->health, (unsigned)tp->max_health,
                                                         killed_player ? "true" : "false");
                                                     websocket_server_broadcast(phit_msg);
                                                 }
 
-                                                // Broadcast punch swing for client arc (reuse SWORD_SWING with punch range)
+                                                // Broadcast swing for client arc
                                                 char swing_msg[256];
                                                 snprintf(swing_msg, sizeof(swing_msg),
                                                     "{\"type\":\"SWORD_SWING\",\"playerId\":%u,"
                                                     "\"x\":%.1f,\"y\":%.1f,\"angle\":%.3f,\"range\":%.0f}",
                                                     player->player_id, player->x, player->y,
-                                                    atk_angle, PUNCH_RANGE);
+                                                    atk_angle, melee_range);
                                                 websocket_server_broadcast(swing_msg);
                                             }
                                         }

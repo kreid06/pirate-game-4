@@ -178,6 +178,10 @@ export class ClientApplication {
   /** Timestamp (ms) of the last punch sent to the server — enforces client-side cooldown. */
   private lastPunchMs = 0;
   private readonly PUNCH_COOLDOWN_MS = 800; // matches server PUNCH_COOLDOWN_MS
+  private lastAxeMs = 0;
+  private readonly AXE_COOLDOWN_MS = 1000; // matches server AXE_COOLDOWN_MS
+  private lastPickaxeMs = 0;
+  private readonly PICKAXE_COOLDOWN_MS = 1200; // matches server PICKAXE_COOLDOWN_MS
   /** True when combat mode is active (toggled with Z, or auto-enabled on first attack). */
   private combatMode = false;
   // ── Ship debug panel ────────────────────────────────────────────────────
@@ -925,6 +929,34 @@ export class ClientApplication {
             this.renderSystem.spawnSwordArc(player.position, dir);
             // Start cooldown ring around cursor (visual, matches server cooldown)
             this.renderSystem.notifySwordSwing(this.SWORD_COOLDOWN_MS);
+            return;
+          }
+          // Axe attack
+          if (activeItem === 'axe' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastAxeMs < this.AXE_COOLDOWN_MS) return;
+            this.lastAxeMs = now;
+            if (!this.combatMode) this.combatMode = true;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 35);
+            this.renderSystem.notifySwordSwing(this.AXE_COOLDOWN_MS);
+            return;
+          }
+          // Pickaxe attack
+          if (activeItem === 'pickaxe' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastPickaxeMs < this.PICKAXE_COOLDOWN_MS) return;
+            this.lastPickaxeMs = now;
+            if (!this.combatMode) this.combatMode = true;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 35);
+            this.renderSystem.notifySwordSwing(this.PICKAXE_COOLDOWN_MS);
             return;
           }
           // Not a hammer or sword click — punch if unarmed or holding non-weapon/tool/building item
