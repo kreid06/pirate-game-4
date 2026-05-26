@@ -387,6 +387,12 @@ export class ClientApplication {
       };
       this.networkManager.onIslandCannonAimSync = (structureId, aimAngle) => {
         this.inputManager?.syncIslandCannonAim(structureId, aimAngle);
+        // Keep the world-state structure in sync so the fallback renderer
+        // always has the latest server-confirmed angle (important after dismount).
+        this.renderSystem.updateStructureCannonAim(structureId, aimAngle);
+      };
+      this.networkManager.onStructureReload = (structureId, reloadMs) => {
+        this.renderSystem.updateStructureCannonReload(structureId, reloadMs);
       };
       this.networkManager.onNoAmmo = () => {
         // Show floating "No cannonballs!" warning at the player's current position
@@ -2211,6 +2217,7 @@ export class ClientApplication {
         const REASONS: Record<string, string> = {
           occupied:          'Space already occupied',
           blocked_by_tree:   'Blocked by a tree',
+          blocked_by_boulder: 'Blocked by a boulder',
           needs_floor:       'Must be placed on a floor',
           needs_floor_edge:  'Must snap to a floor edge',
           needs_door_frame:  'Requires a door frame',
@@ -2636,6 +2643,11 @@ export class ClientApplication {
       this.renderSystem.islandCannonId = this.inputManager.mountedCannonModuleId;
       this.renderSystem.islandCannonAimAngle = this.inputManager.getLastCannonAimAngle();
     } else {
+      // On the frame we transition from mounted→unmounted, persist the last live aim
+      // into placedStructures so the fallback renderer shows the correct angle.
+      if (this.renderSystem.islandCannonId !== null && this.renderSystem.islandCannonAimAngle !== null) {
+        this.renderSystem.updateStructureCannonAim(this.renderSystem.islandCannonId, this.renderSystem.islandCannonAimAngle);
+      }
       this.renderSystem.islandCannonId = null;
       this.renderSystem.islandCannonAimAngle = null;
     }

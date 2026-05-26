@@ -2326,7 +2326,7 @@ int websocket_server_update(struct Sim* sim) {
                                         bool hs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         /* Build extra fields for shipyard construction state */
                                         char hs_sy_extra[256] = "";
-                                        char hs_cannon_extra[64] = "";
+                                        char hs_cannon_extra[96] = "";
                                         char hs_claim_extra[320] = "";
                                         char hs_dom_extra[512] = "";
                                         format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
@@ -2354,8 +2354,9 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (hs_is_cannon) {
                                             snprintf(hs_cannon_extra, sizeof(hs_cannon_extra),
-                                                     ",\"cannon_aim_angle\":%.4f",
-                                                     placed_structures[si].cannon_aim_angle);
+                                                     ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u",
+                                                     placed_structures[si].cannon_aim_angle,
+                                                     placed_structures[si].cannon_reload_ms);
                                         }
                                         if (hs_is_cfrt) {
                                             snprintf(hs_claim_extra, sizeof(hs_claim_extra),
@@ -6825,7 +6826,7 @@ int websocket_server_update(struct Sim* sim) {
                                         bool is_cfrt_s   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
                                         bool is_cflag_s  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                         char sy_extra_s[256] = "";
-                                        char cannon_extra_s[64] = "";
+                                        char cannon_extra_s[96] = "";
                                         char claim_extra_s[320] = "";
                                         char dom_extra_s[512] = "";
                                         format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
@@ -6853,8 +6854,9 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         if (is_cannon_s) {
                                             snprintf(cannon_extra_s, sizeof(cannon_extra_s),
-                                                     ",\"cannon_aim_angle\":%.4f",
-                                                     placed_structures[si].cannon_aim_angle);
+                                                     ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u",
+                                                     placed_structures[si].cannon_aim_angle,
+                                                     placed_structures[si].cannon_reload_ms);
                                         }
                                         if (is_cfrt_s) {
                                             snprintf(claim_extra_s, sizeof(claim_extra_s),
@@ -6960,7 +6962,7 @@ int websocket_server_update(struct Sim* sim) {
                                     bool gs_is_cfrt   = (placed_structures[si].type == STRUCT_COMPANY_FORTRESS);
                                     bool gs_is_cflag  = (placed_structures[si].type == STRUCT_CLAIM_FLAG);
                                     char gs_sy_extra[256] = "";
-                                    char gs_cannon_extra[64] = "";
+                                    char gs_cannon_extra[96] = "";
                                     char gs_claim_extra[320] = "";
                                     char gs_dom_extra[512] = "";
                                     format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
@@ -6988,8 +6990,9 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                                                         if (gs_is_cannon) {
                                                                                 snprintf(gs_cannon_extra, sizeof(gs_cannon_extra),
-                                                                                                 ",\"cannon_aim_angle\":%.4f",
-                                                                                                 placed_structures[si].cannon_aim_angle);
+                                                                                                 ",\"cannon_aim_angle\":%.4f,\"cannon_reload_ms\":%u",
+                                                                                                 placed_structures[si].cannon_aim_angle,
+                                                                                                 placed_structures[si].cannon_reload_ms);
                                                                         }
                                     if (gs_is_cfrt) {
                                         snprintf(gs_claim_extra, sizeof(gs_claim_extra),
@@ -8654,8 +8657,15 @@ void websocket_server_tick(float dt) {
             PlacedStructure* _cs = &placed_structures[_csi];
             if (!_cs->active || _cs->type != STRUCT_CANNON) continue;
             if (_cs->cannon_reload_ms > 0) {
-                _cs->cannon_reload_ms = (_cs->cannon_reload_ms > tick_ms)
-                    ? _cs->cannon_reload_ms - tick_ms : 0;
+                uint32_t prev_ms = _cs->cannon_reload_ms;
+                _cs->cannon_reload_ms = (prev_ms > tick_ms) ? prev_ms - tick_ms : 0;
+                if (_cs->cannon_reload_ms == 0) {
+                    char _done[80];
+                    snprintf(_done, sizeof(_done),
+                             "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":0}",
+                             _cs->id);
+                    broadcast_json_all(_done);
+                }
             }
         }
     }

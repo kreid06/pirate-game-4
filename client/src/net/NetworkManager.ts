@@ -576,6 +576,8 @@ export class NetworkManager {
   public onIslandCannonMounted: ((structureId: number, aimAngle: number, reloadMs: number, mountX: number, mountY: number, facingAngle: number) => void) | null = null;
   /** Fired when server returns authoritative current island-cannon aim in message_ack. */
   public onIslandCannonAimSync: ((structureId: number, aimAngle: number) => void) | null = null;
+  /** Fired when an island cannon starts or finishes reloading. */
+  public onStructureReload: ((structureId: number, reloadMs: number) => void) | null = null;
   /** Fired when the player tries to fire an island cannon but has no cannonballs. */
   public onNoAmmo: (() => void) | null = null;
 
@@ -2658,6 +2660,7 @@ export class NetworkManager {
           doorLocked: s.locked === true,
           rotation:  s.rotation ?? 0,
           cannonAimAngle: typeof s.cannon_aim_angle === 'number' ? s.cannon_aim_angle : undefined,
+          cannonReloadMs: typeof s.cannon_reload_ms === 'number' ? s.cannon_reload_ms : undefined,
           claimProgress:         typeof s.claim_progress_ms === 'number' ? s.claim_progress_ms : undefined,
           claimContested:        s.claim_contested        === true,
           claimTargetsFortress:  s.claim_targets_fortress  === true,
@@ -2710,7 +2713,7 @@ export class NetworkManager {
           doorLocked: message.locked === true,
           rotation:  message.rotation ?? 0,
           cannonAimAngle: typeof message.cannon_aim_angle === 'number' ? message.cannon_aim_angle : undefined,
-          claimProgress:        typeof message.claim_progress_ms === 'number' ? message.claim_progress_ms : undefined,
+          cannonReloadMs: typeof message.cannon_reload_ms === 'number' ? message.cannon_reload_ms : undefined,
           claimContested:       message.claim_contested        === true,
           claimTargetsFortress: message.claim_targets_fortress  === true,
           claimLinkedFort:      typeof message.claim_linked_fort  === 'number' ? message.claim_linked_fort  : undefined,
@@ -3134,6 +3137,12 @@ export class NetworkManager {
           message.slots ?? [],
           message.equip ?? {}
         );
+        break;
+
+      case 'structure_reload':
+        if (typeof message.structure_id === 'number' && typeof message.reload_ms === 'number') {
+          this.onStructureReload?.(message.structure_id, message.reload_ms);
+        }
         break;
 
       case 'tombstone_collect_fail':

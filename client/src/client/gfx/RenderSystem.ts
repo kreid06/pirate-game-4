@@ -2114,6 +2114,18 @@ export class RenderSystem {
     this._claimOverlayDirty = true;
   }
 
+  /** Update the cannonAimAngle of a single cannon structure in-place (no full rebuild needed). */
+  updateStructureCannonAim(id: number, aimAngle: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) s.cannonAimAngle = aimAngle;
+  }
+
+  /** Update the cannonReloadMs of a single cannon structure in-place. */
+  updateStructureCannonReload(id: number, reloadMs: number): void {
+    const s = this.placedStructures.find(p => p.id === id);
+    if (s) s.cannonReloadMs = reloadMs;
+  }
+
   /** Remove a single structure by id (e.g. after server confirms demolish). */
   removePlacedStructure(id: number): void {
     const s = this.placedStructures.find(p => p.id === id);
@@ -7318,7 +7330,12 @@ export class RenderSystem {
     for (const ship of renderShips) {
       this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
     }
-    
+
+    // Queue island cannon reload indicators at layer 6 — same z-level as ship cannon reload
+    if (this.placedStructures.some(s => s.type === 'cannon' && (s.cannonReloadMs ?? 0) > 0)) {
+      this.queueRenderItem(6, 'island-cannon-reload', () => this.drawIslandCannonReloadIndicators(camera));
+    }
+
     // Queue sail masts (layer 7)
     for (const ship of renderShips) {
       this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
@@ -11414,6 +11431,58 @@ export class RenderSystem {
     }
 
     this.ctx.restore();
+  }
+
+  private drawIslandCannonReloadIndicators(camera: Camera): void {
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+    const t          = performance.now() / 1000;
+    const spinAngle  = t * 2.5;
+    const iconR      = 9 * zoom;
+    const arcSpan    = (5 * Math.PI) / 6;
+    const arrowSz    = 3 * zoom;
+    const lw         = 1.5 * zoom;
+
+    for (const s of this.placedStructures) {
+      if (s.type !== 'cannon' || (s.cannonReloadMs ?? 0) === 0) continue;
+      const wp  = Vec2.from(s.x, s.y);
+      if (!camera.isWorldPositionVisible(wp, 50)) continue;
+      const ssp = camera.worldToScreen(wp);
+
+      ctx.save();
+      ctx.translate(ssp.x, ssp.y);
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.90)';
+      ctx.fillStyle   = 'rgba(255, 255, 255, 0.90)';
+      ctx.lineWidth   = lw;
+      ctx.lineCap     = 'round';
+
+      for (let i = 0; i < 2; i++) {
+        const startAngle = spinAngle + i * Math.PI;
+        const endAngle   = startAngle + arcSpan;
+
+        ctx.beginPath();
+        ctx.arc(0, 0, iconR, startAngle, endAngle);
+        ctx.stroke();
+
+        const tipX = Math.cos(endAngle) * iconR;
+        const tipY = Math.sin(endAngle) * iconR;
+        const tx   = -Math.sin(endAngle);
+        const ty   =  Math.cos(endAngle);
+        const rx   =  Math.cos(endAngle);
+        const ry   =  Math.sin(endAngle);
+
+        ctx.beginPath();
+        ctx.moveTo(tipX + tx * arrowSz,              tipY + ty * arrowSz);
+        ctx.lineTo(tipX - tx * arrowSz * 0.5 + rx * arrowSz * 0.9,
+                   tipY - ty * arrowSz * 0.5 + ry * arrowSz * 0.9);
+        ctx.lineTo(tipX - tx * arrowSz * 0.5 - rx * arrowSz * 0.9,
+                   tipY - ty * arrowSz * 0.5 - ry * arrowSz * 0.9);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
   }
 
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {

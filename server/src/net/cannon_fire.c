@@ -1941,9 +1941,12 @@ void check_projectile_static_collisions(struct Sim* sim) {
             }
         }
 
-        /* ── Test vs. island boulders (linear scan, boulders are sparse) ─ */
+        /* ── Test vs. island boulders — rotated ellipse, matches renderer/sim ─ */
         if (!removed) {
-            const float BOULDER_BASE_HIT_R = 38.0f; /* matches client-side boulder radius */
+            static const float BOULDER_BASE_HIT_R = 38.0f;
+            static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
+            static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
+            static const float BSR[5] = { 0.00f, 0.40f, -0.20f,  1.20f, 0.15f };
             const int   CANNON_BOULDER_DMG  = 50;
             for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
                 IslandDef* isl = &ISLAND_PRESETS[ii];
@@ -1955,8 +1958,18 @@ void check_projectile_static_collisions(struct Sim* sim) {
                     float by = isl->y + res->oy;
                     float dx = px - bx;
                     float dy = py - by;
-                    float hitR = BOULDER_BASE_HIT_R * res->size;
-                    if (dx * dx + dy * dy > hitR * hitR) continue;
+                    /* Rotated ellipse — same hash and shape as renderer/sim */
+                    uint32_t bseed = ((uint32_t)((int)res->ox * 73856093))
+                                   ^ ((uint32_t)((int)res->oy * 19349663));
+                    int bsi = (int)((bseed >> 4) % 5u);
+                    float ax = BOULDER_BASE_HIT_R * res->size * BSX[bsi];
+                    float ay = BOULDER_BASE_HIT_R * res->size * BSY[bsi];
+                    float theta = BSR[bsi] + ((float)((bseed >> 8) & 0xFFu) / 256.0f)
+                                  * (2.0f * 3.14159265f);
+                    float ec = cosf(theta), es = sinf(theta);
+                    float lx = dx * ec + dy * es;
+                    float ly = -dx * es + dy * ec;
+                    if ((lx/ax)*(lx/ax) + (ly/ay)*(ly/ay) > 1.0f) continue;
                     /* Hit boulder */
                     res->health -= CANNON_BOULDER_DMG;
                     if (res->health < 0) res->health = 0;
@@ -2024,6 +2037,13 @@ void fire_island_cannon(PlacedStructure* str, WebSocketPlayer* player, uint8_t a
 
     /* Set reload timer (matches ship cannon) */
     str->cannon_reload_ms = (uint32_t)CANNON_RELOAD_TIME_MS;
+    {
+        char _rl_msg[96];
+        snprintf(_rl_msg, sizeof(_rl_msg),
+                 "{\"type\":\"structure_reload\",\"structure_id\":%u,\"reload_ms\":%u}",
+                 str->id, str->cannon_reload_ms);
+        broadcast_json_all(_rl_msg);
+    }
 
     float aim = str->cannon_aim_angle;
     const float BARREL_LENGTH = 40.0f;  /* px — matches the 40-unit barrel drawn by the client */
