@@ -2958,6 +2958,7 @@ export class ClientApplication {
         activeWeaponGroups: this.inputManager?.activeWeaponGroups,
         playerShip,
         controlGroups: this.controlGroups,
+        windAngle: this.networkManager.windAngle,
       });
 
       // Crafting menu (rendered on top of all other UI)

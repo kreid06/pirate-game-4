@@ -531,6 +531,10 @@ export class NetworkManager {
 
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
+  /** Current world wind direction (radians, 0=North, clockwise). Updated from GAME_STATE. */
+  public windAngle: number = 0;
+  /** Current world wind strength (0–1). Updated from GAME_STATE. */
+  public windStrength: number = 0.5;
   public onCompanyCreated: ((company: Company) => void) | null = null;
   public onConnectionStateChanged: ((state: ConnectionState) => void) | null = null;
   public onModuleMountSuccess: ((moduleId: number, moduleKind: string, mountOffset?: Vec2) => void) | null = null;
@@ -2250,10 +2254,18 @@ export class NetworkManager {
         };
         
         this.onWorldStateReceived?.(worldState);
+        // Parse world wind fields attached to GAME_STATE
+        if (typeof message.windAngle    === 'number') this.windAngle    = message.windAngle;
+        if (typeof message.windStrength === 'number') this.windStrength = message.windStrength;
         break;
         
       case MessageType.PONG: // Handles both 'pong' enum and text response
         this.handlePong(message);
+        break;
+
+      case 'WORLD_STATE' as any: // Server broadcast (uppercase); carries windPower + windDirection
+        if (typeof message.windDirection === 'number') this.windAngle    = message.windDirection;
+        if (typeof message.windPower     === 'number') this.windStrength = message.windPower;
         break;
 
       case 'company_created' as any:

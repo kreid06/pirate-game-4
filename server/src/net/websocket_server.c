@@ -300,6 +300,11 @@ static uint64_t g_send_eagain_max  = 0;
 static uint64_t g_send_error_last  = 0;    /* hard send errors (client disconnected) */
 static uint64_t g_send_error_max   = 0;
 
+/* World wind — 20-minute clockwise cycle.
+ * Angle is in radians, 0 = North, increasing clockwise.
+ * Strongest at N/S (|cos|=1) and weakest at E/W (|cos|=0). */
+static float g_wind_angle = 0.0f;
+
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
 static void blob_worker_submit_snapshot(uint32_t current_time);
@@ -8182,6 +8187,11 @@ int websocket_server_update(struct Sim* sim) {
             _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"companies\":");
             _MC1(shared_blob_cache.co_json, shared_blob_cache.co_len);
 #undef _MC1
+            /* World wind — included every tick so late-joining clients get it immediately. */
+            _goff += snprintf(per_gs + _goff, 131072 - _goff,
+                              ",\"windAngle\":%.4f,\"windStrength\":%.3f",
+                              g_wind_angle,
+                              global_sim ? global_sim->wind_power : 0.5f);
             if (_goff < 131072 - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
             per_gs_len[_send_count] = _goff;
 
@@ -9096,6 +9106,20 @@ void websocket_server_tick(float dt) {
             }
         }
         #undef BROADCAST_FIRE_EFFECT
+    }
+
+    // ===== TICK WORLD WIND =====
+    {
+        /* 20-minute clockwise cycle: 2π / (20 × 60) ≈ 0.00524 rad/s */
+        const float WIND_CYCLE_RATE = (2.0f * (float)M_PI) / (20.0f * 60.0f);
+        g_wind_angle += WIND_CYCLE_RATE * dt;
+        if (g_wind_angle >= 2.0f * (float)M_PI)
+            g_wind_angle -= 2.0f * (float)M_PI;
+        if (global_sim) {
+            global_sim->wind_direction = g_wind_angle;
+            /* |cos(angle)| = 1 at N/S (0, π) and 0 at E/W (π/2, 3π/2) */
+            global_sim->wind_power = 0.3f + 0.7f * fabsf(cosf(g_wind_angle));
+        }
     }
 
     // ===== TICK NPC AGENTS =====
@@ -10670,25 +10694,62 @@ void websocket_server_tick(float dt) {
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             struct Ship* ship = &global_sim->ships[s];
             
-            // Calculate average sail openness and fiber efficiency across all masts
+            // Calculate average sail openness, fiber efficiency, and wind alignment
+            // across all masts.
             float total_openness = 0.0f;
             float total_wind_eff = 0.0f;
+            float total_align    = 0.0f;
             int mast_count = 0;
+
+            /* ship_rot needed for per-mast alignment; compute it once up front. */
+            float ship_rot = Q16_TO_FLOAT(ship->rotation);
+
             for (uint8_t m = 0; m < ship->module_count; m++) {
                 if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
                     total_openness += ship->modules[m].data.mast.openness;
                     total_wind_eff += Q16_TO_FLOAT(ship->modules[m].data.mast.wind_efficiency);
+
+                    /* Sail-to-wind angular alignment.
+                     * sail world angle = mast_angle + ship_rot + π/2  (same +π/2 as client)
+                     * wind physics angle = g_wind_angle  (both in same CW-from-North frame)
+                     *
+                     * ±15° (π/12) → 100% effective (full green on HUD)
+                     * ±90° (π/2)  → 15% effective  (full red on HUD)
+                     * linearly blended between the two limits              */
+                    float sail_world = Q16_TO_FLOAT(ship->modules[m].data.mast.angle)
+                                       + ship_rot + (float)M_PI * 0.5f;
+                    float _diff = sail_world - g_wind_angle;
+                    while (_diff >  (float)M_PI) _diff -= 2.0f * (float)M_PI;
+                    while (_diff < -(float)M_PI) _diff += 2.0f * (float)M_PI;
+                    float abs_diff = fabsf(_diff);
+                    const float FULL_EFF_RAD = (float)(M_PI / 12.0); /* 15° */
+                    const float NO_EFF_RAD   = (float)(M_PI / 2.0);  /* 90° */
+                    float align;
+                    if (abs_diff <= FULL_EFF_RAD) {
+                        align = 1.0f;
+                    } else if (abs_diff >= NO_EFF_RAD) {
+                        align = 0.15f;
+                    } else {
+                        align = 1.0f - 0.85f * (abs_diff - FULL_EFF_RAD)
+                                               / (NO_EFF_RAD - FULL_EFF_RAD);
+                    }
+                    total_align += align;
+
                     mast_count++;
                 }
             }
-            float avg_sail_openness = (mast_count > 0) ? (total_openness / mast_count) : 0.0f;
+            float avg_sail_openness  = (mast_count > 0) ? (total_openness / mast_count) : 0.0f;
             // avg_wind_efficiency: 1.0 = pristine fibers, 0.0 = fully destroyed
             float avg_wind_efficiency = (mast_count > 0) ? (total_wind_eff / mast_count) : 1.0f;
+            /* avg_sail_align: 1.0 = sails face wind directly, 0.15 = sails broadside/away */
+            float avg_sail_align      = (mast_count > 0) ? (total_align    / mast_count) : 1.0f;
             
             // Calculate forward force from wind and sails:
             // wind_power * sail_openness% * fiber_efficiency
-            const float BASE_WIND_SPEED = 225.0f; // meters per second at full wind, full sails (tripled sail force)
-            float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f) * avg_wind_efficiency;
+            const float BASE_WIND_SPEED = 225.0f; // meters per second at full wind, full sails
+            float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f)
+                                      * avg_wind_efficiency
+                                      * avg_sail_align;  /* sail-to-wind angular alignment */
             float target_speed = BASE_WIND_SPEED * wind_force_factor;
             
             // Get current ship speed (magnitude of velocity)
@@ -10696,16 +10757,17 @@ void websocket_server_tick(float dt) {
             float vy = Q16_TO_FLOAT(ship->velocity.y);
             float current_speed = sqrtf(vx * vx + vy * vy);
             
-            // Apply forward force in ship's facing direction
-            float ship_rot = Q16_TO_FLOAT(ship->rotation);
+            // Apply forward force in ship's facing direction (ship_rot computed above)
             float target_vx = cosf(ship_rot) * target_speed;
             float target_vy = sinf(ship_rot) * target_speed;
             
             // Debug logging every 2 seconds
             if (current_time - last_movement_log > 2000 && avg_sail_openness > 0) {
-                log_info("⛵ Ship %u: masts=%d, avg_openness=%.1f%%, wind_eff=%.2f, wind=%.2f, target_speed=%.2f m/s, current_speed=%.2f m/s, pos=(%.1f,%.1f)",
-                         ship->id, mast_count, avg_sail_openness, avg_wind_efficiency, global_sim->wind_power, target_speed, current_speed,
-                         SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x)), SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y)));
+                log_info("⛵ Ship %u: masts=%d openness=%.1f%% fib=%.2f align=%.2f wind=%.2f→spd=%.2f cur=%.2f pos=(%.1f,%.1f)",
+                         ship->id, mast_count, avg_sail_openness, avg_wind_efficiency,
+                         avg_sail_align, global_sim->wind_power, target_speed, current_speed,
+                         SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x)),
+                         SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y)));
                 last_movement_log = current_time;
             }
             
