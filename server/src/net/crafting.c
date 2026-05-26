@@ -90,46 +90,43 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         int         output_count;
         CraftIng    ing[3];
         int         ing_count;
+        bool        require_workbench;
     } CraftRecipe;
 
     static const CraftRecipe recipes[] = {
-        /* Hand-craft recipes (no workbench required) */
-        { "craft_repair_kit",    ITEM_REPAIR_KIT,   1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
+        /* ── Hand-craft recipes (no workbench required) ─────────────────── */
+        { "craft_repair_kit",    ITEM_REPAIR_KIT,    1, { {ITEM_WOOD,  4}, {0,0},             {0,0} }, 1, false },
         /* Cloth armour set */
-        { "craft_cloth_hat",     ITEM_CLOTH_HAT,    1, { {ITEM_FIBER,  8}, {0,0}            }, 1 },
-        { "craft_cloth_shirt",   ITEM_CLOTH_SHIRT,  1, { {ITEM_FIBER, 25}, {0,0}            }, 1 },
-        { "craft_cloth_pants",   ITEM_CLOTH_PANTS,  1, { {ITEM_FIBER, 20}, {0,0}            }, 1 },
-        { "craft_cloth_shoes",   ITEM_CLOTH_SHOES,  1, { {ITEM_FIBER, 12}, {0,0}            }, 1 },
-        { "craft_cloth_gloves",  ITEM_CLOTH_GLOVES, 1, { {ITEM_FIBER, 10}, {0,0}            }, 1 },
-        /* Legacy generic cloth armor — kept for save compatibility */
-        { "craft_cloth_armor",   ITEM_CLOTH_ARMOR,  1, { {ITEM_FIBER, 8}, {0,0}             }, 1 },
-        { "craft_wooden_shield", ITEM_WOODEN_SHIELD,1, { {ITEM_WOOD,  6}, {0,0}             }, 1 },
-        { "craft_axe",           ITEM_AXE,          1, { {ITEM_WOOD,  3}, {ITEM_STONE, 2}   }, 2 },
-        { "craft_pickaxe",       ITEM_PICKAXE,      1, { {ITEM_WOOD,  2}, {ITEM_STONE, 4}   }, 2 },
-        { "craft_wooden_floor",  ITEM_WOODEN_FLOOR, 2, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
-        { "craft_workbench",     ITEM_WORKBENCH,    1, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
-        /* Workbench recipes */
-        { "craft_plank",         ITEM_PLANK,        1, { {ITEM_WOOD, 30}, {0,0}             }, 1 },
-        { "craft_deck",          ITEM_DECK,         1, { {ITEM_WOOD, 75}, {0,0}             }, 2 },
-        { "craft_sail",          ITEM_SAIL,          1, { {ITEM_WOOD, 40}, {ITEM_FIBER, 100} }, 2 },
-        { "craft_helm",          ITEM_HELM,          1, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
-        { "craft_cannon",        ITEM_CANNON,        1, { {ITEM_WOOD,  8}, {ITEM_METAL, 20}  }, 2 },
-        { "craft_swivel",        ITEM_SWIVEL,        1, { {ITEM_WOOD,  5}, {ITEM_METAL,  8}  }, 2 },
-        { "craft_sword",         ITEM_SWORD,         1, { {ITEM_WOOD,  2}, {ITEM_METAL,  5}  }, 2 },
-        { "craft_wall",          ITEM_WALL,          4, { {ITEM_WOOD, 10}, {0,0}             }, 1 },
-        { "craft_door_frame",    ITEM_DOOR_FRAME,    1, { {ITEM_WOOD,  6}, {0,0}             }, 1 },
-        { "craft_door",          ITEM_DOOR,          1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
-        { "craft_shipyard",      ITEM_SHIPYARD,      1, { {ITEM_WOOD, 30}, {ITEM_PLANK, 10}  }, 2 },
-        /* Workbench-only recipes */
-        { "craft_floor",         ITEM_WOODEN_FLOOR,  1, { {ITEM_WOOD, 20}, {0,0}             }, 1 },
-        { "craft_workbench",     ITEM_WORKBENCH,     1, { {ITEM_WOOD, 15}, {ITEM_STONE, 10}  }, 2 },
-        { "craft_wood_ceiling",  ITEM_WOOD_CEILING,  1, { {ITEM_WOOD, 15}, {0,0}             }, 1 },
-        { "craft_stone_axe",     ITEM_AXE,           1, { {ITEM_WOOD,  2}, {ITEM_STONE,  5}  }, 2 },
-        { "craft_stone_pickaxe", ITEM_PICKAXE,       1, { {ITEM_WOOD,  2}, {ITEM_STONE,  4}  }, 2 },
-        { "craft_hammer",        ITEM_HAMMER,        1, { {ITEM_WOOD,  4}, {0,0}             }, 1 },
-        { "craft_claim_flag",       ITEM_CLAIM_FLAG,      1, { {ITEM_WOOD,  5}, {0,0},          {0,0}            }, 1 },
-        { "craft_flag_fort",         ITEM_FLAG_FORT,       1, { {ITEM_WOOD, 40}, {ITEM_STONE, 40},{0,0}            }, 2 },
-        { "craft_company_fortress",  ITEM_COMPANY_FORTRESS,1, { {ITEM_WOOD,100}, {ITEM_STONE,100},{ITEM_METAL, 20} }, 3 },
+        { "craft_cloth_hat",     ITEM_CLOTH_HAT,     1, { {ITEM_FIBER,  8}, {0,0},            {0,0} }, 1, false },
+        { "craft_cloth_shirt",   ITEM_CLOTH_SHIRT,   1, { {ITEM_FIBER, 25}, {0,0},            {0,0} }, 1, false },
+        { "craft_cloth_pants",   ITEM_CLOTH_PANTS,   1, { {ITEM_FIBER, 20}, {0,0},            {0,0} }, 1, false },
+        { "craft_cloth_shoes",   ITEM_CLOTH_SHOES,   1, { {ITEM_FIBER, 12}, {0,0},            {0,0} }, 1, false },
+        { "craft_cloth_gloves",  ITEM_CLOTH_GLOVES,  1, { {ITEM_FIBER, 10}, {0,0},            {0,0} }, 1, false },
+        { "craft_wooden_shield", ITEM_WOODEN_SHIELD, 1, { {ITEM_WOOD,   6}, {0,0},            {0,0} }, 1, false },
+        { "craft_axe",           ITEM_AXE,           1, { {ITEM_WOOD,   2}, {ITEM_STONE,  5}, {0,0} }, 2, false },
+        { "craft_pickaxe",       ITEM_PICKAXE,       1, { {ITEM_WOOD,   3}, {ITEM_STONE,  4}, {0,0} }, 2, false },
+        { "craft_wooden_floor",  ITEM_WOODEN_FLOOR,  1, { {ITEM_WOOD,  20}, {0,0},            {0,0} }, 1, false },
+        { "craft_workbench",     ITEM_WORKBENCH,     1, { {ITEM_WOOD,  10}, {0,0},            {0,0} }, 1, false },
+        { "craft_hammer",        ITEM_HAMMER,        1, { {ITEM_WOOD,   4}, {0,0},            {0,0} }, 1, false },
+        { "craft_claim_flag",    ITEM_CLAIM_FLAG,    1, { {ITEM_WOOD,   5}, {0,0},            {0,0} }, 1, false },
+        /* ── Workbench recipes (require workbench proximity) ─────────────── */
+        { "craft_plank",         ITEM_PLANK,         1, { {ITEM_WOOD,  30}, {0,0},            {0,0} }, 1, true  },
+        { "craft_deck",          ITEM_DECK,          1, { {ITEM_WOOD,  75}, {0,0},            {0,0} }, 1, true  },
+        { "craft_sail",          ITEM_SAIL,          1, { {ITEM_WOOD,  40}, {ITEM_FIBER, 100},{0,0} }, 2, true  },
+        { "craft_helm",          ITEM_HELM,          1, { {ITEM_WOOD,  10}, {0,0},            {0,0} }, 1, true  },
+        { "craft_cannon",        ITEM_CANNON,        1, { {ITEM_WOOD,   8}, {ITEM_METAL,  20},{0,0} }, 2, true  },
+        { "craft_swivel",        ITEM_SWIVEL,        1, { {ITEM_WOOD,   5}, {ITEM_METAL,   8},{0,0} }, 2, true  },
+        { "craft_sword",         ITEM_SWORD,         1, { {ITEM_WOOD,   2}, {ITEM_METAL,   5},{0,0} }, 2, true  },
+        { "craft_wall",          ITEM_WALL,          4, { {ITEM_WOOD,  10}, {0,0},            {0,0} }, 1, true  },
+        { "craft_door_frame",    ITEM_DOOR_FRAME,    1, { {ITEM_WOOD,   6}, {0,0},            {0,0} }, 1, true  },
+        { "craft_door",          ITEM_DOOR,          1, { {ITEM_WOOD,   4}, {0,0},            {0,0} }, 1, true  },
+        { "craft_shipyard",      ITEM_SHIPYARD,      1, { {ITEM_WOOD,  30}, {ITEM_PLANK,  10},{0,0} }, 2, true  },
+        { "craft_floor",         ITEM_WOODEN_FLOOR,  1, { {ITEM_WOOD,  20}, {0,0},            {0,0} }, 1, true  },
+        { "craft_wood_ceiling",  ITEM_WOOD_CEILING,  1, { {ITEM_WOOD,  15}, {0,0},            {0,0} }, 1, true  },
+        { "craft_stone_axe",     ITEM_AXE,           1, { {ITEM_WOOD,   2}, {ITEM_STONE,   5},{0,0} }, 2, true  },
+        { "craft_stone_pickaxe", ITEM_PICKAXE,       1, { {ITEM_WOOD,   3}, {ITEM_STONE,   4},{0,0} }, 2, true  },
+        { "craft_flag_fort",     ITEM_FLAG_FORT,     1, { {ITEM_WOOD,  40}, {ITEM_STONE,  40},{0,0} }, 2, true  },
+        { "craft_company_fortress", ITEM_COMPANY_FORTRESS, 1, { {ITEM_WOOD,100},{ITEM_STONE,100},{ITEM_METAL,20} }, 3, true  },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 
@@ -145,6 +142,24 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         snprintf(response, sizeof(response),
                  "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"unknown_recipe\",\"recipe_id\":\"%s\"}", recipe_id);
         goto send_craft_resp;
+    }
+
+    /* Workbench proximity check */
+    if (recipe->require_workbench) {
+        const float WB_RANGE2 = 200.0f * 200.0f;
+        bool near_workbench = false;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            const PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_WORKBENCH) continue;
+            float dx = s->x - player->x;
+            float dy = s->y - player->y;
+            if (dx*dx + dy*dy <= WB_RANGE2) { near_workbench = true; break; }
+        }
+        if (!near_workbench) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"not_at_workbench\",\"recipe_id\":\"%s\"}", recipe_id);
+            goto send_craft_resp;
+        }
     }
 
     /* Check ingredients */

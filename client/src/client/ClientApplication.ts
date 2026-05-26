@@ -1325,6 +1325,16 @@ export class ClientApplication {
           }
         }
         this.networkManager.sendSlotSelect(slot);
+        // Deactivate combat mode when a building item is selected
+        if (this.combatMode) {
+          const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          const pid = this.networkManager.getAssignedPlayerId();
+          const p = ws?.players.find(pl => pl.id === pid);
+          const selectedItem = p?.inventory?.slots[slot]?.item ?? 'none';
+          if (ITEM_DEFS[selectedItem]?.category === 'building') {
+            this.combatMode = false;
+          }
+        }
         // Selecting a hotbar item deselects any build panel ghost kind
         if (this.pendingGhostKind !== null) {
           this.pendingGhostKind = null;

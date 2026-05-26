@@ -141,8 +141,7 @@ const RECIPES: Recipe[] = [
     color: '#7a4820',
     borderColor: '#4a2810',
     ingredients: [
-      { label: 'Wood',  count: 15 },
-      { label: 'Stone', count: 10 },
+      { label: 'Wood', count: 10 },
     ],
   },
   {
@@ -193,7 +192,7 @@ const RECIPES: Recipe[] = [
     color: '#7a7a7c',
     borderColor: '#555558',
     ingredients: [
-      { label: 'Wood',  count: 2 },
+      { label: 'Wood',  count: 3 },
       { label: 'Stone', count: 4 },
     ],
   },
