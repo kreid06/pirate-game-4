@@ -167,6 +167,8 @@ export class RenderSystem {
   private _islandClaims: Map<number, { companyId: number; fortX: number; fortY: number; fortRadius: number; isCompanyFortress: boolean }> = new Map();
   /** When true, draws the territory overlay (Alt held). */
   private _showTerritoryOverlay = false;
+  /** When true, shows names above all allied NPCs (Alt held). */
+  private _showNpcNames = false;
   /**
    * Cached offscreen bitmaps for the territory claim overlay.
    * Keyed by islandId. Invalidated whenever placedStructures or _localCompanyId changes.
@@ -1915,6 +1917,11 @@ export class RenderSystem {
   setTerritoryOverlay(on: boolean): void {
     if (on && !this._showTerritoryOverlay) this._claimOverlayDirty = true; // invalidate on show
     this._showTerritoryOverlay = on;
+  }
+
+  /** Toggle allied NPC names visibility (Alt held = true, released = false). */
+  setNpcNamesVisible(on: boolean): void {
+    this._showNpcNames = on;
   }
 
   setIslandClaim(islandId: number, companyId: number, fortX = 0, fortY = 0, fortRadius = 600, isCompanyFortress = false): void {
@@ -12927,17 +12934,24 @@ export class RenderSystem {
 
     const { phase3Alpha } = this.computeSinkState(ship);
     if (phase3Alpha <= 0) return;
-    
+
+    // Fade sails when the local player is walking on this ship's deck so they
+    // don't obstruct the view of modules/NPCs below them.
+    const _localOnDeck = this._cachedLocalPlayer !== null
+      && this._cachedLocalPlayer.carrierId === ship.id
+      && !this._cachedLocalPlayer.isMounted;
+    const sailAlpha = _localOnDeck ? 0.30 * phase3Alpha : phase3Alpha;
+
     this.ctx.save();
-    if (phase3Alpha < 1) this.ctx.globalAlpha = phase3Alpha;
-    
+    this.ctx.globalAlpha = sailAlpha;
+
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
-    
+
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
-    
+
     // Find all mast modules
     const masts = ship.modules.filter(m => m.kind === 'mast');
     
@@ -13934,8 +13948,11 @@ export class RenderSystem {
 
     this.ctx.restore();
 
-    // Name label only when standing still (avoid visual noise during movement)
-    if (!isMoving) {
+    // Name label: show when this NPC is hovered, or when Alt is held for allied NPCs.
+    // (Role/state/weapon debug info is in the hover debug HUD instead.)
+    const _showName = this.hoveredNpc?.id === npc.id
+      || (this._showNpcNames && !_npcIsEnemy && !_npcIsNeutral);
+    if (_showName) {
       const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
       this.ctx.font = `${fontSize}px Georgia, serif`;
       this.ctx.textAlign = 'center';
@@ -13959,23 +13976,6 @@ export class RenderSystem {
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'bottom';
         this.ctx.fillText('🔒', lx, ly);
-      }
-
-      // Debug: show assigned cannon/module ID and state below name
-      if (npc.assignedWeaponId || npc.state !== 0) {
-        const STATE_SHORT: Record<number, string> = { 0: 'IDL', 1: 'MOV', 2: 'MAN', 3: 'REP' };
-        const ROLE_SHORT: Record<number, string> = { 0: '-', 1: 'G', 2: 'H', 3: 'R', 4: 'P' };
-        const debugLabel = `${ROLE_SHORT[npc.role] ?? '?'}:${STATE_SHORT[npc.state] ?? '?'}`
-          + (npc.assignedWeaponId ? ` c${npc.assignedWeaponId}` : '');
-        const debugFontSize = Math.max(8, Math.min(11, 10 * cameraState.zoom));
-        this.ctx.font = `${debugFontSize}px Georgia, serif`;
-        const dtw = this.ctx.measureText(debugLabel).width;
-        const debugY = screenPos.y + radius + debugFontSize + 2;
-        this.ctx.textBaseline = 'bottom';
-        this.ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        this.ctx.fillRect(screenPos.x - dtw / 2 - 2, debugY - debugFontSize, dtw + 4, debugFontSize + 2);
-        this.ctx.fillStyle = '#aaddff';
-        this.ctx.fillText(debugLabel, screenPos.x, debugY);
       }
     }
   }

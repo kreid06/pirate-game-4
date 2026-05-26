@@ -4728,18 +4728,20 @@ export class ClientApplication {
       }
     });
 
-    // Alt key — show territory claim overlay while held
+    // Alt key — show territory claim overlay + all ally NPC names while held
     window.addEventListener('keydown', (ev) => {
       if (ev.key === 'Alt') {
         ev.preventDefault(); // suppress browser menu activation
         this.showTerritoryOverlay = true;
         this.renderSystem.setTerritoryOverlay(true);
+        this.renderSystem.setNpcNamesVisible(true);
       }
     });
     window.addEventListener('keyup', (ev) => {
       if (ev.key === 'Alt') {
         this.showTerritoryOverlay = false;
         this.renderSystem.setTerritoryOverlay(false);
+        this.renderSystem.setNpcNamesVisible(false);
       }
     });
 

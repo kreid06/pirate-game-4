@@ -2950,15 +2950,15 @@ class HUDElement implements UIElement {
 
     // ── Wind direction arrow (screen-space, always world-aligned) ─────────
     // windAngle = 0 → North (screen up), increases clockwise.
-    // Tail is pinned to the icon centre; length scales with wind strength
-    // (stronger wind = longer arrow). windStrength range 0.3–1.0 maps to
-    // roughly 8–26 px of visible shaft.
+    // Tail is pinned to the icon centre; length scales with wind strength.
+    // windStrength raw range 0.30–1.00 is normalised to 0–1 so the visual
+    // span is as wide as possible: ~8 px at weakest, ~52 px at strongest.
     {
       const headLen   = 9;    // arrowhead triangle height (fixed)
       const headW     = 6;    // arrowhead triangle half-width (fixed)
-      // Scale shaft length by wind strength: min ~14px, max ~36px
       const windStrength = 0.3 + 0.7 * Math.abs(Math.cos(windAngle)); // matches server formula
-      const shaftLen  = 14 + windStrength * 22;
+      const normStr   = (windStrength - 0.3) / 0.7;  // 0 = weakest (E/W), 1 = strongest (N/S)
+      const shaftLen  = 8 + normStr * 44;             // 8 px weak → 52 px strong
       const totalLen  = shaftLen + headLen; // tip offset from tail (origin)
 
       ctx.save();
