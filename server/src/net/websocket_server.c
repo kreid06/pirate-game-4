@@ -2401,17 +2401,10 @@ int websocket_server_init(uint16_t port) {
     {
         /* 9 generic crew per ship — roles assigned at runtime by the manning panel.
          * Any crew member can become a gunner, rigger, or stand idle. */
-        static const char* crew_names[18] = {
-            "Bo",   "Mack", "Finn", "Ray",  "Cole", "Sven",
-            "Ned",  "Hank", "Jim",
-            "Dirk", "Walt", "Hal",  "Cruz", "Ike",  "Rex",
-            "Lars", "Tam",  "Bren"
-        };
-        int crew_idx = 0;
         for (int s = 0; s < 2; s++) {
             uint32_t sid = ships[s].ship_id;
             for (int c = 0; c < 9; c++)
-                spawn_ship_crew(sid, crew_names[crew_idx++]);
+                spawn_ship_crew(sid);
         }
         log_info("🧑 %d crew NPCs spawned across 2 ships (roles assigned by player)",
                  world_npc_count);

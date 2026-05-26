@@ -1046,6 +1046,18 @@ export class RenderSystem {
   }
 
   /**
+   * Spawn a muzzle flash at the cannon-centre world position.
+   * The barrel-tip offset (30 px) is applied here so callers can pass the
+   * raw cannon position received from the server.
+   */
+  spawnMuzzleFlash(x: number, y: number, angle: number): void {
+    const BARREL_TIP = 40; // barrel drawn 40 px from cannon centre in local space
+    const tipX = x + Math.cos(angle) * BARREL_TIP;
+    const tipY = y + Math.sin(angle) * BARREL_TIP;
+    this.effectRenderer.createMuzzleFlash(Vec2.from(tipX, tipY), angle);
+  }
+
+  /**
    * Record a damage hit on an entity so the next ~300 ms of frames
    * render a red flash overlay on that entity's circle.
    */

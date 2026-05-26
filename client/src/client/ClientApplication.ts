@@ -2386,8 +2386,10 @@ export class ClientApplication {
         this.renderSystem.updateFlameWave(cannonId, shipId, x, y, angle, halfCone, waveDist, retreating, retreatDist, dead);
       };
 
-      // Handle CANNON_FIRE_EVENT: render hit-scan tracers for grapeshot / canister
+      // Handle CANNON_FIRE_EVENT: muzzle flash + hit-scan tracers for grapeshot / canister
       this.networkManager.onCannonFireEvent = (_cannonId, _shipId, x, y, angle, projectileId, ammoType) => {
+        // Muzzle flash for every cannon fire
+        this.renderSystem.spawnMuzzleFlash(x, y, angle);
         // Only spawn tracers for hit-scan ammo types (no real projectile, id=0)
         if (projectileId === 0 && (ammoType === 10 || ammoType === 12)) {
           this.renderSystem.spawnGrapeshotTracers(x, y, angle, ammoType);
