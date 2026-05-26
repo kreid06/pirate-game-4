@@ -666,6 +666,12 @@ void tick_world_npcs(float dt) {
                     // Initiate passive regen
                     mod->state_bits |= MODULE_STATE_REPAIRING;
 
+                    // NPC crew restore the repair ceiling as part of active work.
+                    // (damage lowers target_health; NPCs bypass that ceiling so
+                    //  they can bring the module back to full health.)
+                    if (mod->target_health < (int32_t)mod->max_health)
+                        mod->target_health = mod->max_health;
+
                                     // Repair main HP at 10%/s, capped at target_health
                                     {
                                         if (mod->health < (int32_t)mod->target_health) {
