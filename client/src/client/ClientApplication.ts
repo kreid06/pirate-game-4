@@ -17,6 +17,7 @@ import { DamageTeam } from './gfx/EffectRenderer.js';
 // Network System  
 import { NetworkManager, ConnectionState } from '../net/NetworkManager.js';
 import { PredictionEngine } from '../net/PredictionEngine.js';
+import { ShipPredictor } from '../net/ShipPredictor.js';
 
 // Gameplay Systems
 import { InputManager } from './gameplay/InputManager.js';
@@ -86,6 +87,7 @@ export class ClientApplication {
   private renderSystem!: RenderSystem;
   private networkManager!: NetworkManager;
   private predictionEngine!: PredictionEngine;
+  private shipPredictor: ShipPredictor | null = null;
   private inputManager!: InputManager;
   private uiManager!: UIManager;
   private audioManager!: AudioManager;
@@ -778,6 +780,7 @@ export class ClientApplication {
 
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);
+      this.shipPredictor = new ShipPredictor();
       
       // Initialize Input System
       this.inputManager = new InputManager(this.canvas, this.config.input);
@@ -1262,9 +1265,25 @@ export class ClientApplication {
       // Ship control callbacks (when mounted to helm)
       this.inputManager.onShipSailControl = (desiredOpenness) => {
         this.networkManager.sendShipSailControl(desiredOpenness);
+        // Feed predictor — compute avg wind efficiency from mast modules
+        const myId = this.networkManager.getAssignedPlayerId();
+        const world = this.predictedWorldState ?? this.authoritativeWorldState;
+        const myPlayer = world?.players.find(p => p.id === myId);
+        const playerShip = myPlayer?.carrierId ? world?.ships.find(s => s.id === myPlayer.carrierId) : null;
+        let windEfficiency = 1.0;
+        if (playerShip) {
+          const masts = playerShip.modules.filter(m => m.kind === 'mast' && m.moduleData);
+          if (masts.length > 0) {
+            windEfficiency = masts.reduce((sum, m) => sum + ((m.moduleData as any).windEfficiency ?? 1.0), 0) / masts.length;
+          }
+        }
+        this.shipPredictor?.onSailControl(desiredOpenness, windEfficiency);
       };
       this.inputManager.onShipRudderControl = (turningLeft, turningRight, movingBackward) => {
         this.networkManager.sendShipRudderControl(turningLeft, turningRight, movingBackward);
+        const dir = turningLeft ? 'left' : turningRight ? 'right' : 'straight';
+        this.shipPredictor?.onRudderControl(dir);
+        this.shipPredictor?.onReverseThrust(movingBackward ?? false);
       };
       this.inputManager.onShipSailAngleControl = (desiredAngle) => {
         this.networkManager.sendShipSailAngleControl(desiredAngle);
@@ -2756,6 +2775,9 @@ export class ClientApplication {
     
     // Update prediction engine (client-side simulation)
     if (this.authoritativeWorldState && this.state === ClientState.IN_GAME) {
+      // Step the ship predictor every fixed tick (mirrors server physics rate)
+      this.shipPredictor?.step(dt);
+
       this.predictedWorldState = this.predictionEngine.update(
         this.authoritativeWorldState,
         this.inputManager.getCurrentInputFrame(),
@@ -2919,6 +2941,29 @@ export class ClientApplication {
       }
     }
     
+    // Splice ShipPredictor output — use physics-accurate predicted position/rotation/velocity
+    // for the local player's ship, same pattern as the player prediction splice above.
+    if (predictionEnabled && assignedPlayerId !== null && worldToRender) {
+      const predictedShip = this.shipPredictor?.getPredictedShip();
+      if (predictedShip) {
+        const myPlayer = worldToRender.players.find(p => p.id === assignedPlayerId);
+        if (myPlayer?.carrierId) {
+          const shipIdx = worldToRender.ships.findIndex(s => s.id === myPlayer.carrierId);
+          if (shipIdx >= 0) {
+            const newShips = worldToRender.ships.slice();
+            newShips[shipIdx] = {
+              ...worldToRender.ships[shipIdx], // keep server data (modules, health, etc.)
+              position:        predictedShip.position,
+              velocity:        predictedShip.velocity,
+              rotation:        predictedShip.rotation,
+              angularVelocity: predictedShip.angularVelocity,
+            };
+            worldToRender = { ...worldToRender, ships: newShips };
+          }
+        }
+      }
+    }
+
     // Overlay any locally-placed optimistic modules (needed in online mode where
     // worldToRender comes from the interpolation engine and wouldn't include them)
     if (worldToRender && this.localPendingModules.size > 0) {
@@ -3489,6 +3534,18 @@ export class ClientApplication {
     
     // Update prediction engine with authoritative state
     this.predictionEngine.onAuthoritativeState(worldState);
+
+    // Feed ShipPredictor with server ship state + wind
+    if (this.shipPredictor) {
+      const myId = this.networkManager.getAssignedPlayerId();
+      const myPlayer = worldState.players.find(p => p.id === myId);
+      const playerShip = myPlayer?.carrierId ? worldState.ships.find(s => s.id === myPlayer.carrierId) : null;
+      if (playerShip) {
+        this.shipPredictor.onServerShip(playerShip);
+        this.shipPredictor.setWindPower(this.networkManager.windStrength);
+        this.shipPredictor.setWindAngle(this.networkManager.windAngle);
+      }
+    }
 
     // Re-evaluate build mode whenever world state arrives (inventory may have changed)
     this.checkBuildMode();

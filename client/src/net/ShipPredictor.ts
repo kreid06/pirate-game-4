@@ -35,9 +35,11 @@ const BASE_WIND_SPEED    = 2250;   // px/s — max sail speed at full wind + ful
 const WIND_ACCEL_RATE    = 2.0;    // seconds to reach 63% of target speed (exponential)
 const REVERSE_SPEED      = BASE_WIND_SPEED * 0.0375; // 84.375 px/s
 const REVERSE_ACCEL      = 0.8;    // seconds (faster time constant for reverse)
-const MAX_TURN_RATE      = 2.0;    // rad/s at full rudder + full speed
-const RUDDER_ADJUST_RATE = 25.0;   // degrees/s — rudder slew rate
 const MAX_RUDDER_ANGLE   = 50.0;   // degrees
+const RUDDER_ADJUST_RATE = 25.0;   // degrees/s — rudder slew rate
+// Torque-based turning — mirrors server websocket_server.c + simulation.c
+const MAX_RUDDER_TORQUE  = 20000;  // N⋅m at full 50° deflection
+const MOMENT_INERTIA     = 50000;  // kg⋅m² — matches server ship->moment_inertia
 
 // simulation.c drag coefficients.
 // C_QUAD_V is halved from server value (0.008) because client speed is ×10 larger
@@ -70,6 +72,8 @@ export interface ShipControlState {
   reverseThrust: boolean;
   /** Global wind power (0–1); matches server global_sim->wind_power */
   windPower: number;
+  /** World-space wind angle in radians — same CW-from-North convention as server */
+  windAngle: number;
 }
 
 // ─── ShipPredictor ──────────────────────────────────────────────────────────
@@ -88,6 +92,7 @@ export class ShipPredictor {
     targetRudderAngle: 0,
     reverseThrust:     false,
     windPower:         0.5, // server default
+    windAngle:         0,
   };
 
   // ── Server state ingestion ──────────────────────────────────────────────
@@ -151,6 +156,11 @@ export class ShipPredictor {
     this.controlState.windPower = power;
   }
 
+  /** Update world-space wind angle from a server broadcast. */
+  setWindAngle(angle: number): void {
+    this.controlState.windAngle = angle;
+  }
+
   // ── Simulation step ─────────────────────────────────────────────────────
 
   /**
@@ -172,9 +182,28 @@ export class ShipPredictor {
                            Math.min( MAX_RUDDER_ANGLE, ctrl.rudderAngle + rudderChange));
 
     // ── 2. Sail velocity blending ─────────────────────────────────────────
-    //    target_speed = BASE_WIND_SPEED × wind_force_factor
-    //    velocity = velocity + (target_velocity - velocity) × blend
-    const windForceFactor = (ctrl.windPower * ctrl.sailOpenness / 100.0) * ctrl.windEfficiency;
+    //    Mirrors server exactly: wind_force_factor = wind_power × openness × efficiency × align
+    //    Sail alignment: sail world angle vs wind angle (±15°=100%, ±90°=15%, linear blend)
+    let totalAlign = 0, mastCount = 0;
+    for (const mod of ship.modules) {
+      if (mod.kind === 'mast' && mod.moduleData) {
+        const md = mod.moduleData as { angle?: number };
+        const sailWorld = (md.angle ?? 0) + ship.rotation + Math.PI / 2;
+        let diff = sailWorld - ctrl.windAngle;
+        while (diff >  Math.PI) diff -= 2 * Math.PI;
+        while (diff < -Math.PI) diff += 2 * Math.PI;
+        const absDiff = Math.abs(diff);
+        const FULL_EFF = 15 * Math.PI / 180;
+        const NO_EFF   = 90 * Math.PI / 180;
+        totalAlign += absDiff <= FULL_EFF ? 1.0
+                    : absDiff >= NO_EFF   ? 0.15
+                    : 1.0 - 0.85 * (absDiff - FULL_EFF) / (NO_EFF - FULL_EFF);
+        mastCount++;
+      }
+    }
+    const avgSailAlign    = mastCount > 0 ? totalAlign / mastCount : 1.0;
+    const windForceFactor = (ctrl.windPower * ctrl.sailOpenness / 100.0)
+                            * ctrl.windEfficiency * avgSailAlign;
     const targetSpeed     = BASE_WIND_SPEED * windForceFactor;
     const blendFactor     = 1.0 - Math.exp(-dt / WIND_ACCEL_RATE);
 
@@ -191,19 +220,13 @@ export class ShipPredictor {
       vy += (-sin * REVERSE_SPEED - vy) * revBlend;
     }
 
-    // ── 4. Rudder → angular velocity ──────────────────────────────────────
-    const currentSpeed = Math.sqrt(vx * vx + vy * vy);
-    const speedFactor  = Math.max(0.05, currentSpeed / BASE_WIND_SPEED);
-    const turnRate     = (ctrl.rudderAngle / MAX_RUDDER_ANGLE) * MAX_TURN_RATE * speedFactor;
-
-    let angVel = ship.angularVelocity;
-    if (turnRate !== 0) {
-      // Only apply if rudder wants more spin than current (don't fight collision spin)
-      if (!((turnRate > 0 && angVel >= turnRate) || (turnRate < 0 && angVel <= turnRate))) {
-        angVel = turnRate;
-      }
-    }
-    // No steering input: angular drag (below) decays existing spin naturally
+    // ── 4. Rudder → torque → angular acceleration (mirrors server sim_step) ──
+    // net_torque += rudder_factor * MAX_RUDDER_TORQUE
+    // ang_accel   = net_torque / moment_inertia
+    // angVel     += ang_accel * dt   (drag applied in step 5)
+    const rudderNorm = ctrl.rudderAngle / MAX_RUDDER_ANGLE; // -1 to +1
+    const angAccel   = (rudderNorm * MAX_RUDDER_TORQUE) / MOMENT_INERTIA; // rad/s²
+    let angVel = ship.angularVelocity + angAccel * dt;
 
     // ── 5. Hydrodynamic drag — matches simulation.c exactly ───────────────
     const spd   = Math.sqrt(vx * vx + vy * vy);
