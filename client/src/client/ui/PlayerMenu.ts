@@ -127,10 +127,6 @@ const HAND_RECIPES: HandRecipe[] = [
   { output: 'door_frame',    outputQty: 1, cost: [{ item: 'wood',  qty: 6  }],                                    category: 'CONSTRUCTION' },
   { output: 'door',          outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'CONSTRUCTION' },
   { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
-  // Ship parts
-  { output: 'plank',         outputQty: 1, cost: [{ item: 'wood',  qty: 30 }],                                    category: 'SHIP'         },
-  { output: 'deck',          outputQty: 1, cost: [{ item: 'wood',  qty: 75 }],                                    category: 'SHIP'         },
-  { output: 'helm_kit',      outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'SHIP'         },
 ];
 
 /** Mirrors server player_armor_value() — sum of flat armour from cloth gear. */
