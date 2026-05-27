@@ -274,7 +274,7 @@ const RECIPES: Recipe[] = [
     ],
   },
   {
-    id: 'craft_helm',
+    id: 'craft_helm_kit',
     category: 'Ship',
     outputName: 'Helm Kit',
     outputCount: 1,
@@ -665,7 +665,7 @@ export class CraftingMenu {
           craft_plank:       'plank',
           craft_deck:        'deck',
           craft_sail:        'sail',
-          craft_helm:        'helm_kit',
+          craft_helm_kit:    'helm_kit',
           craft_cannon:      'cannon',
           craft_swivel:      'swivel',
           craft_sword:       'sword',
