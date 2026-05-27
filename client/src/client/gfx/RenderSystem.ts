@@ -326,6 +326,16 @@ export class RenderSystem {
   private sinkingGhosts: Map<number, Ship> = new Map();
   /** Last known ship state per id — lets us snapshot a ship the moment it despawns. */
   private lastKnownShips: Map<number, Ship> = new Map();
+  /** moduleId → smoothed barrel aim angle (radians) — interpolated every frame toward server value. */
+  private _smoothBarrelAngles: Map<number, number> = new Map();
+  /** moduleId → smoothed sail rotation angle (degrees) — interpolated every frame toward server value. */
+  private _smoothSailAngles: Map<number, number> = new Map();
+  /** moduleId → smoothed sail openness (0–100) — interpolated every frame toward server value. */
+  private _smoothSailOpenness: Map<number, number> = new Map();
+  /** shipId → smoothed rudder angle (radians) — interpolated every frame toward server value. */
+  private _smoothRudderAngles: Map<number, number> = new Map();
+  /** Timestamp (ms) of the last renderWorld call — used to compute per-frame dt for barrel smoothing. */
+  private _lastRenderMs: number = 0;
   /** Last known NPC set — used to detect NPC deaths for kill announcements. */
   private lastKnownNpcIds: Set<number> = new Set();
   /** NPC id → name cache for the kill announcement message. */
@@ -3279,6 +3289,52 @@ export class RenderSystem {
     this._cachedWorldPlayers  = worldState.players;
     this._cachedWorldNpcs     = worldState.npcs ?? [];
     this._cachedCompanies     = worldState.companies ?? [];
+
+    // ── Smooth barrel angles toward server values every frame ──────────────
+    // The server steps barrels at 60°/s but only broadcasts at ~20 Hz, so the
+    // raw aimDirection jumps 3° every 50 ms.  We lerp the displayed angle at a
+    // faster rate so the visual barrel moves continuously at 60 fps.
+    {
+      const nowMs = performance.now();
+      const frameDt = this._lastRenderMs > 0 ? Math.min((nowMs - this._lastRenderMs) / 1000, 0.1) : 0;
+      this._lastRenderMs = nowMs;
+      // Close 10× the remaining angular gap per second (time constant ≈ 100 ms).
+      const alpha = frameDt > 0 ? Math.min(1.0, 10.0 * frameDt) : 1.0;
+      for (const ship of worldState.ships) {
+        // Rudder angle
+        {
+          const target = ship.rudderAngle || 0;
+          const prev   = this._smoothRudderAngles.get(ship.id) ?? target;
+          let diff = target - prev;
+          while (diff >  Math.PI) diff -= 2 * Math.PI;
+          while (diff < -Math.PI) diff += 2 * Math.PI;
+          this._smoothRudderAngles.set(ship.id, prev + diff * alpha);
+        }
+        for (const mod of ship.modules) {
+          // Cannon barrel
+          if (mod.kind === 'cannon' && mod.moduleData?.kind === 'cannon') {
+            const target = mod.moduleData.aimDirection || 0;
+            const prev   = this._smoothBarrelAngles.get(mod.id) ?? target;
+            let diff = target - prev;
+            while (diff >  Math.PI) diff -= 2 * Math.PI;
+            while (diff < -Math.PI) diff += 2 * Math.PI;
+            this._smoothBarrelAngles.set(mod.id, prev + diff * alpha);
+          }
+          // Sail angle and openness
+          if (mod.kind === 'mast' && mod.moduleData?.kind === 'mast') {
+            const targetAngle    = mod.moduleData.angle    ?? 0;
+            const targetOpenness = mod.moduleData.openness ?? 0;
+            const prevAngle    = this._smoothSailAngles.get(mod.id)   ?? targetAngle;
+            const prevOpenness = this._smoothSailOpenness.get(mod.id) ?? targetOpenness;
+            let diff = targetAngle - prevAngle;
+            while (diff >  180) diff -= 360;
+            while (diff < -180) diff += 360;
+            this._smoothSailAngles.set(mod.id,    prevAngle + diff * alpha);
+            this._smoothSailOpenness.set(mod.id,  prevOpenness + (targetOpenness - prevOpenness) * alpha);
+          }
+        }
+      }
+    }
 
     // Rebuild scaffolded ship lookup: maps ship entity ID → owning shipyard structure
     this._scaffoldedShips.clear();
@@ -9728,7 +9784,8 @@ export class RenderSystem {
       const cannonData = cannon.moduleData;
       const x = cannon.localPos.x;
       const y = cannon.localPos.y;
-      const turretAngle = cannonData.aimDirection || 0; // Cannon aim direction in radians
+      // Use smoothed angle so the barrel moves continuously between server snapshots
+      const turretAngle = this._smoothBarrelAngles.get(cannon.id) ?? (cannonData.aimDirection || 0);
       const localRot = cannon.localRot || 0; // Module rotation
 
       // Health-based darkening
@@ -12187,15 +12244,9 @@ export class RenderSystem {
 
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
 
-      // Client-predicted aim direction — mirrors the server formula.
-      // Formula: desired_offset = playerAimAngleRelative - localRot + PI/2
-      const CANNON_LIMIT = 30 * Math.PI / 180;
-      let predictedAimDir = this.playerAimAngleRelative - (cannon.localRot || 0) + Math.PI / 2;
-      while (predictedAimDir >  Math.PI) predictedAimDir -= 2 * Math.PI;
-      while (predictedAimDir < -Math.PI) predictedAimDir += 2 * Math.PI;
-      predictedAimDir = Math.max(-CANNON_LIMIT, Math.min(CANNON_LIMIT, predictedAimDir));
-
-      const totalAngle = (cannon.localRot || 0) + predictedAimDir;
+      // Use the same smoothed angle as drawShipCannons so trajectory locks to the visual barrel.
+      const turretAngle = this._smoothBarrelAngles.get(cannon.id) ?? (cannon.moduleData.aimDirection || 0);
+      const totalAngle = (cannon.localRot || 0) + turretAngle;
       const cx = cannon.localPos.x;
       const cy = cannon.localPos.y;
 
@@ -12677,8 +12728,8 @@ export class RenderSystem {
     const rudderWidth = 8;
     const rudderLength = 30;
     
-    // Get rudder angle from ship state (server provides this)
-    const rudderAngle = ship.rudderAngle || 0;
+    // Get smoothed rudder angle (falls back to raw server value before first frame)
+    const rudderAngle = this._smoothRudderAngles.get(ship.id) ?? ship.rudderAngle ?? 0;
     
     // Move to rudder pivot point
     this.ctx.save();
@@ -12983,12 +13034,13 @@ export class RenderSystem {
       const width = mastData.sailWidth;
       const height = mastData.height;
       const sailColor = mastData.sailColor;
-      const angle = mastData.angle; // Sail angle in degrees
+      const angle    = this._smoothSailAngles.get(mast.id)   ?? mastData.angle;   // smoothed sail angle (degrees)
+      const openness = this._smoothSailOpenness.get(mast.id) ?? mastData.openness; // smoothed openness (0–100)
       
       // Use sail cloth HP (fiberHealth) for visual degradation, not mast pole HP
       const healthRatio = mastData.fiberMaxHealth > 0 ? mastData.fiberHealth / mastData.fiberMaxHealth : 1;
       const fireIntensity = mastData.sailFireIntensity ?? 0;
-      this.drawSailFiber(x, y, width, height, sailColor, mastData.openness / 100, angle, healthRatio, mast.id, fireIntensity);
+      this.drawSailFiber(x, y, width, height, sailColor, openness / 100, angle, healthRatio, mast.id, fireIntensity);
       
     }
     

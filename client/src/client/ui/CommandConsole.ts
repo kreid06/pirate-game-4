@@ -47,10 +47,17 @@ const COMMANDS: CommandDef[] = [
   },
   {
     name: 'TpToPlayer',
-    description: 'Teleport yourself to a player, or teleport one player to another.',
+    description: 'Teleport yourself to a player (by name or ID).',
     args: [
-      { name: 'targetOrDestination' },
-      { name: 'destination (optional)' },
+      { name: 'destination name|id' },
+    ],
+  },
+  {
+    name: 'TpPlayerToPlayer',
+    description: 'Teleport one player to another player (by name or ID).',
+    args: [
+      { name: 'source name|id' },
+      { name: 'destination name|id' },
     ],
   },
   {
