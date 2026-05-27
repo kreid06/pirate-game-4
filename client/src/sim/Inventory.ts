@@ -167,6 +167,36 @@ export const ITEM_KIND_ID: Partial<Record<ItemKind, number>> = Object.fromEntrie
 
 // ── Canvas icon helpers ───────────────────────────────────────────────────────
 
+/** Cached sword sprite loaded from /items/sword.png. */
+let _swordImg: HTMLImageElement | null = null;
+let _swordImgLoaded = false;
+(function () {
+  if (typeof window === 'undefined') return;
+  const img = new Image();
+  img.src = '/items/sword.png';
+  img.onload = () => { _swordImgLoaded = true; };
+  _swordImg = img;
+})();
+
+export function drawSwordIcon(
+  ctx: CanvasRenderingContext2D,
+  cx:  number,
+  cy:  number,
+  sz:  number,
+): void {
+  if (_swordImgLoaded && _swordImg) {
+    const dim = Math.round(sz * 0.80);
+    ctx.drawImage(_swordImg, Math.round(cx - dim / 2), Math.round(cy - dim / 2), dim, dim);
+  } else {
+    // Fallback while image loads
+    ctx.fillStyle = '#c0c0c0';
+    ctx.font = `bold ${Math.round(sz * 0.55)}px Georgia, serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('S', cx, cy);
+  }
+}
+
 /** Cached monochrome axe sprite (white emoji, redrawn when slot size changes). */
 let _axeCache: { sz: number; canvas: OffscreenCanvas } | null = null;
 

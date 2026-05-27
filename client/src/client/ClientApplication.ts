@@ -2823,9 +2823,12 @@ export class ClientApplication {
         dt
       );
       
-      // Update camera based on predicted state
+      // Update camera based on interpolated state so it tracks the same smoothed
+      // position that the renderer uses, avoiding the 20 Hz snap from raw server data.
       if (this.predictedWorldState) {
-        this.updateCamera(this.predictedWorldState, dt);
+        const _cameraFollowState =
+          this.predictionEngine.getInterpolatedState(performance.now()) ?? this.predictedWorldState;
+        this.updateCamera(_cameraFollowState, dt);
         
         // Update input manager with current player position and velocity for hybrid protocol
         const assignedPlayerId = this.networkManager.getAssignedPlayerId();

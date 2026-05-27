@@ -16,7 +16,7 @@ import {
   COMPANY_PIRATES,
   COMPANY_NAVY,
 } from '../../sim/Types.js';
-import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID, drawAxeIcon } from '../../sim/Inventory.js';
+import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon } from '../../sim/Inventory.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -543,6 +543,7 @@ export class PlayerMenu {
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
           if (item === 'axe') drawAxeIcon(ctx, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2, ESLOTSZ);
+          else if (item === 'sword') drawSwordIcon(ctx, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2, ESLOTSZ);
           else ctx.fillText(def.symbol, sx + ESLOTSZ / 2, sy + ESLOTSZ / 2);
         }
 
@@ -1085,6 +1086,7 @@ export class PlayerMenu {
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
           if (slot.item === 'axe') drawAxeIcon(ctx, sx + ISZ / 2, sy + ISZ / 2, ISZ);
+          else if (slot.item === 'sword') drawSwordIcon(ctx, sx + ISZ / 2, sy + ISZ / 2, ISZ);
           else ctx.fillText(def.symbol, sx + ISZ / 2, sy + ISZ / 2);
 
           if (slot.quantity > 1) {
@@ -1139,6 +1141,7 @@ export class PlayerMenu {
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
         if (dragSlotData.item === 'axe') drawAxeIcon(ctx, gx + ISZ / 2, gy + ISZ / 2, ISZ);
+        else if (dragSlotData.item === 'sword') drawSwordIcon(ctx, gx + ISZ / 2, gy + ISZ / 2, ISZ);
         else ctx.fillText(def.symbol, gx + ISZ / 2, gy + ISZ / 2);
         ctx.globalAlpha = 1.0;
         ctx.restore();
