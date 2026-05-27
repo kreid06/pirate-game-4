@@ -1030,7 +1030,8 @@ export class ClientApplication {
           }
 
           // Harvest mode: active slot = axe + not on a ship + hovering a tree → chop
-          if (activeItem === 'axe' && player && player.carrierId === 0) {
+          // (disabled in combat mode — sword/punch state suppresses gathering)
+          if (activeItem === 'axe' && player && player.carrierId === 0 && !this.combatMode) {
             const tree = this.renderSystem.getHoveredTree();
             if (tree) {
               console.log(`🪓 [HARVEST] Sending harvest_resource`);
@@ -1088,8 +1089,10 @@ export class ClientApplication {
           }
 
           // Harvest fiber: hover a fiber plant → press E (no tool required)
-          if (player && player.carrierId === 0) {
-            const plant = this.renderSystem.getHoveredFiberPlant();
+          // Falls back to proximity if no plant is hovered (handles cases where
+          // a floor tile is placed over the bush and the cursor lands on it instead).
+          if (player && player.carrierId === 0 && !this.combatMode) {
+            const plant = this.renderSystem.getHoveredFiberPlant() ?? this.renderSystem.getNearbyFiberPlant();
             if (plant) {
               this.networkManager.sendHarvestFiber();
               return;
@@ -1097,7 +1100,7 @@ export class ClientApplication {
           }
 
           // Harvest stone: hover a rock → press E (no tool required, gives ITEM_STONE)
-          if (player && player.carrierId === 0) {
+          if (player && player.carrierId === 0 && !this.combatMode) {
             const rock = this.renderSystem.getHoveredRock();
             if (rock) {
               this.networkManager.sendHarvestStone();
@@ -1106,7 +1109,7 @@ export class ClientApplication {
           }
 
           // Mine rock: pickaxe equipped + hovering rock → press E (gives ITEM_METAL)
-          if (activeItem === 'pickaxe' && player && player.carrierId === 0) {
+          if (activeItem === 'pickaxe' && player && player.carrierId === 0 && !this.combatMode) {
             const rock = this.renderSystem.getHoveredRock();
             if (rock) {
               this.networkManager.sendHarvestRock();
@@ -1533,11 +1536,12 @@ export class ClientApplication {
       };
       
       // Set up scroll-wheel zoom — accumulate into _userZoomMul so AOI base zoom
-      // remains separate and the two combine correctly.
+      // remains separate and the two combine correctly. We update only targetZoom
+      // here; the per-frame lerp (see updateCamera) smoothly animates camera.zoom
+      // toward targetZoom so scroll-wheel zooms feel eased instead of snappy.
       this.inputManager.onZoom = (factor, _screenPoint) => {
         this._userZoomMul = Math.max(0.1, Math.min(4.0, this._userZoomMul * factor));
         this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
-        this.camera.setZoom(this.targetZoom);
       };
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic

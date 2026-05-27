@@ -76,7 +76,7 @@ const RECIPES: Recipe[] = [
     id: 'craft_wall',
     category: 'Structures',
     outputName: 'Wall',
-    outputCount: 4,
+    outputCount: 1,
     symbol: '┃',
     color: '#5c3a1a',
     borderColor: '#2e1a08',
