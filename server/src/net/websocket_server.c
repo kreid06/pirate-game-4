@@ -10935,40 +10935,12 @@ void websocket_server_tick(float dt) {
             current_speed = sqrtf(vx * vx + vy * vy);
             
             // ===== APPLY RUDDER-BASED TURNING =====
-            // Turning effectiveness depends on ship speed
-            float speed_factor = current_speed / BASE_WIND_SPEED; // 0 = stopped, 1 = full speed
-            if (speed_factor < 0.01f) {
-                // Ship is stopped - can still turn slowly in place
-                speed_factor = 0.05f; // Minimum turning ability when stopped
-            }
-            
-            // Convert rudder angle to turning rate
-            // Max rudder (50°) at full speed = max turn rate
-            const float MAX_TURN_RATE = 2.0f; // radians per second at full speed
-            float rudder_factor = ship->rudder_angle / 50.0f; // -1 to +1
-            float turn_rate = rudder_factor * MAX_TURN_RATE * speed_factor;
-            
-            // Set angular velocity toward the desired turn rate, but preserve
-            // collision-induced spin so impacts feel physical across ticks.
-            // The direct-assignment approach was overwriting any dw added by
-            // handle_ship_collisions() the moment the next tick began.
-            {
-                float current_w = Q16_TO_FLOAT(ship->angular_velocity);
-                float new_w;
-                if (turn_rate == 0.0f) {
-                    // No steering input — let drag decay any existing spin naturally
-                    new_w = current_w;
-                } else if ((turn_rate > 0.0f && current_w >= turn_rate) ||
-                           (turn_rate < 0.0f && current_w <= turn_rate)) {
-                    // Collision gave us at least as much spin as the rudder wants
-                    // in the same direction — don't fight it, drag will bring it down
-                    new_w = current_w;
-                } else {
-                    // Rudder needs more spin (or opposite direction) — apply it
-                    new_w = turn_rate;
-                }
-                ship->angular_velocity = Q16_FROM_FLOAT(new_w);
-            }
+            // Accumulate torque into net_torque; sim_step divides by moment_inertia
+            // and applies angular drag — same path as keyboard A/D input.
+            const float MAX_RUDDER_TORQUE = 20000.0f; // N⋅m at full 50° deflection
+            float rudder_factor = ship->rudder_angle / 50.0f; // -1.0 to +1.0
+            ship->net_torque = q16_add_sat(ship->net_torque,
+                                           Q16_FROM_FLOAT(rudder_factor * MAX_RUDDER_TORQUE));
         }
     }
 
