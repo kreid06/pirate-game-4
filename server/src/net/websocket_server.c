@@ -7486,134 +7486,188 @@ int websocket_server_update(struct Sim* sim) {
                                 }
 
                             } else if (strcmp(cmd_name, "tptoplayer") == 0) {
-                                /* /TpToPlayer <destinationPlayer>
-                                 *   Teleports the issuing player to the named player.
-                                 * /TpToPlayer <targetPlayer> <destinationPlayer>
-                                 *   Teleports targetPlayer to destinationPlayer (admin). */
-                                char tp2_arg1[64] = "";
-                                char tp2_arg2[64] = "";
+                                /* /TpToPlayer <name|id>  — teleports yourself to a player */
+                                char tp_dst[64] = "";
                                 {
                                     const char *p = cmd_body;
-                                    while (*p && *p != ' ') p++; /* skip cmd name */
+                                    while (*p && *p != ' ') p++;
                                     while (*p == ' ') p++;
                                     int ai = 0;
-                                    while (*p && *p != ' ' && ai < 63) tp2_arg1[ai++] = *p++;
-                                    tp2_arg1[ai] = '\0';
-                                    while (*p == ' ') p++;
-                                    ai = 0;
-                                    while (*p && *p != ' ' && ai < 63) tp2_arg2[ai++] = *p++;
-                                    tp2_arg2[ai] = '\0';
+                                    while (*p && *p != ' ' && ai < 63) tp_dst[ai++] = *p++;
+                                    tp_dst[ai] = '\0';
                                 }
-
-                                if (tp2_arg1[0] == '\0') {
+                                if (tp_dst[0] == '\0') {
                                     snprintf(response, sizeof(response),
-                                        "{\"type\":\"command_response\","
-                                        "\"success\":false,"
-                                        "\"text\":\"Usage: /TpToPlayer <destination> OR /TpToPlayer <target> <destination>\"}");
+                                        "{\"type\":\"command_response\",\"success\":false,"
+                                        "\"text\":\"Usage: /TpToPlayer <name|id>\"}");
                                 } else {
-                                    /* Helper: find a player by case-insensitive name prefix */
-                                    #define FIND_PLAYER_BY_NAME(out_ptr, name_cstr) do { \
-                                        (out_ptr) = NULL; \
-                                        char _lname[64]; \
-                                        int _li = 0; \
-                                        while ((name_cstr)[_li] && _li < 63) { \
-                                            _lname[_li] = ((name_cstr)[_li] >= 'A' && (name_cstr)[_li] <= 'Z') \
-                                                ? (name_cstr)[_li] + 32 : (name_cstr)[_li]; \
-                                            _li++; \
-                                        } \
-                                        _lname[_li] = '\0'; \
-                                        for (int _pi = 0; _pi < WS_MAX_CLIENTS && !(out_ptr); _pi++) { \
-                                            if (!players[_pi].active) continue; \
-                                            char _lpn[64]; int _pj = 0; \
-                                            while (players[_pi].name[_pj] && _pj < 63) { \
-                                                _lpn[_pj] = (players[_pi].name[_pj] >= 'A' && players[_pi].name[_pj] <= 'Z') \
-                                                    ? players[_pi].name[_pj] + 32 : players[_pi].name[_pj]; \
-                                                _pj++; \
+                                    /* Lookup by numeric ID or case-insensitive name prefix */
+                                    #define FIND_PNID(out, str) do { \
+                                        (out) = NULL; \
+                                        int _is_num = ((str)[0] >= '0' && (str)[0] <= '9'); \
+                                        if (_is_num) { \
+                                            unsigned int _tid = (unsigned int)atoi(str); \
+                                            for (int _pi = 0; _pi < WS_MAX_CLIENTS && !(out); _pi++) \
+                                                if (players[_pi].active && players[_pi].player_id == _tid) \
+                                                    (out) = &players[_pi]; \
+                                        } else { \
+                                            char _ln[64]; int _li = 0; \
+                                            while ((str)[_li] && _li < 63) { \
+                                                _ln[_li] = ((str)[_li] >= 'A' && (str)[_li] <= 'Z') \
+                                                    ? (str)[_li] + 32 : (str)[_li]; _li++; } \
+                                            _ln[_li] = '\0'; \
+                                            for (int _pi = 0; _pi < WS_MAX_CLIENTS && !(out); _pi++) { \
+                                                if (!players[_pi].active) continue; \
+                                                char _lpn[64]; int _pj = 0; \
+                                                while (players[_pi].name[_pj] && _pj < 63) { \
+                                                    _lpn[_pj] = (players[_pi].name[_pj] >= 'A' && players[_pi].name[_pj] <= 'Z') \
+                                                        ? players[_pi].name[_pj] + 32 : players[_pi].name[_pj]; _pj++; } \
+                                                _lpn[_pj] = '\0'; \
+                                                if (strstr(_lpn, _ln)) (out) = &players[_pi]; \
                                             } \
-                                            _lpn[_pj] = '\0'; \
-                                            if (strstr(_lpn, _lname)) (out_ptr) = &players[_pi]; \
                                         } \
                                     } while (0)
 
-                                    WebSocketPlayer *tp2_mover = NULL;
-                                    WebSocketPlayer *tp2_dest  = NULL;
+                                    WebSocketPlayer *tp_mover = find_player(client->player_id);
+                                    WebSocketPlayer *tp_dest  = NULL;
+                                    FIND_PNID(tp_dest, tp_dst);
+                                    #undef FIND_PNID
 
-                                    if (tp2_arg2[0] == '\0') {
-                                        /* Single-arg form: issuer → arg1 */
-                                        tp2_mover = find_player(client->player_id);
-                                        FIND_PLAYER_BY_NAME(tp2_dest, tp2_arg1);
+                                    if (!tp_mover) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Could not find your player session.\"}");
+                                    } else if (!tp_dest) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}", tp_dst);
+                                    } else if (tp_mover == tp_dest) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Cannot teleport to yourself.\"}");
                                     } else {
-                                        /* Two-arg form: arg1 → arg2 */
-                                        FIND_PLAYER_BY_NAME(tp2_mover, tp2_arg1);
-                                        FIND_PLAYER_BY_NAME(tp2_dest,  tp2_arg2);
+                                        if (tp_mover->is_mounted) {
+                                            tp_mover->is_mounted = false;
+                                            tp_mover->mounted_module_id = 0;
+                                            tp_mover->controlling_ship_id = 0;
+                                        }
+                                        if (tp_dest->parent_ship_id != 0) {
+                                            SimpleShip *ds = find_ship(tp_dest->parent_ship_id);
+                                            if (ds) board_player_on_ship(tp_mover, ds, tp_dest->local_x, tp_dest->local_y);
+                                            else { tp_mover->x = tp_dest->x; tp_mover->y = tp_dest->y; tp_mover->parent_ship_id = 0; }
+                                        } else {
+                                            tp_mover->x = tp_dest->x; tp_mover->y = tp_dest->y;
+                                            tp_mover->parent_ship_id = 0; tp_mover->on_island_id = tp_dest->on_island_id;
+                                        }
+                                        char tp_bcast[256];
+                                        snprintf(tp_bcast, sizeof(tp_bcast),
+                                            "{\"type\":\"player_teleported\",\"player_id\":%u,"
+                                            "\"x\":%.1f,\"y\":%.1f,\"parent_ship\":%u,"
+                                            "\"local_x\":%.1f,\"local_y\":%.1f}",
+                                            tp_mover->player_id, tp_mover->x, tp_mover->y,
+                                            tp_mover->parent_ship_id, tp_mover->local_x, tp_mover->local_y);
+                                        websocket_server_broadcast(tp_bcast);
+                                        log_info("🚀 TpToPlayer: %u (%s) → %u (%s)",
+                                                 tp_mover->player_id, tp_mover->name,
+                                                 tp_dest->player_id, tp_dest->name);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":true,"
+                                            "\"text\":\"Teleported you to %s.\"}", tp_dest->name);
                                     }
-                                    #undef FIND_PLAYER_BY_NAME
+                                }
 
-                                    if (!tp2_mover) {
+                            } else if (strcmp(cmd_name, "tpplayertoplayer") == 0) {
+                                /* /TpPlayerToPlayer <source name|id> <destination name|id>  — admin */
+                                char tpp_src[64] = "", tpp_dst[64] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++;
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) tpp_src[ai++] = *p++;
+                                    tpp_src[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) tpp_dst[ai++] = *p++;
+                                    tpp_dst[ai] = '\0';
+                                }
+                                if (tpp_src[0] == '\0' || tpp_dst[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\",\"success\":false,"
+                                        "\"text\":\"Usage: /TpPlayerToPlayer <source name|id> <destination name|id>\"}");
+                                } else {
+                                    #define FIND_PNID(out, str) do { \
+                                        (out) = NULL; \
+                                        int _is_num = ((str)[0] >= '0' && (str)[0] <= '9'); \
+                                        if (_is_num) { \
+                                            unsigned int _tid = (unsigned int)atoi(str); \
+                                            for (int _pi = 0; _pi < WS_MAX_CLIENTS && !(out); _pi++) \
+                                                if (players[_pi].active && players[_pi].player_id == _tid) \
+                                                    (out) = &players[_pi]; \
+                                        } else { \
+                                            char _ln[64]; int _li = 0; \
+                                            while ((str)[_li] && _li < 63) { \
+                                                _ln[_li] = ((str)[_li] >= 'A' && (str)[_li] <= 'Z') \
+                                                    ? (str)[_li] + 32 : (str)[_li]; _li++; } \
+                                            _ln[_li] = '\0'; \
+                                            for (int _pi = 0; _pi < WS_MAX_CLIENTS && !(out); _pi++) { \
+                                                if (!players[_pi].active) continue; \
+                                                char _lpn[64]; int _pj = 0; \
+                                                while (players[_pi].name[_pj] && _pj < 63) { \
+                                                    _lpn[_pj] = (players[_pi].name[_pj] >= 'A' && players[_pi].name[_pj] <= 'Z') \
+                                                        ? players[_pi].name[_pj] + 32 : players[_pi].name[_pj]; _pj++; } \
+                                                _lpn[_pj] = '\0'; \
+                                                if (strstr(_lpn, _ln)) (out) = &players[_pi]; \
+                                            } \
+                                        } \
+                                    } while (0)
+
+                                    WebSocketPlayer *tpp_mover = NULL, *tpp_dest = NULL;
+                                    FIND_PNID(tpp_mover, tpp_src);
+                                    FIND_PNID(tpp_dest,  tpp_dst);
+                                    #undef FIND_PNID
+
+                                    if (!tpp_mover) {
                                         snprintf(response, sizeof(response),
-                                            "{\"type\":\"command_response\","
-                                            "\"success\":false,"
-                                            "\"text\":\"Player '%s' not found.\"}" , tp2_arg1);
-                                    } else if (!tp2_dest) {
-                                        const char *missing = tp2_arg2[0] ? tp2_arg2 : tp2_arg1;
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Source player '%s' not found.\"}", tpp_src);
+                                    } else if (!tpp_dest) {
                                         snprintf(response, sizeof(response),
-                                            "{\"type\":\"command_response\","
-                                            "\"success\":false,"
-                                            "\"text\":\"Player '%s' not found.\"}", missing);
-                                    } else if (tp2_mover == tp2_dest) {
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Destination player '%s' not found.\"}", tpp_dst);
+                                    } else if (tpp_mover == tpp_dest) {
                                         snprintf(response, sizeof(response),
-                                            "{\"type\":\"command_response\","
-                                            "\"success\":false,"
+                                            "{\"type\":\"command_response\",\"success\":false,"
                                             "\"text\":\"Cannot teleport a player to themselves.\"}");
                                     } else {
-                                        /* Dismount mover from any module */
-                                        if (tp2_mover->is_mounted) {
-                                            tp2_mover->is_mounted          = false;
-                                            tp2_mover->mounted_module_id   = 0;
-                                            tp2_mover->controlling_ship_id = 0;
+                                        if (tpp_mover->is_mounted) {
+                                            tpp_mover->is_mounted = false;
+                                            tpp_mover->mounted_module_id = 0;
+                                            tpp_mover->controlling_ship_id = 0;
                                         }
-
-                                        if (tp2_dest->parent_ship_id != 0) {
-                                            /* Destination is on a ship — board mover at dest's local pos */
-                                            SimpleShip *dest_ship = find_ship(tp2_dest->parent_ship_id);
-                                            if (dest_ship) {
-                                                board_player_on_ship(tp2_mover, dest_ship,
-                                                    tp2_dest->local_x, tp2_dest->local_y);
-                                            } else {
-                                                tp2_mover->x          = tp2_dest->x;
-                                                tp2_mover->y          = tp2_dest->y;
-                                                tp2_mover->parent_ship_id = 0;
-                                            }
+                                        if (tpp_dest->parent_ship_id != 0) {
+                                            SimpleShip *ds = find_ship(tpp_dest->parent_ship_id);
+                                            if (ds) board_player_on_ship(tpp_mover, ds, tpp_dest->local_x, tpp_dest->local_y);
+                                            else { tpp_mover->x = tpp_dest->x; tpp_mover->y = tpp_dest->y; tpp_mover->parent_ship_id = 0; }
                                         } else {
-                                            /* Destination is on land/sea — place mover at dest's world pos */
-                                            tp2_mover->x           = tp2_dest->x;
-                                            tp2_mover->y           = tp2_dest->y;
-                                            tp2_mover->parent_ship_id  = 0;
-                                            tp2_mover->on_island_id = tp2_dest->on_island_id;
+                                            tpp_mover->x = tpp_dest->x; tpp_mover->y = tpp_dest->y;
+                                            tpp_mover->parent_ship_id = 0; tpp_mover->on_island_id = tpp_dest->on_island_id;
                                         }
-
-                                        /* Broadcast new position to all clients */
-                                        char tp2_msg[256];
-                                        snprintf(tp2_msg, sizeof(tp2_msg),
-                                            "{\"type\":\"player_teleported\","
-                                            "\"player_id\":%u,"
-                                            "\"x\":%.1f,\"y\":%.1f,"
-                                            "\"parent_ship\":%u,"
+                                        char tpp_bcast[256];
+                                        snprintf(tpp_bcast, sizeof(tpp_bcast),
+                                            "{\"type\":\"player_teleported\",\"player_id\":%u,"
+                                            "\"x\":%.1f,\"y\":%.1f,\"parent_ship\":%u,"
                                             "\"local_x\":%.1f,\"local_y\":%.1f}",
-                                            tp2_mover->player_id,
-                                            tp2_mover->x, tp2_mover->y,
-                                            tp2_mover->parent_ship_id,
-                                            tp2_mover->local_x, tp2_mover->local_y);
-                                        websocket_server_broadcast(tp2_msg);
-
-                                        log_info("🚀 TpToPlayer: %u (%s) → %u (%s)",
-                                                 tp2_mover->player_id, tp2_mover->name,
-                                                 tp2_dest->player_id,  tp2_dest->name);
+                                            tpp_mover->player_id, tpp_mover->x, tpp_mover->y,
+                                            tpp_mover->parent_ship_id, tpp_mover->local_x, tpp_mover->local_y);
+                                        websocket_server_broadcast(tpp_bcast);
+                                        log_info("🚀 TpPlayerToPlayer: %u (%s) → %u (%s)",
+                                                 tpp_mover->player_id, tpp_mover->name,
+                                                 tpp_dest->player_id, tpp_dest->name);
                                         snprintf(response, sizeof(response),
-                                            "{\"type\":\"command_response\","
-                                            "\"success\":true,"
+                                            "{\"type\":\"command_response\",\"success\":true,"
                                             "\"text\":\"Teleported %s to %s.\"}",
-                                            tp2_mover->name, tp2_dest->name);
+                                            tpp_mover->name, tpp_dest->name);
                                     }
                                 }
 
