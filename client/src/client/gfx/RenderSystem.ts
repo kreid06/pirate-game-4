@@ -138,6 +138,8 @@ export class RenderSystem {
   private hoveredDeckSlot: { ship: Ship } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
+  /** Camera mode badge to overlay on screen. 'free' | 'rotate' | null. */
+  public cameraMode: 'free' | 'rotate' | null = null;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
   public localPlayerId: number | null = null;
   /** Player position info used by the hover tooltip to determine interact range. */
@@ -1032,10 +1034,10 @@ export class RenderSystem {
    * @param zoom      Pixels per world unit
    * @param deltaMs   Frame delta in milliseconds (for time accumulation)
    */
-  beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number): void {
+  beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number, cameraRotation: number = 0): void {
     if (!this._gl) return;
     this._glTimeSec += deltaMs / 1000;
-    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec, this.canvas.width, this.canvas.height);
+    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec, this.canvas.width, this.canvas.height, cameraRotation);
   }
 
   /** Flush the GL batcher — call AFTER renderWorld() each frame when GL is active. */
@@ -3513,6 +3515,9 @@ export class RenderSystem {
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
+    // Camera mode badge (free-cam / rotate-cam indicator)
+    if (this.cameraMode) this.drawCameraModeBadge();
+
     // Sword cooldown cursor ring (topmost — always in screen space)
     this.drawSwordCooldownCursor();
     // Ladder hold-progress ring
@@ -3535,6 +3540,50 @@ export class RenderSystem {
     this.drawShipHullTooltip(camera);
   }
   
+  /**
+   * Draws a small pill badge at the top-centre of the canvas indicating the
+   * current camera mode (FREE CAMERA / ROTATE CAMERA).
+   */
+  private drawCameraModeBadge(): void {
+    const mode = this.cameraMode;
+    if (!mode) return;
+    const ctx = this.ctx;
+    const label   = mode === 'free' ? '🎥  FREE CAMERA' : '🔄  ROTATE CAMERA';
+    const accent  = mode === 'free' ? '#44ccff' : '#ffcc44';
+    const cx      = this.canvas.width / 2;
+    const cy      = 28;
+
+    ctx.save();
+    ctx.font = 'bold 13px "Georgia", serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    const tw   = ctx.measureText(label).width;
+    const ph   = 18;  // pill half-height
+    const pw   = tw / 2 + 14;  // pill half-width
+
+    // Pill background
+    ctx.fillStyle   = 'rgba(0, 0, 0, 0.70)';
+    ctx.strokeStyle = accent;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(cx - pw, cy - ph / 2, pw * 2, ph, ph / 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = accent;
+    ctx.fillText(label, cx, cy);
+
+    // "Home to reset" hint for rotate mode
+    if (mode === 'rotate') {
+      ctx.font = '10px "Georgia", serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText('Home: reset angle', cx, cy + ph / 2 + 9);
+    }
+
+    ctx.restore();
+  }
+
   /**
    * Draws a shrinking arc ring around the mouse cursor while the sword is on cooldown.
    * Full ring = just swung; empty ring = ready.
@@ -3634,6 +3683,7 @@ export class RenderSystem {
     const cx   = screenPos.x;
     const cy   = screenPos.y;
     const zoom = camera.getState().zoom;
+    const cameraRotation = camera.getState().rotation;
     const TWO_PI = Math.PI * 2;
     const { width, height } = this.canvas;
 
@@ -3658,7 +3708,7 @@ export class RenderSystem {
       fctx.moveTo(cx, cy);
       for (let i = 0; i <= N; i++) {
         const idx   = i % N;
-        const angle = idx * TWO_PI / N;
+        const angle = idx * TWO_PI / N - cameraRotation;
         const dist  = hitDist[idx] * zoom * scale;
         fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
       }
@@ -14360,7 +14410,7 @@ export class RenderSystem {
         if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
           // For curved planks, draw in ship-local coordinates
           this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-          this.ctx.rotate(ship.rotation);
+          this.ctx.rotate(ship.rotation - camera.getState().rotation);
           this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
           
           // Draw curved plank boundary
@@ -14444,7 +14494,7 @@ export class RenderSystem {
         } else {
           // For straight modules, draw simple rectangle boundary
           this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-          this.ctx.rotate(ship.rotation);
+          this.ctx.rotate(ship.rotation - camera.getState().rotation);
           this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
           this.ctx.translate(module.localPos.x, module.localPos.y);
           this.ctx.rotate(module.localRot);
@@ -15213,6 +15263,7 @@ export class RenderSystem {
     
     // Draw team-coloured highlight outline around the hovered module
     const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
+    const _htCamRot = camera.getState().rotation;
     this.ctx.save();
     
     // Check if it's a curved plank (needs special handling)
@@ -15220,7 +15271,7 @@ export class RenderSystem {
       // For curved planks, draw directly in ship-local coordinates
       // Transform to ship's coordinate system only
       this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation);
+      this.ctx.rotate(ship.rotation - _htCamRot);
       this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
       
       // Draw curved plank highlight
@@ -15295,7 +15346,7 @@ export class RenderSystem {
       // For straight planks and other modules, use full transform
       // Transform to ship's coordinate system
       this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation);
+      this.ctx.rotate(ship.rotation - _htCamRot);
       this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
       
       // Transform to module's local position and rotation

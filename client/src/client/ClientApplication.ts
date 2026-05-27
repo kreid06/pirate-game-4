@@ -188,6 +188,14 @@ export class ClientApplication {
   private combatMode = false;
   /** Timestamp of last combat action — used for the 10 s auto-disable timer. */
   private lastCombatActionMs = 0;
+
+  // ── Camera mode state ─────────────────────────────────────────────────
+  /** True while free-camera mode is active (middle-mouse toggled). */
+  private _freeCameraMode = false;
+  /** True while rotate-camera mode is active (Shift + middle-mouse held). */
+  private _rotateCamActive = false;
+  /** Camera rotation target — lerped toward each frame. */
+  private _cameraRotationTarget = 0;
   // ── Ship debug panel ────────────────────────────────────────────────────
   private _shipDebugPanel: HTMLDivElement | null = null;
   private _shipDebugTableBody: HTMLTableSectionElement | null = null;
@@ -1542,6 +1550,33 @@ export class ClientApplication {
       this.inputManager.onZoom = (factor, _screenPoint) => {
         this._userZoomMul = Math.max(0.1, Math.min(4.0, this._userZoomMul * factor));
         this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
+      };
+
+      // ── Camera mode callbacks ─────────────────────────────────────────────
+      // Middle-mouse (no Shift) → toggle free-camera mode
+      this.inputManager.onMiddleMouseToggle = () => {
+        this._freeCameraMode = !this._freeCameraMode;
+        // Sync flag so InputManager can gate normal mouse actions while in free-cam mode
+        this.inputManager.freeCameraMode = this._freeCameraMode;
+        // Entering free-cam: release camera from player tracking while active.
+        // Exiting free-cam: next updateCamera call will resume player following.
+      };
+
+      // Free-cam drag — pan the camera position directly
+      this.inputManager.onFreeCamDrag = (dx, dy) => {
+        if (!this._freeCameraMode) return;
+        // screenToWorldDelta applies the correct inverse rotation (+rot) and zoom
+        const worldDelta = this.camera.screenToWorldDelta(Vec2.from(dx, dy));
+        const pos = this.camera.getState().position;
+        this.camera.setPosition(Vec2.from(pos.x - worldDelta.x, pos.y - worldDelta.y));
+      };
+
+      // Shift + middle-mouse (hold) → rotate camera
+      this.inputManager.onRotateCamStart  = () => { this._rotateCamActive = true; };
+      this.inputManager.onRotateCamEnd    = () => { this._rotateCamActive = false; };
+      this.inputManager.onRotateCamDrag   = (dx, _dy) => {
+        // Horizontal drag rotates by ~0.005 rad/px
+        this._cameraRotationTarget += dx * 0.005;
       };
 
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
@@ -3001,6 +3036,7 @@ export class ClientApplication {
     } else {
       // Pass aiming state so cannon aim guides only draw when actively aiming
       this.renderSystem.playerIsAiming = this.inputManager?.isRightMouseDown ?? false;
+      this.renderSystem.cameraMode = this._rotateCamActive ? 'rotate' : this._freeCameraMode ? 'free' : null;
       this.renderSystem.localPlayerId = assignedPlayerId;
       this.renderSystem.playerAimAngleRelative = this.inputManager?.cannonAimAngleRelative ?? 0;
       // Use the loaded ammo type (physically in the barrel) so the aim guide shows
@@ -3042,7 +3078,7 @@ export class ClientApplication {
       // Render game world with hybrid state
       if (this._glRenderer) {
         const camState = this.camera.getState();
-        this.renderSystem.beginGLFrame(camState.position.x, camState.position.y, camState.zoom, this._lastDeltaMs);
+        this.renderSystem.beginGLFrame(camState.position.x, camState.position.y, camState.zoom, this._lastDeltaMs, camState.rotation);
       }
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       if (this._glRenderer) {
@@ -3327,29 +3363,33 @@ export class ClientApplication {
       }
       return;
     }
-    
-    // Smooth camera follow with lerp for grid stability.
-    // But when world-wrap teleports the player across a seam, snap immediately
-    // so the camera doesn't scroll across the whole map.
-    const currentPos = this.camera.getState().position;
-    const mapWrapEnabled = this.networkManager.mapWrap;
-    const mapWidth = this.networkManager.mapWidth;
-    const mapHeight = this.networkManager.mapHeight;
-    const crossedWrapSeam = mapWrapEnabled
-      && mapWidth > 0
-      && mapHeight > 0
-      && (
-        Math.abs(player.position.x - currentPos.x) > mapWidth * 0.5
-        || Math.abs(player.position.y - currentPos.y) > mapHeight * 0.5
-      );
 
-    if (crossedWrapSeam) {
-      this.camera.setPosition(player.position);
-    } else {
-      const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
-      const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
-      const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
-      this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+    // In free-camera mode the camera position is driven entirely by drag input.
+    // Skip all player-following and AOI position logic, but still lerp zoom/rotation.
+    if (!this._freeCameraMode) {
+      // Smooth camera follow with lerp for grid stability.
+      // But when world-wrap teleports the player across a seam, snap immediately
+      // so the camera doesn't scroll across the whole map.
+      const currentPos = this.camera.getState().position;
+      const mapWrapEnabled = this.networkManager.mapWrap;
+      const mapWidth = this.networkManager.mapWidth;
+      const mapHeight = this.networkManager.mapHeight;
+      const crossedWrapSeam = mapWrapEnabled
+        && mapWidth > 0
+        && mapHeight > 0
+        && (
+          Math.abs(player.position.x - currentPos.x) > mapWidth * 0.5
+          || Math.abs(player.position.y - currentPos.y) > mapHeight * 0.5
+        );
+
+      if (crossedWrapSeam) {
+        this.camera.setPosition(player.position);
+      } else {
+        const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
+        const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
+        const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
+        this.camera.setPosition(Vec2.from(smoothedX, smoothedY));
+      }
     }
 
     // Dynamic AOI zoom: only applied when the player is NOT at the helm.
@@ -3368,6 +3408,13 @@ export class ClientApplication {
     if (Math.abs(currentZoom - this.targetZoom) > 0.001) {
       const zoomLerp = 1.0 - Math.pow(0.01, dt);
       this.camera.setZoom(currentZoom + (this.targetZoom - currentZoom) * zoomLerp);
+    }
+
+    // Smooth rotation toward target (same ease-out curve as zoom)
+    const currentRot = this.camera.getState().rotation;
+    if (Math.abs(currentRot - this._cameraRotationTarget) > 0.0001) {
+      const rotLerp = 1.0 - Math.pow(0.01, dt);
+      this.camera.setRotation(currentRot + (this._cameraRotationTarget - currentRot) * rotLerp);
     }
   }
   
@@ -4852,6 +4899,15 @@ export class ClientApplication {
           this.renderSystem.toggleHoverBoundaries();
           e.preventDefault();
           break;
+
+        case 'Home': {
+          // Reset camera rotation to 0 and exit rotate/free-camera modes
+          this._cameraRotationTarget = 0;
+          this._rotateCamActive  = false;
+          // Do NOT automatically exit free-cam mode; user may still want to pan
+          e.preventDefault();
+          break;
+        }
 
         case 'm':
         case 'M': {

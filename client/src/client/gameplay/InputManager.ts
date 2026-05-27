@@ -156,6 +156,21 @@ export class InputManager {
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
 
+  // ── Camera mode callbacks ──────────────────────────────────────────────
+  /** Middle-mouse pressed (no shift) — toggle free-camera mode. */
+  public onMiddleMouseToggle: (() => void) | null = null;
+  /** Middle-mouse pressed with Shift held — begin rotate mode. */
+  public onRotateCamStart: (() => void) | null = null;
+  /** Middle-mouse released after rotate mode. */
+  public onRotateCamEnd: (() => void) | null = null;
+  /** Mouse moved while free-camera is active — delta in screen pixels. */
+  public onFreeCamDrag: ((dx: number, dy: number) => void) | null = null;
+  /** Mouse moved while rotate-camera is active — delta in screen pixels. */
+  public onRotateCamDrag: ((dx: number, dy: number) => void) | null = null;
+
+  /** Set to true by ClientApplication when free-camera mode is active. Gates normal mouse actions. */
+  public freeCameraMode = false;
+
   // UI overlay input hooks — called before game input is processed
   /** Called on every mousemove so overlays (e.g. world map) can update drag state. */
   public onUIMouseMove: ((x: number, y: number) => void) | null = null;
@@ -257,6 +272,18 @@ export class InputManager {
   public get cannonAimAngleRelative(): number { return this.lastCannonAimAngle; }
   private lastLeftClickTime: number = 0;
   private readonly DOUBLE_CLICK_THRESHOLD = 300; // 300ms for double-click detection
+
+  // Middle-mouse drag tracking (Shift+middle = rotate cam)
+  private _middleMouseDown = false;
+  private _middleShiftDown = false; // true if Shift was held when middle was pressed
+  private _lastMiddleX = 0;
+  private _lastMiddleY = 0;
+
+  // Left-drag tracking (only active in free-camera mode)
+  private _leftFreeCamDown = false;
+  private _leftFreeCamShift = false; // true → rotate, false → pan
+  private _lastLeftFreeCamX = 0;
+  private _lastLeftFreeCamY = 0;
   private currentShipId: number | null = null; // Track which ship player is on for aim calculation
   private currentShipRotation: number = 0; // Track ship's current rotation for relative aiming
   
@@ -327,7 +354,36 @@ export class InputManager {
     // Handle cannon aiming (works whether on ship or not)
     // deltaTime is already in seconds (see ClientApplication.updateClient)
     this.handleCannonAiming(deltaTime);
-    
+
+    // Arrow Left/Right rotate the camera in any mode
+    {
+      const rotLeft  = this.inputState.pressedKeys.has('ArrowLeft');
+      const rotRight = this.inputState.pressedKeys.has('ArrowRight');
+      if (rotLeft || rotRight) {
+        // 0.005 rad/px is the sensitivity in ClientApplication.onRotateCamDrag
+        // 1.5 rad/s target → dx = 1.5 / 0.005 * dt = 300 * dt
+        const rotDx = ((rotRight ? 1 : 0) - (rotLeft ? 1 : 0)) * 300 * deltaTime;
+        if (this.onRotateCamDrag) this.onRotateCamDrag(rotDx, 0);
+      }
+    }
+
+    // Free-camera mode: WASD/arrows pan the camera; skip all player movement
+    if (this.freeCameraMode) {
+      const panUp    = this.inputState.pressedKeys.has('KeyW') || this.inputState.pressedKeys.has('ArrowUp');
+      const panDown  = this.inputState.pressedKeys.has('KeyS') || this.inputState.pressedKeys.has('ArrowDown');
+      const panLeft  = this.inputState.pressedKeys.has('KeyA');
+      const panRight = this.inputState.pressedKeys.has('KeyD');
+      if (panUp || panDown || panLeft || panRight) {
+        const PAN_SPEED = 400; // screen-pixels per second (converted to world units by onFreeCamDrag)
+        // Negate so W/ArrowUp moves camera up (world-space Y decreases) matching drag convention
+        const dx = ((panLeft  ? 1 : 0) - (panRight ? 1 : 0)) * PAN_SPEED * deltaTime;
+        const dy = ((panUp    ? 1 : 0) - (panDown  ? 1 : 0)) * PAN_SPEED * deltaTime;
+        if (this.onFreeCamDrag) this.onFreeCamDrag(dx, dy);
+      }
+      this.resetFrameFlags();
+      return;
+    }
+
     // If mounted to helm, handle ship controls instead of player movement
     if (this.mountKind === 'helm') {
       this.handleShipControls();
@@ -1143,6 +1199,12 @@ export class InputManager {
         mapping.pressed = true;
       }
     }
+
+    // Arrow keys rotate / pan camera — prevent default browser scroll
+    if (event.code === 'ArrowLeft' || event.code === 'ArrowRight' ||
+        (this.freeCameraMode && (event.code === 'ArrowUp' || event.code === 'ArrowDown'))) {
+      event.preventDefault();
+    }
     
     // Handle debug toggles immediately (not part of simulation input)
     switch (event.code) {
@@ -1360,12 +1422,33 @@ export class InputManager {
   
   private onMouseMove(event: MouseEvent): void {
     const rect = this.canvas.getBoundingClientRect();
-    this.inputState.mousePosition = Vec2.from(
-      event.clientX - rect.left,
-      event.clientY - rect.top
-    );
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    this.inputState.mousePosition = Vec2.from(sx, sy);
     if (this.onUIMouseMove) {
-      this.onUIMouseMove(this.inputState.mousePosition.x, this.inputState.mousePosition.y);
+      this.onUIMouseMove(sx, sy);
+    }
+    // Free-camera left-drag: pan or rotate
+    if (this._leftFreeCamDown) {
+      const dx = sx - this._lastLeftFreeCamX;
+      const dy = sy - this._lastLeftFreeCamY;
+      this._lastLeftFreeCamX = sx;
+      this._lastLeftFreeCamY = sy;
+      if (this._leftFreeCamShift) {
+        if (this.onRotateCamDrag) this.onRotateCamDrag(dx, dy);
+      } else {
+        if (this.onFreeCamDrag) this.onFreeCamDrag(dx, dy);
+      }
+    }
+    // Middle-mouse rotate-cam drag (Shift+middle)
+    if (this._middleMouseDown) {
+      const dx = sx - this._lastMiddleX;
+      const dy = sy - this._lastMiddleY;
+      this._lastMiddleX = sx;
+      this._lastMiddleY = sy;
+      if (this._middleShiftDown) {
+        if (this.onRotateCamDrag) this.onRotateCamDrag(dx, dy);
+      }
     }
   }
   
@@ -1373,6 +1456,16 @@ export class InputManager {
     event.preventDefault();
     
     if (event.button === 0) { // Left mouse button
+      // Free camera mode: left-drag pans (or Shift+left-drag rotates); skip all game logic
+      if (this.freeCameraMode) {
+        const rect = this.canvas.getBoundingClientRect();
+        this._leftFreeCamDown = true;
+        this._leftFreeCamShift = event.shiftKey;
+        this._lastLeftFreeCamX = event.clientX - rect.left;
+        this._lastLeftFreeCamY = event.clientY - rect.top;
+        return;
+      }
+
       // Shift+click toggles cannon group membership — check before any UI consumption
       if (event.shiftKey) {
         if (this.onGroupAssign) this.onGroupAssign();
@@ -1440,9 +1533,23 @@ export class InputManager {
       }
 
       this.lastLeftClickTime = now;
-      
+
+    } else if (event.button === 1) { // Middle mouse button
+      event.preventDefault();
+      const rect = this.canvas.getBoundingClientRect();
+      this._lastMiddleX = event.clientX - rect.left;
+      this._lastMiddleY = event.clientY - rect.top;
+      if (event.shiftKey) {
+        // Shift + middle → rotate camera mode (hold-to-drag)
+        this._middleMouseDown = true;
+        this._middleShiftDown = true;
+        if (this.onRotateCamStart) this.onRotateCamStart();
+      } else {
+        // Middle alone → toggle free-camera mode (pure click, no drag)
+        if (this.onMiddleMouseToggle) this.onMiddleMouseToggle();
+      }
+
     } else if (event.button === 2) { // Right mouse button
-      // Early-out hook: allows callers to intercept all right-clicks (e.g. cancel Move To mode)
       if (this.onBeforeRightClick && this.onBeforeRightClick()) return;
       // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
       if (this.isCtrlHeld()) {
@@ -1471,6 +1578,11 @@ export class InputManager {
     event.preventDefault();
     
     if (event.button === 0) { // Left mouse button
+      // Stop free-cam left-drag
+      if (this._leftFreeCamDown) {
+        this._leftFreeCamDown = false;
+        return;
+      }
       this.inputState.leftMouseDown = false;
       this.inputState.leftMouseReleased = true;
       if (this.onUIMouseUp) this.onUIMouseUp(event.offsetX, event.offsetY);
@@ -1486,6 +1598,14 @@ export class InputManager {
             this.flameAmmoSwitchTimer = null;
           }, 1000);
         }
+      }
+    } else if (event.button === 1) { // Middle mouse button
+      if (this._middleMouseDown) {
+        this._middleMouseDown = false;
+        if (this._middleShiftDown) {
+          if (this.onRotateCamEnd) this.onRotateCamEnd();
+        }
+        this._middleShiftDown = false;
       }
     } else if (event.button === 2) { // Right mouse button
       if (this.inputState.rightMouseDown) {
