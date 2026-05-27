@@ -4028,6 +4028,7 @@ int websocket_server_update(struct Sim* sim) {
                                     // No friendly fire: skip players of the same company
                                     if (player->company_id != 0 &&
                                         tp->company_id == player->company_id) continue;
+                                                    if (tp->health == 0) continue; /* already dead */
                                                     float px2 = tp->x - player->x;
                                                     float py2 = tp->y - player->y;
                                                     if (px2*px2 + py2*py2 > SWORD_RANGE2) continue;
@@ -4044,6 +4045,8 @@ int websocket_server_update(struct Sim* sim) {
                                                     bool killed_player = (tp->health <= dmg16);
                                                     if (killed_player) tp->health = 0;
                                                     else tp->health -= dmg16;
+                                                    tp->last_damage_ms = get_time_ms();
+                                                    tp->hp_regen_accum_ms = 0;
                                                     // Award XP to the attacker on kill
                                                     if (killed_player) {
                                                         player_apply_xp(player, PLAYER_XP_PER_PLAYER_KILL);
@@ -4178,6 +4181,7 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (!tp->active || tp->player_id == player->player_id) continue;
                                                     if (player->company_id != 0 &&
                                                         tp->company_id == player->company_id) continue;
+                                                    if (tp->health == 0) continue; /* already dead */
                                                     float px2 = tp->x - player->x;
                                                     float py2 = tp->y - player->y;
                                                     if (px2*px2 + py2*py2 > melee_range2) continue;
@@ -4193,6 +4197,8 @@ int websocket_server_update(struct Sim* sim) {
                                                     bool killed_player = (tp->health <= pdmg16);
                                                     if (killed_player) tp->health = 0;
                                                     else tp->health -= pdmg16;
+                                                    tp->last_damage_ms = get_time_ms();
+                                                    tp->hp_regen_accum_ms = 0;
                                                     if (killed_player) {
                                                         player_apply_xp(player, PLAYER_XP_PER_PLAYER_KILL);
                                                         player_die(tp);
@@ -9132,7 +9138,7 @@ void websocket_server_tick(float dt) {
             // ── Check Players ────────────────────────────────────────────────
             for (int wpi = 0; wpi < WS_MAX_CLIENTS && (is_flame || !proj_consumed); wpi++) {
                 WebSocketPlayer* wp = &players[wpi];
-                if (!wp->active) continue;
+                if (!wp->active || wp->health == 0) continue; /* skip dead players */
                 if (proj->firing_ship_id != INVALID_ENTITY_ID &&
                     wp->parent_ship_id == (uint32_t)proj->firing_ship_id) continue;
 
@@ -9156,6 +9162,8 @@ void websocket_server_tick(float dt) {
                     int _arm_val_p = player_armor_value(wp);
                     uint16_t dmg16 = (uint16_t)(_raw_dmg_p - _arm_val_p > 1 ? _raw_dmg_p - _arm_val_p : 1);
                     if (wp->health <= dmg16) { wp->health = 0; player_die(wp); } else { wp->health -= dmg16; }
+                    wp->last_damage_ms = get_time_ms();
+                    wp->hp_regen_accum_ms = 0;
                     if (!wp->is_mounted) {
                         float dist = sqrtf(dx * dx + dy * dy);
                         float kx   = (dist > 0.1f) ? (dx / dist) : 1.0f;
@@ -9629,17 +9637,19 @@ void websocket_server_tick(float dt) {
                         }
                     }
                     /* ── Passive HP regeneration ─────────────────────────────────────────
-                     * Recover 1 HP every 10 seconds when alive and not at full health. */
-                    if (ws_player->health > 0 && ws_player->health < ws_player->max_health) {
+                     * Recover 2 HP every 5 seconds when alive, not at full health,
+                     * and at least 10 s have passed since the last time damage was taken. */
+                    if (ws_player->health > 0 && ws_player->health < ws_player->max_health
+                        && (current_time - ws_player->last_damage_ms) >= 10000u) {
                         ws_player->hp_regen_accum_ms += (uint32_t)(dt * 1000.0f + 0.5f);
-                        if (ws_player->hp_regen_accum_ms >= 10000u) {
-                            ws_player->hp_regen_accum_ms -= 10000u;
-                            ws_player->health++;
-                            if (ws_player->health > ws_player->max_health)
-                                ws_player->health = ws_player->max_health;
+                        if (ws_player->hp_regen_accum_ms >= 5000u) {
+                            ws_player->hp_regen_accum_ms -= 5000u;
+                            uint16_t healed = ws_player->health + 2u > ws_player->max_health
+                                            ? ws_player->max_health : ws_player->health + 2u;
+                            ws_player->health = healed;
                         }
                     } else {
-                        ws_player->hp_regen_accum_ms = 0; /* reset when dead or full */
+                        ws_player->hp_regen_accum_ms = 0; /* reset when dead, full, or recently damaged */
                     }
                 }
                 if (ws_player->health == 0) {
@@ -10553,7 +10563,7 @@ void websocket_server_tick(float dt) {
         /* Players on fire: 5 base HP + 1.25% max_health per 500ms tick */
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
-            if (!wp->active || wp->fire_timer_ms == 0) continue;
+            if (!wp->active || wp->health == 0 || wp->fire_timer_ms == 0) continue;
             /* Water extinguishes fire — player swimming */
             if (wp->movement_state == PLAYER_STATE_SWIMMING) {
                 wp->fire_timer_ms = 0;
@@ -10566,6 +10576,8 @@ void websocket_server_tick(float dt) {
             }
             uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 80u);
             if (wp->health > pl_fire_dmg) { wp->health -= pl_fire_dmg; } else { wp->health = 0; player_die(wp); }
+            wp->last_damage_ms = get_time_ms();
+            wp->hp_regen_accum_ms = 0;
             if (wp->fire_timer_ms > dot_elapsed) {
                 wp->fire_timer_ms -= dot_elapsed;
             } else {

@@ -1127,9 +1127,12 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             float half_cone = 18.0f * (float)(M_PI / 180.0f);
             float dot = nx * fdir_x + ny * fdir_y;
             if (dot < cosf(half_cone)) continue;
+            if (wp->health == 0) continue; /* already dead */
             uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
             bool grape_killed = (wp->health <= dmg);
             if (grape_killed) wp->health = 0; else wp->health -= dmg;
+            wp->last_damage_ms = get_time_ms();
+            wp->hp_regen_accum_ms = 0;
             char hit_msg[256];
             snprintf(hit_msg, sizeof(hit_msg),
                 "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"

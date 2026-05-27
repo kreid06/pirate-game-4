@@ -2678,6 +2678,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             struct Player* player = &sim->players[j];
             if (player->id == proj->owner_id) continue;
             if (player->ship_id == proj->owner_id) continue;
+            if (player->health == 0) continue; /* already dead — projectiles pass through */
 
             float dx = Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(proj->position.x);
             float dy = Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(proj->position.y);
