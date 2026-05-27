@@ -187,8 +187,8 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     interpolationDelay: 66, // 66ms render delay (~2 server frames at 30Hz - ensures we always have data)
     extrapolationLimit: 66, // 66ms max extrapolation (~2 server frames - allows smooth rendering between updates)
     rollbackLimit: 10, // 10 ticks rollback for lag compensation
-    predictionErrorThreshold: 999999.0, // DISABLED - no rollbacks
-    enablePrediction: false, // DISABLED - Using pure interpolation for now, prediction as future feature
+    predictionErrorThreshold: 5.0, // 5 px position tolerance before rollback (doubled when moving)
+    enablePrediction: false,
     enableInterpolation: true
   },
   

@@ -427,39 +427,27 @@ function isPlayerInsideShipBounds(playerPos: Vec2, ship: Ship): boolean {
  * Enhanced free movement when player is not on deck
  */
 function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFrame, dt: number): void {
-  // Match server physics EXACTLY
-  const SWIM_ACCELERATION = 160.0; // units/s² - MUST match server
-  const SWIM_DECELERATION = 120.0; // units/s² - MUST match server
-  const SWIM_MAX_SPEED = 30.0; // units/s - MUST match server
+  // Match server physics (simulation.c + websocket_server.c)
+  const SWIM_ACCELERATION = 160.0; // px/s² - matches server CLIENT_TO_SERVER(160.0)
+  const SWIM_MAX_SPEED = 30.0;     // px/s  - matches server CLIENT_TO_SERVER(30.0)
+  // Server applies 0.95 drag each tick at 20 Hz; express as dt-independent multiplier:
+  // per_second = 0.95^20, so per dt = per_second^dt = 0.95^(20*dt)
+  const SWIM_DRAG_PER_SECOND = Math.pow(0.95, 20); // ≈ 0.358
   
   const isMoving = inputFrame.movement.lengthSq() > 0.01;
   
   if (isMoving) {
-    // Apply acceleration (matching server formula exactly)
+    // Apply acceleration then hard-clamp (server order: accel → clamp → drag)
     const acceleration = inputFrame.movement.mul(SWIM_ACCELERATION * dt);
     player.velocity = player.velocity.add(acceleration);
-    
-    // HARD CLAMP to max speed (server does this immediately after acceleration)
     const currentSpeed = player.velocity.length();
     if (currentSpeed > SWIM_MAX_SPEED) {
-      console.log(`⚠️ CLAMP | Speed ${currentSpeed.toFixed(2)} → ${SWIM_MAX_SPEED} | accel: ${acceleration.length().toFixed(2)} | dt: ${dt.toFixed(4)}`);
       player.velocity = player.velocity.normalize().mul(SWIM_MAX_SPEED);
     }
-  } else {
-    // Apply deceleration when stopped (match server)
-    const currentSpeed = player.velocity.length();
-    if (currentSpeed > 0.1) {
-      const decelAmount = SWIM_DECELERATION * dt;
-      if (decelAmount >= currentSpeed) {
-        // Stop completely
-        player.velocity = Vec2.zero();
-      } else {
-        // Reduce speed
-        const scale = (currentSpeed - decelAmount) / currentSpeed;
-        player.velocity = player.velocity.mul(scale);
-      }
-    }
   }
+  
+  // Passive drag applied every tick on the server regardless of input
+  player.velocity = player.velocity.mul(Math.pow(SWIM_DRAG_PER_SECOND, dt));
   
   // DON'T add water current - server doesn't have this, causes velocity mismatch
   // const currentStrength = 10;
@@ -503,7 +491,7 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
   player.position = finalPosition;
   player.velocity = finalVelocity;
   
-  // Final clamp to ensure we NEVER exceed max speed (match server exactly)
+  // Final safety clamp (drag should keep us below max, but guard against FP drift)
   const finalSpeed = player.velocity.length();
   if (finalSpeed > SWIM_MAX_SPEED) {
     player.velocity = player.velocity.normalize().mul(SWIM_MAX_SPEED);

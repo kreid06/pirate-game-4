@@ -12,6 +12,7 @@ import { PredictionConfig } from '../client/ClientConfig.js';
 import { WorldState, InputFrame } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { simulate } from '../sim/Physics.js';
+import { createCarrierDetectionState, DETECTION_CONFIG, ShipDetectionState, CarrierDetectionState } from '../sim/CarrierDetection.js';
 
 /**
  * Prediction state entry with enhanced tracking
@@ -115,6 +116,11 @@ export class PredictionEngine {
     serverMispredictions: 0
   };
   
+  // Carrier detection state persisted across prediction frames.
+  // Each frame starts from the raw server state (empty carrierDetection), so without this
+  // the detection confirmationTicks would always be 0 and onDeck would flicker every frame.
+  private persistentCarrierDetection: Map<number, CarrierDetectionState> = new Map();
+
   // Ring buffer constants (16 frames = ~350ms at 60Hz)
   private static readonly REWIND_BUFFER_SIZE = 16;
   private static readonly MAX_PREDICTION_HISTORY = 32;
@@ -205,8 +211,16 @@ export class PredictionEngine {
       return baseWorldState;
     }
     
-    // Perform client-side simulation step
-    const predictedState = this.simulateStep(baseWorldState, inputFrame, deltaTime);
+    // Perform client-side simulation step.
+    // Inject persistent carrier detection so on-ship confirmation state is continuous
+    // between frames (raw server state has empty carrierDetection each time).
+    const stateForSim: WorldState = this.persistentCarrierDetection.size > 0
+      ? { ...baseWorldState, carrierDetection: new Map(this.persistentCarrierDetection) }
+      : baseWorldState;
+    const predictedState = this.simulateStep(stateForSim, inputFrame, deltaTime);
+
+    // Carry forward carrier detection into the next frame
+    this.persistentCarrierDetection = new Map(predictedState.carrierDetection);
     
     // Store prediction state using the estimated server tick
     this.storePredictionState(inputFrame.tick, predictedState, inputFrame);
@@ -223,7 +237,30 @@ export class PredictionEngine {
    * Handle new authoritative state from server
    */
   onAuthoritativeState(serverState: WorldState): void {
-    this.authoritativeState = serverState;
+    // Build seeded carrier detection from server-reported player states.
+    // For on-ship players, start with confirmationTicks well above threshold so rollback
+    // re-simulations (and the next update() call) immediately treat the player as on-deck.
+    // For off-ship players, use a fresh empty state to clear any stale on-ship detection.
+    const seededDetection = new Map<number, CarrierDetectionState>();
+    for (const player of serverState.players) {
+      if (player.carrierId > 0) {
+        const det = createCarrierDetectionState();
+        det.currentCarrierId = player.carrierId;
+        det.candidateStates.set(player.carrierId, {
+          shipId: player.carrierId,
+          penetrationDepth: 50.0,
+          relativeVelocity: 0,
+          confirmationTicks: DETECTION_CONFIG.CONFIRM_IN_TICKS + 10,
+          lastDetected: serverState.timestamp,
+        } satisfies ShipDetectionState);
+        seededDetection.set(player.id, det);
+      } else {
+        seededDetection.set(player.id, createCarrierDetectionState());
+      }
+    }
+    this.authoritativeState = { ...serverState, carrierDetection: seededDetection };
+    // Also sync the persistent detection used by update() each frame
+    this.persistentCarrierDetection = new Map(seededDetection);
     this.lastAuthoritativeTick = serverState.tick;
     
     // Reset client tick offset when we get a new server state

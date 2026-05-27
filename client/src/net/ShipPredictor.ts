@@ -39,10 +39,14 @@ const MAX_RUDDER_ANGLE   = 50.0;   // degrees
 const RUDDER_ADJUST_RATE = 25.0;   // degrees/s — rudder slew rate
 // Torque-based turning — mirrors server websocket_server.c + simulation.c
 const MAX_RUDDER_TORQUE  = 20000;  // N⋅m at full 50° deflection
-const MOMENT_INERTIA     = 50000;  // kg⋅m² — matches server ship->moment_inertia
+// Server stores moment_inertia as Q16_FROM_FLOAT(50000.0f), but 50000×65536=3.27B
+// overflows INT32_MAX and saturates to INT32_MAX=2147483647 at runtime on x86-64.
+// Effective Q16 value = INT32_MAX/65536 ≈ 32767.999, so we use 32768 here.
+// → ang_accel = 20000 / 32768 = 0.6104 rad/s² (matches server q16_div result).
+const MOMENT_INERTIA     = 32768;  // effective kg⋅m² after server Q16 overflow
 
 // simulation.c drag coefficients.
-// C_QUAD_V is halved from server value (0.008) because client speed is ×10 larger
+// C_QUAD_V is divided by 10 from server value (0.008) because client speed is ×10 larger
 // and the formula is: drag = 1 − (C_LIN + C_QUAD × |v|).
 const C_LIN_V  = 0.02;    // linear velocity drag per tick
 const C_QUAD_V = 0.0008;  // quadratic velocity drag per tick (0.008 / 10 for client scale)
