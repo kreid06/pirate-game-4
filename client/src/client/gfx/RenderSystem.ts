@@ -138,6 +138,8 @@ export class RenderSystem {
   private hoveredDeckSlot: { ship: Ship } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
+  /** Camera mode badge to overlay on screen. 'free' | 'rotate' | null. */
+  public cameraMode: 'free' | 'rotate' | null = null;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
   public localPlayerId: number | null = null;
   /** Player position info used by the hover tooltip to determine interact range. */
@@ -269,6 +271,13 @@ export class RenderSystem {
     isHovered: boolean; bushAlpha: number; deathAlpha: number;
     ox: number; oy: number;
     wx: number; wy: number;
+  }> = [];
+  /** Wood ceiling tiles pending draw — populated by drawPlacedStructures, consumed by drawPendingCeilings after bushes. */
+  private _pendingCeilings: Array<{
+    s: PlacedStructure;
+    ssp: { x: number; y: number };
+    sz: number;
+    isHovered: boolean;
   }> = [];
   /** All visible resources — populated by drawIsland, leaves+prompts drawn after bushes in renderWorld. */
   private _pendingAllRes: Array<{
@@ -1025,10 +1034,10 @@ export class RenderSystem {
    * @param zoom      Pixels per world unit
    * @param deltaMs   Frame delta in milliseconds (for time accumulation)
    */
-  beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number): void {
+  beginGLFrame(camX: number, camY: number, zoom: number, deltaMs: number, cameraRotation: number = 0): void {
     if (!this._gl) return;
     this._glTimeSec += deltaMs / 1000;
-    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec, this.canvas.width, this.canvas.height);
+    this._gl.beginFrame(camX, camY, zoom, this._glTimeSec, this.canvas.width, this.canvas.height, cameraRotation);
   }
 
   /** Flush the GL batcher — call AFTER renderWorld() each frame when GL is active. */
@@ -2547,6 +2556,29 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredFiberPlant : null;
   }
 
+  /**
+   * Proximity-based fallback for fiber harvest.  Returns the world-pos of the
+   * nearest live fiber bush within `range` of the player (regardless of cursor
+   * hover).  Handles the case where a wooden_floor is placed over a bush and
+   * the cursor naturally lands on the floor sprite instead of the bush.
+   */
+  getNearbyFiberPlant(range: number = 50): { wx: number; wy: number } | null {
+    const player = this._cachedLocalPlayer;
+    if (!player || player.carrierId !== 0) return null;
+    const r2 = range * range;
+    let bestD2 = r2;
+    let best: { wx: number; wy: number } | null = null;
+    for (const e of this._pendingAllRes) {
+      if (e.res.type !== 'fiber') continue;
+      if ((e.res.maxHp ?? 0) > 0 && (e.res.hp ?? 0) <= 0) continue; // depleted (dying)
+      const dx = e.wx - player.position.x;
+      const dy = e.wy - player.position.y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 <= bestD2) { bestD2 = d2; best = { wx: e.wx, wy: e.wy }; }
+    }
+    return best;
+  }
+
   /** Return hovered rock world pos if player is in range and off-ship, else null. */
   getHoveredRock(range: number = 50): { wx: number; wy: number } | null {
     if (!this._hoveredRock) return null;
@@ -3419,6 +3451,9 @@ export class RenderSystem {
       this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy, b.wx, b.wy);
     }
 
+    // ── Wood ceilings — above bushes (roof covers vegetation underneath) ──────
+    this.drawPendingCeilings(camera);
+
     // ── Tree leaves — above bushes and players ────────────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type !== 'wood') continue;
@@ -3480,6 +3515,9 @@ export class RenderSystem {
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
+    // Camera mode badge (free-cam / rotate-cam indicator)
+    if (this.cameraMode) this.drawCameraModeBadge();
+
     // Sword cooldown cursor ring (topmost — always in screen space)
     this.drawSwordCooldownCursor();
     // Ladder hold-progress ring
@@ -3502,6 +3540,50 @@ export class RenderSystem {
     this.drawShipHullTooltip(camera);
   }
   
+  /**
+   * Draws a small pill badge at the top-centre of the canvas indicating the
+   * current camera mode (FREE CAMERA / ROTATE CAMERA).
+   */
+  private drawCameraModeBadge(): void {
+    const mode = this.cameraMode;
+    if (!mode) return;
+    const ctx = this.ctx;
+    const label   = mode === 'free' ? '🎥  FREE CAMERA' : '🔄  ROTATE CAMERA';
+    const accent  = mode === 'free' ? '#44ccff' : '#ffcc44';
+    const cx      = this.canvas.width / 2;
+    const cy      = 28;
+
+    ctx.save();
+    ctx.font = 'bold 13px "Georgia", serif';
+    ctx.textAlign    = 'center';
+    ctx.textBaseline = 'middle';
+    const tw   = ctx.measureText(label).width;
+    const ph   = 18;  // pill half-height
+    const pw   = tw / 2 + 14;  // pill half-width
+
+    // Pill background
+    ctx.fillStyle   = 'rgba(0, 0, 0, 0.70)';
+    ctx.strokeStyle = accent;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(cx - pw, cy - ph / 2, pw * 2, ph, ph / 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Label
+    ctx.fillStyle = accent;
+    ctx.fillText(label, cx, cy);
+
+    // "Home to reset" hint for rotate mode
+    if (mode === 'rotate') {
+      ctx.font = '10px "Georgia", serif';
+      ctx.fillStyle = 'rgba(255,255,255,0.55)';
+      ctx.fillText('Home: reset angle', cx, cy + ph / 2 + 9);
+    }
+
+    ctx.restore();
+  }
+
   /**
    * Draws a shrinking arc ring around the mouse cursor while the sword is on cooldown.
    * Full ring = just swung; empty ring = ready.
@@ -3601,6 +3683,7 @@ export class RenderSystem {
     const cx   = screenPos.x;
     const cy   = screenPos.y;
     const zoom = camera.getState().zoom;
+    const cameraRotation = camera.getState().rotation;
     const TWO_PI = Math.PI * 2;
     const { width, height } = this.canvas;
 
@@ -3625,7 +3708,7 @@ export class RenderSystem {
       fctx.moveTo(cx, cy);
       for (let i = 0; i <= N; i++) {
         const idx   = i % N;
-        const angle = idx * TWO_PI / N;
+        const angle = idx * TWO_PI / N - cameraRotation;
         const dist  = hitDist[idx] * zoom * scale;
         fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
       }
@@ -3994,6 +4077,7 @@ export class RenderSystem {
     this._pendingBushes     = [];
     this._pendingBoulders   = [];
     this._pendingAllRes     = [];
+    this._pendingCeilings   = [];
 
     const localPlayer = this._cachedLocalPlayer;
     const axeEquipped = (() => {
@@ -5320,102 +5404,9 @@ export class RenderSystem {
           ctx.restore();
         }
       } else if (s.type === 'wood_ceiling') {
-        // ── Wooden ceiling tile with true-LOS shadow edge ──
-        // Strategy: clip-and-draw twice. The lit region (inside the visibility
-        // polygon) draws ceiling content at MIN_CEIL_ALPHA so the floor beneath
-        // shows through. The shadow region (outside the vis poly) draws the
-        // ceiling fully opaque. NO destination-out — we never punch holes in
-        // the canvas, so layers behind us (e.g. ocean) stay covered.
-        const rotRad = (s.rotation ?? 0) * Math.PI / 180;
-        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
-        const half = sz / 2;
-        const fillCol  = isHovered ? '#c8924a' : '#96642a';
-        const stripCol = RenderSystem.structureCompanyColor(s.companyId);
-        const stripH   = Math.max(1, 2 * zoom);
-
-        // Inline draw of the full ceiling content at the current globalAlpha factor.
-        const drawCeilContent = (alphaFactor: number): void => {
-          ctx.globalAlpha = alphaFactor;
-          ctx.fillStyle = fillCol;
-          ctx.fillRect(-half, -half, sz, sz);
-
-          ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
-          ctx.lineWidth = Math.max(0.5, 0.9 * zoom);
-          ctx.beginPath();
-          ctx.moveTo(-half, -half); ctx.lineTo(half, half);
-          ctx.moveTo(half, -half);  ctx.lineTo(-half, half);
-          ctx.moveTo(-half, 0);     ctx.lineTo(half, 0);
-          ctx.stroke();
-
-          ctx.globalAlpha = 0.8 * alphaFactor;
-          ctx.fillStyle = stripCol;
-          ctx.fillRect(-half, -half, sz, stripH);
-
-          if (dmgDarken > 0.01) {
-            ctx.globalAlpha = dmgDarken * alphaFactor;
-            ctx.fillStyle = 'rgba(0,0,0,1)';
-            ctx.fillRect(-half, -half, sz, sz);
-          }
-        };
-
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(rotRad);
-
-        if (visPolyValid) {
-          // Pre-compute vis poly in this tile's local space (post-rotate frame),
-          // SCALED to screen pixels (multiply by zoom) so it matches the screen-pixel
-          // clip rect (-half, -half, sz, sz) where sz = 50 * zoom.
-          const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
-          const vp = new Float32Array(visPolyPts.length);
-          for (let i = 0; i < visPolyPts.length; i += 2) {
-            const dx = (visPolyPts[i]   - s.x) * zoom;
-            const dy = (visPolyPts[i+1] - s.y) * zoom;
-            vp[i]   = dx * cosR - dy * sinR;
-            vp[i+1] = dx * sinR + dy * cosR;
-          }
-
-          // 1. SHADOW region = tile rect MINUS vis poly (even-odd fill rule).
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(-half, -half, sz, sz);
-          ctx.moveTo(vp[0], vp[1]);
-          for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
-          ctx.closePath();
-          ctx.clip('evenodd');
-          drawCeilContent(1);
-          ctx.restore();
-
-          // 2. LIT region = tile rect ∩ vis poly, drawn semi-transparent.
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(-half, -half, sz, sz);
-          ctx.clip();
-          ctx.beginPath();
-          ctx.moveTo(vp[0], vp[1]);
-          for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
-          ctx.closePath();
-          ctx.clip();
-          drawCeilContent(MIN_CEIL_ALPHA);
-          ctx.restore();
-        } else {
-          // No vis poly → draw fully opaque (clipped to tile rect for clean edges).
-          ctx.save();
-          ctx.beginPath();
-          ctx.rect(-half, -half, sz, sz);
-          ctx.clip();
-          drawCeilContent(1);
-          ctx.restore();
-        }
-
-        // Outer border (always at full alpha — single clean rect over the whole tile).
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = '#5a3a12';
-        ctx.lineWidth = Math.max(0.5, 1.5 * zoom);
-        ctx.strokeRect(-half, -half, sz, sz);
-
-        ctx.restore();
+        // Defer ceiling rendering to drawPendingCeilings(), invoked after bushes
+        // in renderWorld so roofs cover bush sprites placed under the building.
+        this._pendingCeilings.push({ s, ssp, sz, isHovered });
       } else if (s.type === 'cannon') {
         // ── Placed island cannon — same visual as ship cannon ──
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
@@ -6320,6 +6311,109 @@ export class RenderSystem {
         ctx.restore(); // reset lineDash / lineWidth
       }
     }
+  }
+
+  /**
+   * Render deferred wood ceiling tiles.  Called from renderWorld AFTER the
+   * fiber-bush pass so roofs visually cover bushes that grow beneath the
+   * building.  Mirrors the inline render block previously in drawPlacedStructures.
+   */
+  private drawPendingCeilings(camera: Camera): void {
+    if (this._pendingCeilings.length === 0) return;
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+    const visPolyPts   = this._visPolyPts;
+    const visPolyValid = visPolyPts.length >= 6;
+    const MIN_CEIL_ALPHA = 0.25;
+
+    for (const { s, ssp, sz, isHovered } of this._pendingCeilings) {
+      const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+      const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+      const dmgDarken = (1 - hpFrac) * 0.5;
+      const half = sz / 2;
+      const fillCol  = isHovered ? '#c8924a' : '#96642a';
+      const stripCol = RenderSystem.structureCompanyColor(s.companyId);
+      const stripH   = Math.max(1, 2 * zoom);
+
+      const drawCeilContent = (alphaFactor: number): void => {
+        ctx.globalAlpha = alphaFactor;
+        ctx.fillStyle = fillCol;
+        ctx.fillRect(-half, -half, sz, sz);
+
+        ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
+        ctx.lineWidth = Math.max(0.5, 0.9 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(-half, -half); ctx.lineTo(half, half);
+        ctx.moveTo(half, -half);  ctx.lineTo(-half, half);
+        ctx.moveTo(-half, 0);     ctx.lineTo(half, 0);
+        ctx.stroke();
+
+        ctx.globalAlpha = 0.8 * alphaFactor;
+        ctx.fillStyle = stripCol;
+        ctx.fillRect(-half, -half, sz, stripH);
+
+        if (dmgDarken > 0.01) {
+          ctx.globalAlpha = dmgDarken * alphaFactor;
+          ctx.fillStyle = 'rgba(0,0,0,1)';
+          ctx.fillRect(-half, -half, sz, sz);
+        }
+      };
+
+      ctx.save();
+      ctx.translate(ssp.x, ssp.y);
+      ctx.rotate(rotRad);
+
+      if (visPolyValid) {
+        const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
+        const vp = new Float32Array(visPolyPts.length);
+        for (let i = 0; i < visPolyPts.length; i += 2) {
+          const dx = (visPolyPts[i]   - s.x) * zoom;
+          const dy = (visPolyPts[i+1] - s.y) * zoom;
+          vp[i]   = dx * cosR - dy * sinR;
+          vp[i+1] = dx * sinR + dy * cosR;
+        }
+
+        // Shadow region (tile rect MINUS vis poly) — fully opaque.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-half, -half, sz, sz);
+        ctx.moveTo(vp[0], vp[1]);
+        for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
+        ctx.closePath();
+        ctx.clip('evenodd');
+        drawCeilContent(1);
+        ctx.restore();
+
+        // Lit region (tile rect ∩ vis poly) — semi-transparent.
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-half, -half, sz, sz);
+        ctx.clip();
+        ctx.beginPath();
+        ctx.moveTo(vp[0], vp[1]);
+        for (let i = 2; i < vp.length; i += 2) ctx.lineTo(vp[i], vp[i+1]);
+        ctx.closePath();
+        ctx.clip();
+        drawCeilContent(MIN_CEIL_ALPHA);
+        ctx.restore();
+      } else {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-half, -half, sz, sz);
+        ctx.clip();
+        drawCeilContent(1);
+        ctx.restore();
+      }
+
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = '#5a3a12';
+      ctx.lineWidth = Math.max(0.5, 1.5 * zoom);
+      ctx.strokeRect(-half, -half, sz, sz);
+
+      ctx.restore();
+    }
+
+    ctx.globalAlpha = 1;
   }
 
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
@@ -14316,7 +14410,7 @@ export class RenderSystem {
         if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
           // For curved planks, draw in ship-local coordinates
           this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-          this.ctx.rotate(ship.rotation);
+          this.ctx.rotate(ship.rotation - camera.getState().rotation);
           this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
           
           // Draw curved plank boundary
@@ -14400,7 +14494,7 @@ export class RenderSystem {
         } else {
           // For straight modules, draw simple rectangle boundary
           this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-          this.ctx.rotate(ship.rotation);
+          this.ctx.rotate(ship.rotation - camera.getState().rotation);
           this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
           this.ctx.translate(module.localPos.x, module.localPos.y);
           this.ctx.rotate(module.localRot);
@@ -15169,6 +15263,7 @@ export class RenderSystem {
     
     // Draw team-coloured highlight outline around the hovered module
     const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
+    const _htCamRot = camera.getState().rotation;
     this.ctx.save();
     
     // Check if it's a curved plank (needs special handling)
@@ -15176,7 +15271,7 @@ export class RenderSystem {
       // For curved planks, draw directly in ship-local coordinates
       // Transform to ship's coordinate system only
       this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation);
+      this.ctx.rotate(ship.rotation - _htCamRot);
       this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
       
       // Draw curved plank highlight
@@ -15251,7 +15346,7 @@ export class RenderSystem {
       // For straight planks and other modules, use full transform
       // Transform to ship's coordinate system
       this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation);
+      this.ctx.rotate(ship.rotation - _htCamRot);
       this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
       
       // Transform to module's local position and rotation

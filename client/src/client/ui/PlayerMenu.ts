@@ -122,6 +122,10 @@ const HAND_RECIPES: HandRecipe[] = [
   { output: 'claim_flag',    outputQty: 1, cost: [{ item: 'wood',  qty: 5  }],                                    category: 'TOOLS'        },
   // Construction
   { output: 'wooden_floor',  outputQty: 1, cost: [{ item: 'wood',  qty: 20 }],                                    category: 'CONSTRUCTION' },
+  { output: 'wood_ceiling',  outputQty: 1, cost: [{ item: 'wood',  qty: 15 }],                                    category: 'CONSTRUCTION' },
+  { output: 'wall',          outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
+  { output: 'door_frame',    outputQty: 1, cost: [{ item: 'wood',  qty: 6  }],                                    category: 'CONSTRUCTION' },
+  { output: 'door',          outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'CONSTRUCTION' },
   { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
 ];
 

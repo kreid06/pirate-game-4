@@ -28,6 +28,7 @@ layout(location = 0) in vec2 a_clipPos;
 uniform vec2  u_cameraPos;
 uniform float u_zoom;
 uniform vec2  u_resolution;
+uniform float u_cameraRotation;
 
 out vec2 v_worldPos;
 
@@ -39,7 +40,13 @@ void main() {
   // so the pattern scrolls in the same direction as everything else.
   vec2 offset = vec2(pixel.x - u_resolution.x * 0.5,
                      u_resolution.y * 0.5 - pixel.y);
-  v_worldPos  = u_cameraPos + offset / u_zoom;
+  // Rotate the screen-space offset by the camera rotation to get the
+  // correct world-space position when the camera is rotated.
+  float cosR = cos(u_cameraRotation);
+  float sinR = sin(u_cameraRotation);
+  vec2 rotOffset = vec2(offset.x * cosR - offset.y * sinR,
+                        offset.x * sinR + offset.y * cosR);
+  v_worldPos  = u_cameraPos + rotOffset / u_zoom;
 }`;
 
 const FRAG_SRC = /* glsl */`#version 300 es
@@ -190,6 +197,7 @@ export class OceanRenderer {
     timeSec: number,
     viewWidth?: number,
     viewHeight?: number,
+    cameraRotation: number = 0,
   ): void {
     const gl   = this._gl;
     const prog = this._prog;
@@ -197,10 +205,11 @@ export class OceanRenderer {
     const rh = viewHeight ?? this._ctx.height;
 
     prog.use();
-    prog.setUniform2f('u_cameraPos',  camX, camY);
-    prog.setUniform1f('u_zoom',       zoom);
-    prog.setUniform2f('u_resolution', rw, rh);
-    prog.setUniform1f('u_time',       timeSec);
+    prog.setUniform2f('u_cameraPos',       camX, camY);
+    prog.setUniform1f('u_zoom',            zoom);
+    prog.setUniform2f('u_resolution',      rw, rh);
+    prog.setUniform1f('u_time',            timeSec);
+    prog.setUniform1f('u_cameraRotation',  cameraRotation);
 
     gl.bindVertexArray(this._vao);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
