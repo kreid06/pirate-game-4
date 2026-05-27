@@ -2697,48 +2697,10 @@ void handle_projectile_collisions(struct Sim* sim) {
             }
         }
 
-        /* ---- Boulder collision — projectile stops on contact ---- */
-        if (!removed) {
-            float px_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
-            float py_cli = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
-
-            for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
-                const IslandDef *isl = &ISLAND_PRESETS[ii];
-                for (int ri = 0; ri < isl->resource_count && !removed; ri++) {
-                    const IslandResource *res = &isl->resources[ri];
-                    if (res->type_id != RES_BOULDER && res->type_id != RES_STONE_BOULDER) continue;
-                    if (res->health <= 0) continue;
-
-                    float bx_cli = isl->x + res->ox;
-                    float by_cli = isl->y + res->oy;
-                    float dx_cli = px_cli - bx_cli;
-                    float dy_cli = py_cli - by_cli;
-                    /* Rotated ellipse for projectile absorption — same hash as client */
-                    static const float BSX[5] = { 1.00f, 0.88f, 1.18f, 0.72f, 1.35f };
-                    static const float BSY[5] = { 0.72f, 0.88f, 0.60f, 1.00f, 0.50f };
-                    static const float BSR[5] = { 0.00f, 0.40f, -0.20f, 1.20f, 0.15f };
-                    uint32_t bseed2 = ((uint32_t)((int)res->ox * 73856093)) ^
-                                     ((uint32_t)((int)res->oy * 19349663));
-                    int bsi2 = (int)((bseed2 >> 4) % 5u);
-                    float ax2 = 38.0f * res->size * BSX[bsi2];
-                    float ay2 = 38.0f * res->size * BSY[bsi2];
-                    float theta2 = BSR[bsi2] + ((float)((bseed2 >> 8) & 0xFFu) / 256.0f) * (2.0f * 3.14159265f);
-                    float c2 = cosf(theta2), s2 = sinf(theta2);
-                    /* Rotate delta into ellipse local frame, then point-in-ellipse test */
-                    float lx2 =  dx_cli * c2 + dy_cli * s2;
-                    float ly2 = -dx_cli * s2 + dy_cli * c2;
-                    float ex = lx2 / ax2, ey = ly2 / ay2;
-                    if (ex*ex + ey*ey < 1.0f) {
-                        log_info("💥 Proj %u hit boulder at (%.1f, %.1f) — absorbed",
-                                 proj->id, bx_cli, by_cli);
-                        memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                                (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-                        sim->projectile_count--;
-                        removed = true;
-                    }
-                }
-            }
-        }
+        /* Boulder collisions are handled by check_projectile_static_collisions()
+         * in cannon_fire.c, which both applies damage AND removes the projectile.
+         * Do NOT duplicate the absorption here — doing so eats the cannonball
+         * before damage can be applied. */
 
         if (!removed) i++;
     }
