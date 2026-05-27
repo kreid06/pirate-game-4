@@ -1922,6 +1922,14 @@ export class ClientApplication {
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
 
+      // Exit free-camera mode whenever any menu is opened
+      this.uiManager.onMenuOpen = () => {
+        if (this._freeCameraMode) {
+          this._freeCameraMode = false;
+          this.inputManager.freeCameraMode = false;
+        }
+      };
+
       // Wire crew assignment changes from the manning panel to the server
       this.uiManager.setCrewAssignmentCallback((shipId, assignments) => {
         this.networkManager.sendCrewAssign(shipId, assignments);
@@ -4923,6 +4931,11 @@ export class ClientApplication {
             const myId = this.networkManager.getAssignedPlayerId();
             const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
             const pos = me?.position ? { x: me.position.x, y: me.position.y } : undefined;
+            // Exit free-camera mode when opening the world map
+            if (this._freeCameraMode) {
+              this._freeCameraMode = false;
+              this.inputManager.freeCameraMode = false;
+            }
             this.uiManager.openWorldMap(pos);
           }
           e.preventDefault();

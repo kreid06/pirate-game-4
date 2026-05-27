@@ -287,12 +287,16 @@ export class UIManager {
     return this.activeMenuId !== null || this.respawnScreen.visible || this.worldMapScreen.visible;
   }
 
+  /** Called whenever a menu is opened — used by ClientApplication to exit free-camera mode. */
+  public onMenuOpen: (() => void) | null = null;
+
   /**
    * Open one of the UIManager-owned menus by ID, closing any currently open menu first.
    * For menus owned by ClientApplication (crafting, shipyard, pause), call this to keep
    * activeMenuId in sync — pass the id and handle open/close yourself.
    */
   openMenu(id: MenuId): void {
+    this.onMenuOpen?.();
     this.closeActiveMenu();
     this.activeMenuId = id;
     switch (id) {
@@ -415,6 +419,7 @@ export class UIManager {
     if (this.tombstoneMenu.visible) return this.tombstoneMenu.handleWheel(x, y, deltaY);
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
+    if (this.activeMenuId === MENU_ID.SHIP)   return this.shipMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
@@ -2224,7 +2229,7 @@ class HUDElement implements UIElement {
       const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
       const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
                                        (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed);
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation);
     }
 
     // Health / stamina bars above hotbar
@@ -2798,7 +2803,8 @@ class HUDElement implements UIElement {
     shipHull: import('../../common/Vec2.js').Vec2[] = [],
     windAngle: number = 0,
     debugMode: boolean = false,
-    shipSpeed: number = 0
+    shipSpeed: number = 0,
+    cameraRotation: number = 0
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
@@ -2816,9 +2822,9 @@ class HUDElement implements UIElement {
     // Half-diagonal of the icon bounding box: max screen extent after any rotation
     const halfDiag = Math.ceil(Math.sqrt(iW * iW + iH * iH) / 2) + 4; // ≈62
 
-    // ── Apply ship rotation around icon centre ────────────────────────────
+    // ── Apply ship rotation around icon centre (adjusted for camera rotation) ──
     ctx.translate(cx, cy);
-    ctx.rotate(shipRotation + Math.PI / 2);
+    ctx.rotate(shipRotation - cameraRotation + Math.PI / 2);
     ctx.translate(-cx, -cy);
 
     // ── Ship silhouette path (defined in rotated space) ───────────────────
@@ -2852,7 +2858,7 @@ class HUDElement implements UIElement {
 
       // Undo rotation → back to screen (unrotated) space
       ctx.translate(cx, cy);
-      ctx.rotate(-(shipRotation + Math.PI / 2));
+      ctx.rotate(-(shipRotation - cameraRotation + Math.PI / 2));
       ctx.translate(-cx, -cy);
 
       // Water rises from the screen-bottom of the silhouette bounding box upward
@@ -2998,7 +3004,7 @@ class HUDElement implements UIElement {
 
       ctx.save();
       ctx.translate(cx, cy);  // tail = icon centre
-      ctx.rotate(windAngle);
+      ctx.rotate(windAngle - cameraRotation);
 
       ctx.shadowColor = 'rgba(255, 235, 80, 0.85)';
       ctx.shadowBlur  = 6;

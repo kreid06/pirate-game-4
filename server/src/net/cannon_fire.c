@@ -417,7 +417,9 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
 
         // Only move a cannon if it is occupied (player mounted or WorldNpc AT_GUN).
         // Cannons cannot aim without crew present.
-        bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
+        // NOTE: MODULE_STATE_OCCUPIED is stored on SimpleShip modules, not sim_ship modules.
+        // When the player is directly mounted on this cannon (at_cannon), they ARE the occupant.
+        bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0 || at_cannon;
         if (!cannon_has_occupant) {
             for (int ni = 0; ni < world_npc_count; ni++) {
                 WorldNpc* wnpc = &world_npcs[ni];
@@ -1103,6 +1105,8 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             bool killed = false;
             if (npc->health <= dmg) { npc->health = 0; npc->active = false; killed = true; }
             else { npc->health -= dmg; }
+            npc->last_damage_ms = get_time_ms();
+            npc->hp_regen_accum_ms = 0;
             char hit_msg[256];
             snprintf(hit_msg, sizeof(hit_msg),
                 "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"

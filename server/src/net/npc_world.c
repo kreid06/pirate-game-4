@@ -643,6 +643,23 @@ void tick_world_npcs(float dt) {
             npc->y = npc->local_y;
         }
 
+        /* ── Passive HP regeneration ──────────────────────────────────────────
+         * Same cadence as player regen: +2 HP every 5 s, 10 s combat delay. */
+        if (npc->health > 0 && npc->health < npc->max_health) {
+            uint32_t now_regen = get_time_ms();
+            if (npc->last_damage_ms == 0 || (now_regen - npc->last_damage_ms) >= 10000u) {
+                npc->hp_regen_accum_ms += (uint32_t)(dt * 1000.0f + 0.5f);
+                if (npc->hp_regen_accum_ms >= 5000u) {
+                    npc->hp_regen_accum_ms -= 5000u;
+                    uint16_t healed = (npc->health + 2u > npc->max_health)
+                                    ? npc->max_health : (uint16_t)(npc->health + 2u);
+                    npc->health = healed;
+                }
+            } else {
+                npc->hp_regen_accum_ms = 0;
+            }
+        }
+
         // ── Repair crew (NPC_ROLE_REPAIRER) ───────────────────────────────────────────────
         if (npc->role != NPC_ROLE_REPAIRER) continue;
         if (!global_sim) continue;

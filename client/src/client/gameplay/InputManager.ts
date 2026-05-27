@@ -1349,6 +1349,9 @@ export class InputManager {
             // Force next handleCannonAiming() to re-send aim with updated group list
             // even if the mouse hasn't moved, so the server learns about the new selection.
             this.lastSentCannonAimAngle = Infinity;
+            // Reset double-click timer so the first fire click after switching groups
+            // is never misread as a double-click (which fires ALL cannons).
+            this.lastLeftClickTime = 0;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();
@@ -1374,6 +1377,9 @@ export class InputManager {
               this.activeWeaponGroup = groupIdx;
             }
             this.lastSentCannonAimAngle = Infinity;
+            // Reset double-click timer so the first fire click after switching groups
+            // is never misread as a double-click (which fires ALL cannons).
+            this.lastLeftClickTime = 0;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();

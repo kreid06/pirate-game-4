@@ -343,6 +343,8 @@ export class RenderSystem {
   private _smoothSailOpenness: Map<number, number> = new Map();
   /** shipId → smoothed rudder angle (radians) — interpolated every frame toward server value. */
   private _smoothRudderAngles: Map<number, number> = new Map();
+  /** shipId → current sail-fiber alpha, interpolated toward 0.30 when on deck or 1.0 otherwise. */
+  private _sailAlphaByShip: Map<number, number> = new Map();
   /** Timestamp (ms) of the last renderWorld call — used to compute per-frame dt for barrel smoothing. */
   private _lastRenderMs: number = 0;
   /** Last known NPC set — used to detect NPC deaths for kill announcements. */
@@ -3364,6 +3366,18 @@ export class RenderSystem {
             this._smoothSailAngles.set(mod.id,    prevAngle + diff * alpha);
             this._smoothSailOpenness.set(mod.id,  prevOpenness + (targetOpenness - prevOpenness) * alpha);
           }
+        }
+
+        // Sail-fiber alpha: fade to 0.30 when local player is on deck, else 1.0
+        {
+          const onDeck = this._cachedLocalPlayer !== null
+            && this._cachedLocalPlayer.carrierId === ship.id
+            && !this._cachedLocalPlayer.isMounted;
+          const targetAlpha = onDeck ? 0.30 : 1.0;
+          const prevAlpha   = this._sailAlphaByShip.get(ship.id) ?? targetAlpha;
+          const FADE_SPEED  = 3.0; // fractions of the gap closed per second
+          const newAlpha    = prevAlpha + (targetAlpha - prevAlpha) * Math.min(1, FADE_SPEED * frameDt);
+          this._sailAlphaByShip.set(ship.id, newAlpha);
         }
       }
     }
@@ -13093,11 +13107,10 @@ export class RenderSystem {
     if (phase3Alpha <= 0) return;
 
     // Fade sails when the local player is walking on this ship's deck so they
-    // don't obstruct the view of modules/NPCs below them.
-    const _localOnDeck = this._cachedLocalPlayer !== null
-      && this._cachedLocalPlayer.carrierId === ship.id
-      && !this._cachedLocalPlayer.isMounted;
-    const sailAlpha = _localOnDeck ? 0.30 * phase3Alpha : phase3Alpha;
+    // don't obstruct the view of modules/NPCs below them.  The alpha is
+    // smoothly interpolated each frame (see _sailAlphaByShip in renderWorld).
+    const smoothedAlpha = this._sailAlphaByShip.get(ship.id) ?? 1.0;
+    const sailAlpha = smoothedAlpha * phase3Alpha;
 
     this.ctx.save();
     this.ctx.globalAlpha = sailAlpha;

@@ -554,6 +554,7 @@ void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
             uint32_t cid = sorted_ids[c];
             ShipModule* cmod = find_module_on_ship(ship, cid);
             if (!cmod || !(cmod->state_bits & MODULE_STATE_NEEDED)) continue;
+            if (cmod->player_mounted_id != 0) continue; /* player already on this cannon */
             /* Already assigned to this one? Stay */
             if (cid == npc->assigned_weapon_id) { best_id = cid; best_diff = sorted_diff[c]; break; }
             /* Check nobody else is already covering it */

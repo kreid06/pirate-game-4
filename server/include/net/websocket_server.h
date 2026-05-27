@@ -220,6 +220,10 @@ typedef struct WorldNpc {
     uint32_t      fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
     bool          in_water;       // true when NPC has been knocked off the ship deck
 
+    // ── Passive HP regeneration ─────────────────────────────────────────────
+    uint32_t      hp_regen_accum_ms; // accumulates ms; triggers +2 HP every 5 s
+    uint32_t      last_damage_ms;    // timestamp (get_time_ms) of last damage taken
+
     // ── Task lock ───────────────────────────────────────────────────────────
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.

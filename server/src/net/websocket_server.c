@@ -3997,6 +3997,8 @@ int websocket_server_update(struct Sim* sim) {
                                                     } else {
                                                         tnpc->health -= dmg16;
                                                     }
+                                                    tnpc->last_damage_ms = get_time_ms();
+                                                    tnpc->hp_regen_accum_ms = 0;
 
                                                     // Small knockback impulse
                                                     float dist = sqrtf(nx*nx + ny*ny);
@@ -4154,6 +4156,8 @@ int websocket_server_update(struct Sim* sim) {
                                                     } else {
                                                         tnpc->health -= dmg16;
                                                     }
+                                                    tnpc->last_damage_ms = get_time_ms();
+                                                    tnpc->hp_regen_accum_ms = 0;
                                                     float dist = sqrtf(nx*nx + ny*ny);
                                                     float kx = (dist > 0.1f) ? (nx/dist) : atk_dx;
                                                     float ky = (dist > 0.1f) ? (ny/dist) : atk_dy;
@@ -7582,7 +7586,8 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                 }
 
-                            } else if (strcmp(cmd_name, "tpplayertoplayer") == 0) {
+                            } else if (strcmp(cmd_name, "tpplayertoplayer") == 0 ||
+                                       strcmp(cmd_name, "tpplayertopplayer") == 0) {
                                 /* /TpPlayerToPlayer <source name|id> <destination name|id>  — admin */
                                 char tpp_src[64] = "", tpp_dst[64] = "";
                                 {

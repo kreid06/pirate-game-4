@@ -114,9 +114,14 @@ export class ShipMenu {
   private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
   private _currentShipName = '';
 
+  /** Current vertical scroll offset (px) for the crew section. */
+  private _crewScrollY = 0;
+  /** Bounds of the scrollable crew area — for wheel hit-testing. */
+  private _crewScrollBounds: { x: number; y: number; w: number; h: number } | null = null;
+
   toggle(): void { this.visible = !this.visible; if (!this.visible) this._settingsOpen = false; }
   open():   void { this.visible = true;  }
-  close():  void { this.visible = false; this._settingsOpen = false; }
+  close():  void { this.visible = false; this._settingsOpen = false; this._crewScrollY = 0; }
 
   /**
    * Handle a canvas click while the menu is visible.
@@ -189,6 +194,27 @@ export class ShipMenu {
     // Click outside panel — let caller close the menu
     return false;
   }
+
+  /**
+   * Handle mouse-wheel scroll.  Returns true if consumed.
+   * Routes to the crew list scrollable area when the pointer is over it.
+   */
+  handleWheel(deltaY: number, x: number, y: number): boolean {
+    if (!this.visible) return false;
+    const b = this._crewScrollBounds;
+    if (b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+      this._crewScrollY = Math.max(0,
+        Math.min(this._crewScrollMaxY, this._crewScrollY + deltaY * 0.4));
+      return true;
+    }
+    // Consume wheel inside panel so the game camera doesn't zoom
+    if (x >= this._panelX && x <= this._panelX + PANEL_W &&
+        y >= this._panelY && y <= this._panelY + PANEL_H) {
+      return true;
+    }
+    return false;
+  }
+  private _crewScrollMaxY = 0;
 
   render(
     ctx:        CanvasRenderingContext2D,
@@ -427,12 +453,20 @@ export class ShipMenu {
     ctx.fillStyle = COMPANY_COLORS[co] ?? '#aaa';
     ctx.fillRect(px + PAD + 8, py + 10, 14, 14);
 
+    const _coName = COMPANY_NAMES[co] ?? companies.find(c => c.id === co)?.name ?? 'Unknown';
+    const _shipDisplayName = ship.shipName ? ship.shipName : `Ship #${ship.id}`;
+
+    // Ship name — main title
     ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = TEXT_HEAD;
-    const _coName = COMPANY_NAMES[co] ?? companies.find(c => c.id === co)?.name ?? 'Unknown';
-    ctx.fillText(`Ship #${ship.id}   — ${_coName}`, px + PAD + 30, py + 9);
+    ctx.fillText(_shipDisplayName, px + PAD + 30, py + 5);
+
+    // Ship #ID + company — subtitle
+    ctx.font = '11px Georgia, serif';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText(`Ship #${ship.id}  —  ${_coName}`, px + PAD + 30, py + 23);
 
     // Speed + heading
     const spd = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.y ** 2);
@@ -441,7 +475,7 @@ export class ShipMenu {
     ctx.fillStyle = TEXT_MONO;
     ctx.fillText(
       `Speed: ${spd.toFixed(1)} u/s   Heading: ${deg.toFixed(1)}°`,
-      px + PAD + 30, py + 28
+      px + PAD + 30, py + 36
     );
 
     // World pos
@@ -637,12 +671,35 @@ export class ShipMenu {
           : '  No crew aboard.',
         px + PAD, py + 4,
       );
+      this._crewScrollBounds = null;
       return;
     }
 
     const ROLE_TAGS: Record<number, string> = { 0: 'Sailor', 1: 'Gunner', 2: 'Helm', 3: 'Rigger', 4: 'Repair' };
-    const NPC_ROW_H = 36;
-    const BAR_H_SM  = 5;
+    const NPC_ROW_H    = 36;
+    const BAR_H_SM     = 5;
+    const CREW_VISIBLE_H = 180; // max visible height before scrolling kicks in
+
+    // Calculate total content height
+    const totalH = aboard.length * NPC_ROW_H;
+    const needsScroll = totalH > CREW_VISIBLE_H;
+    const viewH  = needsScroll ? CREW_VISIBLE_H : totalH;
+
+    // Clamp scroll
+    this._crewScrollMaxY = Math.max(0, totalH - viewH);
+    this._crewScrollY    = Math.max(0, Math.min(this._crewScrollMaxY, this._crewScrollY));
+
+    // Store scroll area bounds for wheel routing
+    this._crewScrollBounds = { x: px + PAD, y: py, w: PANEL_W - PAD * 2, h: viewH };
+
+    // Clip to the visible crew area
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, PANEL_W, viewH);
+    ctx.clip();
+
+    // Translate for scroll
+    ctx.translate(0, -this._crewScrollY);
 
     for (const npc of aboard) {
       const rowX = px + PAD;
@@ -697,9 +754,24 @@ export class ShipMenu {
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText('▸', rowX + rowW, rowY + 4);
 
-      // Register hit area
-      this._npcHitAreas.push({ npc, x: rowX, y: rowY, w: rowW, h: NPC_ROW_H - 2 });
+      // Register hit area in screen-space (adjusted for scroll offset)
+      const screenRowY = rowY - this._crewScrollY;
+      this._npcHitAreas.push({ npc, x: rowX, y: screenRowY, w: rowW, h: NPC_ROW_H - 2 });
       py += NPC_ROW_H;
+    }
+
+    ctx.restore();
+
+    // Draw scrollbar track if needed
+    if (needsScroll) {
+      const sbX    = px + PANEL_W - PAD + 2;
+      const trackY = this._crewScrollBounds.y;
+      const sbH    = Math.max(20, Math.round((viewH / totalH) * viewH));
+      const sbY    = trackY + Math.round((this._crewScrollY / this._crewScrollMaxY) * (viewH - sbH));
+      ctx.fillStyle = '#223';
+      ctx.fillRect(sbX, trackY, 6, viewH);
+      ctx.fillStyle = '#556';
+      ctx.fillRect(sbX, sbY, 6, sbH);
     }
   }
 
