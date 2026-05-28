@@ -241,6 +241,9 @@ void tick_npc_agents(float dt) {
             case NPC_ROLE_RIGGER: {
                 // Set sail openness and angle to the ship's desired values
                 if (module->type_id == MODULE_TYPE_MAST) {
+                    /* Player directly mounted to this mast takes over as rigger —
+                     * skip NPC sail update so they don't fight each other. */
+                    if (module->state_bits & MODULE_STATE_OCCUPIED) break;
                     uint8_t target_openness = ship->desired_sail_openness;
                     module->data.mast.openness = target_openness;
                     if (target_openness > 0)
