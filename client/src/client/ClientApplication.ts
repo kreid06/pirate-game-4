@@ -1516,9 +1516,14 @@ export class ClientApplication {
         // Ramp placement — snaps to predefined snap points on the ship
         const rampSlot = this.renderSystem.getHoveredRampSlot();
         if (rampSlot) {
-          const facing = this.renderSystem.getRampFacingRadians();
-          console.log(`🪜 [BUILD] Placing ramp at snap ${rampSlot.snapIndex} (${rampSlot.localPos.x},${rampSlot.localPos.y}) facing ${facing.toFixed(2)}rad on ship ${rampSlot.ship.id}`);
-          this.networkManager.sendPlaceRamp(rampSlot.ship.id, rampSlot.snapIndex, facing);
+          if (this.renderSystem.isInHatchBuildMode()) {
+            console.log(`🪟 [BUILD] Placing hatch cover at snap ${rampSlot.snapIndex} on ship ${rampSlot.ship.id}`);
+            this.networkManager.sendPlaceHatchCover(rampSlot.ship.id, rampSlot.snapIndex);
+          } else {
+            const facing = this.renderSystem.getRampFacingRadians();
+            console.log(`🪜 [BUILD] Placing ramp at snap ${rampSlot.snapIndex} (${rampSlot.localPos.x},${rampSlot.localPos.y}) facing ${facing.toFixed(2)}rad on ship ${rampSlot.ship.id}`);
+            this.networkManager.sendPlaceRamp(rampSlot.ship.id, rampSlot.snapIndex, facing);
+          }
           return;
         }
         // Mast placement build mode
@@ -3901,6 +3906,8 @@ export class ClientApplication {
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
     const inRampBuildMode   = activeItem === 'ramp';
+    // Hatch cover build mode: on-ship + wood_ceiling equipped
+    const inHatchBuildMode  = (player?.carrierId ?? 0) !== 0 && activeItem === 'wood_ceiling';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress' || activeItem === 'claim_flag');
@@ -3949,9 +3956,10 @@ export class ClientApplication {
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
     this.renderSystem.setRampBuildMode(!this.explicitBuildMode && inRampBuildMode);
+    this.renderSystem.setHatchBuildMode(!this.explicitBuildMode && inHatchBuildMode);
     if (this.inputManager) this.inputManager.inRampBuildMode = !this.explicitBuildMode && inRampBuildMode;
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || this.islandBuildMode
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
   }
 

@@ -14,6 +14,7 @@ export type ModuleKind =
   | 'deck'           // Ship deck - interior floor surface
   | 'swivel'         // Swivel gun - fast, anti-personnel edge weapon
   | 'ramp'           // Deck ramp - connects lower and upper deck levels
+  | 'hatch_cover'    // Hatch cover - seals a snap-point hole, blocks falling through
   | 'custom';        // User-defined module types
 
 /**
@@ -31,6 +32,7 @@ export enum ModuleTypeId {
   DECK = 7,
   SWIVEL = 8,
   RAMP = 9,
+  HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -50,6 +52,7 @@ export const MODULE_TYPE_MAP = {
       case 'deck': return ModuleTypeId.DECK;
       case 'swivel': return ModuleTypeId.SWIVEL;
       case 'ramp': return ModuleTypeId.RAMP;
+      case 'hatch_cover': return ModuleTypeId.HATCH_COVER;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -65,6 +68,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.DECK: return 'deck';
       case ModuleTypeId.SWIVEL: return 'swivel';
       case ModuleTypeId.RAMP: return 'ramp';
+      case ModuleTypeId.HATCH_COVER: return 'hatch_cover';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }

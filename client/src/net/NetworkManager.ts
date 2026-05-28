@@ -97,6 +97,7 @@ export enum MessageType {
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
   PLACE_RAMP = 'place_ramp',
+  PLACE_HATCH_COVER = 'place_hatch_cover',
   PLAYER_SET_DECK = 'player_set_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
   CREW_ASSIGN = 'crew_assign',
@@ -442,6 +443,13 @@ interface PlaceRampMessage extends NetworkMessage {
   rotation: number;  // ramp facing in radians (0, π/2, π, 3π/2)
 }
 
+interface PlaceHatchCoverMessage extends NetworkMessage {
+  type: MessageType.PLACE_HATCH_COVER;
+  timestamp: number;
+  shipId: number;
+  snapIndex: number;
+}
+
 interface PlayerSetDeckMessage extends NetworkMessage {
   type: MessageType.PLAYER_SET_DECK;
   timestamp: number;
@@ -511,7 +519,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlayerSetDeckMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlayerSetDeckMessage;
 
 /**
  * Main network manager class
@@ -1604,6 +1612,16 @@ export class NetworkManager {
   sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_RAMP, timestamp: Date.now(), shipId, snapIndex, rotation });
+  }
+
+  /**
+   * Request the server to place a hatch cover at the given snap-point index on the player's ship.
+   * Consumes 1 ITEM_WOOD_CEILING from the player's inventory.
+   * Mutually exclusive with a ramp at the same snap point.
+   */
+  sendPlaceHatchCover(shipId: number, snapIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_HATCH_COVER, timestamp: Date.now(), shipId, snapIndex });
   }
 
   /**

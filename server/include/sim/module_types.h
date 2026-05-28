@@ -26,8 +26,9 @@ typedef enum {
     MODULE_TYPE_PLANK = 6,          // Hull segment
     MODULE_TYPE_DECK = 7,           // Floor surface
     MODULE_TYPE_SWIVEL = 8,         // Swivel gun — fast, low-damage, anti-personnel
-    MODULE_TYPE_RAMP   = 9,         // Deck ramp — connects lower and upper deck levels
-    MODULE_TYPE_CUSTOM = 255        // User-defined
+    MODULE_TYPE_RAMP         = 9,   // Deck ramp — connects lower and upper deck levels
+    MODULE_TYPE_HATCH_COVER  = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
+    MODULE_TYPE_CUSTOM       = 255  // User-defined
 } ModuleTypeId;
 
 /**

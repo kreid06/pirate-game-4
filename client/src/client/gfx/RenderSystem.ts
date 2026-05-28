@@ -143,6 +143,7 @@ export class RenderSystem {
   private hoveredDeckSlot: { ship: Ship; deckLevel: number } | null = null;
   /** Whether ramp placement build mode is active (ramp item held). */
   private rampBuildMode: boolean = false;
+  private hatchBuildMode: boolean = false;
   /** The ramp snap point slot currently under the cursor in ramp build mode. */
   private hoveredRampSlot: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
@@ -1595,7 +1596,7 @@ export class RenderSystem {
         const w = modData.length || 20;
         const h = modData.width  || 10;
         ctx.rect(-w / 2, -h / 2, w, h);
-      } else if (kind === 'ramp') {
+      } else if (kind === 'ramp' || kind === 'hatch_cover') {
         ctx.rect(-25, -25, 50, 50);
       } else {
         ctx.rect(-10, -10, 20, 20);
@@ -2227,6 +2228,17 @@ export class RenderSystem {
   setRampBuildMode(active: boolean): void {
     this.rampBuildMode = active;
     if (!active) this.hoveredRampSlot = null;
+  }
+
+  /** Enable or disable hatch cover placement build mode */
+  setHatchBuildMode(active: boolean): void {
+    this.hatchBuildMode = active;
+    if (!active) this.hoveredRampSlot = null;
+  }
+
+  /** Whether hatch cover build mode is currently active */
+  isInHatchBuildMode(): boolean {
+    return this.hatchBuildMode;
   }
 
   /** Whether ramp build mode is currently active */
@@ -3500,8 +3512,8 @@ export class RenderSystem {
           // Helm renders as a circle with radius 8
           width = 16;
           height = 16;
-        } else if (moduleKind === 'ramp') {
-          // Ramp renders as a 50×50 square (matches visual footprint)
+        } else if (moduleKind === 'ramp' || moduleKind === 'hatch_cover') {
+          // Ramp / hatch cover render as a 50×50 square (matches visual footprint)
           width = 50;
           height = 50;
         }
@@ -3780,8 +3792,8 @@ export class RenderSystem {
       this.hoveredDeckSlot = null;
     }
 
-    // In ramp build mode, detect which snap point is under the cursor
-    if (this.rampBuildMode) {
+    // In ramp or hatch build mode, detect which snap point is under the cursor
+    if (this.rampBuildMode || this.hatchBuildMode) {
       this.detectHoveredRampSlot(worldState);
     } else {
       this.hoveredRampSlot = null;
@@ -8004,6 +8016,11 @@ export class RenderSystem {
             const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
               if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              // Hatch cover blocks any fall-through
+              const hatchMod = _cs.modules.find(
+                m => m.kind === 'hatch_cover' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+              );
+              if (hatchMod) return false;
               const rampMod = _cs.modules.find(
                 m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
               );
@@ -8160,8 +8177,8 @@ export class RenderSystem {
       }
     }
 
-    // In ramp build mode, overlay ghost ramp outlines at snap points (layer 3)
-    if (this.rampBuildMode) {
+    // In ramp or hatch build mode, overlay ghost outlines at snap points (layer 3)
+    if (this.rampBuildMode || this.hatchBuildMode) {
       for (const ship of worldState.ships) {
         this.queueRenderItem(3, `ramp-ghost-${ship.id}`, () => this.drawRampSnapGhosts(ship, camera), 0);
       }
@@ -10452,9 +10469,9 @@ export class RenderSystem {
 
       for (let i = 0; i < RenderSystem.RAMP_SNAP_POINTS.length; i++) {
         const sp = RenderSystem.RAMP_SNAP_POINTS[i];
-        // Skip snap points already occupied by a ramp module
+        // Skip snap points already occupied by a ramp or hatch cover module
         const occupied = ship.modules.some(
-          m => m.kind === 'ramp'
+          m => (m.kind === 'ramp' || m.kind === 'hatch_cover')
             && Math.abs(m.localPos.x - sp.x) < 20
             && Math.abs(m.localPos.y - sp.y) < 20
         );
@@ -10576,9 +10593,15 @@ export class RenderSystem {
         const rampMod = ship.modules.find(
           m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
         );
+        const hatchMod = ship.modules.find(
+          m => m.kind === 'hatch_cover' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+        );
 
         if (rampMod) {
           drawRampVisual(sp, rampMod.localRot);
+        } else if (hatchMod) {
+          // Solid sealed hatch — looks like regular deck planking
+          this.drawHatchCoverAt(sp, lw);
         } else if (hasLowerDeck) {
           this.ctx.fillStyle = '#5c3d1e';
           this.ctx.fillRect(rx, ry, 50, 50);
@@ -10659,8 +10682,53 @@ export class RenderSystem {
   }
 
   /**
+   * Draw a placed hatch cover at a snap point — looks like sealed deck planking.
+   * Caller must have already applied ship-local transform.
+   */
+  private drawHatchCoverAt(
+    sp: { x: number; y: number },
+    lw: number,
+    alpha: number = 1.0,
+  ): void {
+    this.ctx.save();
+    this.ctx.translate(sp.x, sp.y);
+    if (alpha !== 1.0) this.ctx.globalAlpha *= alpha;
+
+    // Solid plank fill — same warm wood tone as the deck surface
+    this.ctx.fillStyle = '#7a5230';
+    this.ctx.fillRect(-25, -25, 50, 50);
+
+    // Horizontal plank lines
+    this.ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+    this.ctx.lineWidth   = lw * 1.2;
+    for (let p = 1; p < 5; p++) {
+      const yy = -25 + (p / 5) * 50;
+      this.ctx.beginPath();
+      this.ctx.moveTo(-25, yy);
+      this.ctx.lineTo(25, yy);
+      this.ctx.stroke();
+    }
+
+    // Border — slightly lighter to differentiate from regular floor
+    this.ctx.strokeStyle = '#c89050';
+    this.ctx.lineWidth   = lw * 2.5;
+    this.ctx.strokeRect(-25, -25, 50, 50);
+
+    // Small "X" latch indicator in the centre
+    this.ctx.strokeStyle = 'rgba(200,140,60,0.80)';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(-8, -8); this.ctx.lineTo(8, 8);
+    this.ctx.moveTo(8, -8);  this.ctx.lineTo(-8, 8);
+    this.ctx.stroke();
+
+    this.ctx.restore();
+  }
+
+  /**
    * Draw ghost ramp outlines at all available snap points on a ship (ramp build mode).
    * Shows a gradient preview matching the current rampFacing — light (top) to dark (bottom).
+   * When in hatch build mode, shows a hatch cover preview instead.
    */
   private drawRampSnapGhosts(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
@@ -10674,13 +10742,14 @@ export class RenderSystem {
 
     const lw = 1.5 / cameraState.zoom;
     const facingAngle = this.rampFacing * Math.PI / 2;
+    const isHatchMode = this.hatchBuildMode;
 
     for (let i = 0; i < RenderSystem.RAMP_SNAP_POINTS.length; i++) {
       const sp = RenderSystem.RAMP_SNAP_POINTS[i];
 
-      // Skip occupied snap points
+      // Skip occupied snap points (ramp or hatch cover)
       const occupied = ship.modules.some(
-        m => m.kind === 'ramp'
+        m => (m.kind === 'ramp' || m.kind === 'hatch_cover')
           && Math.abs(m.localPos.x - sp.x) < 20
           && Math.abs(m.localPos.y - sp.y) < 20
       );
@@ -10689,41 +10758,71 @@ export class RenderSystem {
       const isHovered = this.hoveredRampSlot?.ship === ship
                      && this.hoveredRampSlot?.snapIndex === i;
 
-      if (isHovered) {
-        // Hovered: draw the exact same visual as a placed ramp so the
-        // highlight footprint matches the eventual placement 1:1.
-        this.drawRampVisualAt(sp, facingAngle, lw, 1.0);
-
-        // Add an outer glow ring + rotate hint, positioned relative to the
-        // unrotated snap point so it always sits around the 50×50 footprint.
-        this.ctx.save();
-        this.ctx.translate(sp.x, sp.y);
-        this.ctx.rotate(facingAngle);
-        this.ctx.strokeStyle = '#ffee88';
-        this.ctx.lineWidth   = lw * 1.5;
-        this.ctx.strokeRect(-31, -31, 62, 62);
-
-        const fontSize = Math.max(7, Math.round(9 / cameraState.zoom));
-        this.ctx.font         = `bold ${fontSize}px Georgia, serif`;
-        this.ctx.fillStyle    = '#ffffffcc';
-        this.ctx.textAlign    = 'center';
-        this.ctx.textBaseline = 'bottom';
-        this.ctx.fillText('R: rotate', 0, -34);
-        this.ctx.restore();
+      if (isHatchMode) {
+        // Hatch cover ghost
+        if (isHovered) {
+          this.drawHatchCoverAt(sp, lw, 1.0);
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.strokeStyle = '#ffee88';
+          this.ctx.lineWidth   = lw * 1.5;
+          this.ctx.strokeRect(-31, -31, 62, 62);
+          const fontSize = Math.max(7, Math.round(9 / cameraState.zoom));
+          this.ctx.font         = `bold ${fontSize}px Georgia, serif`;
+          this.ctx.fillStyle    = '#ffffffcc';
+          this.ctx.textAlign    = 'center';
+          this.ctx.textBaseline = 'bottom';
+          this.ctx.fillText('Hatch cover', 0, -34);
+          this.ctx.restore();
+        } else {
+          this.drawHatchCoverAt(sp, lw, 0.30);
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.strokeStyle = 'rgba(200,150,60,0.60)';
+          this.ctx.lineWidth   = lw;
+          this.ctx.setLineDash([5 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.strokeRect(-25, -25, 50, 50);
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+        }
       } else {
-        // Unhovered: faded preview using the same visual at reduced opacity,
-        // plus a dashed outline so empty slots are still legible.
-        this.drawRampVisualAt(sp, facingAngle, lw, 0.30);
+        // Ramp ghost
+        if (isHovered) {
+          // Hovered: draw the exact same visual as a placed ramp so the
+          // highlight footprint matches the eventual placement 1:1.
+          this.drawRampVisualAt(sp, facingAngle, lw, 1.0);
 
-        this.ctx.save();
-        this.ctx.translate(sp.x, sp.y);
-        this.ctx.rotate(facingAngle);
-        this.ctx.strokeStyle = 'rgba(200,150,60,0.60)';
-        this.ctx.lineWidth   = lw;
-        this.ctx.setLineDash([5 / cameraState.zoom, 3 / cameraState.zoom]);
-        this.ctx.strokeRect(-25, -25, 50, 50);
-        this.ctx.setLineDash([]);
-        this.ctx.restore();
+          // Add an outer glow ring + rotate hint, positioned relative to the
+          // unrotated snap point so it always sits around the 50×50 footprint.
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.rotate(facingAngle);
+          this.ctx.strokeStyle = '#ffee88';
+          this.ctx.lineWidth   = lw * 1.5;
+          this.ctx.strokeRect(-31, -31, 62, 62);
+
+          const fontSize = Math.max(7, Math.round(9 / cameraState.zoom));
+          this.ctx.font         = `bold ${fontSize}px Georgia, serif`;
+          this.ctx.fillStyle    = '#ffffffcc';
+          this.ctx.textAlign    = 'center';
+          this.ctx.textBaseline = 'bottom';
+          this.ctx.fillText('R: rotate', 0, -34);
+          this.ctx.restore();
+        } else {
+          // Unhovered: faded preview using the same visual at reduced opacity,
+          // plus a dashed outline so empty slots are still legible.
+          this.drawRampVisualAt(sp, facingAngle, lw, 0.30);
+
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.rotate(facingAngle);
+          this.ctx.strokeStyle = 'rgba(200,150,60,0.60)';
+          this.ctx.lineWidth   = lw;
+          this.ctx.setLineDash([5 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.strokeRect(-25, -25, 50, 50);
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+        }
       }
     }
 

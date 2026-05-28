@@ -5388,9 +5388,20 @@ int websocket_server_update(struct Sim* sim) {
                                                     }
 
                                                     if (dl == 0) {
-                                                        // Upper → Lower (fall): empty hole always OK;
-                                                        // with ramp, only from top/light face (rlx > 0).
-                                                        if (!ramp) { allow = true; }
+                                                        // Upper → Lower (fall): blocked if hatch cover present;
+                                                        // empty hole always OK; with ramp, only from top/light face (rlx > 0).
+                                                        ShipModule* hatch_cv = NULL;
+                                                        for (uint8_t m = 0; m < sh->module_count; m++) {
+                                                            if (sh->modules[m].type_id != MODULE_TYPE_HATCH_COVER) continue;
+                                                            float mx = Q16_TO_FLOAT(sh->modules[m].local_pos.x);
+                                                            float my = Q16_TO_FLOAT(sh->modules[m].local_pos.y);
+                                                            if (fabsf(mx - snap_lx_srv) < MATCH_TOL_SRV &&
+                                                                fabsf(my - snap_ly_srv) < MATCH_TOL_SRV) {
+                                                                hatch_cv = &sh->modules[m]; break;
+                                                            }
+                                                        }
+                                                        if (hatch_cv) { /* hatch cover blocks any fall */ }
+                                                        else if (!ramp) { allow = true; }
                                                         else {
                                                             float rrot = Q16_TO_FLOAT(ramp->local_rot);
                                                             float rlx = dx * cosf(-rrot) - dy * sinf(-rrot);
@@ -5473,11 +5484,12 @@ int websocket_server_update(struct Sim* sim) {
                                         } else if (ramp_sim->module_count >= MAX_MODULES_PER_SHIP) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                         } else {
-                                            // Check if a ramp already occupies this snap point (within tolerance)
+                                            // Check if a ramp or hatch cover already occupies this snap point (within tolerance)
                                             bool occupied = false;
                                             float tol = CLIENT_TO_SERVER(20.0f);
                                             for (uint8_t m = 0; m < ramp_sim->module_count; m++) {
-                                                if (ramp_sim->modules[m].type_id != MODULE_TYPE_RAMP) continue;
+                                                if (ramp_sim->modules[m].type_id != MODULE_TYPE_RAMP &&
+                                                    ramp_sim->modules[m].type_id != MODULE_TYPE_HATCH_COVER) continue;
                                                 float rx = Q16_TO_FLOAT(ramp_sim->modules[m].local_pos.x);
                                                 float ry = Q16_TO_FLOAT(ramp_sim->modules[m].local_pos.y);
                                                 if (fabsf(rx - local_x) < tol && fabsf(ry - local_y) < tol) {
@@ -5516,6 +5528,108 @@ int websocket_server_update(struct Sim* sim) {
                                                          player->player_id, new_id, snap_index, ramp_sim->id);
                                                 snprintf(response, sizeof(response),
                                                     "{\"type\":\"message_ack\",\"status\":\"ramp_placed\",\"ramp_id\":%u}",
+                                                    new_id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_hatch_cover") == 0) {
+                            // PLACE HATCH COVER: seal a snap-point hole with a ceiling tile.
+                            // A hatch cover blocks players from falling through the hole.
+                            // Payload: {"type":"place_hatch_cover","shipId":N,"snapIndex":0|1}
+                            // Consumes 1 ITEM_WOOD_CEILING from the player's inventory.
+                            // Mutually exclusive with a ramp at the same snap point.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int hatch_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_WOOD_CEILING &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            hatch_slot = s; break;
+                                        }
+                                    }
+                                    if (hatch_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_ceiling\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        uint16_t target_ship_id = player->parent_ship_id;
+                                        int snap_index = 0;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        const char* p_si  = strstr(payload, "\"snapIndex\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                        if (p_si)  { sscanf(p_si + 12, "%d", &snap_index); }
+                                        if (snap_index < 0 || snap_index > 1) snap_index = 0;
+
+                                        float snap_x_client[2] = { 220.0f, -140.0f };
+                                        float snap_y_client[2] = {   0.0f,    0.0f };
+                                        float local_x = CLIENT_TO_SERVER(snap_x_client[snap_index]);
+                                        float local_y = CLIENT_TO_SERVER(snap_y_client[snap_index]);
+
+                                        struct Ship* hatch_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                hatch_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        SimpleShip* hatch_simple = find_ship(target_ship_id);
+                                        if (!hatch_sim || !hatch_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (hatch_sim->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            // Reject if snap point already occupied by ramp or hatch cover
+                                            bool hatch_occupied = false;
+                                            float htol = CLIENT_TO_SERVER(20.0f);
+                                            for (uint8_t m = 0; m < hatch_sim->module_count; m++) {
+                                                if (hatch_sim->modules[m].type_id != MODULE_TYPE_RAMP &&
+                                                    hatch_sim->modules[m].type_id != MODULE_TYPE_HATCH_COVER) continue;
+                                                float hx = Q16_TO_FLOAT(hatch_sim->modules[m].local_pos.x);
+                                                float hy = Q16_TO_FLOAT(hatch_sim->modules[m].local_pos.y);
+                                                if (fabsf(hx - local_x) < htol && fabsf(hy - local_y) < htol) {
+                                                    hatch_occupied = true; break;
+                                                }
+                                            }
+                                            if (hatch_occupied) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"snap_point_occupied\"}");
+                                            } else {
+                                                uint16_t max_id = 0;
+                                                for (uint8_t m = 0; m < hatch_sim->module_count; m++)
+                                                    if (hatch_sim->modules[m].id > max_id) max_id = hatch_sim->modules[m].id;
+                                                for (uint8_t m = 0; m < hatch_simple->module_count; m++)
+                                                    if (hatch_simple->modules[m].id > max_id) max_id = hatch_simple->modules[m].id;
+                                                uint16_t new_id = max_id + 1;
+
+                                                ShipModule nh;
+                                                memset(&nh, 0, sizeof(ShipModule));
+                                                nh.id          = new_id;
+                                                nh.type_id     = MODULE_TYPE_HATCH_COVER;
+                                                nh.local_pos.x = Q16_FROM_FLOAT(local_x);
+                                                nh.local_pos.y = Q16_FROM_FLOAT(local_y);
+                                                nh.local_rot   = 0;
+                                                nh.state_bits  = MODULE_STATE_ACTIVE;
+                                                nh.health      = 6000;
+                                                nh.max_health  = 6000;
+
+                                                hatch_sim->modules[hatch_sim->module_count++]       = nh;
+                                                hatch_simple->modules[hatch_simple->module_count++] = nh;
+
+                                                player->inventory.slots[hatch_slot].quantity--;
+                                                if (player->inventory.slots[hatch_slot].quantity == 0)
+                                                    player->inventory.slots[hatch_slot].item = ITEM_NONE;
+
+                                                log_info("🪟 Player %u placed hatch cover %u (snap %d) on ship %u",
+                                                         player->player_id, new_id, snap_index, hatch_sim->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"hatch_placed\",\"hatch_id\":%u}",
                                                     new_id);
                                             }
                                         }

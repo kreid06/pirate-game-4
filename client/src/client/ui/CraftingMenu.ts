@@ -133,6 +133,18 @@ const RECIPES: Recipe[] = [
     ],
   },
   {
+    id: 'craft_ramp',
+    category: 'Structures',
+    outputName: 'Ramp',
+    outputCount: 1,
+    symbol: '⟋',
+    color: '#7a5c2a',
+    borderColor: '#4a3410',
+    ingredients: [
+      { label: 'Wood', count: 20 },
+    ],
+  },
+  {
     id: 'craft_workbench',
     category: 'Structures',
     outputName: 'Workbench',
