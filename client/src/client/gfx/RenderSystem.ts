@@ -1428,11 +1428,235 @@ export class RenderSystem {
   }
 
   /**
+   * Draw the coloured glow highlight on the currently-hovered ship hull.
+   * Uses the same friendly/enemy team-colour palette as the module highlight.
+   * Called unconditionally so the highlight is always immediate.
+   */
+  private drawShipHullHighlight(camera: Camera): void {
+    if (!this.hoveredShip || this.hoveredModule) return;
+    const ship = this.hoveredShip;
+    if (!ship.hull || ship.hull.length < 3) return;
+    const hull        = ship.hull;
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const now         = performance.now();
+    const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+    const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+    type HoverTeam = 'friendly' | 'enemy' | 'alliance';
+    const hoverTeam: HoverTeam = this.isShipFriendly(ship) ? 'friendly' : 'enemy';
+    const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
+      friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+      enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+      alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+    };
+    const pal = HOVER_PALETTE[hoverTeam];
+    const hexToRgba = (hex: string, a: number) => {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    };
+    const buildHullPath = (ctx: CanvasRenderingContext2D) => {
+      ctx.beginPath();
+      ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+      ctx.closePath();
+    };
+
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cameraState.zoom, cameraState.zoom);
+    ctx.rotate(ship.rotation - cameraState.rotation);
+
+    ctx.shadowColor  = pal.glow;
+    ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+    ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
+    ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+    ctx.globalAlpha  = 1;
+    buildHullPath(ctx);
+    ctx.stroke();
+
+    ctx.shadowBlur   = 0;
+    ctx.strokeStyle  = pal.inner;
+    ctx.lineWidth    = 2.5 / cameraState.zoom;
+    ctx.globalAlpha  = glowAlpha;
+    buildHullPath(ctx);
+    ctx.stroke();
+
+    ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+    ctx.fillStyle    = pal.fill;
+    buildHullPath(ctx);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw the coloured glow highlight on the currently-hovered ship module.
+   * Called unconditionally every frame so the highlight is always immediate,
+   * independent of the 500 ms tooltip delay.
+   *
+   * Uses the legacy per-kind path geometry (curved planks, cannon w/ rotated
+   * barrel, ladder dims, etc.) inside the unified 3-pass glow design.
+   */
+  private drawModuleHoverHighlight(camera: Camera): void {
+    if (!this.hoveredModule) return;
+    const { ship: modShip, module: mod } = this.hoveredModule;
+    const modData     = (mod as any).moduleData ?? mod;
+    const kind        = (modData.kind ?? mod.kind) as string;
+    const screenPos   = camera.worldToScreen(modShip.position);
+    const cameraState = camera.getState();
+    const now         = performance.now();
+    const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+    const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+    type HoverTeam = 'friendly' | 'enemy' | 'alliance';
+    const hoverTeam: HoverTeam = this.isShipFriendly(modShip) ? 'friendly' : 'enemy';
+    const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
+      friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+      enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+      alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+    };
+    const pal = HOVER_PALETTE[hoverTeam];
+    const hexToRgba = (hex: string, a: number) => {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    };
+
+    // ── Build the per-kind path(s). May issue multiple sub-paths (e.g. cannon
+    //    base + rotated barrel). The caller wraps this in 3 passes.
+    const isCurvedPlank = kind === 'plank' && modData.isCurved && modData.curveData;
+
+    const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
+      ctx.beginPath();
+      if (isCurvedPlank) {
+        const { start, control, end, t1, t2 } = modData.curveData;
+        const segments = 20;
+        const halfPlankWidth = modData.width / 2;
+        const points: Array<{x: number; y: number}> = [];
+        for (let i = 0; i <= segments; i++) {
+          const t = t1 + (t2 - t1) * (i / segments);
+          points.push(this.getQuadraticPoint(start, control, end, t));
+        }
+        const outer: Array<{x: number; y: number}> = [];
+        const inner: Array<{x: number; y: number}> = [];
+        for (let i = 0; i < points.length; i++) {
+          const pt = points[i];
+          let dx: number, dy: number;
+          if (i === 0) { dx = points[1].x - pt.x; dy = points[1].y - pt.y; }
+          else if (i === points.length - 1) { dx = pt.x - points[i - 1].x; dy = pt.y - points[i - 1].y; }
+          else { dx = points[i + 1].x - points[i - 1].x; dy = points[i + 1].y - points[i - 1].y; }
+          const len = Math.sqrt(dx * dx + dy * dy);
+          if (len > 0) { dx /= len; dy /= len; }
+          const perpX = -dy, perpY = dx;
+          outer.push({ x: pt.x + perpX * halfPlankWidth, y: pt.y + perpY * halfPlankWidth });
+          inner.push({ x: pt.x - perpX * halfPlankWidth, y: pt.y - perpY * halfPlankWidth });
+        }
+        ctx.moveTo(outer[0].x, outer[0].y);
+        for (let i = 1; i < outer.length; i++) ctx.lineTo(outer[i].x, outer[i].y);
+        for (let i = inner.length - 1; i >= 0; i--) ctx.lineTo(inner[i].x, inner[i].y);
+        ctx.closePath();
+        return;
+      }
+      if (kind === 'mast') {
+        ctx.arc(0, 0, modData.radius || 15, 0, Math.PI * 2);
+      } else if (kind === 'helm' || kind === 'steering-wheel') {
+        ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      } else if (kind === 'cannon') {
+        // Base
+        ctx.rect(-15, -10, 30, 20);
+        // Rotated barrel — apply rotation only to the barrel rect
+        const turretAngle = modData.aimDirection ?? 0;
+        ctx.save();
+        ctx.rotate(turretAngle);
+        ctx.rect(-8, -40, 16, 40);
+        ctx.restore();
+      } else if (kind === 'swivel') {
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+      } else if (kind === 'ladder') {
+        ctx.rect(-10, -20, 20, 40);
+      } else if (kind === 'plank') {
+        const w = modData.length || 20;
+        const h = modData.width  || 10;
+        ctx.rect(-w / 2, -h / 2, w, h);
+      } else {
+        ctx.rect(-10, -10, 20, 20);
+      }
+    };
+
+    // ── Set up transform. Curved planks are pre-baked in ship-local space; all
+    //    other kinds use the module's localPos + localRot.
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.rotate(modShip.rotation - cameraState.rotation);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    if (!isCurvedPlank) {
+      this.ctx.translate(mod.localPos.x, mod.localPos.y);
+      this.ctx.rotate((mod as any).localRot ?? 0);
+    }
+
+    // Outer glow pass
+    this.ctx.shadowColor  = pal.glow;
+    this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+    this.ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
+    this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+    this.ctx.globalAlpha  = 1;
+    buildModulePath(this.ctx);
+    this.ctx.stroke();
+
+    // Inner crisp stroke
+    this.ctx.shadowBlur   = 0;
+    this.ctx.strokeStyle  = pal.inner;
+    this.ctx.lineWidth    = 2.5 / cameraState.zoom;
+    this.ctx.globalAlpha  = glowAlpha;
+    buildModulePath(this.ctx);
+    this.ctx.stroke();
+
+    // Translucent fill overlay
+    this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+    this.ctx.fillStyle    = pal.fill;
+    buildModulePath(this.ctx);
+    this.ctx.fill();
+
+    this.ctx.restore();
+
+    // Demolish hint: axe equipped + non-plank module → show "🪓 E – Demolish [kind]"
+    if (this.axeEquipped && kind !== 'plank') {
+      const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
+      const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
+      const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
+      const label = `🪓 E – Demolish ${kind}`;
+      const labelX = hintScreen.x;
+      const labelY = hintScreen.y - 42;
+      const tCtx = this.ctx;
+      tCtx.save();
+      tCtx.font = 'bold 13px Georgia, serif';
+      tCtx.textAlign = 'center';
+      const tw = tCtx.measureText(label).width;
+      tCtx.fillStyle = 'rgba(30,10,10,0.7)';
+      tCtx.strokeStyle = '#cc2222';
+      tCtx.lineWidth = 1.5;
+      tCtx.beginPath();
+      tCtx.roundRect(labelX - tw / 2 - 8, labelY - 16, tw + 16, 22, 4);
+      tCtx.fill();
+      tCtx.stroke();
+      tCtx.fillStyle = '#ffcccc';
+      tCtx.fillText(label, labelX, labelY);
+      tCtx.restore();
+    }
+  }
+
+  /**
    * Draw an animated marching-arrow line from the commanded NPC to the mouse cursor.
    * Shown whenever Move To targeting mode is active.
    */
   private drawMoveToArrowLine(worldState: WorldState, camera: Camera): void {
     if (this._moveToSourceNpcId === null || !this.mouseWorldPos) return;
+    const now = performance.now();
 
     // Resolve the NPC's current world position (same logic as drawNpc)
     const npc = worldState.npcs.find(n => n.id === this._moveToSourceNpcId);
@@ -1448,114 +1672,6 @@ export class RenderSystem {
           ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
           ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
         );
-      }
-    }
-
-    // ── Module highlight: coloured glow when cursor hovers a module ──
-    // green = same company, red = enemy, light-blue = alliance (future)
-    const now = performance.now();
-    if (this.hoveredModule) {
-      const { ship: modShip, module: mod } = this.hoveredModule;
-      const screenPos   = camera.worldToScreen(modShip.position);
-      const cameraState = camera.getState();
-      const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
-      const glowAlpha   = 0.6 + 0.4 * glowPulse;
-
-      // Determine team relationship
-      type HoverTeam = 'friendly' | 'enemy' | 'alliance';
-      const hoverTeam: HoverTeam = this.isShipFriendly(modShip) ? 'friendly' : 'enemy';
-      // future: 'alliance' when all-company feature is implemented
-      const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
-        friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
-        enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
-        alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
-      };
-      const pal = HOVER_PALETTE[hoverTeam];
-
-      // Build the module's local-space path for the given kind
-      const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
-        ctx.beginPath();
-        if (mod.kind === 'mast') {
-          ctx.arc(0, 0, (mod as any).radius || 15, 0, Math.PI * 2);
-        } else if (mod.kind === 'helm' || mod.kind === 'steering-wheel') {
-          ctx.arc(0, 0, 8, 0, Math.PI * 2);
-        } else if (mod.kind === 'cannon') {
-          ctx.rect(-15, -10, 30, 20);
-        } else if (mod.kind === 'swivel') {
-          ctx.arc(0, 0, 10, 0, Math.PI * 2);
-        } else if (mod.kind === 'ladder') {
-          ctx.rect(-10, -20, 20, 40);
-        } else if (mod.kind === 'plank') {
-          const w = (mod as any).length || 20;
-          const h = (mod as any).width  || 10;
-          ctx.rect(-w / 2, -h / 2, w, h);
-        } else {
-          ctx.rect(-10, -10, 20, 20);
-        }
-      };
-
-      this.ctx.save();
-      this.ctx.translate(screenPos.x, screenPos.y);
-      this.ctx.rotate(modShip.rotation - cameraState.rotation);
-      this.ctx.scale(cameraState.zoom, cameraState.zoom);
-      this.ctx.translate(mod.localPos.x, mod.localPos.y);
-      this.ctx.rotate((mod as any).localRot ?? 0);
-
-      const hexToRgba = (hex: string, a: number) => {
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
-      };
-
-      // Outer glow pass
-      this.ctx.shadowColor  = pal.glow;
-      this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-      this.ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
-      this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
-      this.ctx.globalAlpha  = 1;
-      buildModulePath(this.ctx);
-      this.ctx.stroke();
-
-      // Inner crisp stroke
-      this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = pal.inner;
-      this.ctx.lineWidth    = 2.5 / cameraState.zoom;
-      this.ctx.globalAlpha  = glowAlpha;
-      buildModulePath(this.ctx);
-      this.ctx.stroke();
-
-      // Translucent fill overlay
-      this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
-      this.ctx.fillStyle    = pal.fill;
-      buildModulePath(this.ctx);
-      this.ctx.fill();
-
-      this.ctx.restore();
-
-      // Demolish hint: axe equipped + non-plank module → show "🪓 E – Demolish [kind]"
-      if (this.axeEquipped && mod.kind !== 'plank') {
-        const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
-        const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
-        const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
-        const label = `🪓 E – Demolish ${mod.kind}`;
-        const labelX = hintScreen.x;
-        const labelY = hintScreen.y - 42;
-        const tCtx = this.ctx;
-        tCtx.save();
-        tCtx.font = 'bold 13px Georgia, serif';
-        tCtx.textAlign = 'center';
-        const tw = tCtx.measureText(label).width;
-        tCtx.fillStyle = 'rgba(30,10,10,0.7)';
-        tCtx.strokeStyle = '#cc2222';
-        tCtx.lineWidth = 1.5;
-        tCtx.beginPath();
-        tCtx.roundRect(labelX - tw / 2 - 8, labelY - 16, tw + 16, 22, 4);
-        tCtx.fill();
-        tCtx.stroke();
-        tCtx.fillStyle = '#ffcccc';
-        tCtx.fillText(label, labelX, labelY);
-        tCtx.restore();
       }
     }
 
@@ -1591,45 +1707,53 @@ export class RenderSystem {
       const screenPos    = camera.worldToScreen(hullHitShip.position);
       const cameraState  = camera.getState();
       const hull         = hullHitShip.hull;
-      // Alternating gold/white glow pulse
       const glowPulse    = 0.55 + 0.45 * Math.sin(now / 160);
       const glowAlpha    = 0.6 + 0.4 * glowPulse;
+
+      type HullTeam = 'friendly' | 'enemy' | 'alliance';
+      const hullTeam: HullTeam = this.isShipFriendly(hullHitShip) ? 'friendly' : 'enemy';
+      const HULL_PALETTE: Record<HullTeam, { glow: string; inner: string; fill: string }> = {
+        friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+        enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+        alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+      };
+      const hPal = HULL_PALETTE[hullTeam];
+      const hToRgba = (hex: string, a: number) => {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+      };
+      const buildHullPath = (ctx: CanvasRenderingContext2D) => {
+        ctx.beginPath();
+        ctx.moveTo(hull[0].x, hull[0].y);
+        for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+        ctx.closePath();
+      };
 
       this.ctx.save();
       this.ctx.translate(screenPos.x, screenPos.y);
       this.ctx.scale(cameraState.zoom, cameraState.zoom);
       this.ctx.rotate(hullHitShip.rotation - cameraState.rotation);
 
-      // Outer glow pass  (wider, dimmer)
-      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowColor  = hPal.glow;
       this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.strokeStyle  = hToRgba(hPal.glow, glowAlpha * 0.55);
       this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
       this.ctx.globalAlpha  = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(hull[0].x, hull[0].y);
-      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
-      this.ctx.closePath();
+      buildHullPath(this.ctx);
       this.ctx.stroke();
 
-      // Inner crisp stroke
       this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
-      this.ctx.lineWidth    = (2.5) / cameraState.zoom;
+      this.ctx.strokeStyle  = hPal.inner;
+      this.ctx.lineWidth    = 2.5 / cameraState.zoom;
       this.ctx.globalAlpha  = glowAlpha;
-      this.ctx.beginPath();
-      this.ctx.moveTo(hull[0].x, hull[0].y);
-      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
-      this.ctx.closePath();
+      buildHullPath(this.ctx);
       this.ctx.stroke();
 
-      // Translucent amber fill overlay
       this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
-      this.ctx.fillStyle    = '#ffe066';
-      this.ctx.beginPath();
-      this.ctx.moveTo(hull[0].x, hull[0].y);
-      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
-      this.ctx.closePath();
+      this.ctx.fillStyle    = hPal.fill;
+      buildHullPath(this.ctx);
       this.ctx.fill();
 
       this.ctx.restore();
@@ -1850,41 +1974,50 @@ export class RenderSystem {
     const glowAlpha   = 0.6  + 0.4  * glowPulse;
     const ctx         = this.ctx;
 
+    type MsHullTeam = 'friendly' | 'enemy' | 'alliance';
+    const msHullTeam: MsHullTeam = this.isShipFriendly(hullHitShip) ? 'friendly' : 'enemy';
+    const MS_HULL_PALETTE: Record<MsHullTeam, { glow: string; inner: string; fill: string }> = {
+      friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+      enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+      alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+    };
+    const msPal = MS_HULL_PALETTE[msHullTeam];
+    const msHexToRgba = (hex: string, a: number) => {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    };
+    const buildMsHullPath = (c: CanvasRenderingContext2D) => {
+      c.beginPath();
+      c.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) c.lineTo(hull[i].x, hull[i].y);
+      c.closePath();
+    };
+
     ctx.save();
     ctx.translate(screenPos.x, screenPos.y);
     ctx.scale(cameraState.zoom, cameraState.zoom);
     ctx.rotate(hullHitShip.rotation - cameraState.rotation);
 
-    // Outer glow
-    ctx.shadowColor  = '#ffe066';
+    ctx.shadowColor  = msPal.glow;
     ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-    ctx.strokeStyle  = `rgba(255,220,60,${(glowAlpha * 0.55).toFixed(3)})`;
+    ctx.strokeStyle  = msHexToRgba(msPal.glow, glowAlpha * 0.55);
     ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
     ctx.globalAlpha  = 1;
-    ctx.beginPath();
-    ctx.moveTo(hull[0].x, hull[0].y);
-    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
-    ctx.closePath();
+    buildMsHullPath(ctx);
     ctx.stroke();
 
-    // Inner crisp stroke
     ctx.shadowBlur   = 0;
-    ctx.strokeStyle  = `rgba(255,240,130,${(glowAlpha * 0.9).toFixed(3)})`;
+    ctx.strokeStyle  = msPal.inner;
     ctx.lineWidth    = 2.5 / cameraState.zoom;
     ctx.globalAlpha  = glowAlpha;
-    ctx.beginPath();
-    ctx.moveTo(hull[0].x, hull[0].y);
-    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
-    ctx.closePath();
+    buildMsHullPath(ctx);
     ctx.stroke();
 
-    // Translucent amber fill
-    ctx.globalAlpha = 0.08 + 0.06 * glowPulse;
-    ctx.fillStyle   = '#ffe066';
-    ctx.beginPath();
-    ctx.moveTo(hull[0].x, hull[0].y);
-    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
-    ctx.closePath();
+    ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+    ctx.fillStyle    = msPal.fill;
+    buildMsHullPath(ctx);
     ctx.fill();
 
     ctx.restore();
@@ -3694,6 +3827,10 @@ export class RenderSystem {
     this.drawLadderHoldRing();
     // Move To directive arrow line (above world, below UI menus)
     this.drawMoveToArrowLine(worldState, camera);
+    // Module hover glow (always-on, independent of move-to mode)
+    this.drawModuleHoverHighlight(camera);
+    // Ship hull hover glow (always-on, normal hover)
+    this.drawShipHullHighlight(camera);
     // Ship hull highlight when multi-select NPCs are pending a destination
     this.drawMultiSelectHoverHighlight(worldState, camera);
     // Box-select drag rectangle
@@ -15605,139 +15742,9 @@ export class RenderSystem {
 
     ctx.restore();
 
-    // Draw team-coloured highlight outline around the hovered module
-    const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
-    const _htCamRot = camera.getState().rotation;
-    this.ctx.save();
-    
-    // Check if it's a curved plank (needs special handling)
-    if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
-      // For curved planks, draw directly in ship-local coordinates
-      // Transform to ship's coordinate system only
-      this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation - _htCamRot);
-      this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
-      
-      // Draw curved plank highlight
-      this.ctx.strokeStyle = _htColor;
-      this.ctx.lineWidth = 3 / camera.getState().zoom;
-      this.ctx.beginPath();
-      
-      const { start, control, end, t1, t2 } = moduleData.curveData;
-      const segments = 20;
-      const halfPlankWidth = moduleData.width / 2;
-      
-      // Sample points along the curve
-      const points: Array<{x: number, y: number}> = [];
-      for (let i = 0; i <= segments; i++) {
-        const t = t1 + (t2 - t1) * (i / segments);
-        const pt = this.getQuadraticPoint(start, control, end, t);
-        points.push(pt);
-      }
-      
-      // Calculate perpendicular offsets for width
-      const outerPoints: Array<{x: number, y: number}> = [];
-      const innerPoints: Array<{x: number, y: number}> = [];
-      
-      for (let i = 0; i < points.length; i++) {
-        const pt = points[i];
-        
-        // Calculate tangent direction
-        let dx: number, dy: number;
-        if (i === 0) {
-          dx = points[1].x - pt.x;
-          dy = points[1].y - pt.y;
-        } else if (i === points.length - 1) {
-          dx = pt.x - points[i - 1].x;
-          dy = pt.y - points[i - 1].y;
-        } else {
-          dx = points[i + 1].x - points[i - 1].x;
-          dy = points[i + 1].y - points[i - 1].y;
-        }
-        
-        // Normalize and get perpendicular
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len > 0) {
-          dx /= len;
-          dy /= len;
-        }
-        
-        const perpX = -dy;
-        const perpY = dx;
-        
-        outerPoints.push({
-          x: pt.x + perpX * halfPlankWidth,
-          y: pt.y + perpY * halfPlankWidth
-        });
-        
-        innerPoints.push({
-          x: pt.x - perpX * halfPlankWidth,
-          y: pt.y - perpY * halfPlankWidth
-        });
-      }
-      
-      // Draw the outline
-      this.ctx.moveTo(outerPoints[0].x, outerPoints[0].y);
-      for (let i = 1; i < outerPoints.length; i++) {
-        this.ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
-      }
-      for (let i = innerPoints.length - 1; i >= 0; i--) {
-        this.ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
-      }
-      this.ctx.closePath();
-      this.ctx.stroke();
-    } else {
-      // For straight planks and other modules, use full transform
-      // Transform to ship's coordinate system
-      this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation - _htCamRot);
-      this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
-      
-      // Transform to module's local position and rotation
-      this.ctx.translate(module.localPos.x, module.localPos.y);
-      this.ctx.rotate(module.localRot);
-      
-      // Draw highlight based on module type
-      this.ctx.strokeStyle = _htColor;
-      this.ctx.lineWidth = 3 / camera.getState().zoom;
-      
-      if (moduleData.kind === 'plank') {
-        // Straight plank
-        const width = moduleData.length || 20;
-        const height = moduleData.width || 10;
-        const halfWidth = width / 2;
-        const halfHeight = height / 2;
-        this.ctx.strokeRect(-halfWidth, -halfHeight, width, height);
-      } else if (moduleData.kind === 'cannon') {
-        // Draw cannon highlight: base rect + barrel at its current aim angle
-        this.ctx.strokeRect(-15, -10, 30, 20);
-        const turretAngle = (moduleData as any).aimDirection ?? 0;
-        this.ctx.save();
-        this.ctx.rotate(turretAngle);
-        this.ctx.strokeRect(-8, -40, 16, 40); // barrel: same dims as drawShipCannons
-        this.ctx.restore();
-      } else if (moduleData.kind === 'ladder') {
-        // Ladder renders as fillRect(-10, -20, 20, 40)
-        this.ctx.strokeRect(-10, -20, 20, 40);
-      } else if (moduleData.kind === 'mast') {
-        // Mast is a circle
-        const radius = (moduleData as any).radius || 15;
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, radius, 0, Math.PI * 2);
-        this.ctx.stroke();
-      } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
-        // Helm renders as a circle with radius 8
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
-        this.ctx.stroke();
-      } else {
-        // Default highlight for other modules
-        const size = 20;
-        this.ctx.strokeRect(-size/2, -size/2, size, size);
-      }
-    }
-    
-    this.ctx.restore();
+    // NOTE: Module hover highlight is drawn by drawModuleHoverHighlight() in the
+    // main render pipeline — it fires immediately on hover (no tooltip delay) and
+    // uses the unified glow/inner/fill design. No additional highlight here.
   }
 
   // -----------------------------------------------------------------------
