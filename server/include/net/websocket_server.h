@@ -66,7 +66,8 @@ typedef struct SimpleShip {
     float angular_velocity;
     
     // Physics properties (from ship definitions)
-    float mass;              // Ship mass (kg)
+    float base_mass;         // Hull-only mass (kg) — constant, set at creation
+    float mass;              // Total dynamic mass (kg) = base_mass + crew + cargo
     float moment_of_inertia; // Rotational inertia (kg⋅m²)
     float max_speed;         // Maximum speed (m/s)
     float turn_rate;         // Maximum turn rate (rad/s)

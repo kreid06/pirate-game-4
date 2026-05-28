@@ -1766,6 +1766,7 @@ export class UIManager {
   }
   
   private onKeyDown(event: KeyboardEvent): void {
+    if (event.repeat) return;
     // Close any open modal on Escape or backtick
     if (event.code === 'Escape' || event.code === 'Backquote') {
       // Let the company menu handle ESC first (e.g. cancel name-entry form)

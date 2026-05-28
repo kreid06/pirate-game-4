@@ -106,6 +106,9 @@ bool is_outside_deck(uint16_t ship_id, float local_x, float local_y);
 
 void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y);
 void dismount_player_from_ship(WebSocketPlayer* player, const char* reason);
+/** Recompute ship->mass from hull base + all aboard players' body + inventory weights.
+ *  Also syncs the sim ship's Q16 mass and moment_inertia. Safe to call with NULL. */
+void recalc_ship_mass(SimpleShip* ship);
 
 void websocket_server_broadcast(const char* message);
 

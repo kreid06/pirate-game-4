@@ -14639,7 +14639,8 @@ export class RenderSystem {
       const ship = this.hoveredShip;
       title = `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
       accentColor = '#ff8844';
-      rows.push({ label: 'ID',       value: String(ship.id) });
+      const spd = Math.hypot(ship.velocity.x, ship.velocity.y);
+      rows.push({ label: 'ID',       value: `${ship.id}  ${spd.toFixed(1)} px/s` });
       rows.push({ label: 'Company',  value: coName(ship.companyId), color: coColor(ship.companyId) });
       const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
       rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });

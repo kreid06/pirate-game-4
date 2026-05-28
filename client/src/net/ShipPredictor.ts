@@ -28,6 +28,7 @@
 
 import { Ship } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
+import { BRIGANTINE_MASS } from '../common/ShipDefinitions.js';
 
 // ─── Server constants, ported to client pixel units ────────────────────────
 // websocket_server.c  BASE_WIND_SPEED = 225 m/s  ×10 → 2250 px/s
@@ -208,8 +209,11 @@ export class ShipPredictor {
     const avgSailAlign    = mastCount > 0 ? totalAlign / mastCount : 1.0;
     const windForceFactor = (ctrl.windPower * ctrl.sailOpenness / 100.0)
                             * ctrl.windEfficiency * avgSailAlign;
-    const targetSpeed     = BASE_WIND_SPEED * windForceFactor;
-    const blendFactor     = 1.0 - Math.exp(-dt / WIND_ACCEL_RATE);
+
+    // Mass scaling — mirrors server: heavier ships have lower top speed (v_eq ∝ F/m).
+    const massRatio   = ship.mass > 0 ? BRIGANTINE_MASS / ship.mass : 1.0;
+    const targetSpeed = BASE_WIND_SPEED * windForceFactor * massRatio;
+    const blendFactor = 1.0 - Math.exp(-dt / WIND_ACCEL_RATE);
 
     const cos = Math.cos(ship.rotation);
     const sin = Math.sin(ship.rotation);
@@ -219,9 +223,10 @@ export class ShipPredictor {
 
     // ── 3. Reverse thrust override ────────────────────────────────────────
     if (ctrl.reverseThrust) {
+      const revSpeed = REVERSE_SPEED * massRatio;
       const revBlend = 1.0 - Math.exp(-dt / REVERSE_ACCEL);
-      vx += (-cos * REVERSE_SPEED - vx) * revBlend;
-      vy += (-sin * REVERSE_SPEED - vy) * revBlend;
+      vx += (-cos * revSpeed - vx) * revBlend;
+      vy += (-sin * revSpeed - vy) * revBlend;
     }
 
     // ── 4. Rudder → torque → angular acceleration (mirrors server sim_step) ──

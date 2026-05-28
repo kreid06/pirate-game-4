@@ -638,6 +638,97 @@ static void resolve_player_npc_collisions(const SimpleShip* ship,
 }
 
 // Helper to board a player onto a ship
+// ── Cargo weight table (kg per single item) ──────────────────────────────────
+// Indexed by ItemKind value (max value is 36).  Unknown IDs yield 0 kg.
+static const float ITEM_WEIGHT_KG[64] = {
+    [0]  = 0.0f,  // ITEM_NONE
+    [1]  = 5.0f,  // ITEM_PLANK
+    [2]  = 3.0f,  // ITEM_REPAIR_KIT
+    [3]  = 5.0f,  // ITEM_CANNON_BALL
+    [4]  = 2.0f,  // ITEM_SWORD
+    [5]  = 1.0f,  // ITEM_PISTOL
+    [6]  = 1.5f,  // ITEM_HAMMER
+    [7]  = 200.0f,// ITEM_CANNON
+    [8]  = 30.0f, // ITEM_SAIL
+    [9]  = 50.0f, // ITEM_HELM
+    [10] = 2.0f,  // ITEM_CLOTH_ARMOR
+    [11] = 5.0f,  // ITEM_LEATHER_ARMOR
+    [12] = 15.0f, // ITEM_IRON_ARMOR
+    [13] = 20.0f, // ITEM_DECK
+    [14] = 50.0f, // ITEM_SWIVEL
+    [15] = 2.0f,  // ITEM_AXE
+    [16] = 10.0f, // ITEM_WOODEN_FLOOR
+    [17] = 30.0f, // ITEM_WORKBENCH
+    [18] = 15.0f, // ITEM_WALL
+    [19] = 8.0f,  // ITEM_DOOR_FRAME
+    [20] = 8.0f,  // ITEM_DOOR / ITEM_WOODEN_SHIELD
+    [21] = 4.0f,  // ITEM_IRON_SHIELD
+    [22] = 3.0f,  // ITEM_WOOD
+    [23] = 0.1f,  // ITEM_FIBER
+    [24] = 5.0f,  // ITEM_METAL
+    [25] = 3.0f,  // ITEM_PICKAXE
+    [26] = 100.0f,// ITEM_SHIPYARD
+    [27] = 4.0f,  // ITEM_STONE
+    [28] = 10.0f, // ITEM_WOOD_CEILING
+    [29] = 5.0f,  // ITEM_CLAIM_FLAG
+    [30] = 0.5f,  // ITEM_CLOTH_HAT
+    [31] = 1.0f,  // ITEM_CLOTH_SHIRT
+    [32] = 0.8f,  // ITEM_CLOTH_PANTS
+    [33] = 0.5f,  // ITEM_CLOTH_SHOES
+    [34] = 0.3f,  // ITEM_CLOTH_GLOVES
+    [35] = 30.0f, // ITEM_FLAG_FORT
+    [36] = 200.0f,// ITEM_COMPANY_FORTRESS
+};
+
+/** Body mass assumed for every player aboard (kg). */
+#define PLAYER_BODY_MASS_KG 80.0f
+
+/** Return the total weight (kg) of one player's inventory (bag + equipment). */
+static float player_inventory_weight(const WebSocketPlayer* p) {
+    float w = 0.0f;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        unsigned kind = (unsigned)p->inventory.slots[s].item;
+        if (kind > 0 && kind < 64)
+            w += ITEM_WEIGHT_KG[kind] * (float)p->inventory.slots[s].quantity;
+    }
+    /* Equipment slots — each is quantity 1 */
+#define _EQ(f) do { unsigned k=(unsigned)p->inventory.equipment.f; if(k>0&&k<64) w+=ITEM_WEIGHT_KG[k]; } while(0)
+    _EQ(helm); _EQ(torso); _EQ(legs); _EQ(feet); _EQ(hands); _EQ(shield);
+#undef _EQ
+    return w;
+}
+
+/**
+ * Recompute ship->mass = base_mass + sum(player body + inventory) for all
+ * players currently aboard.  Also writes the updated mass into the sim ship
+ * (Q16) and scales moment_inertia proportionally.
+ */
+void recalc_ship_mass(SimpleShip* ship) {
+    if (!ship || !ship->active) return;
+
+    float cargo_kg = 0.0f;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (!players[i].active) continue;
+        if (players[i].parent_ship_id != ship->ship_id) continue;
+        cargo_kg += PLAYER_BODY_MASS_KG + player_inventory_weight(&players[i]);
+    }
+
+    float new_mass = ship->base_mass + cargo_kg;
+    ship->mass     = new_mass;
+
+    /* Sync into authoritative sim ship */
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+    if (sim_ship) {
+        sim_ship->mass = Q16_FROM_FLOAT(new_mass);
+        /* BRIGANTINE_MOMENT_OF_INERTIA (500000) overflows Q16_FROM_FLOAT at runtime
+         * (float-to-int yields INT32_MIN on x86-64 CVTTSS2SI), which inverts the sign
+         * of angular acceleration.  sim_create_ship uses Q16_FROM_FLOAT(50000.0f) as a
+         * compile-time constant which GCC saturates to Q16_MAX (positive).  Use Q16_MAX
+         * explicitly here to match that effective value and keep turning correct. */
+        sim_ship->moment_inertia = Q16_MAX;
+    }
+}
+
 void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
     // company_id is NOT inherited from ship — assigned by admin or player choice
@@ -651,9 +742,10 @@ void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local
     // Inherit ship velocity
     player->velocity_x = ship->velocity_x;
     player->velocity_y = ship->velocity_y;
-    
-    log_info("⚓ Player %u boarded ship %u at local (%.1f, %.1f)", 
-             player->player_id, ship->ship_id, player->local_x, player->local_y);
+
+    recalc_ship_mass(ship);
+    log_info("⚓ Player %u boarded ship %u at local (%.1f, %.1f) — ship mass now %.0f kg",
+             player->player_id, ship->ship_id, player->local_x, player->local_y, ship->mass);
 }
 
 // Helper to dismount a player from a ship (into water)
@@ -661,7 +753,8 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
     if (player->parent_ship_id == 0) {
         return; // Already in water
     }
-    
+    uint16_t old_ship_id = player->parent_ship_id;
+
     log_info("🌊 Player %u dismounting from ship %u (reason: %s)", 
              player->player_id, player->parent_ship_id, reason);
     
@@ -681,6 +774,8 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
         player->mounted_module_id = 0;
         player->controlling_ship_id = 0;
     }
+
+    recalc_ship_mass(find_ship(old_ship_id));
 }
 
 // Base64 encoding for WebSocket handshake
@@ -3919,7 +4014,11 @@ int websocket_server_update(struct Sim* sim) {
                             // Craft a recipe at a workbench
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
-                                if (player) handle_craft_item(player, client, payload);
+                                if (player) {
+                                    handle_craft_item(player, client, payload);
+                                    if (player->parent_ship_id != 0)
+                                        recalc_ship_mass(find_ship(player->parent_ship_id));
+                                }
                             }
                             handled = true;
 
@@ -4854,6 +4953,8 @@ int websocket_server_update(struct Sim* sim) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
                                     handle_drop_item(player, client, payload);
+                                    if (player->parent_ship_id != 0)
+                                        recalc_ship_mass(find_ship(player->parent_ship_id));
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }
@@ -4868,6 +4969,8 @@ int websocket_server_update(struct Sim* sim) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
                                     handle_pickup_item(player, client, payload);
+                                    if (player->parent_ship_id != 0)
+                                        recalc_ship_mass(find_ship(player->parent_ship_id));
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }
@@ -9804,7 +9907,7 @@ void websocket_server_tick(float dt) {
         const float SWIM_MAX_SPEED = CLIENT_TO_SERVER(30.0f);     // Maximum swimming speed (server units/s)
         const float SWIM_DECELERATION = CLIENT_TO_SERVER(120.0f); // Deceleration when stopping (server units/s²)
         
-        const float WALK_MAX_SPEED = CLIENT_TO_SERVER(40.0f);     // Maximum walking speed on deck (server units/s)
+        const float WALK_MAX_SPEED = CLIENT_TO_SERVER(60.0f);     // Maximum walking speed on deck (server units/s)
         
         for (uint16_t i = 0; i < global_sim->player_count; i++) {
             struct Player* sim_player = &global_sim->players[i];
@@ -9961,8 +10064,12 @@ void websocket_server_tick(float dt) {
                                 ship_world_to_local(_zship, ws_player->x, ws_player->y,
                                                     &ws_player->local_x, &ws_player->local_y);
                             }
-                            float _zwalk = SERVER_TO_CLIENT(WALK_MAX_SPEED);
-                            if (ws_player->is_sprinting) _zwalk *= 1.6f;
+                            float _inv_kg_z    = player_inventory_weight(ws_player);
+                            float _carry_cap_z = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
+                            float _carry_r_z   = (_carry_cap_z > 0.0f) ? (_inv_kg_z / _carry_cap_z) : 0.0f;
+                            float _smult_z     = fmaxf(0.3f, 1.0f - _carry_r_z * 0.5f);
+                            float _zwalk = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _smult_z;
+                            if (ws_player->is_sprinting && _carry_r_z < 0.85f) _zwalk *= 2.0f;
                             /* Convert world-space input direction to ship-local space */
                             float _zcr =  cosf(_zship->rotation), _zsr = sinf(_zship->rotation);
                             float _zldx =  movement_x * _zcr + movement_y * _zsr;
@@ -10055,8 +10162,12 @@ void websocket_server_tick(float dt) {
                             
                             // Apply movement in local coordinates (direct velocity, not acceleration)
                             // Note: local_x/y are stored in CLIENT coordinates, so convert speed back to client
-                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
-                            if (ws_player->is_sprinting) walk_speed_client *= 1.6f;
+                            float _inv_kg      = player_inventory_weight(ws_player);
+                            float _carry_cap   = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
+                            float _carry_ratio = (_carry_cap > 0.0f) ? (_inv_kg / _carry_cap) : 0.0f;
+                            float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
+                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
+                            if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
                             float new_local_x = ws_player->local_x + local_move_x * walk_speed_client * dt;
                             float new_local_y = ws_player->local_y + local_move_y * walk_speed_client * dt;
                             
@@ -10142,8 +10253,12 @@ void websocket_server_tick(float dt) {
                             }
                         } else if (ws_player->on_island_id != 0) {
                             // ===== ISLAND WALKING (WORLD COORDINATES) =====
-                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
-                            if (ws_player->is_sprinting) walk_speed_client *= 1.6f;
+                            float _inv_kg      = player_inventory_weight(ws_player);
+                            float _carry_cap   = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
+                            float _carry_ratio = (_carry_cap > 0.0f) ? (_inv_kg / _carry_cap) : 0.0f;
+                            float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
+                            float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
+                            if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
                             float new_x = ws_player->x + movement_x * walk_speed_client * dt;
                             float new_y = ws_player->y + movement_y * walk_speed_client * dt;
                             /* Walk freely on beach + grass. Step off the beach → swim. */
@@ -10310,8 +10425,12 @@ void websocket_server_tick(float dt) {
                                 ws_player->on_dock_id = 0;
                                 ws_player->movement_state = PLAYER_STATE_SWIMMING;
                             } else {
-                                float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED);
-                                if (ws_player->is_sprinting) walk_speed_client *= 1.6f;
+                                float _inv_kg      = player_inventory_weight(ws_player);
+                                float _carry_cap   = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
+                                float _carry_ratio = (_carry_cap > 0.0f) ? (_inv_kg / _carry_cap) : 0.0f;
+                                float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
+                                float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
+                                if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
                                 float new_x = ws_player->x + movement_x * walk_speed_client * dt;
                                 float new_y = ws_player->y + movement_y * walk_speed_client * dt;
                                 bool _hs = (dock_sy->construction_phase == CONSTRUCTION_BUILDING);
@@ -11190,11 +11309,19 @@ void websocket_server_tick(float dt) {
             
             // Calculate forward force from wind and sails:
             // wind_power * sail_openness% * fiber_efficiency
-            const float BASE_WIND_SPEED = 225.0f; // meters per second at full wind, full sails
+            const float BASE_WIND_SPEED = 225.0f; // meters per second at full wind, full sails, unloaded hull
+
+            /* Mass scaling — heavier ships (crew + cargo) reach a proportionally lower
+             * top speed.  Sail force F is constant; equilibrium speed v_eq ∝ F/m, so
+             * target_speed = BASE_WIND_SPEED × wind_factor × (base_mass / current_mass). */
+            SimpleShip* ws_ship = find_ship(ship->id);
+            float mass_ratio = (ws_ship && ws_ship->mass > 0.0f)
+                               ? (BRIGANTINE_MASS / ws_ship->mass) : 1.0f;
+
             float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f)
                                       * avg_wind_efficiency
                                       * avg_sail_align;  /* sail-to-wind angular alignment */
-            float target_speed = BASE_WIND_SPEED * wind_force_factor;
+            float target_speed = BASE_WIND_SPEED * wind_force_factor * mass_ratio;
             
             // Get current ship speed (magnitude of velocity)
             float vx = Q16_TO_FLOAT(ship->velocity.x);
@@ -11207,9 +11334,9 @@ void websocket_server_tick(float dt) {
             
             // Debug logging every 2 seconds
             if (current_time - last_movement_log > 2000 && avg_sail_openness > 0) {
-                log_info("⛵ Ship %u: masts=%d openness=%.1f%% fib=%.2f align=%.2f wind=%.2f→spd=%.2f cur=%.2f pos=(%.1f,%.1f)",
+                log_info("⛵ Ship %u: masts=%d openness=%.1f%% fib=%.2f align=%.2f wind=%.2f mass_ratio=%.2f→spd=%.2f cur=%.2f pos=(%.1f,%.1f)",
                          ship->id, mast_count, avg_sail_openness, avg_wind_efficiency,
-                         avg_sail_align, global_sim->wind_power, target_speed, current_speed,
+                         avg_sail_align, global_sim->wind_power, mass_ratio, target_speed, current_speed,
                          SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x)),
                          SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y)));
                 last_movement_log = current_time;
@@ -11227,18 +11354,16 @@ void websocket_server_tick(float dt) {
             /* ===== REVERSE THRUST (S key) =====
              * When the helmsman holds S, override the wind target with a slow
              * backward velocity — 15% of BASE_WIND_SPEED in the stern direction.
+             * Also scaled by mass_ratio so a loaded ship reverses more slowly.
              * Uses a faster blend (0.8s) so the ship brakes and reverses quickly. */
-            {
-                SimpleShip* ws_ship = find_ship(ship->id);
-                if (ws_ship && ws_ship->reverse_thrust) {
-                    const float REVERSE_SPEED    = BASE_WIND_SPEED * 0.0375f;
-                    const float REVERSE_ACCEL    = 0.8f; /* time-constant in seconds */
-                    float rev_blen = 1.0f - expf(-dt / REVERSE_ACCEL);
-                    float rev_vx = -cosf(ship_rot) * REVERSE_SPEED;
-                    float rev_vy = -sinf(ship_rot) * REVERSE_SPEED;
-                    vx += (rev_vx - vx) * rev_blen;
-                    vy += (rev_vy - vy) * rev_blen;
-                }
+            if (ws_ship && ws_ship->reverse_thrust) {
+                const float REVERSE_SPEED = BASE_WIND_SPEED * 0.0375f * mass_ratio;
+                const float REVERSE_ACCEL = 0.8f; /* time-constant in seconds */
+                float rev_blen = 1.0f - expf(-dt / REVERSE_ACCEL);
+                float rev_vx = -cosf(ship_rot) * REVERSE_SPEED;
+                float rev_vy = -sinf(ship_rot) * REVERSE_SPEED;
+                vx += (rev_vx - vx) * rev_blen;
+                vy += (rev_vy - vy) * rev_blen;
             }
 
             ship->velocity.x = Q16_FROM_FLOAT(vx);

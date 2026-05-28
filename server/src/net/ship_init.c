@@ -209,6 +209,7 @@ void init_brigantine_ship(int idx, float world_x, float world_y, uint8_t ship_se
     s->y = world_y;
     s->active = true;
 
+    s->base_mass        = BRIGANTINE_MASS;
     s->mass             = BRIGANTINE_MASS;
     s->moment_of_inertia = BRIGANTINE_MOMENT_OF_INERTIA;
     s->max_speed        = BRIGANTINE_MAX_SPEED;
