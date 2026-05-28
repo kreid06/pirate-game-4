@@ -4339,15 +4339,19 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             } else {
                                 WebSocketPlayer* player = find_player(client->player_id);
-                                if (player && player->is_mounted && player->controlling_ship_id != 0) {
+                                /* Accept from helm-mounted (controlling_ship_id) OR directly
+                                 * mast-mounted (parent_ship_id) players — same override logic
+                                 * as cannons: the player physically at the mast IS the rigger. */
+                                uint16_t sail_ship_id = player ? player->controlling_ship_id : 0;
+                                if (player && player->is_mounted && sail_ship_id == 0) {
+                                    /* Mast-mounted: use parent ship */
+                                    ShipModule* _mm = find_module_by_id(find_ship(player->parent_ship_id), player->mounted_module_id);
+                                    if (_mm && _mm->type_id == MODULE_TYPE_MAST)
+                                        sail_ship_id = player->parent_ship_id;
+                                }
+                                if (player && player->is_mounted && sail_ship_id != 0) {
                                     // Find the ship being controlled
-                                    SimpleShip* ship = NULL;
-                                    for (int s = 0; s < ship_count; s++) {
-                                        if (ships[s].ship_id == player->controlling_ship_id) {
-                                            ship = &ships[s];
-                                            break;
-                                        }
-                                    }
+                                    SimpleShip* ship = find_ship(sail_ship_id);
                                     
                                     if (ship) {
                                         // Parse desired_angle
@@ -4359,7 +4363,7 @@ int websocket_server_update(struct Sim* sim) {
                                         
                                         handle_ship_sail_angle_control(player, client, ship, desired_angle);
                                     } else {
-                                        log_warn("Player %u controlling non-existent ship %u", player->player_id, player->controlling_ship_id);
+                                        log_warn("Player %u controlling non-existent ship %u", player->player_id, sail_ship_id);
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                     }
                                 } else {

@@ -398,7 +398,11 @@ export class InputManager {
     }
 
     // If mounted to cannon/mast/swivel, handle interact-to-dismount only
+    // Mast also gets sail-angle controls (Shift+A/D) — same override as cannon aiming.
     if (this.mountKind === 'cannon' || this.mountKind === 'mast' || this.mountKind === 'swivel') {
+      if (this.mountKind === 'mast') {
+        this.handleShipControls();
+      }
       if (this.isActionActive('interact') && this.canInteract()) {
         this.lastInteractionTime = Date.now();
         if (this.onActionEvent) this.onActionEvent('dismount');
