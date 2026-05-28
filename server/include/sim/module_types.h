@@ -120,18 +120,14 @@ typedef struct {
 typedef struct {
     uint16_t id;                // Unique module ID
     ModuleTypeId type_id;       // Module type (for network)
-    uint16_t deck_id;           // Which deck this module belongs to
+    uint8_t deck_id;            // Which deck this module belongs to (0=lower, 1=upper, 255=none)
     Vec2Q16 local_pos;          // Position relative to ship center
     q16_t local_rot;            // Rotation relative to ship
     uint16_t state_bits;        // Compact state flags
     q16_t health;               // Current HP (all module types)
     q16_t target_health;        // Repair ceiling (planks only) — decreases with damage;
-                                //   player must spend wood to raise it back toward max_health
-    q16_t max_health;           // Maximum HP:
-                                //   plank: 10000, cannon: 8000
-                                //   mast: 15000, helm: 10000
-    
-    // Type-specific data (union to save memory)
+    q16_t max_health;           // Maximum HP
+
     union {
         CannonModuleData cannon;
         MastModuleData mast;
@@ -141,13 +137,7 @@ typedef struct {
         SwivelModuleData swivel;
     } data;
 
-    // Status effects (separate from type-specific data)
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
-
-    /* player_id of the player currently mounted here (0 = none).
-     * Set by handle_cannon_interact / handle_swivel_interact and cleared on
-     * dismount.  NPCs check this so they never attempt to occupy a cannon
-     * that a player is already manning. */
     uint32_t player_mounted_id;
 } ShipModule;
 

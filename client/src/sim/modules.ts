@@ -86,7 +86,7 @@ export enum ModuleStateBits {
 export interface ShipModule {
   id: number;                    // Unique module ID within the ship
   kind: ModuleKind;             // Type of module
-  deckId: number;               // Which deck level this module is on (0 = main deck)
+  deckId: number;               // Which deck this module belongs to: 0=lower deck, 1=upper deck, 255=deck-independent (matches server deck_id)
   localPos: Vec2;               // Position relative to ship center
   localRot: number;             // Rotation relative to ship orientation (radians)
   occupiedBy: number | null;    // Player/entity ID currently using this module
@@ -220,7 +220,7 @@ export interface DeckModuleData {
   condition: number;           // Surface condition (0-100, affects traction/speed)
   texture: 'smooth' | 'rough' | 'planked' | 'tiled'; // Surface texture
   walkable: boolean;           // Whether players can walk on this deck section
-  deckLevel: number;           // Deck height level (0 = main deck, 1 = upper deck, -1 = lower deck)
+  deckLevel: number;           // Deck level id: 0 = lower deck, 1 = upper deck (matches server deck_id / z_index)
 }
 
 /**
@@ -549,12 +549,16 @@ export class ModuleUtils {
   /**
    * Create ship deck from a polygon hull
    * Creates a deck module that covers the ship's interior area defined by the hull polygon
+   * @param hullPolygon  Hull polygon in ship-local coordinates
+   * @param deckId       Module ID for this deck floor (e.g. 200 = lower, 201 = upper)
+   * @param deckLevel    Deck level / deck_id: 0 = lower deck, 1 = upper deck (matches server deck_id)
    */
-  static createShipDeckFromPolygon(hullPolygon: Vec2[], deckId: number = 200): ShipModule {
+  static createShipDeckFromPolygon(hullPolygon: Vec2[], deckId: number = 200, deckLevel: number = 0): ShipModule {
     // Very small margin to maximize deck coverage and fill plank gaps
     const deckMargin = 1; // Minimal margin for nearly complete coverage
     
     const deckModule = this.createDefaultModule(deckId, 'deck', Vec2.from(0, 0));
+    deckModule.deckId = deckLevel; // module belongs to this deck level
     
     if (deckModule.moduleData && deckModule.moduleData.kind === 'deck') {
       // Create a deck polygon that follows the hull shape, shrunk inward
@@ -565,7 +569,7 @@ export class ModuleUtils {
       deckModule.moduleData.condition = 100;
       deckModule.moduleData.texture = 'planked';
       deckModule.moduleData.walkable = true;
-      deckModule.moduleData.deckLevel = 0;
+      deckModule.moduleData.deckLevel = deckLevel;
       
     }
     

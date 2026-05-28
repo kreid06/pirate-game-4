@@ -9,7 +9,7 @@
 #include "net/websocket_server_internal.h"
 #include "net/ship_init.h"
 #include "net/cannon_fire.h"
-#include "../../protocol/ship_definitions.h"
+#include "../../../protocol/ship_definitions.h"
 #include "net/module_interactions.h"
 #include "sim/ship_level.h"
 

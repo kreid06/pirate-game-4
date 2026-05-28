@@ -15,7 +15,8 @@ import { ShipModule, ModuleUtils, ModuleKind } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 import {
   BRIGANTINE_PHYSICS,
-  BRIGANTINE_DECK_ID,
+  BRIGANTINE_LOWER_DECK_MODULE_ID,
+  BRIGANTINE_UPPER_DECK_MODULE_ID,
   BRIGANTINE_HELM_ID,
   BRIGANTINE_PLANK_SEGMENTS_START_ID as BRIGANTINE_PLANK_START_ID
 } from '../common/ShipDefinitions.js';
@@ -245,9 +246,10 @@ export class BrigantineTestBuilder {
     this.modules = [];
     this.nextModuleId = 1000;
     
-    // Always add deck
+    // Always add both decks: lower (deck_id=0) and upper (deck_id=1)
     const hull = createCurvedShipHull();
-    this.modules.push(ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_DECK_ID));
+    this.modules.push(ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_LOWER_DECK_MODULE_ID, 0));
+    this.modules.push(ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_UPPER_DECK_MODULE_ID, 1));
     
     // Always add planks
     this.modules.push(...ModuleUtils.createShipPlanksFromSegments(BRIGANTINE_PLANK_START_ID));
@@ -361,9 +363,7 @@ export class BrigantineTestBuilder {
   exportLoadout(name: string, description: string): BrigantineLoadout {
     // Filter out deck and planks for cleaner export
     const customModules = this.modules.filter(m => 
-      m.id !== BRIGANTINE_DECK_ID && 
-      m.id < BRIGANTINE_PLANK_START_ID ||
-      m.id >= BRIGANTINE_PLANK_START_ID + 48
+      m.kind !== 'deck' && m.kind !== 'plank'
     );
     
     return {

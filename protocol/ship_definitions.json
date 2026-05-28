@@ -83,6 +83,42 @@
         "thickness": 30,
         "comment": "Auto-generated from hull segments, see PlankSegments.ts"
       }
-    }
+    },
+    "decks": [
+      {
+        "id": 1,
+        "z_index": 1,
+        "collision": [
+          { "x": 190, "y": 90 },
+          { "x": 415, "y": 0 },
+          { "x": 190, "y": -90 },
+          { "x": -260, "y": -90 },
+          { "x": -345, "y": 0 },
+          { "x": -260, "y": 90 }
+        ],
+        "snap_points": [
+          { "x": 300, "y": 0, "type": "ladder" },
+          { "x": 0, "y": 0, "type": "ladder" },
+          { "x": -300, "y": 0, "type": "ladder" }
+        ]
+      },
+      {
+        "id": 0,
+        "z_index": 0,
+        "collision": [
+          { "x": 190, "y": 90 },
+          { "x": 415, "y": 0 },
+          { "x": 190, "y": -90 },
+          { "x": -260, "y": -90 },
+          { "x": -345, "y": 0 },
+          { "x": -260, "y": 90 }
+        ],
+        "snap_points": [
+          { "x": 300, "y": 0, "type": "ladder" },
+          { "x": 0, "y": 0, "type": "ladder" },
+          { "x": -300, "y": 0, "type": "ladder" }
+        ]
+      }
+    ]
   }
 }

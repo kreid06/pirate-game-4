@@ -48,6 +48,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
+import { BRIGANTINE_LOWER_DECK_MODULE_ID, BRIGANTINE_UPPER_DECK_MODULE_ID } from '../common/ShipDefinitions.js';
 
 /**
  * Application lifecycle states
@@ -5866,8 +5867,9 @@ export class ClientApplication {
         attrCaps: [50, 35, 35, 50, 25],
       },
       modules: [
-        // Deck — walkable interior polygon inset from hull
-        ModuleUtils.createShipDeckFromPolygon(hull),
+        // Two-deck setup: lower deck (deck_id=0) and upper deck (deck_id=1)
+        ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_LOWER_DECK_MODULE_ID, 0),
+        ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_UPPER_DECK_MODULE_ID, 1),
 
         // Hull planks — 24 segments covering the full hull perimeter
         ...ModuleUtils.createShipPlanksFromSegments(100),
@@ -5907,7 +5909,7 @@ export class ClientApplication {
           rotation: 0,
           radius: PhysicsConfig.PLAYER_RADIUS,
           carrierId: ship.id,
-          deckId: ship.modules[0].id,
+          deckId: 0, // lower deck (deck_index 0)
           onDeck: true,
           isMounted: false,
           companyId: 0,

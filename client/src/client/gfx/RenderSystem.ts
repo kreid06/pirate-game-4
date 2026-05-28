@@ -14585,7 +14585,8 @@ export class RenderSystem {
       rows.push({ label: 'Mod ID',    value: String(module.id) });
       rows.push({ label: 'Ship ID',   value: String(ship.id) });
       rows.push({ label: 'Kind',      value: kind });
-      rows.push({ label: 'Deck',      value: String(module.deckId) });
+      const deckVal = module.deckId === 0xFF ? 'none' : module.deckId === 0 ? '0 (lower)' : module.deckId === 1 ? '1 (upper)' : String(module.deckId);
+      rows.push({ label: 'Deck',      value: deckVal });
       rows.push({ label: 'LocalPos',  value: `(${module.localPos.x.toFixed(0)}, ${module.localPos.y.toFixed(0)})` });
       if (module.occupiedBy !== null) rows.push({ label: 'OccupiedBy', value: String(module.occupiedBy), color: '#ffee88' });
       if (md) {

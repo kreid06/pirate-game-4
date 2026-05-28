@@ -76,7 +76,7 @@ export interface Player {
   rotation: number; // Facing direction in radians (from mouse aim)
   radius: number;
   carrierId: number; // 0 = not on ship (parent_ship from server)
-  deckId: number;
+  deckId: number;   // Deck the player is on: 0 = lower deck, 1 = upper deck (from server deck_index)
   onDeck: boolean;
   
   // Local (ship-relative) position - used when on a ship

@@ -2044,7 +2044,7 @@ export class NetworkManager {
                   gameplayModules.push({
                     id: mod.id,
                     kind: kind,
-                    deckId: 0,
+                    deckId: mod.deck_id ?? 0, // 0=lower deck, 1=upper deck (server deck_id)
                     localPos: Vec2.from(mod.x || 0, mod.y || 0),
                     localRot: mod.rotation || 0,
                     occupiedBy: null,
@@ -2161,7 +2161,7 @@ export class NetworkManager {
             rotation: player.rotation || 0, // Server sends rotation (facing direction)
             radius: player.radius || 8,
             carrierId: player.parent_ship || 0, // Server sends parent_ship
-            deckId: player.deckId || 0,
+            deckId: player.deck_index ?? player.deckId ?? 0, // Server sends deck_index (0=lower, 1=upper)
             onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
             
             // Local (ship-relative) position when on a ship

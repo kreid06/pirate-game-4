@@ -3,6 +3,7 @@
 #include "sim/module_ids.h"
 #include "sim/ship_level.h"
 #include "sim/island.h"
+#include "sim/deck_utils.h"
 #include "net/protocol.h"
 #include "core/hash.h"
 #include "core/math.h"
@@ -10,6 +11,10 @@
 #include <string.h>
 #include <assert.h>
 #include <math.h>
+
+/* Ship geometry source-of-truth — generated from protocol/ship_definitions.json.
+ * Defines BRIGANTINE_DECK_COUNT, BRIGANTINE_DECK_0/1, etc. */
+#include "../../../protocol/ship_definitions.h"
 
 // Include hash function implementation
 extern uint64_t hash_sim_state(const struct Sim* sim);
@@ -332,6 +337,14 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
     for (uint16_t i = 0; i < sim->ship_count; i++) {
         struct Ship* ship = &sim->ships[i];
         update_ship_physics(ship, dt);
+
+        // Example: Deck-aware module placement validation (for maintainers)
+        // for (uint8_t m = 0; m < ship->module_count; m++) {
+        //     ShipModule* mod = &ship->modules[m];
+        //     if (!validate_module_placement(ship, mod->deck_id, mod->snap_idx)) {
+        //         // Handle invalid placement (log, remove, etc.)
+        //     }
+        // }
 
         /* Shallow-water drag — extra friction when ship hull centre is in
          * the shallow-water ring around any island.  Applied AFTER the base
@@ -923,9 +936,10 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
     entity_id id = allocate_entity_id(sim);
     if (id == INVALID_ENTITY_ID) return id;
     
+
     struct Ship* ship = &sim->ships[sim->ship_count];
     memset(ship, 0, sizeof(struct Ship));
-    
+
     ship->id = id;
     ship->position = position;
     ship->rotation = rotation;
@@ -933,14 +947,40 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
     ship->angular_velocity = 0;
     ship->mass = Q16_FROM_FLOAT(1000.0f); // 1000 kg default
     ship->moment_inertia = Q16_FROM_FLOAT(50000.0f); // kg⋅m²
-    /* Hull extends ~42.3 server units to the bow tip; use 45 for safe broad-phase margin. */
     ship->bounding_radius = Q16_FROM_FLOAT(45.0f);
     ship->hull_health = Q16_FROM_INT(100);
-    ship->desired_sail_openness = 0;  // Sails start closed
-    ship->rudder_angle = 0.0f;        // Rudder centered
-    ship->target_rudder_angle = 0.0f; // No input
+    ship->desired_sail_openness = 0;
+    ship->rudder_angle = 0.0f;
+    ship->target_rudder_angle = 0.0f;
 
     ship_level_init(&ship->level_stats);
+
+    // ── Multi-deck initialization (brigantine) ──
+    // Data comes from BRIGANTINE_DECK_0/BRIGANTINE_DECK_1 in ship_definitions.h.
+    // That header stores geometry as Vec2 {float x,y} (client pixels); ShipDeck stores
+    // float collision_px[][2] — identical layout, copied field-by-field for clarity.
+    ship->deck_count = BRIGANTINE_DECK_COUNT;
+    {
+#define _COPY_DECK(DST_IDX, SRC) do { \
+        ShipDeck* _d = &ship->decks[DST_IDX]; \
+        _d->id = (SRC).id; \
+        _d->z_index = (SRC).z_index; \
+        _d->collision_count = (SRC).collision_count; \
+        for (int _v = 0; _v < (SRC).collision_count && _v < MAX_DECK_COLLISION_VERTS; _v++) { \
+            _d->collision_px[_v][0] = (SRC).collision[_v].x; \
+            _d->collision_px[_v][1] = (SRC).collision[_v].y; \
+        } \
+        _d->snap_point_count = (SRC).snap_point_count; \
+        for (int _s = 0; _s < (SRC).snap_point_count && _s < MAX_SNAP_POINTS_PER_DECK; _s++) { \
+            _d->snap_points[_s].x    = (SRC).snap_points[_s].x; \
+            _d->snap_points[_s].y    = (SRC).snap_points[_s].y; \
+            _d->snap_points[_s].type = (SRC).snap_points[_s].type; \
+        } \
+    } while(0)
+        _COPY_DECK(0, BRIGANTINE_DECK_0);
+        _COPY_DECK(1, BRIGANTINE_DECK_1);
+#undef _COPY_DECK
+    }
     
     // Create brigantine hull with curved bow/stern sections (47 vertices)
     // Matches client-side createCurvedShipHull() from ShipUtils.ts

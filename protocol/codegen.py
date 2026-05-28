@@ -155,6 +155,37 @@ def generate_c(data: dict) -> str:
         out.append(c_physics_defines(
             ship_id, ship["physics"], ship["dimensions"], ship["modules"]
         ))
+
+        # Decks array
+        decks = ship.get("decks", [])
+        prefix = ship_id.upper()
+        out.append(f"// {ship_id.title()} decks\n")
+        out.append(f"#define {prefix}_DECK_COUNT {len(decks)}\n")
+        for i, deck in enumerate(decks):
+            out.append(f"static const struct {{\n")
+            out.append(f"    uint8_t id;\n")
+            out.append(f"    uint8_t z_index;\n")
+            out.append(f"    Vec2 collision[{len(deck['collision'])}];\n")
+            out.append(f"    uint8_t collision_count;\n")
+            out.append(f"    struct {{ float x, y; uint8_t type; }} snap_points[{len(deck['snap_points'])}];\n")
+            out.append(f"    uint8_t snap_point_count;\n")
+            out.append(f"}} {prefix}_DECK_{i} = {{\n")
+            out.append(f"    {deck['id']}, // id\n")
+            out.append(f"    {deck['z_index']}, // z_index\n")
+            out.append(f"    {{ ")
+            out.append(", ".join(f"{{ {_cf(pt['x'])}, {_cf(pt['y'])} }}" for pt in deck['collision']))
+            out.append(f" }}, // collision\n")
+            out.append(f"    {len(deck['collision'])}, // collision_count\n")
+            out.append(f"    {{ ")
+            out.append(", ".join(f"{{ {_cf(sp['x'])}, {_cf(sp['y'])}, {0 if sp['type']=='ladder' else 1} }}" for sp in deck['snap_points']))
+            out.append(f" }}, // snap_points\n")
+            out.append(f"    {len(deck['snap_points'])}, // snap_point_count\n")
+            out.append(f"}};\n")
+        if decks:
+            out.append(f"static const void* {prefix}_DECKS[{len(decks)}] = {{ ")
+            out.append(", ".join(f"&{prefix}_DECK_{i}" for i in range(len(decks))))
+            out.append(f" }};\n")
+        out.append("\n")
     out.append(C_FOOTER.format(guard=grd))
     return "".join(out)
 

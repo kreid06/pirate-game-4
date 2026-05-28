@@ -26,7 +26,18 @@ export const BRIGANTINE_ANGULAR_DRAG = 0.95;
 export const BRIGANTINE_LENGTH = 760;
 export const BRIGANTINE_BEAM = 180;
 
-export const BRIGANTINE_DECK_ID = 200;
+// ── Deck identifiers ─────────────────────────────────
+// deck_id values match the server's ShipDeck.id field (0=lower, 1=upper)
+export const BRIGANTINE_DECK_COUNT = 2;
+export const BRIGANTINE_DECK_LOWER_ID = 0;  // deck_id for lower deck (z_index 0)
+export const BRIGANTINE_DECK_UPPER_ID = 1;  // deck_id for upper deck (z_index 1)
+
+// Module IDs for the deck floor surface modules
+export const BRIGANTINE_LOWER_DECK_MODULE_ID = 200;  // module representing the lower deck floor
+export const BRIGANTINE_UPPER_DECK_MODULE_ID = 201;  // module representing the upper deck floor
+/** @deprecated Use BRIGANTINE_LOWER_DECK_MODULE_ID */
+export const BRIGANTINE_DECK_ID = BRIGANTINE_LOWER_DECK_MODULE_ID;
+
 export const BRIGANTINE_HELM_ID = 1000;
 export const BRIGANTINE_PLANK_SEGMENTS_START_ID = 100;
 export const BRIGANTINE_PLANK_SEGMENTS_COUNT = 48;

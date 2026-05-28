@@ -70,10 +70,56 @@ static inline int generate_brigantine_hull(Vec2 *out) {
 #define BRIGANTINE_BEAM 180.0f
 
 /* ── Brigantine module IDs ─── */
-#define BRIGANTINE_DECK_ID 200
-#define BRIGANTINE_HELM_ID 1000
+#define BRIGANTINE_DECK_ID          200   /* module ID for lower deck floor (legacy alias) */
+#define BRIGANTINE_LOWER_DECK_MODULE_ID 200   /* module ID for lower deck floor */
+#define BRIGANTINE_UPPER_DECK_MODULE_ID 201   /* module ID for upper deck floor */
+#define BRIGANTINE_HELM_ID          1000
 static const Vec2 BRIGANTINE_HELM_POSITION = { -90.0f, 0.0f };
 #define BRIGANTINE_PLANK_SEGMENTS_START_ID 100
 #define BRIGANTINE_PLANK_SEGMENTS_COUNT 48
+
+/* ── Brigantine deck identifiers ─── */
+/* These match ShipDeck.id values and WebSocketPlayer.deck_index */
+#define BRIGANTINE_DECK_LOWER_ID  0   /* lower deck (z_index 0) */
+#define BRIGANTINE_DECK_UPPER_ID  1   /* upper deck (z_index 1) */
+#define BRIGANTINE_DECK_COUNT     2
+/* Lower deck (id=0, z_index=0) — BRIGANTINE_DECK_LOWER_ID */
+static const struct {
+    uint8_t id;
+    uint8_t z_index;
+    Vec2 collision[6];
+    uint8_t collision_count;
+    struct { float x, y; uint8_t type; } snap_points[3];
+    uint8_t snap_point_count;
+} BRIGANTINE_DECK_LOWER = {
+    0, // id  = BRIGANTINE_DECK_LOWER_ID
+    0, // z_index
+    { { 190.0f, 90.0f }, { 415.0f, 0.0f }, { 190.0f, -90.0f }, { -260.0f, -90.0f }, { -345.0f, 0.0f }, { -260.0f, 90.0f } }, // collision
+    6, // collision_count
+    { { 300.0f, 0.0f, 0 }, { 0.0f, 0.0f, 0 }, { -300.0f, 0.0f, 0 } }, // snap_points
+    3, // snap_point_count
+};
+/* Upper deck (id=1, z_index=1) — BRIGANTINE_DECK_UPPER_ID */
+static const struct {
+    uint8_t id;
+    uint8_t z_index;
+    Vec2 collision[6];
+    uint8_t collision_count;
+    struct { float x, y; uint8_t type; } snap_points[3];
+    uint8_t snap_point_count;
+} BRIGANTINE_DECK_UPPER = {
+    1, // id  = BRIGANTINE_DECK_UPPER_ID
+    1, // z_index
+    { { 190.0f, 90.0f }, { 415.0f, 0.0f }, { 190.0f, -90.0f }, { -260.0f, -90.0f }, { -345.0f, 0.0f }, { -260.0f, 90.0f } }, // collision
+    6, // collision_count
+    { { 300.0f, 0.0f, 0 }, { 0.0f, 0.0f, 0 }, { -300.0f, 0.0f, 0 } }, // snap_points
+    3, // snap_point_count
+};
+/* Legacy aliases — existing code that references BRIGANTINE_DECK_0/1 still compiles.
+ * Prefer BRIGANTINE_DECK_LOWER / BRIGANTINE_DECK_UPPER in new code. */
+#define BRIGANTINE_DECK_0 BRIGANTINE_DECK_UPPER  /* id=1, upper (old name kept for compat) */
+#define BRIGANTINE_DECK_1 BRIGANTINE_DECK_LOWER  /* id=0, lower (old name kept for compat) */
+/* Array ordered by deck id: [0]=lower, [1]=upper — matches BRIGANTINE_DECK_LOWER_ID / UPPER_ID */
+static const void* BRIGANTINE_DECKS[2] = { &BRIGANTINE_DECK_LOWER, &BRIGANTINE_DECK_UPPER };
 
 #endif /* SHIP_DEFINITIONS_H */
