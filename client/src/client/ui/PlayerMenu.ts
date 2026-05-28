@@ -16,7 +16,7 @@ import {
   COMPANY_PIRATES,
   COMPANY_NAVY,
 } from '../../sim/Types.js';
-import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon } from '../../sim/Inventory.js';
+import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight } from '../../sim/Inventory.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -798,6 +798,59 @@ export class PlayerMenu {
       ctx.fillText(tipText, tipX + TIP_PAD, tipY + tipH / 2);
     }
 
+    // ── Carry Weight bar ─────────────────────────────────────────────────────
+    {
+      sty += 8;
+      // Separator line
+      ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(statusX, sty);
+      ctx.lineTo(statusX + statusW, sty);
+      ctx.stroke();
+      sty += 5;
+
+      const weightLvl     = (player.statWeight ?? 0) as number;
+      const BASE_CAPACITY = 300;
+      const capacity      = Math.round(BASE_CAPACITY * (1 + weightLvl * 0.1));
+      const carried       = computeInventoryWeight(player.inventory);
+      const pct           = Math.min(carried / capacity, 1);
+
+      // Warn colours: normal → green, >75% → amber, >95% → red
+      const barColor = pct >= 0.95 ? '#cc2222' : pct >= 0.75 ? '#cc8811' : '#3a8a3a';
+
+      const BAR_H  = 8;
+      const LABEL_W = 80;
+      const barW   = statusW - LABEL_W;
+      const barX   = statusX + LABEL_W;
+
+      ctx.font         = 'bold 11px Georgia, serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = '#aabbcc';
+      ctx.fillText('Carry Weight', statusX + 4, sty + BAR_H / 2);
+
+      // Track
+      ctx.fillStyle = '#111827';
+      ctx.fillRect(barX, sty, barW, BAR_H);
+      // Fill
+      ctx.fillStyle = barColor;
+      ctx.fillRect(barX, sty, Math.round(barW * pct), BAR_H);
+      // Border
+      ctx.strokeStyle = '#334';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(barX, sty, barW, BAR_H);
+
+      sty += BAR_H + 3;
+
+      // Numeric label right-aligned: "47 / 110"
+      ctx.font      = '10px Georgia, serif';
+      ctx.textAlign = 'right';
+      ctx.fillStyle = pct >= 0.95 ? '#ff6666' : pct >= 0.75 ? '#ffcc66' : '#88aabb';
+      ctx.fillText(`${carried} kg / ${capacity} kg`, statusX + statusW, sty);
+      sty += 13;
+    }
+
     // Vertical divider spanning full right-column height
     const totalH = Math.max(equipBlockH, sty - equipTop);
     ctx.strokeStyle = BORDER;
@@ -1180,7 +1233,7 @@ export class PlayerMenu {
     const nameH  = 18;
     const descLines = this._wrapText(ctx, def.description, W - PAD_T * 2, '12px Georgia, serif');
     const quantityLine = slot.quantity > 1 ? 1 : 0;
-    const totalH = PAD_T + nameH + 4 + LINE + 4 + descLines.length * LINE + quantityLine * LINE + PAD_T;
+    const totalH = PAD_T + nameH + 4 + LINE + 4 + descLines.length * LINE + quantityLine * LINE + LINE + PAD_T;
 
     // Position above slot, clamped to canvas
     const cw = ctx.canvas.width;
@@ -1230,7 +1283,18 @@ export class PlayerMenu {
     if (slot.quantity > 1) {
       ctx.fillStyle = '#aaa';
       ctx.fillText(`Qty: ${slot.quantity}`, tx + PAD_T + 4, cy);
+      cy += LINE;
     }
+
+    // Weight
+    const wPerUnit = def.weight;
+    const totalWt  = wPerUnit * (slot.quantity || 1);
+    const weightTxt = slot.quantity > 1
+      ? `Weight: ${wPerUnit} kg ea  ·  ${totalWt} kg total`
+      : `Weight: ${wPerUnit} kg`;
+    ctx.fillStyle = '#8ab4cc';
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillText(weightTxt, tx + PAD_T + 4, cy);
 
     ctx.restore();
   }

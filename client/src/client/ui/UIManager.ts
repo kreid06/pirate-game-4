@@ -10,7 +10,7 @@ import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem }
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
-import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon } from '../../sim/Inventory.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
@@ -2231,7 +2231,15 @@ class HUDElement implements UIElement {
       const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
       const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
                                        (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel);
+
+      // Sum cargo weight for all players currently aboard this ship
+      const SHIP_WEIGHT_CAPACITY = 500;
+      const shipRawWeight = context.worldState.players
+        .filter(p => p.onDeck && p.carrierId === playerShip.id)
+        .reduce((sum, p) => sum + computeInventoryWeight(p.inventory), 0);
+      const _shipWeight = Math.min(100, (shipRawWeight / SHIP_WEIGHT_CAPACITY) * 100);
+
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel, _shipWeight);
     }
 
     // Health / stamina bars above hotbar
@@ -2248,6 +2256,16 @@ class HUDElement implements UIElement {
       ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
       : undefined;
     this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
+
+    // Vital bars (weight / food / water) — right of hotbar
+    const BASE_CARRY = 300;
+    const carryCapacity = BASE_CARRY * (1 + ((player.statWeight ?? 0) as number) * 0.1);
+    this.renderVitalBars(
+      ctx, ctx.canvas,
+      computeInventoryWeight(player.inventory), carryCapacity,
+      player.hunger ?? 100,
+      player.thirst ?? 100,
+    );
 
     // Equipment HUD — all 6 slots (helm, chest, legs, feet, hands, shield)
     this.renderEquipmentHUD(ctx, ctx.canvas, player.inventory.equipment);
@@ -2577,6 +2595,143 @@ class HUDElement implements UIElement {
     ctx.restore();
   }
 
+  /** Three vertical vital bars (carry weight / food / water) to the right of the hotbar. */
+  private renderVitalBars(
+    ctx:          CanvasRenderingContext2D,
+    canvas:       HTMLCanvasElement,
+    carryWeight:  number,   // kg currently carried
+    carryCapacity: number,  // max kg
+    hunger:       number,   // 0–100 (100 = full)
+    thirst:       number,   // 0–100 (100 = full)
+  ): void {
+    const SLOT_SIZE = 48;
+    const SLOT_GAP  = 4;
+    const PADDING   = 6;
+    const LABEL_H   = 16;
+    const hotbarW   = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const hotbarH   = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const hotbarX   = Math.round((canvas.width - hotbarW) / 2);
+    const hotbarY   = canvas.height - hotbarH - 8;
+
+    const BAR_W    = 14;
+    const BAR_GAP  = 5;
+    const ICON_SZ  = 8;
+    const NUM_H    = 9;  // height reserved for numeric label
+    const PAD      = 5;
+    const barH     = hotbarH - PAD * 2 - ICON_SZ - 3 - NUM_H;
+    const PANEL_W  = 3 * BAR_W + 2 * BAR_GAP + PAD * 2;
+    const PANEL_H  = hotbarH;
+    const px       = hotbarX + hotbarW + 6;
+    const py       = hotbarY;
+
+    ctx.save();
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(px, py, PANEL_W, PANEL_H);
+    ctx.strokeStyle = '#556';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(px, py, PANEL_W, PANEL_H);
+
+    const barTop  = py + PAD;
+    const iconTop = barTop + barH + 3;
+    const numTop  = iconTop + ICON_SZ + 1;
+
+    interface BarDef {
+      label:    string;
+      pct:      number;
+      highIsBad: boolean;
+      normal:   string;
+      warn:     string;
+      crit:     string;
+      warnAt:   number;
+      critAt:   number;
+    }
+    const defs: BarDef[] = [
+      { label: 'WT',   pct: Math.min(carryWeight / Math.max(carryCapacity, 1), 1),
+        highIsBad: true,  normal: '#664422', warn: '#cc8811', crit: '#cc2222', warnAt: 0.70, critAt: 0.90 },
+      { label: 'FOOD', pct: Math.max(0, Math.min(hunger / 100, 1)),
+        highIsBad: false, normal: '#3a8a3a', warn: '#cc8811', crit: '#cc2222', warnAt: 0.30, critAt: 0.15 },
+      { label: 'H2O',  pct: Math.max(0, Math.min(thirst / 100, 1)),
+        highIsBad: false, normal: '#2266bb', warn: '#cc8811', crit: '#cc2222', warnAt: 0.30, critAt: 0.15 },
+    ];
+
+    for (let i = 0; i < defs.length; i++) {
+      const d   = defs[i];
+      const bx  = px + PAD + i * (BAR_W + BAR_GAP);
+      const icx = bx + BAR_W / 2;
+
+      const isCrit = d.highIsBad ? d.pct >= d.critAt  : d.pct <= d.critAt;
+      const isWarn = d.highIsBad ? d.pct >= d.warnAt  : d.pct <= d.warnAt;
+      const fill   = isCrit ? d.crit : isWarn ? d.warn : d.normal;
+
+      // Track
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(bx, barTop, BAR_W, barH);
+
+      // Fill (bottom-up)
+      const fillH = Math.round(barH * d.pct);
+      ctx.fillStyle = fill;
+      ctx.fillRect(bx, barTop + barH - fillH, BAR_W, fillH);
+
+      // Border
+      ctx.strokeStyle = isCrit ? 'rgba(255,80,80,0.6)' : 'rgba(255,255,255,0.22)';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(bx, barTop, BAR_W, barH);
+
+      // Rotated label inside bar
+      ctx.save();
+      ctx.fillStyle    = 'rgba(255,255,255,0.75)';
+      ctx.font         = `bold 7px Georgia, serif`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.translate(bx + BAR_W / 2, barTop + barH / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(d.label, 0, 0);
+      ctx.restore();
+
+      // Icon
+      const icy = iconTop + ICON_SZ / 2;
+      const r   = ICON_SZ * 0.44;
+      if (i === 0) {
+        // Anchor (weight)
+        ctx.strokeStyle = isCrit ? '#ff6666' : '#aabbaa';
+        ctx.fillStyle   = isCrit ? '#ff6666' : '#aabbaa';
+        ctx.lineWidth   = 1;
+        ctx.beginPath(); ctx.arc(icx, icy - r * 0.5, r * 0.3, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(icx, icy - r * 0.2); ctx.lineTo(icx, icy + r * 0.9); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(icx - r * 0.7, icy - r * 0.1); ctx.lineTo(icx + r * 0.7, icy - r * 0.1); ctx.stroke();
+        ctx.beginPath(); ctx.arc(icx, icy + r * 0.5, r * 0.5, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+      } else if (i === 1) {
+        // Apple (food)
+        ctx.fillStyle = isCrit ? '#ff6666' : '#66bb44';
+        ctx.beginPath(); ctx.arc(icx, icy + r * 0.1, r, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = isCrit ? '#ff8888' : '#88dd66';
+        ctx.lineWidth   = 1;
+        ctx.beginPath(); ctx.moveTo(icx, icy - r * 0.8); ctx.lineTo(icx + r * 0.5, icy - r * 1.2); ctx.stroke();
+      } else {
+        // Teardrop (water)
+        ctx.beginPath();
+        ctx.moveTo(icx, iconTop);
+        ctx.bezierCurveTo(icx + r * 0.9, icy - r * 0.1, icx + r, icy + r * 0.5, icx, icy + r);
+        ctx.bezierCurveTo(icx - r, icy + r * 0.5, icx - r * 0.9, icy - r * 0.1, icx, iconTop);
+        ctx.closePath();
+        ctx.fillStyle = isCrit ? '#ff6666' : '#4499dd';
+        ctx.fill();
+      }
+
+      // Numeric label below icon
+      ctx.font         = '8px Georgia, serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = isCrit ? '#ff9999' : 'rgba(160,180,200,0.75)';
+      const numTxt = i === 0
+        ? `${Math.round(carryWeight)}`
+        : `${Math.round(d.pct * 100)}%`;
+      ctx.fillText(numTxt, bx + BAR_W / 2, numTop);
+    }
+
+    ctx.restore();
+  }
+
   /** Draw a tooltip above the hovered hotbar slot. */
   private renderHotbarTooltip(
     ctx: CanvasRenderingContext2D,
@@ -2598,7 +2753,7 @@ class HUDElement implements UIElement {
     const LINE  = 16;
     const nameH = 18;
     const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Georgia, serif');
-    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + PAD;
+    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + LINE + PAD;
 
     // Position: centred above the slot, clamped to canvas
     let tx = slotX + SLOT_SIZE / 2 - W / 2;
@@ -2647,6 +2802,16 @@ class HUDElement implements UIElement {
       ctx.fillText(line, tx + PAD + 4, cy);
       cy += LINE;
     }
+
+    // Weight
+    const wPerUnit = def.weight;
+    const totalW   = wPerUnit * (slot.quantity || 1);
+    const weightTxt = slot.quantity > 1
+      ? `Weight: ${wPerUnit} kg ea  ·  ${totalW} kg total`
+      : `Weight: ${wPerUnit} kg`;
+    ctx.fillStyle = '#8ab4cc';
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillText(weightTxt, tx + PAD + 4, cy);
 
     ctx.restore();
   }

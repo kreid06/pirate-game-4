@@ -15377,12 +15377,27 @@ export class RenderSystem {
     // Convert mouse world position to screen position for tooltip
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     
-    // Build tooltip text lines
-    const lines: string[] = [];
-    lines.push(`Type: ${moduleData.kind.toUpperCase()}`);
-    lines.push(`ID: ${module.id}`);
-    
-    // Quality helper: map material to quality tier
+    // ── Card-style tooltip (matches item tooltip design) ─────────────────
+    const ctx = this.ctx;
+    const cw  = this.canvas.width;
+    const ch  = this.canvas.height;
+
+    // Per-kind visual identity
+    const KIND_META: Record<string, { name: string; color: string; border: string; desc: string }> = {
+      'cannon':         { name: 'Cannon',       color: '#cc3322', border: '#ff6644', desc: 'Heavy siege weapon. Fires iron shot across open water.' },
+      'swivel':         { name: 'Swivel Gun',    color: '#cc3322', border: '#ff8855', desc: 'Light deck-mounted gun. Ideal for close-quarters and crew suppression.' },
+      'mast':           { name: 'Mast',          color: '#336688', border: '#66aacc', desc: 'Drives the ship using wind. Sail state and openness affect speed.' },
+      'helm':           { name: 'Helm',          color: '#886622', border: '#ddaa44', desc: 'Controls ship heading. Turn rate and responsiveness govern handling.' },
+      'steering-wheel': { name: 'Helm',          color: '#886622', border: '#ddaa44', desc: 'Controls ship heading. Turn rate and responsiveness govern handling.' },
+      'plank':          { name: 'Hull Plank',    color: '#664422', border: '#aa7744', desc: 'Structural hull plank. Protects against water ingress and cannon fire.' },
+      'deck':           { name: 'Deck',          color: '#445544', border: '#778877', desc: 'Provides a stable surface for crew and cargo.' },
+      'ladder':         { name: 'Ladder',        color: '#334455', border: '#5577aa', desc: 'Allows crew to move between deck levels.' },
+      'seat':           { name: 'Seat',          color: '#553344', border: '#886677', desc: 'Resting position for crew members.' },
+      'custom':         { name: 'Custom Module', color: '#444455', border: '#7777aa', desc: 'A custom-built module with unique properties.' },
+    };
+    const meta = KIND_META[moduleData.kind] ?? { name: moduleData.kind, color: '#555566', border: '#8888aa', desc: '' };
+
+    // Quality helper
     const qualityFromMaterial = (mat: string): string => {
       switch (mat) {
         case 'iron':  return 'Uncommon';
@@ -15391,114 +15406,184 @@ export class RenderSystem {
       }
     };
 
-    // Add type-specific info
+    // Stat lines
+    type StatLine = { label: string; value: string; color?: string };
+    const stats: StatLine[] = [];
+
     if (moduleData.kind === 'plank') {
-      const hp = Math.round(moduleData.health);
+      const hp    = Math.round(moduleData.health);
       const maxHp = moduleData.maxHealth ?? 10000;
-      lines.push(`Health: ${hp} / ${maxHp}`);
-      lines.push(`Quality: ${qualityFromMaterial(moduleData.material)}`);
-      if (moduleData.sectionName) {
-        lines.push(`Section: ${moduleData.sectionName}`);
-      }
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+      if (moduleData.sectionName) stats.push({ label: 'Section', value: moduleData.sectionName });
     } else if (moduleData.kind === 'cannon') {
-      const hp = Math.round(moduleData.health);
-      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 8000);
+      const hp    = Math.round(moduleData.health);
       const maxHp = (moduleData as any).maxHealth ?? 8000;
-      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
-      lines.push(`Dmg: 3000`);
-      lines.push(`Reload: ${(moduleData as any).reloadTime ?? 3.0}s`);
-      lines.push(`Quality: Common`);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Damage',  value: '3000' });
+      stats.push({ label: 'Reload',  value: `${(moduleData as any).reloadTime ?? 3.0}s` });
+      stats.push({ label: 'Quality', value: 'Common' });
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
-      const hp = Math.round((moduleData as any).health ?? 10000);
-      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 10000);
+      const hp    = Math.round((moduleData as any).health ?? 10000);
       const maxHp = (moduleData as any).maxHealth ?? 10000;
-      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
-      lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
-      lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health',         value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Turn Rate',      value: moduleData.maxTurnRate.toFixed(2) });
+      stats.push({ label: 'Responsiveness', value: `${(moduleData.responsiveness * 100).toFixed(0)}%` });
     } else if (moduleData.kind === 'mast') {
-      // Guard against Q16 fixed-point blowup from server (Q16 max for 15000 ≈ 983 million)
-      const Q16_THRESHOLD = 100_000;
-      const rawHp  = moduleData.health ?? 15000;
-      const rawTgt = (moduleData as any).targetHealth ?? moduleData.maxHealth ?? 15000;
+      const Q16   = 100_000;
+      const rawHp = moduleData.health ?? 15000;
       const rawMax = moduleData.maxHealth ?? 15000;
-      const hp    = Math.round(rawHp  > Q16_THRESHOLD ? rawHp  / 65536 : rawHp);
-      const tgt   = Math.round(rawTgt > Q16_THRESHOLD ? rawTgt / 65536 : rawTgt);
-      const maxHp = Math.round(rawMax > Q16_THRESHOLD ? rawMax / 65536 : rawMax);
-      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
-      // Guard against 0/0 fiber health on freshly placed masts
+      const hp    = Math.round(rawHp  > Q16 ? rawHp  / 65536 : rawHp);
+      const maxHp = Math.round(rawMax > Q16 ? rawMax / 65536 : rawMax);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
       const rawFh    = moduleData.fiberHealth    ?? 15000;
       const rawFhMax = moduleData.fiberMaxHealth ?? 15000;
-      const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16_THRESHOLD ? rawFh    / 65536 : rawFh);
-      const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16_THRESHOLD ? rawFhMax / 65536 : rawFhMax);
+      const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16 ? rawFh    / 65536 : rawFh);
+      const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16 ? rawFhMax / 65536 : rawFhMax);
       const fhPct = fhMax > 0 ? Math.round((fh / fhMax) * 100) : 100;
-      lines.push(`Sail Fibers: ${fh} / ${fhMax} (${fhPct}%)`);
-      lines.push(`Sail State: ${moduleData.sailState.toUpperCase()}`);
-      lines.push(`Openness: ${moduleData.openness.toFixed(0)}%`);
-      lines.push(`Wind Efficiency: ${(moduleData.windEfficiency * 100).toFixed(0)}%`);
+      stats.push({ label: 'Sail Fibers',    value: `${fh} / ${fhMax} (${fhPct}%)`, color: fhPct > 60 ? '#44cc66' : fhPct > 30 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Sail State',     value: moduleData.sailState.toUpperCase() });
+      stats.push({ label: 'Openness',       value: `${moduleData.openness.toFixed(0)}%` });
+      stats.push({ label: 'Wind Eff.',      value: `${(moduleData.windEfficiency * 100).toFixed(0)}%` });
     }
-    
-    // Add interaction hint
-    lines.push('');
+
+    // Weight
+    const MODULE_KG: Record<string, number> = {
+      'cannon': 100, 'swivel': 180, 'mast': 150, 'helm': 20, 'steering-wheel': 20,
+      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50,
+    };
+    const weightKg = MODULE_KG[moduleData.kind] ?? 50;
+
+    // Interact range
     const MAX_INTERACT_DIST = 50;
     let interactLabel = '[E] Interact';
     if (this.playerInteractInfo) {
       const { worldPos, localPos, carrierId } = this.playerInteractInfo;
       const cos = Math.cos(ship.rotation);
       const sin = Math.sin(ship.rotation);
-      const modWorldX = ship.position.x + (module.localPos.x * cos - module.localPos.y * sin);
-      const modWorldY = ship.position.y + (module.localPos.x * sin + module.localPos.y * cos);
+      const mwx = ship.position.x + (module.localPos.x * cos - module.localPos.y * sin);
+      const mwy = ship.position.y + (module.localPos.x * sin + module.localPos.y * cos);
       let dist: number;
       if (carrierId === ship.id && localPos) {
         dist = localPos.sub(module.localPos).length();
       } else {
-        dist = worldPos.sub(Vec2.from(modWorldX, modWorldY)).length();
+        dist = worldPos.sub(Vec2.from(mwx, mwy)).length();
       }
       interactLabel = dist <= MAX_INTERACT_DIST ? '[E] Interact' : 'Not in Range';
     }
-    lines.push(interactLabel);
-    
-    // Measure text dimensions
-    this.ctx.font = '14px Georgia, serif';
-    this.ctx.textAlign = 'left';
-    this.ctx.textBaseline = 'top';
-    
-    let maxWidth = 0;
-    for (const line of lines) {
-      const metrics = this.ctx.measureText(line);
-      maxWidth = Math.max(maxWidth, metrics.width);
+
+    // ── Layout ───────────────────────────────────────────────────────────
+    const PAD    = 10;
+    const W      = 230;
+    const LINE   = 16;
+    const NAME_H = 18;
+
+    const wrapText = (text: string, maxW: number): string[] => {
+      ctx.font = '12px Georgia, serif';
+      const words = text.split(' ');
+      const ls: string[] = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? `${cur} ${w}` : w;
+        if (ctx.measureText(test).width > maxW && cur) { ls.push(cur); cur = w; }
+        else cur = test;
+      }
+      if (cur) ls.push(cur);
+      return ls;
+    };
+    const descLines = meta.desc ? wrapText(meta.desc, W - PAD * 2 - 4) : [];
+
+    const totalH = PAD + NAME_H + 4
+      + LINE + 4
+      + descLines.length * LINE + (descLines.length > 0 ? 6 : 0)
+      + stats.length * LINE + (stats.length > 0 ? 6 : 0)
+      + LINE + 8   // weight
+      + LINE       // hint
+      + PAD;
+
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + W      > cw) tx = screenPos.x - W      - 15;
+    if (ty + totalH > ch) ty = screenPos.y - totalH - 15;
+    tx = Math.max(4, tx);
+    ty = Math.max(4, ty);
+
+    // ── Draw card ────────────────────────────────────────────────────────
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = meta.border;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left accent bar
+    ctx.fillStyle = meta.color;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, 4, totalH, [6, 0, 0, 6]);
+    ctx.fill();
+
+    let cy = ty + PAD;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    // Name
+    ctx.font      = 'bold 14px Georgia, serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(meta.name, tx + PAD + 4, cy);
+    cy += NAME_H + 4;
+
+    // ID + kind
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillStyle = '#888888';
+    ctx.fillText(`ID: ${module.id}   [${moduleData.kind}]`, tx + PAD + 4, cy);
+    cy += LINE + 4;
+
+    // Description
+    if (descLines.length > 0) {
+      ctx.font      = '12px Georgia, serif';
+      ctx.fillStyle = '#cccccc';
+      for (const line of descLines) { ctx.fillText(line, tx + PAD + 4, cy); cy += LINE; }
+      cy += 6;
     }
-    
-    const padding = 10;
-    const lineHeight = 18;
-    const boxWidth = maxWidth + padding * 2;
-    const boxHeight = lines.length * lineHeight + padding * 2;
-    
-    // Position tooltip near mouse, but keep it on screen
-    let tooltipX = screenPos.x + 15;
-    let tooltipY = screenPos.y + 15;
-    
-    // Keep tooltip on screen
-    if (tooltipX + boxWidth > this.canvas.width) {
-      tooltipX = screenPos.x - boxWidth - 15;
+
+    // Stats (label left, value right)
+    if (stats.length > 0) {
+      ctx.font = '12px Georgia, serif';
+      for (const st of stats) {
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#888888';
+        ctx.fillText(st.label, tx + PAD + 4, cy);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = st.color ?? '#cccccc';
+        ctx.fillText(st.value, tx + W - PAD - 4, cy);
+        cy += LINE;
+      }
+      cy += 6;
     }
-    if (tooltipY + boxHeight > this.canvas.height) {
-      tooltipY = screenPos.y - boxHeight - 15;
-    }
-    
-    // Draw tooltip background
-    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
-    this.ctx.strokeStyle = '#ffaa00';
-    this.ctx.lineWidth = 2;
-    this.ctx.fillRect(tooltipX, tooltipY, boxWidth, boxHeight);
-    this.ctx.strokeRect(tooltipX, tooltipY, boxWidth, boxHeight);
-    
-    // Draw tooltip text
-    this.ctx.fillStyle = '#ffffff';
-    for (let i = 0; i < lines.length; i++) {
-      const textY = tooltipY + padding + i * lineHeight;
-      this.ctx.fillText(lines[i], tooltipX + padding, textY);
-    }
-    
+
+    // Weight
+    ctx.textAlign = 'left';
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillStyle = '#8ab4cc';
+    ctx.fillText(`Weight: ${weightKg} kg`, tx + PAD + 4, cy);
+    cy += LINE + 8;
+
+    // Interact hint
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillStyle = interactLabel === '[E] Interact' ? '#aaaaaa' : '#ff6644';
+    ctx.fillText(interactLabel, tx + PAD + 4, cy);
+
+    ctx.restore();
+
     // Draw team-coloured highlight outline around the hovered module
     const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
     const _htCamRot = camera.getState().rotation;

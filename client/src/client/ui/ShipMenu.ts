@@ -8,7 +8,8 @@
  * Sections:
  *  • Identity      — ship ID, company, speed, heading
  *  • Hull & Ammo   — hullHealth bar, cannonAmmo
- *  • Modules       — grouped count by kind with health summary
+ *  • Stats         — health, water ingress, cargo weight
+ *  • Progression   — ship XP and upgradeable attributes
  *  • Crew          — NPCs aboard (count + role breakdown)
  */
 
@@ -33,7 +34,7 @@ import {
   SHIP_LEVEL_TOTAL_POINT_CAP,
   SHIP_LEVEL_XP_BASE,
 } from '../../sim/Types.js';
-import { ShipModule, CannonModuleData, MastModuleData, PlankModuleData } from '../../sim/modules.js';
+import { computeInventoryWeight } from '../../sim/Inventory.js';
 
 // ── Shared palette ────────────────────────────────────────────────────────────
 
@@ -268,9 +269,10 @@ export class ShipMenu {
     this._currentShipName = ship.shipName ?? '';
     cur = this._identity(ctx, px, cur, ship, worldState.companies ?? []);
     cur = this._hullAmmo(ctx, px, cur, ship);
-    cur = this._modulesSection(ctx, px, cur, ship.modules);
+    cur = this._statsSection(ctx, px, cur, ship, worldState);
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
-    this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3);
+    const crewMaxH = py + PANEL_H - cur - 4;
+    this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3, Math.max(60, crewMaxH));
 
     // Render settings overlay on top if open
     if (this._settingsOpen) {
@@ -549,98 +551,90 @@ export class ShipMenu {
     return py + 8;
   }
 
-  private _modulesSection(
-    ctx:     CanvasRenderingContext2D,
-    px:      number, py: number,
-    modules: ShipModule[],
+  private _statsSection(
+    ctx:        CanvasRenderingContext2D,
+    px:         number, py: number,
+    ship:       NonNullable<ReturnType<WorldState['ships']['find']>>,
+    worldState: WorldState,
   ): number {
-    // Group by kind, compute health summaries
-    const groups = new Map<string, { total: number; damaged: number; occupied: number }>();
-    for (const m of modules) {
-      if (m.kind === 'deck') continue; // skip deck as it's structural noise
-      const entry = groups.get(m.kind) ?? { total: 0, damaged: 0, occupied: 0 };
-      entry.total++;
-      if (m.occupiedBy != null) entry.occupied++;
+    py = this._sectionHeader(ctx, px, py, 'STATS', '');
 
-      // Health check
-      const md = m.moduleData;
-      if (md) {
-        const hp =
-          md.kind === 'cannon' ? (md as CannonModuleData).health :
-          md.kind === 'mast'   ? (md as MastModuleData).health :
-          md.kind === 'plank'  ? (md as PlankModuleData).health :
-          md.kind === 'helm' || md.kind === 'steering-wheel' ? (md as any).health :
-          null;
-        const maxHp =
-          md.kind === 'cannon' ? (md as CannonModuleData).maxHealth ?? 8000 :
-          md.kind === 'mast'   ? (md as MastModuleData).maxHealth ?? 15000 :
-          md.kind === 'plank'  ? (md as PlankModuleData).maxHealth ?? 10000 :
-          md.kind === 'helm' || md.kind === 'steering-wheel' ? (md as any).maxHealth ?? 10000 :
-          null;
-        if (hp !== null && maxHp !== null && hp / maxHp < 0.5) entry.damaged++;
-      }
+    const barW = PANEL_W - PAD * 2 - 104;
+    const barX = px + PAD + 96;
 
-      groups.set(m.kind, entry);
-    }
+    const rows: Array<{
+      label:    string;
+      pct:      number;
+      color:    string;
+      valueStr: string;
+      stripe:   boolean;
+    }> = [];
 
-    const kindOrder = ['helm', 'steering-wheel', 'cannon', 'mast', 'plank', 'ladder', 'seat', 'custom'];
-    const sorted = kindOrder
-      .filter(k => groups.has(k))
-      .concat([...groups.keys()].filter(k => !kindOrder.includes(k)));
+    // Health
+    const health    = Math.max(0, Math.min(100, ship.hullHealth));
+    const hColor    = health > 60 ? GREEN : health > 30 ? ORANGE : RED;
+    rows.push({ label: 'Hull Health', pct: health / 100, color: hColor, valueStr: `${health.toFixed(0)}%`, stripe: false });
 
-    const count = sorted.length;
-    py = this._sectionHeader(ctx, px, py, 'MODULES', `${modules.filter(m => m.kind !== 'deck').length} installed`);
+    // Water Ingress (inverse of health)
+    const water     = Math.max(0, 100 - health);
+    const wColor    = water > 70 ? RED : water > 30 ? ORANGE : '#2266bb';
+    rows.push({ label: 'Water Ingress', pct: water / 100, color: wColor, valueStr: `${water.toFixed(0)}%`, stripe: true });
 
-    const colLabel = px + PAD + 8;
-    const colCount = px + PAD + 180;
-    const colOcc   = px + PAD + 240;
-    const colDmg   = px + PAD + 320;
+    // Ship Weight — modules + bodies (75 kg each) + inventory
+    const SHIP_WEIGHT_CAP = 6000; // default brigantine max
 
-    // Column header
-    ctx.font = 'bold 11px Georgia, serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = TEXT_DIM;
-    ctx.fillText('Module', colLabel, py + ROW_H / 2);
-    ctx.fillText('#', colCount, py + ROW_H / 2);
-    ctx.fillText('In use', colOcc, py + ROW_H / 2);
-    ctx.fillText('Damaged', colDmg, py + ROW_H / 2);
-    py += ROW_H;
+    const MODULE_KG: Record<string, number> = {
+      'cannon':         100,
+      'swivel':         180,
+      'mast':           150,
+      'helm':            20,
+      'steering-wheel':  20,
+      'plank':           30,
+      'deck':           200,
+      'ladder':           5,
+      'seat':            25,
+      'custom':          50,
+    };
+    const moduleKg  = ship.modules.reduce((s, m) => s + (MODULE_KG[m.kind] ?? 50), 0);
 
-    for (let i = 0; i < sorted.length && i < 8; i++) {
-      const kind  = sorted[i];
-      const entry = groups.get(kind)!;
+    const aboadPlayers = worldState.players.filter(p => p.carrierId === ship.id);
+    const aboardNpcs   = worldState.npcs.filter(n => n.shipId === ship.id);
+    const bodyKg       = (aboadPlayers.length + aboardNpcs.length) * 75;
+    const invKg        = aboadPlayers.reduce((s, p) => s + computeInventoryWeight(p.inventory), 0);
 
-      if (i % 2 === 1) {
+    const totalKg  = moduleKg + bodyKg + invKg;
+    const wPct     = Math.min(totalKg / SHIP_WEIGHT_CAP, 1);
+    const cColor   = wPct > 0.9 ? RED : wPct > 0.7 ? ORANGE : '#664422';
+    rows.push({ label: 'Ship Weight', pct: wPct, color: cColor, valueStr: `${totalKg} / ${SHIP_WEIGHT_CAP} kg`, stripe: false });
+
+    for (const row of rows) {
+      if (row.stripe) {
         ctx.fillStyle = BG_STRIPE;
         ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H);
       }
 
-      const label = kind.replace('-', ' ');
-      ctx.font = '13px Georgia, serif';
-      ctx.textAlign = 'left';
+      ctx.font         = '12px Georgia, serif';
+      ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText(row.label, px + PAD + 8, py + ROW_H / 2);
+
+      // Track
+      ctx.fillStyle = '#1a1a28';
+      ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+      // Fill
+      ctx.fillStyle = row.color;
+      ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * row.pct), BAR_H);
+      // Border
+      ctx.strokeStyle = '#334';
+      ctx.lineWidth   = 0.8;
+      ctx.strokeRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+      // Value
+      ctx.font      = '11px Georgia, serif';
+      ctx.textAlign = 'right';
       ctx.fillStyle = TEXT_HEAD;
-      ctx.fillText(label.charAt(0).toUpperCase() + label.slice(1), colLabel, py + ROW_H / 2);
+      ctx.fillText(row.valueStr, barX + barW - 2, py + ROW_H / 2);
 
-      ctx.fillStyle = TEXT_MONO;
-      ctx.fillText(String(entry.total), colCount, py + ROW_H / 2);
-
-      ctx.fillStyle = entry.occupied > 0 ? ORANGE : TEXT_DIM;
-      ctx.fillText(entry.occupied > 0 ? String(entry.occupied) : '—', colOcc, py + ROW_H / 2);
-
-      ctx.fillStyle = entry.damaged > 0 ? RED : TEXT_DIM;
-      ctx.fillText(entry.damaged > 0 ? String(entry.damaged) : '—', colDmg, py + ROW_H / 2);
-
-      py += ROW_H;
-    }
-
-    if (count > 8) {
-      ctx.font = '12px Georgia, serif';
-      ctx.fillStyle = TEXT_DIM;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(`  … and ${count - 8} more module types`, px + PAD, py + 2);
       py += ROW_H;
     }
 
@@ -653,6 +647,7 @@ export class ShipMenu {
     worldState: WorldState,
     shipId:     number,
     shipType:   number = 3,
+    maxH:       number = 300,
   ): void {
     this._npcHitAreas = [];
     const aboard  = worldState.npcs.filter(n => n.shipId === shipId);
@@ -678,7 +673,7 @@ export class ShipMenu {
     const ROLE_TAGS: Record<number, string> = { 0: 'Sailor', 1: 'Gunner', 2: 'Helm', 3: 'Rigger', 4: 'Repair' };
     const NPC_ROW_H    = 36;
     const BAR_H_SM     = 5;
-    const CREW_VISIBLE_H = 180; // max visible height before scrolling kicks in
+    const CREW_VISIBLE_H = Math.min(180, Math.max(NPC_ROW_H * 2, maxH - 28)); // 28 = section header + margin
 
     // Calculate total content height
     const totalH = aboard.length * NPC_ROW_H;

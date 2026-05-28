@@ -68,48 +68,50 @@ export interface ItemDef {
   symbol: string;
   /** Short description shown in the hotbar tooltip */
   description: string;
+  /** Weight per single unit — used for ship cargo load calculation */
+  weight: number;
 }
 
 export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
-  none:          { kind: 'none',          name: 'Empty',         category: 'none',     maxStack: 0,  color: '#2a2a2a', borderColor: '#444',    symbol: '',   description: 'An empty slot.' },
-  plank:         { kind: 'plank',         name: 'Plank',         category: 'building', maxStack: 99, color: '#b8832b', borderColor: '#7a5520', symbol: 'P',  description: 'Replaces a missing hull plank on your ship.' },
-  repair_kit:    { kind: 'repair_kit',    name: 'Repair Kit',    category: 'repair',   maxStack: 99, color: '#2577e3', borderColor: '#1a4fa0', symbol: 'R',  description: 'Press E to repair the most damaged plank or sail on your ship.' },
-  cannon_ball:   { kind: 'cannon_ball',   name: 'Cannonball',    category: 'ammo',     maxStack: 99, color: '#555',    borderColor: '#333',    symbol: 'C',  description: 'Standard ammunition. Deals heavy damage to hull planks.' },
-  cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '\u26ab', description: 'Replaces a destroyed cannon on your ship.' },
-  sail:          { kind: 'sail',          name: 'Sail',          category: 'building', maxStack: 9,  color: '#1e8c6e', borderColor: '#0f5c48', symbol: '\u26f5', description: 'Replaces a missing mast and sail on your ship.' },
-  helm_kit:      { kind: 'helm_kit',      name: 'Helm Kit',      category: 'building', maxStack: 3,  color: '#6a3d8f', borderColor: '#3d2060', symbol: 'W',  description: 'Replaces a destroyed ship helm (steering wheel).' },
-  deck:          { kind: 'deck',          name: 'Deck',          category: 'building', maxStack: 9,  color: '#8b5e3c', borderColor: '#5c3a1c', symbol: '\u229f', description: 'Replaces a destroyed ship deck. Required for crew to walk on.' },
-  sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S',  description: 'Melee weapon. Left-click to slash nearby enemies.' },
-  pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G',  description: 'Ranged weapon. Left-click to fire a shot at your cursor.' },
-  hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H',  description: 'Click a damaged module or the ship deck to begin a repair minigame.' },
-  cloth_armor:   { kind: 'cloth_armor',   name: 'Cloth Armor',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'A',  description: 'Light armor. Provides basic protection against attacks.' },
-  leather_armor: { kind: 'leather_armor', name: 'Leather Armor', category: 'armor',    maxStack: 1,  color: '#8b5a2b', borderColor: '#5a3010', symbol: 'A',  description: 'Medium armor. Better protection than cloth.' },
-  iron_armor:    { kind: 'iron_armor',    name: 'Iron Armor',    category: 'armor',    maxStack: 1,  color: '#8a8a8c', borderColor: '#555558', symbol: 'A',  description: 'Heavy armor. Provides strong protection.' },
-  wooden_shield: { kind: 'wooden_shield', name: 'Wooden Shield', category: 'shield',   maxStack: 1,  color: '#c8a46e', borderColor: '#8a6030', symbol: 'D',  description: 'A light wooden shield for blocking attacks.' },
-  iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D',  description: 'A sturdy iron shield for reliable defense.' },
-  swivel:        { kind: 'swivel',        name: 'Swivel Gun',    category: 'building', maxStack: 9,  color: '#7a4a2a', borderColor: '#4a2810', symbol: '\u2023', description: 'A fast anti-personnel swivel gun. Place anywhere on the ship rail.' },
-  axe:           { kind: 'axe',           name: 'Axe',           category: 'tool',     maxStack: 1,  color: '#8b5e2a', borderColor: '#5c3a10', symbol: '\uD83E\uDE93', description: 'Chop wood resources on islands. Equip and press E near a tree.' },
-  wooden_floor:  { kind: 'wooden_floor',  name: 'Wooden Floor',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u229f',      description: 'Place on island ground as a foundation for workbenches.' },
-  workbench:     { kind: 'workbench',     name: 'Workbench',     category: 'building', maxStack: 5,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u2692',      description: 'Crafting station. Place on a wooden floor and press E to open.' },
-  wall:          { kind: 'wall',          name: 'Wall',          category: 'building', maxStack: 20, color: '#5c3a1a', borderColor: '#2e1a08', symbol: '\u2503',      description: 'Place on a floor tile edge to build a wall segment.' },
-  door_frame:    { kind: 'door_frame',    name: 'Door Frame',    category: 'building', maxStack: 10, color: '#7a4820', borderColor: '#3e200c', symbol: 'Fr',          description: 'Place on a floor tile edge. Creates a gap for a door panel.' },
-  door:          { kind: 'door',          name: 'Door',          category: 'building', maxStack: 4,  color: '#7a4820', borderColor: '#3e200c', symbol: '\u25a1',      description: 'Snap onto a door frame. Press E to open/close.' },
-  wood:          { kind: 'wood',          name: 'Wood',          category: 'none',     maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting.' },
-  fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.' },
-  metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.' },
-  pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.' },
-  shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.' },
-  stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.' },
-  wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.' },
-  claim_flag:    { kind: 'claim_flag',    name: 'Claiming Flag', category: 'building', maxStack: 5,  color: '#dd3333', borderColor: '#991111', symbol: '\uD83D\uDEA9', description: 'Plant in contested territory to capture it for your company over 60 seconds.' },
-  flag_fort:       { kind: 'flag_fort',       name: 'Flag Fort',        category: 'building', maxStack: 1,  color: '#cc8822', borderColor: '#886611', symbol: '\uD83C\uDFF0', description: 'Place on an unclaimed island to establish your company\u2019s territory claim.' },
-  company_fortress: { kind: 'company_fortress', name: 'Company Fortress', category: 'building', maxStack: 1,  color: '#8844cc', borderColor: '#5522aa', symbol: '\uD83C\uDFAF', description: 'Place on an island to begin a 15-minute build. Claims the entire island when complete.' },
+  none:          { kind: 'none',          name: 'Empty',         category: 'none',     maxStack: 0,  color: '#2a2a2a', borderColor: '#444',    symbol: '',   description: 'An empty slot.',                                                                    weight: 0   },
+  plank:         { kind: 'plank',         name: 'Plank',         category: 'building', maxStack: 99, color: '#b8832b', borderColor: '#7a5520', symbol: 'P',  description: 'Replaces a missing hull plank on your ship.',                                        weight: 15  },
+  repair_kit:    { kind: 'repair_kit',    name: 'Repair Kit',    category: 'repair',   maxStack: 99, color: '#2577e3', borderColor: '#1a4fa0', symbol: 'R',  description: 'Press E to repair the most damaged plank or sail on your ship.',                    weight: 2   },
+  cannon_ball:   { kind: 'cannon_ball',   name: 'Cannonball',    category: 'ammo',     maxStack: 99, color: '#555',    borderColor: '#333',    symbol: 'C',  description: 'Standard ammunition. Deals heavy damage to hull planks.',                           weight: 8   },
+  cannon:        { kind: 'cannon',        name: 'Cannon',        category: 'building', maxStack: 9,  color: '#333333', borderColor: '#111',    symbol: '\u26ab', description: 'Replaces a destroyed cannon on your ship.',                                      weight: 50  },
+  sail:          { kind: 'sail',          name: 'Sail',          category: 'building', maxStack: 9,  color: '#1e8c6e', borderColor: '#0f5c48', symbol: '\u26f5', description: 'Replaces a missing mast and sail on your ship.',                                 weight: 10  },
+  helm_kit:      { kind: 'helm_kit',      name: 'Helm Kit',      category: 'building', maxStack: 3,  color: '#6a3d8f', borderColor: '#3d2060', symbol: 'W',  description: 'Replaces a destroyed ship helm (steering wheel).',                                   weight: 8   },
+  deck:          { kind: 'deck',          name: 'Deck',          category: 'building', maxStack: 9,  color: '#8b5e3c', borderColor: '#5c3a1c', symbol: '\u229f', description: 'Replaces a destroyed ship deck. Required for crew to walk on.',                  weight: 20  },
+  sword:         { kind: 'sword',         name: 'Sword',         category: 'weapon',   maxStack: 1,  color: '#c0c0c0', borderColor: '#777',    symbol: 'S',  description: 'Melee weapon. Left-click to slash nearby enemies.',                                  weight: 4   },
+  pistol:        { kind: 'pistol',        name: 'Pistol',        category: 'weapon',   maxStack: 1,  color: '#8b4513', borderColor: '#5a2d0c', symbol: 'G',  description: 'Ranged weapon. Left-click to fire a shot at your cursor.',                          weight: 3   },
+  hammer:        { kind: 'hammer',        name: 'Hammer',        category: 'tool',     maxStack: 1,  color: '#c07830', borderColor: '#885020', symbol: 'H',  description: 'Click a damaged module or the ship deck to begin a repair minigame.',              weight: 3   },
+  cloth_armor:   { kind: 'cloth_armor',   name: 'Cloth Armor',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'A',  description: 'Light armor. Provides basic protection against attacks.',                           weight: 5   },
+  leather_armor: { kind: 'leather_armor', name: 'Leather Armor', category: 'armor',    maxStack: 1,  color: '#8b5a2b', borderColor: '#5a3010', symbol: 'A',  description: 'Medium armor. Better protection than cloth.',                                        weight: 8   },
+  iron_armor:    { kind: 'iron_armor',    name: 'Iron Armor',    category: 'armor',    maxStack: 1,  color: '#8a8a8c', borderColor: '#555558', symbol: 'A',  description: 'Heavy armor. Provides strong protection.',                                           weight: 15  },
+  wooden_shield: { kind: 'wooden_shield', name: 'Wooden Shield', category: 'shield',   maxStack: 1,  color: '#c8a46e', borderColor: '#8a6030', symbol: 'D',  description: 'A light wooden shield for blocking attacks.',                                        weight: 5   },
+  iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D',  description: 'A sturdy iron shield for reliable defense.',                                         weight: 10  },
+  swivel:        { kind: 'swivel',        name: 'Swivel Gun',    category: 'building', maxStack: 9,  color: '#7a4a2a', borderColor: '#4a2810', symbol: '\u2023', description: 'A fast anti-personnel swivel gun. Place anywhere on the ship rail.',            weight: 12  },
+  axe:           { kind: 'axe',           name: 'Axe',           category: 'tool',     maxStack: 1,  color: '#8b5e2a', borderColor: '#5c3a10', symbol: '\uD83E\uDE93', description: 'Chop wood resources on islands. Equip and press E near a tree.',           weight: 4   },
+  wooden_floor:  { kind: 'wooden_floor',  name: 'Wooden Floor',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u229f',      description: 'Place on island ground as a foundation for workbenches.',               weight: 8   },
+  workbench:     { kind: 'workbench',     name: 'Workbench',     category: 'building', maxStack: 5,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u2692',      description: 'Crafting station. Place on a wooden floor and press E to open.',       weight: 15  },
+  wall:          { kind: 'wall',          name: 'Wall',          category: 'building', maxStack: 20, color: '#5c3a1a', borderColor: '#2e1a08', symbol: '\u2503',      description: 'Place on a floor tile edge to build a wall segment.',                   weight: 6   },
+  door_frame:    { kind: 'door_frame',    name: 'Door Frame',    category: 'building', maxStack: 10, color: '#7a4820', borderColor: '#3e200c', symbol: 'Fr',          description: 'Place on a floor tile edge. Creates a gap for a door panel.',         weight: 4   },
+  door:          { kind: 'door',          name: 'Door',          category: 'building', maxStack: 4,  color: '#7a4820', borderColor: '#3e200c', symbol: '\u25a1',      description: 'Snap onto a door frame. Press E to open/close.',                        weight: 5   },
+  wood:          { kind: 'wood',          name: 'Wood',          category: 'none',     maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting.',                          weight: 2   },
+  fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.',                          weight: 1   },
+  metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.',                                  weight: 5   },
+  pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.',                         weight: 5   },
+  shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.',                 weight: 80  },
+  stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.',                  weight: 4   },
+  wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.',                        weight: 6   },
+  claim_flag:    { kind: 'claim_flag',    name: 'Claiming Flag', category: 'building', maxStack: 5,  color: '#dd3333', borderColor: '#991111', symbol: '\uD83D\uDEA9', description: 'Plant in contested territory to capture it for your company over 60 seconds.', weight: 2 },
+  flag_fort:       { kind: 'flag_fort',       name: 'Flag Fort',        category: 'building', maxStack: 1,  color: '#cc8822', borderColor: '#886611', symbol: '\uD83C\uDFF0', description: 'Place on an unclaimed island to establish your company\u2019s territory claim.', weight: 75  },
+  company_fortress: { kind: 'company_fortress', name: 'Company Fortress', category: 'building', maxStack: 1, color: '#8844cc', borderColor: '#5522aa', symbol: '\uD83C\uDFAF', description: 'Place on an island to begin a 15-minute build. Claims the entire island when complete.', weight: 100 },
   /* ── Cloth armour set ─────────────────────────────────────────────────── */
-  cloth_hat:     { kind: 'cloth_hat',     name: 'Cloth Hat',     category: 'armor',    maxStack: 1,  color: '#9e8f5a', borderColor: '#6b5f35', symbol: '\u26D1', description: 'Light cloth helm. +5 armour. Reduces incoming damage.' },
-  cloth_shirt:   { kind: 'cloth_shirt',   name: 'Cloth Shirt',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'Cs', description: 'Light cloth chest. +20 armour. Reduces incoming damage.' },
-  cloth_pants:   { kind: 'cloth_pants',   name: 'Cloth Pants',   category: 'armor',    maxStack: 1,  color: '#7a7040', borderColor: '#524a28', symbol: 'Cp', description: 'Light cloth legs. +15 armour. Reduces incoming damage.' },
-  cloth_shoes:   { kind: 'cloth_shoes',   name: 'Cloth Shoes',   category: 'armor',    maxStack: 1,  color: '#8f7c50', borderColor: '#5c5030', symbol: 'Cx', description: 'Light cloth boots. +8 armour. Reduces incoming damage.' },
-  cloth_gloves:  { kind: 'cloth_gloves',  name: 'Cloth Gloves',  category: 'armor',    maxStack: 1,  color: '#9a8855', borderColor: '#635830', symbol: 'Cg', description: 'Light cloth gloves. +7 armour. Reduces incoming damage.' },
+  cloth_hat:     { kind: 'cloth_hat',     name: 'Cloth Hat',     category: 'armor',    maxStack: 1,  color: '#9e8f5a', borderColor: '#6b5f35', symbol: '\u26D1', description: 'Light cloth helm. +5 armour. Reduces incoming damage.',       weight: 1 },
+  cloth_shirt:   { kind: 'cloth_shirt',   name: 'Cloth Shirt',   category: 'armor',    maxStack: 1,  color: '#8b7f4a', borderColor: '#5c5430', symbol: 'Cs', description: 'Light cloth chest. +20 armour. Reduces incoming damage.',       weight: 2 },
+  cloth_pants:   { kind: 'cloth_pants',   name: 'Cloth Pants',   category: 'armor',    maxStack: 1,  color: '#7a7040', borderColor: '#524a28', symbol: 'Cp', description: 'Light cloth legs. +15 armour. Reduces incoming damage.',        weight: 2 },
+  cloth_shoes:   { kind: 'cloth_shoes',   name: 'Cloth Shoes',   category: 'armor',    maxStack: 1,  color: '#8f7c50', borderColor: '#5c5030', symbol: 'Cx', description: 'Light cloth boots. +8 armour. Reduces incoming damage.',        weight: 1 },
+  cloth_gloves:  { kind: 'cloth_gloves',  name: 'Cloth Gloves',  category: 'armor',    maxStack: 1,  color: '#9a8855', borderColor: '#635830', symbol: 'Cg', description: 'Light cloth gloves. +7 armour. Reduces incoming damage.',      weight: 1 },
 };
 
 /**
@@ -307,6 +309,17 @@ export function parseInventoryFromServer(
 
 export function isStackable(kind: ItemKind): boolean {
   return (ITEM_DEFS[kind]?.maxStack ?? 0) > 1;
+}
+
+/** Total weight of all items across all bag slots (equipped items not counted). */
+export function computeInventoryWeight(inv: PlayerInventory): number {
+  let total = 0;
+  for (const slot of inv.slots) {
+    if (slot.item !== 'none' && slot.quantity > 0) {
+      total += (ITEM_DEFS[slot.item]?.weight ?? 0) * slot.quantity;
+    }
+  }
+  return total;
 }
 
 export function getActiveSlot(inv: PlayerInventory): InventorySlot {
