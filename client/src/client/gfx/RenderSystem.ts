@@ -107,6 +107,11 @@ export class RenderSystem {
   /** Ship (other than the player's own) whose hull the cursor is over. */
   private hoveredShip: Ship | null = null;
 
+  /** Tooltip hover-delay (500 ms) */
+  private _tooltipHoverKey   = '';
+  private _tooltipHoverStart = 0;
+  private _tooltipReady      = false;
+
   /** Timestamp (ms) of the last sword swing, used to draw a cooldown ring. */
   private lastSwordSwingAt: number = 0;
   private swordCooldownMs: number = 800;
@@ -3705,7 +3710,20 @@ export class RenderSystem {
       this.drawHoverBoundariesDebug(worldState, camera);
     }
     
-    // Draw hover tooltip (screen space, on top of everything)
+    // Draw hover tooltip (screen space, on top of everything) — 500 ms delay
+    const _curTtKey = this.hoveredModule
+      ? `mod-${(this.hoveredModule.module as { id?: number }).id ?? 0}`
+      : this.hoveredNpc
+      ? `npc-${this.hoveredNpc.id}`
+      : this.hoveredShip
+      ? `ship-${this.hoveredShip.id}`
+      : '';
+    const _nowTt = performance.now();
+    if (_curTtKey !== this._tooltipHoverKey) {
+      this._tooltipHoverKey   = _curTtKey;
+      this._tooltipHoverStart = _nowTt;
+    }
+    this._tooltipReady = _curTtKey !== '' && (_nowTt - this._tooltipHoverStart) >= 500;
     this.drawHoverTooltip(camera);
     this.drawNpcTooltip(camera);
     this.drawShipHullTooltip(camera);
@@ -15107,6 +15125,7 @@ export class RenderSystem {
     if (!this.hoveredShip || !this.mouseWorldPos) return;
     // Don't overlap module or NPC tooltips
     if (this.hoveredModule || this.hoveredNpc) return;
+    if (!this._tooltipReady) return;
 
     const ship = this.hoveredShip;
     const COMPANY_NAMES: Record<number, string> = {
@@ -15240,6 +15259,7 @@ export class RenderSystem {
     if (!this.hoveredNpc || !this.mouseWorldPos) return;
     // Skip if a module tooltip is already showing (avoid overlap)
     if (this.hoveredModule) return;
+    if (!this._tooltipReady) return;
 
     const npc = this.hoveredNpc;
     const ROLE_NAMES: Record<number, string> = {
@@ -15368,6 +15388,7 @@ export class RenderSystem {
    */
   private drawHoverTooltip(camera: Camera): void {
     if (!this.hoveredModule || !this.mouseWorldPos) return;
+    if (!this._tooltipReady) return;
     
     const { ship, module } = this.hoveredModule;
     const moduleData = module.moduleData;

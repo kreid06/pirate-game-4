@@ -2142,8 +2142,43 @@ class HUDElement implements UIElement {
   public mouseY = 0;
   private _cachedPlayerLevel = 1;
   private _cachedPlayerXp    = 0;
-  
+
+  // ── Tooltip hover-delay tracking (500 ms) ─────────────────────────────
+  private _ttHoverKey   = '';
+  private _ttHoverStart = 0;
+  private _ttFrameKey   = '';
+
+  /** Register a bar as hovered this frame. Returns true once 500 ms has elapsed. */
+  private _ttHit(key: string): boolean {
+    this._ttFrameKey = key;
+    return this._ttHoverKey === key && (Date.now() - this._ttHoverStart) >= 500;
+  }
+
+  // ── Bar change-flash tracking ───────────────────────────────────────────
+  private _barFlash = new Map<string, number>(); // key → perf timestamp of last change
+  private _barPrev  = new Map<string, number>(); // key → previous ratio 0–1
+
+  /** Call before drawing a bar fill. Triggers a change-flash if ratio moved. */
+  private _tickFlash(key: string, ratio: number): void {
+    const prev = this._barPrev.get(key);
+    if (prev !== undefined && Math.abs(ratio - prev) > 0.01) {
+      this._barFlash.set(key, performance.now());
+    }
+    this._barPrev.set(key, ratio);
+  }
+
+  /** White overlay alpha (0–0.55) for the active change-flash on a bar. */
+  private _flashAlpha(key: string): number {
+    const t = this._barFlash.get(key);
+    if (t === undefined) return 0;
+    const elapsed = performance.now() - t;
+    const DURATION = 600;
+    if (elapsed >= DURATION) { this._barFlash.delete(key); return 0; }
+    return 0.55 * (1 - elapsed / DURATION);
+  }
+
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
+    this._ttFrameKey = '';
     // Find our player using the server-assigned player ID
     const player = context.assignedPlayerId !== null && context.assignedPlayerId !== undefined
       ? context.worldState.players.find(p => p.id === context.assignedPlayerId)
@@ -2232,14 +2267,21 @@ class HUDElement implements UIElement {
       const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
                                        (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
 
-      // Sum cargo weight for all players currently aboard this ship
-      const SHIP_WEIGHT_CAPACITY = 500;
-      const shipRawWeight = context.worldState.players
-        .filter(p => p.onDeck && p.carrierId === playerShip.id)
-        .reduce((sum, p) => sum + computeInventoryWeight(p.inventory), 0);
-      const _shipWeight = Math.min(100, (shipRawWeight / SHIP_WEIGHT_CAPACITY) * 100);
+      // Compute total ship weight: modules + bodies (75 kg ea) + inventory
+      const SHIP_WEIGHT_CAP = 6000;
+      const MODULE_KG_W: Record<string, number> = {
+        cannon: 100, swivel: 180, mast: 150, helm: 20, 'steering-wheel': 20,
+        plank: 30, deck: 200, ladder: 5, seat: 25, custom: 50,
+      };
+      const _modKg      = playerShip.modules.reduce((s, m) => s + (MODULE_KG_W[m.kind] ?? 50), 0);
+      const _aboard     = context.worldState.players.filter(p => p.onDeck && p.carrierId === playerShip.id);
+      const _npcsAboard = context.worldState.npcs.filter(n => n.shipId === playerShip.id);
+      const _bodyKg     = (_aboard.length + _npcsAboard.length) * 75;
+      const _invKg      = _aboard.reduce((sum, p) => sum + computeInventoryWeight(p.inventory), 0);
+      const shipRawKg   = _modKg + _bodyKg + _invKg;
+      const _shipWeight = Math.min(100, (shipRawKg / SHIP_WEIGHT_CAP) * 100);
 
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel, _shipWeight);
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel, _shipWeight, shipRawKg, SHIP_WEIGHT_CAP);
     }
 
     // Health / stamina bars above hotbar
@@ -2269,6 +2311,12 @@ class HUDElement implements UIElement {
 
     // Equipment HUD — all 6 slots (helm, chest, legs, feet, hands, shield)
     this.renderEquipmentHUD(ctx, ctx.canvas, player.inventory.equipment);
+
+    // Finalise tooltip hover delay — reset timer whenever hovered element changes
+    if (this._ttFrameKey !== this._ttHoverKey) {
+      this._ttHoverKey   = this._ttFrameKey;
+      this._ttHoverStart = Date.now();
+    }
   }
 
   private renderPlayerBars(
@@ -2334,6 +2382,13 @@ class HUDElement implements UIElement {
     const xpDrawRatio = (canLevelUp || statPoints > 0) ? 1 : xpRatio;
     ctx.fillStyle = xpBarColor;
     ctx.fillRect(barX, xpY, Math.round(barW * xpDrawRatio), XP_BAR_H);
+    // Change-flash overlay
+    this._tickFlash('bar-xp', xpRatio);
+    const _xpFa = this._flashAlpha('bar-xp');
+    if (_xpFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_xpFa.toFixed(2)})`;
+      ctx.fillRect(barX, xpY, barW, XP_BAR_H);
+    }
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
@@ -2364,6 +2419,13 @@ class HUDElement implements UIElement {
     ctx.fillRect(barX, hpY, barW, BAR_H);
     ctx.fillStyle = hpColor;
     ctx.fillRect(barX, hpY, Math.round(barW * hpRatio), BAR_H);
+    // Change-flash overlay
+    this._tickFlash('bar-hp', hpRatio);
+    const _hpFa = this._flashAlpha('bar-hp');
+    if (_hpFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_hpFa.toFixed(2)})`;
+      ctx.fillRect(barX, hpY, barW, BAR_H);
+    }
     ctx.strokeStyle = hpCrit ? '#ff4444' : 'rgba(255,255,255,0.20)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, hpY, barW, BAR_H);
@@ -2386,6 +2448,13 @@ class HUDElement implements UIElement {
     ctx.fillRect(barX, stY, barW, BAR_H);
     ctx.fillStyle = stColor;
     ctx.fillRect(barX, stY, Math.round(barW * stRatio), BAR_H);
+    // Change-flash overlay
+    this._tickFlash('bar-st', stRatio);
+    const _stFa = this._flashAlpha('bar-st');
+    if (_stFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_stFa.toFixed(2)})`;
+      ctx.fillRect(barX, stY, barW, BAR_H);
+    }
     ctx.strokeStyle = 'rgba(255,255,255,0.20)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, stY, barW, BAR_H);
@@ -2428,6 +2497,47 @@ class HUDElement implements UIElement {
       ctx.textAlign = 'center';
       ctx.fillStyle = 'rgba(130, 130, 155, 0.50)';
       ctx.fillText('[Z] Combat Mode', indicatorX + indicatorW / 2, indicatorY + indicatorH / 2);
+    }
+
+    // ── Bar hover tooltips ─────────────────────────────────────────────────
+    const _mx = this.mouseX, _my = this.mouseY;
+    if (_mx >= barX && _mx <= barX + barW) {
+      if (_my >= xpY && _my <= xpY + XP_BAR_H) {
+        if (this._ttHit('bar-xp')) {
+          const xpDesc = isMaxLevel
+            ? 'You have reached the maximum level.'
+            : `${xpToNext - xp} XP needed to reach level ${level + 1}.`;
+          this._drawStatTooltip(ctx, canvas, barX + barW / 2, xpY,
+            'Experience', '#4488ff', '#aaddff',
+            isMaxLevel ? 'MAX LEVEL' : `${xp} / ${xpToNext} XP`,
+            xpDesc,
+            statPoints > 0 ? [{ label: 'Unspent stat points', val: String(statPoints), col: '#ffdd44' }] : [],
+          );
+        }
+      } else if (_my >= hpY && _my <= hpY + BAR_H) {
+        if (this._ttHit('bar-hp')) {
+          const hpDesc = hpCrit
+            ? 'Critical — seek healing immediately.'
+            : hpWarn ? 'Low health. Use supplies or rest to recover.'
+            : 'Damaged by enemies and environmental hazards.';
+          this._drawStatTooltip(ctx, canvas, barX + barW / 2, hpY,
+            'Health', hpColor, '#aaffbb',
+            `${Math.ceil(health)} / ${maxHealth}`,
+            hpDesc, [],
+          );
+        }
+      } else if (_my >= stY && _my <= stY + BAR_H) {
+        if (this._ttHit('bar-st')) {
+          const stDesc = stLow
+            ? 'Nearly exhausted. Stop sprinting to recover.'
+            : 'Consumed by sprinting, climbing, and combat. Regenerates over time.';
+          this._drawStatTooltip(ctx, canvas, barX + barW / 2, stY,
+            'Stamina', stColor, '#ffee88',
+            `${Math.ceil(stamina)} / ${maxStamina}`,
+            stDesc, [],
+          );
+        }
+      }
     }
 
     ctx.restore();
@@ -2587,7 +2697,9 @@ class HUDElement implements UIElement {
         this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
         this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE
       ) {
-        this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy);
+        if (this._ttHit(`hotbar-${i}`)) {
+          this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy);
+        }
         break;
       }
     }
@@ -2671,6 +2783,19 @@ class HUDElement implements UIElement {
       const fillH = Math.round(barH * d.pct);
       ctx.fillStyle = fill;
       ctx.fillRect(bx, barTop + barH - fillH, BAR_W, fillH);
+      // Change-flash + critical-full red pulse (WT only)
+      const _vbKey = i === 0 ? 'bar-wt' : i === 1 ? 'bar-food' : 'bar-h2o';
+      this._tickFlash(_vbKey, d.pct);
+      const _vbFa = this._flashAlpha(_vbKey);
+      if (_vbFa > 0) {
+        ctx.fillStyle = `rgba(255,255,255,${_vbFa.toFixed(2)})`;
+        ctx.fillRect(bx, barTop, BAR_W, barH);
+      }
+      if (i === 0 && isCrit) {
+        const _pulse = 0.20 + 0.20 * Math.sin(performance.now() / 200);
+        ctx.fillStyle = `rgba(255,0,0,${_pulse.toFixed(2)})`;
+        ctx.fillRect(bx, barTop, BAR_W, barH);
+      }
 
       // Border
       ctx.strokeStyle = isCrit ? 'rgba(255,80,80,0.6)' : 'rgba(255,255,255,0.22)';
@@ -2727,6 +2852,131 @@ class HUDElement implements UIElement {
         ? `${Math.round(carryWeight)}`
         : `${Math.round(d.pct * 100)}%`;
       ctx.fillText(numTxt, bx + BAR_W / 2, numTop);
+    }
+
+    // ── Bar hover tooltips ─────────────────────────────────────────────────
+    const _mx = this.mouseX, _my = this.mouseY;
+    for (let i = 0; i < defs.length; i++) {
+      const d  = defs[i];
+      const bx = px + PAD + i * (BAR_W + BAR_GAP);
+      if (_mx < bx || _mx > bx + BAR_W || _my < barTop || _my > barTop + barH) continue;
+      const isCrit = d.highIsBad ? d.pct >= d.critAt : d.pct <= d.critAt;
+      const isWarn = d.highIsBad ? d.pct >= d.warnAt : d.pct <= d.warnAt;
+      const col    = isCrit ? d.crit : isWarn ? d.warn : d.normal;
+      const ttKey  = i === 0 ? 'bar-wt' : i === 1 ? 'bar-food' : 'bar-h2o';
+      if (i === 0) {
+        if (this._ttHit(ttKey)) {
+          const wtDesc = isCrit
+            ? 'Overencumbered — movement is impaired.'
+            : isWarn ? 'Heavy load. Movement may slow near capacity.'
+            : 'Items in your inventory add to carry weight.';
+          this._drawStatTooltip(ctx, canvas, bx + BAR_W / 2, barTop,
+            'Carry Weight', col, '#ccbbaa',
+            `${Math.round(carryWeight)} / ${Math.round(carryCapacity)} kg`,
+            wtDesc, [],
+          );
+        }
+      } else if (i === 1) {
+        if (this._ttHit(ttKey)) {
+          const desc = isCrit ? 'Starving — health is draining rapidly.'
+            : isWarn ? 'Hungry. Eat food to restore your hunger.'
+            : 'Well fed. Food restores hunger over time.';
+          this._drawStatTooltip(ctx, canvas, bx + BAR_W / 2, barTop,
+            'Hunger', col, '#aaffaa',
+            `${Math.round(hunger)}%`,
+            desc, [],
+          );
+        }
+      } else {
+        if (this._ttHit(ttKey)) {
+          const desc = isCrit ? 'Dehydrated — health is draining rapidly.'
+            : isWarn ? 'Thirsty. Drink water to restore your thirst.'
+            : 'Well hydrated. Water restores thirst over time.';
+          this._drawStatTooltip(ctx, canvas, bx + BAR_W / 2, barTop,
+            'Thirst', col, '#aabbff',
+            `${Math.round(thirst)}%`,
+            desc, [],
+          );
+        }
+      }
+    }
+
+    ctx.restore();
+  }
+
+  /** Draw a compact stat info card anchored above a bar. */
+  private _drawStatTooltip(
+    ctx:       CanvasRenderingContext2D,
+    canvas:    HTMLCanvasElement,
+    anchorCX:  number,
+    anchorTop: number,
+    name:      string,
+    accent:    string,
+    border:    string,
+    value:     string,
+    desc:      string,
+    extras:    Array<{ label: string; val: string; col?: string }>,
+  ): void {
+    const PAD    = 10;
+    const W      = 210;
+    const LINE   = 15;
+    const NAME_H = 17;
+
+    const descLines = this.wrapText(ctx, desc, W - PAD * 2 - 4, '11px Georgia, serif');
+    const totalH = PAD + NAME_H + 4
+      + (descLines.length > 0 ? descLines.length * LINE + 4 : 0)
+      + extras.length * LINE
+      + PAD;
+
+    let tx = anchorCX - W / 2;
+    let ty = anchorTop - totalH - 8;
+    tx = Math.max(4, Math.min(canvas.width - W - 4, tx));
+    if (ty < 4) ty = anchorTop + 8;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = border;
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = accent;
+    this.roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    ctx.font      = 'bold 13px Georgia, serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(name, tx + PAD + 4, cy);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText(value, tx + W - PAD - 4, cy);
+    cy += NAME_H + 4;
+
+    if (descLines.length > 0) {
+      ctx.textAlign = 'left';
+      ctx.font      = '11px Georgia, serif';
+      ctx.fillStyle = '#aaaaaa';
+      for (const l of descLines) { ctx.fillText(l, tx + PAD + 4, cy); cy += LINE; }
+      cy += 4;
+    }
+
+    for (const e of extras) {
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#888888';
+      ctx.fillText(e.label, tx + PAD + 4, cy);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = e.col ?? '#cccccc';
+      ctx.fillText(e.val, tx + W - PAD - 4, cy);
+      cy += LINE;
     }
 
     ctx.restore();
@@ -2974,7 +3224,9 @@ class HUDElement implements UIElement {
     cameraRotation: number = 0,
     shipName?: string,
     shipLevel?: number,
-    shipWeight: number = 0
+    shipWeight: number = 0,
+    shipWeightKg: number = 0,
+    shipWeightCap: number = 6000,
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
@@ -3245,11 +3497,28 @@ class HUDElement implements UIElement {
     const waterFillH = Math.round(vBarH * waterFill);
     ctx.fillStyle    = isCritical ? '#cc2222' : '#2266bb';
     ctx.fillRect(lBarX, labelY + vBarH - waterFillH, vBarW, waterFillH);
+    this._tickFlash('ship-water', waterFill);
+    const _wFa = this._flashAlpha('ship-water');
+    if (_wFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_wFa.toFixed(2)})`;
+      ctx.fillRect(lBarX, labelY, vBarW, vBarH);
+    }
 
     // Weight fill (bottom-up)
     const weightFillH = Math.round(vBarH * weightRatio);
     ctx.fillStyle     = weightCrit ? '#cc2222' : weightWarn ? '#cc8811' : '#664422';
     ctx.fillRect(rBarX, labelY + vBarH - weightFillH, vBarW, weightFillH);
+    this._tickFlash('ship-weight', weightRatio);
+    const _swFa = this._flashAlpha('ship-weight');
+    if (_swFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_swFa.toFixed(2)})`;
+      ctx.fillRect(rBarX, labelY, vBarW, vBarH);
+    }
+    if (weightCrit) {
+      const _swPulse = 0.20 + 0.20 * Math.sin(performance.now() / 200);
+      ctx.fillStyle = `rgba(255,0,0,${_swPulse.toFixed(2)})`;
+      ctx.fillRect(rBarX, labelY, vBarW, vBarH);
+    }
 
     // Borders
     ctx.lineWidth   = 1;
@@ -3344,6 +3613,12 @@ class HUDElement implements UIElement {
 
     ctx.fillStyle = barColor;
     ctx.fillRect(ix, barY, Math.round(barW * plankRatio), barH);
+    this._tickFlash('ship-deck', plankRatio);
+    const _dkFa = this._flashAlpha('ship-deck');
+    if (_dkFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_dkFa.toFixed(2)})`;
+      ctx.fillRect(ix, barY, barW, barH);
+    }
 
     ctx.strokeStyle = plankCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
     ctx.lineWidth   = 1;
@@ -3436,6 +3711,64 @@ class HUDElement implements UIElement {
       row('Speed', `${shipSpeed.toFixed(0)} px/s`, '#aaaaaa');
 
       ctx.restore();
+    }
+
+    // ── Bar hover tooltips ─────────────────────────────────────────────────
+    {
+      const _mx = this.mouseX, _my = this.mouseY;
+
+      // Water ingress vertical bar
+      if (_mx >= lBarX && _mx <= lBarX + vBarW && _my >= labelY && _my <= labelY + vBarH) {
+        if (this._ttHit('ship-water')) {
+          const waterPct = Math.round(waterFill * 100);
+          const wDesc = isCritical
+            ? 'Critical flooding \u2014 the ship is in danger of sinking.'
+            : waterFill > 0.3 ? 'Significant water ingress. Repair planks to reduce flooding.'
+            : 'Hull is intact. No significant flooding.';
+          this._drawStatTooltip(ctx, canvas, lBarX + vBarW / 2, labelY,
+            'Water Ingress',
+            isCritical ? '#cc2222' : '#2266bb',
+            isCritical ? '#ff4444' : '#66aacc',
+            `${waterPct}%`,
+            wDesc,
+            [{ label: 'Hull Health', val: `${Math.round(hullHealth)}%`, col: hullHealth > 60 ? '#44cc66' : hullHealth > 30 ? '#ffaa22' : '#ff4444' }],
+          );
+        }
+      }
+
+      // Ship weight vertical bar
+      if (_mx >= rBarX && _mx <= rBarX + vBarW && _my >= labelY && _my <= labelY + vBarH) {
+        if (this._ttHit('ship-weight')) {
+          const swDesc = weightCrit
+            ? 'Overloaded \u2014 ship performance is heavily impaired.'
+            : weightWarn ? 'Heavy load. Ship maneuverability is reduced.'
+            : 'Ship weight is within safe limits.';
+          this._drawStatTooltip(ctx, canvas, rBarX + vBarW / 2, labelY,
+            'Ship Weight',
+            weightCrit ? '#cc2222' : weightWarn ? '#cc8811' : '#664422',
+            weightCrit ? '#ff4444' : weightWarn ? '#ffaa22' : '#aa7744',
+            `${shipWeightKg} / ${shipWeightCap} kg`,
+            swDesc, [],
+          );
+        }
+      }
+
+      // Deck integrity horizontal bar
+      if (_mx >= ix && _mx <= ix + barW && _my >= barY && _my <= barY + barH + 14) {
+        if (this._ttHit('ship-deck')) {
+          const dkDesc = plankCrit
+            ? 'Deck is critically damaged. Board repairs recommended immediately.'
+            : plankWarn ? 'Deck integrity is low. Repair planks to restore structural strength.'
+            : 'Deck is in good condition.';
+          this._drawStatTooltip(ctx, canvas, ix + barW / 2, barY,
+            'Deck Integrity',
+            barColor,
+            plankCrit ? '#ff4444' : plankWarn ? '#ffaa22' : '#66cc88',
+            `${hullPct}%`,
+            dkDesc, [],
+          );
+        }
+      }
     }
 
     ctx.restore();

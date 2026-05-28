@@ -433,7 +433,7 @@ export class PredictionEngine {
       ships: this.interpolateShips(from.ships, to.ships, alpha), // LINEAR - handles varying server intervals better
       players: this.interpolatePlayers(from.players, to.players, alpha), // LINEAR - matches ship interpolation for mounted players
       cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, smoothAlpha),
-      npcs: to.npcs,
+      npcs: this.interpolateNpcs(from.npcs, to.npcs, alpha), // LINEAR - matches player/ship interpolation
       tombstones: to.tombstones ?? [],
       droppedItems: to.droppedItems ?? [],
       companies: to.companies ?? [],
@@ -515,6 +515,42 @@ export class PredictionEngine {
     return result;
   }
   
+  /**
+   * Interpolate NPC positions, rotations, and local (deck) positions.
+   * NPCs on a ship also have localPosition interpolated so they glide smoothly
+   * across the deck between server ticks.
+   */
+  private interpolateNpcs(fromNpcs: any[], toNpcs: any[], alpha: number): any[] {
+    const result = [];
+
+    const fromById = new Map<number, any>();
+    for (const n of fromNpcs) fromById.set(n.id, n);
+
+    for (const toNpc of toNpcs) {
+      const fromNpc = fromById.get(toNpc.id);
+
+      if (!fromNpc) {
+        result.push(toNpc);
+        continue;
+      }
+
+      const interpolated: any = {
+        ...toNpc,
+        position: this.lerpVec2(fromNpc.position, toNpc.position, alpha),
+        rotation: this.lerpAngle(fromNpc.rotation ?? 0, toNpc.rotation ?? 0, alpha),
+      };
+
+      // Interpolate deck-local position when the NPC is aboard a ship
+      if (fromNpc.localPosition && toNpc.localPosition) {
+        interpolated.localPosition = this.lerpVec2(fromNpc.localPosition, toNpc.localPosition, alpha);
+      }
+
+      result.push(interpolated);
+    }
+
+    return result;
+  }
+
   /**
    * Interpolate cannonball positions
    */
