@@ -122,6 +122,10 @@ export enum MessageType {
   MODULE_INTERACT_SUCCESS = 'module_interact_success',
   MODULE_INTERACT_FAILURE = 'module_interact_failure',
   
+  // Chat
+  CHAT_MESSAGE   = 'chat_message',   // client → server
+  CHAT_BROADCAST = 'chat_broadcast', // server → client
+
   // Server notifications
   PLAYER_BOARDED = 'player_boarded',
   STRUCTURE_PLACED = 'structure_placed',
@@ -483,7 +487,14 @@ interface PickupItemMessage extends NetworkMessage {
   item_id: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage;
+interface ChatMessageOut extends NetworkMessage {
+  type: MessageType.CHAT_MESSAGE;
+  timestamp: number;
+  channel: string;
+  text: string;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut;
 
 /**
  * Main network manager class
@@ -714,6 +725,9 @@ export class NetworkManager {
   public onTombstoneSpawned: ((tombstone: import('../sim/Types').Tombstone) => void) | null = null;
   /** Fired when a tombstone is collected by a player. */
   public onTombstoneCollected: ((id: number, playerId: number) => void) | null = null;
+
+  /** Fired when a chat broadcast arrives from the server. */
+  public onChatMessage: ((channel: string, senderName: string, text: string) => void) | null = null;
   /** Fired when a tombstone despawns (15-min TTL expired). */
   public onTombstoneDespawned: ((id: number) => void) | null = null;
   /** Fired when the server sends tombstone item contents (response to tombstone_open). */
@@ -1283,6 +1297,11 @@ export class NetworkManager {
   sendDropItem(slot: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.DROP_ITEM, timestamp: Date.now(), slot });
+  }
+
+  sendChatMessage(channel: string, text: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.CHAT_MESSAGE, timestamp: Date.now(), channel, text });
   }
 
   sendPickupItem(itemId: number): void {
@@ -3165,6 +3184,14 @@ export class NetworkManager {
 
       case 'tombstone_collect_fail':
         // silently ignore — server already sent reason
+        break;
+
+      case MessageType.CHAT_BROADCAST:
+        this.onChatMessage?.(
+          message.channel   ?? 'global',
+          message.senderName ?? 'Unknown',
+          message.text       ?? ''
+        );
         break;
 
       case 'message_ack':

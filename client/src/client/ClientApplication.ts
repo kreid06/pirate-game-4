@@ -33,6 +33,7 @@ import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { CommandConsole } from './ui/CommandConsole.js';
+import { ChatBox } from './ui/ChatBox.js';
 import { IslandEditor } from './gfx/IslandEditor.js';
 import { logout } from './auth/AuthService.js';
 
@@ -241,6 +242,8 @@ export class ClientApplication {
   private pauseMenu = new PauseMenu();
   /** Terminal command bar — opened by / when no other menu is up. */
   private commandConsole = new CommandConsole();
+  /** In-game chat window — opened by T. */
+  private chatBox = new ChatBox();
   /** Dev tool for editing island polygon layers — opened via /islandEditor. */
   private islandEditor: IslandEditor | null = null;
   /** True when the player's active slot is wooden_floor or workbench on an island. */
@@ -1956,6 +1959,12 @@ export class ClientApplication {
       this.networkManager.onCommandResponse = (text, success) => {
         this.commandConsole.pushResponse(text, success ? 'response' : 'error');
         // Don't auto-open — the player can re-open with / to see the log
+      };
+      this.networkManager.onChatMessage = (channel, senderName, text) => {
+        this.chatBox.addMessage(channel as import('./ui/ChatBox.js').ChatChannel, senderName, text);
+      };
+      this.chatBox.onSend = (channel, text) => {
+        this.networkManager.sendChatMessage(channel, text);
       };
       this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
         // Snap the local player position if it's us being teleported
@@ -4549,6 +4558,18 @@ export class ClientApplication {
             && !this.buildMenuOpen
             && !this.explicitBuildMode) {
             this.commandConsole.open();
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case 't':
+        case 'T': {
+          // Open chat input (T to talk)
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.commandConsole.visible
+            && !this.chatBox.isOpen) {
+            this.chatBox.open();
             e.preventDefault();
           }
           break;

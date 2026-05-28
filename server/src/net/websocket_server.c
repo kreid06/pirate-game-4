@@ -1826,6 +1826,104 @@ static void handle_tombstone_take_slot(WebSocketPlayer* player,
     send_tombstone_items(client, t);
 }
 
+static void handle_chat_message(WebSocketPlayer* player,
+                                 const char* payload)
+{
+    /* {"type":"chat_message","channel":"global","text":"hello world"} */
+    char channel[16] = "global";
+    char text[256]   = {0};
+
+    /* Parse channel */
+    const char* pc = strstr(payload, "\"channel\":");
+    if (pc) {
+        const char* qs = strchr(pc + 10, '"');
+        if (qs) {
+            const char* qe = strchr(qs + 1, '"');
+            if (qe) {
+                size_t len = (size_t)(qe - qs - 1);
+                if (len >= sizeof(channel)) len = sizeof(channel) - 1;
+                memcpy(channel, qs + 1, len);
+                channel[len] = '\0';
+            }
+        }
+    }
+
+    /* Parse text */
+    const char* pt = strstr(payload, "\"text\":");
+    if (pt) {
+        const char* qs = strchr(pt + 7, '"');
+        if (qs) {
+            /* Walk forward and unescape basic \" sequences */
+            size_t pos = 0;
+            const char* c = qs + 1;
+            while (*c && pos < sizeof(text) - 1) {
+                if (*c == '\\' && *(c + 1) == '"') {
+                    text[pos++] = '"'; c += 2;
+                } else if (*c == '"') {
+                    break; /* end of string */
+                } else {
+                    text[pos++] = *c++;
+                }
+            }
+            text[pos] = '\0';
+        }
+    }
+
+    if (text[0] == '\0') return; /* silently ignore empty messages */
+
+    /* Sanitise channel to known values */
+    const char* valid[] = {"global", "local", "company", "alliance"};
+    bool ch_ok = false;
+    for (int i = 0; i < 4; i++) if (strcmp(channel, valid[i]) == 0) { ch_ok = true; break; }
+    if (!ch_ok) strcpy(channel, "global");
+
+    /* Build broadcast JSON */
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+        "{\"type\":\"chat_broadcast\","
+        "\"channel\":\"%s\","
+        "\"senderId\":%u,"
+        "\"senderName\":\"%s\","
+        "\"text\":\"%s\"}",
+        channel, player->player_id, player->name, text);
+
+    /* Deliver to appropriate recipients */
+    if (strcmp(channel, "global") == 0) {
+        websocket_server_broadcast(msg);
+    } else if (strcmp(channel, "local") == 0) {
+        /* Broadcast to players within 600 world units */
+        const float LOCAL_RANGE = 600.0f;
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            if (!players[i].active) continue;
+            float dx = players[i].x - player->x;
+            float dy = players[i].y - player->y;
+            if (dx * dx + dy * dy > LOCAL_RANGE * LOCAL_RANGE) continue;
+            for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                if (ws_server.clients[ci].connected
+                    && ws_server.clients[ci].player_id == players[i].player_id) {
+                    ws_send_text(ws_server.clients[ci].fd, msg);
+                    break;
+                }
+            }
+        }
+    } else if (strcmp(channel, "company") == 0 || strcmp(channel, "alliance") == 0) {
+        /* For alliance, fall back to same company (alliance system not yet implemented) */
+        for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+            if (!players[i].active) continue;
+            if (players[i].company_id != player->company_id) continue;
+            for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                if (ws_server.clients[ci].connected
+                    && ws_server.clients[ci].player_id == players[i].player_id) {
+                    ws_send_text(ws_server.clients[ci].fd, msg);
+                    break;
+                }
+            }
+        }
+    }
+
+    log_info("💬  [%s] %s: %s", channel, player->name, text);
+}
+
 static void handle_drop_item(WebSocketPlayer* player,
                               struct WebSocketClient* client,
                               const char* payload)
@@ -1854,8 +1952,12 @@ static void handle_drop_item(WebSocketPlayer* player,
     if (next_dropped_item_id == 0) next_dropped_item_id = 1;
     di->item_kind     = (uint8_t)isl->item;
     di->quantity      = isl->quantity;
-    di->x             = player->x;
-    di->y             = player->y;
+    /* Throw the item ~80 units ahead of the player so it can be tossed off a ship */
+    {
+        const float THROW_DIST = 80.0f;
+        di->x = player->x + cosf(player->rotation) * THROW_DIST;
+        di->y = player->y + sinf(player->rotation) * THROW_DIST;
+    }
     di->spawn_time_ms = get_time_ms();
     di->active        = true;
     isl->item     = ITEM_NONE;
@@ -4766,6 +4868,20 @@ int websocket_server_update(struct Sim* sim) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
                                     handle_pickup_item(player, client, payload);
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "chat_message") == 0) {
+                            // CHAT: player sends a message {"type":"chat_message","channel":"global","text":"..."}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_chat_message(player, payload);
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }

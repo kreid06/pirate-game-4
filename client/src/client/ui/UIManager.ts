@@ -2186,7 +2186,7 @@ class HUDElement implements UIElement {
     
     if (!player) return;
     
-    // ── Top-left stats box ────────────────────────────────────────────────
+    // ── Stats box (left of hotbar) ────────────────────────────────────────
     ctx.save();
 
     const fps      = Math.round(context.fps);
@@ -2196,9 +2196,18 @@ class HUDElement implements UIElement {
     const glScale  = context.glScalePct ?? 0;
     const fpsColor = fps >= 60 ? '#44ff66' : fps >= 30 ? '#ffaa00' : '#ff4444';
 
-    const BOX_W = 260;
-    const BOX_H = 118;
-    const BX = 10, BY = 10;
+    // Mirror hotbar layout to anchor the stats panel beside it
+    const _hbSlot = 48, _hbGap = 4, _hbPad = 6, _hbLabelH = 16;
+    const _hbW  = HOTBAR_SLOTS * (_hbSlot + _hbGap) - _hbGap + _hbPad * 2;
+    const _hbH  = _hbSlot + _hbPad * 2 + _hbLabelH;
+    const _hbX  = Math.round(ctx.canvas.width / 2 - _hbW / 2);
+    const _hbY  = ctx.canvas.height - _hbH - 8;
+    // Player bars sit above the hotbar (same constants as renderPlayerBars)
+    const _barsH = 4 * 2 + 6 + 3 + 10 * 2 + 3; // PPPAD*2 + XP_H + GAP + BAR_H*2 + GAP = 40
+    const BOX_W  = 220;
+    const BOX_H  = _hbH + _barsH + 4; // 76 + 40 + 4 = 120
+    const BX     = Math.max(8, _hbX - BOX_W - 6);
+    const BY     = _hbY - _barsH - 4;
 
     // Background + border
     ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
@@ -2213,13 +2222,13 @@ class HUDElement implements UIElement {
     // FPS row — large & colour-coded
     ctx.font      = 'bold 15px Georgia, serif';
     ctx.fillStyle = fpsColor;
-    ctx.fillText(`${fps} FPS  ${frameMs.toFixed(1)} ms`, BX + 10, BY + 9);
+    ctx.fillText(`${fps} FPS  ${frameMs.toFixed(1)}ms`, BX + 10, BY + 9);
 
     // Ping + GL row
     ctx.font      = '13px Georgia, serif';
     ctx.fillStyle = ping < 80 ? '#88ddff' : ping < 200 ? '#ffaa00' : '#ff4444';
-    const glText  = glScale > 0 ? `  GL ${glDc} dc @ ${glScale}%` : '  Canvas 2D';
-    ctx.fillText(`Ping ${ping} ms${glText}`, BX + 10, BY + 28);
+    const glText  = glScale > 0 ? `  GL ${glDc}dc @${glScale}%` : '  Canvas 2D';
+    ctx.fillText(`Ping ${ping}ms${glText}`, BX + 10, BY + 28);
 
     // Divider
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
@@ -2235,12 +2244,12 @@ class HUDElement implements UIElement {
 
     // Ship / velocity
     ctx.fillStyle = '#cccccc';
-    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '—'}   Vel ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 69);
+    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '—'}  Vel ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 68);
 
     // Network bandwidth
     const ns = context.networkStats;
     ctx.fillStyle = '#aaaaaa';
-    ctx.fillText(`↑ ${(ns.bytesSent / 1024).toFixed(1)} KB  ↓ ${(ns.bytesReceived / 1024).toFixed(1)} KB  loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 86);
+    ctx.fillText(`↑${(ns.bytesSent / 1024).toFixed(1)}KB ↓${(ns.bytesReceived / 1024).toFixed(1)}KB loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 84);
 
     ctx.restore();
 
