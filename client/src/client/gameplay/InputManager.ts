@@ -115,6 +115,8 @@ export class InputManager {
   public onGroupAssign: (() => void) | null = null;
   /** Ctrl+Digit while hovering a cannon — assign it directly to the given group index. */
   public onGroupAssignTo: ((group: number) => void) | null = null;
+  /** Ctrl+right-click while an NPC is hovered — cycle that NPC's command state. */
+  public onNpcStateCycle: (() => void) | null = null;
   /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
   public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
   /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
@@ -1499,17 +1501,19 @@ export class InputManager {
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
 
       // Shift+left-click is handled at the top of onMouseDown — unreachable here
-      if (this.isCtrlHeld()) {
-        // Ctrl+click while mounted: toggle cannon group membership
+
+      // Move To mode takes priority over everything — works with or without Ctrl held
+      if (this.onBeforeLeftClick && this.onBeforeLeftClick()) {
+        // Intercept hook consumed the click (e.g. Move To mode) — emit attack and skip cannon fire
+        if (this.onActionEvent) this.onActionEvent('attack', this.inputState.mouseWorldPosition);
+      } else if (this.isCtrlHeld()) {
+        // Ctrl+click: NPC command radial or cannon group assignment
         if (this.onGroupAssign) this.onGroupAssign();
       } else if (this.mountKind === 'none') {
         // Walking: left-click = attack toward mouse
         if (this.onActionEvent) {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
-      } else if (this.onBeforeLeftClick && this.onBeforeLeftClick()) {
-        // Intercept hook consumed the click (e.g. Move To mode) — emit attack and skip cannon fire
-        if (this.onActionEvent) this.onActionEvent('attack', this.inputState.mouseWorldPosition);
       } else {
         // Mounted to helm, cannon, or swivel: fire weapon(s)
         // Flame mode: ammo_type 11 (liquid flame) always streams regardless of activeAmmoGroup toggle
@@ -1526,10 +1530,15 @@ export class InputManager {
             }, 100);
           }
         } else if (isDoubleClick) {
-          console.log('💥💥 Double-click: Fire ALL cannons!');
-          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
-          // Cannon will reload into the pending ammo type
-          this.loadedAmmoType = this.selectedAmmoType;
+          // Guard: at helm with no weapon groups selected, double-click should not fire
+          // all manned cannons ship-wide — that was unintended.
+          const helmNoGroups = this.mountKind === 'helm' && this.activeWeaponGroups.size === 0;
+          if (!helmNoGroups) {
+            console.log('💥💥 Double-click: Fire ALL in selected group(s)!');
+            if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
+            // Cannon will reload into the pending ammo type
+            this.loadedAmmoType = this.selectedAmmoType;
+          }
         } else {
           console.log('💥 Single-click: Fire aimed cannons');
           if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
@@ -1557,9 +1566,9 @@ export class InputManager {
 
     } else if (event.button === 2) { // Right mouse button
       if (this.onBeforeRightClick && this.onBeforeRightClick()) return;
-      // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
+      // Ctrl+right-click: cycle NPC command state if NPC hovered, else group-assign
       if (this.isCtrlHeld()) {
-        if (this.onGroupAssign) this.onGroupAssign();
+        if (this.onNpcStateCycle) this.onNpcStateCycle();
         return;
       }
       // Build menu: right-click fires ghost-cancel / ghost-remove callback

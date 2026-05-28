@@ -439,6 +439,7 @@ void assign_weapon_group_crew(SimpleShip* ship) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->ship_id != ship->ship_id) continue;
             if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+            if (npc->task_locked) continue; /* locked NPCs stay pinned to their current post */
             if (npc->assigned_weapon_id != 0) {
                 /* Only pull from a cannon whose NEEDED has expired */
                 ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);

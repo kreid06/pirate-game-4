@@ -149,6 +149,7 @@ int world_save(const char *path) {
             "\n    {\n"
             "      \"id\": %u,\n"
             "      \"seq\": %u,\n"
+            "      \"name\": \"%s\",\n"
             "      \"type\": %u,\n"
             "      \"company\": %u,\n"
             "      \"x\": %.3f,\n"
@@ -166,6 +167,7 @@ int world_save(const char *path) {
             "      \"modules\": [",
             (unsigned)s->ship_id,
             (unsigned)s->ship_seq,
+            s->ship_name,
             (unsigned)s->ship_type,
             (unsigned)s->company_id,
             (double)s->x,
@@ -488,8 +490,10 @@ int world_load(const char *path) {
                 unsigned sail_openness = 0, ammo = 0;
                 bool infinite_ammo = false, is_sinking = false, is_scaffolded = false;
 
+                char ship_name[32] = {0};
                 ws_json_uint(obj,  "id",            &id);
                 ws_json_uint(obj,  "seq",           &seq);
+                ws_json_str (obj,  "name",          ship_name, sizeof(ship_name));
                 ws_json_uint(obj,  "type",          &type);
                 ws_json_uint(obj,  "company",       &company);
                 ws_json_float(obj, "x",             &x);
@@ -520,6 +524,8 @@ int world_load(const char *path) {
                     if (new_id) {
                         SimpleShip *s = find_ship((uint16_t)new_id);
                         if (s) {
+                            if (ship_name[0])
+                                strncpy(s->ship_name, ship_name, sizeof(s->ship_name) - 1);
                             s->rotation           = rot;
                             s->velocity_x         = vx;
                             s->velocity_y         = vy;

@@ -223,6 +223,10 @@ export class ClientApplication {
   private _holdEDropTimer = -1;
   /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
   private _moveToNpcId: number | null = null;
+  /** Multiple NPCs selected via Ctrl+drag box — all move together on next click. */
+  private _selectedNpcIds: number[] = [];
+  /** NPC IDs whose command-ignore flag is set (client-side only).  Ctrl+right-click toggles. */
+  private _npcIgnoreSet = new Set<number>();
   /** Screen-space position to flash once the server confirms (or rejects) a goto-module command. */
   private _pendingModuleFlashPos: Vec2 | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
@@ -654,6 +658,8 @@ export class ClientApplication {
           const npc = ws.npcs.find(n => n.id === npcId);
           if (npc) npc.companyId = 0; // COMPANY_UNCLAIMED
         }
+        // Clear any client-side ignore state for this NPC
+        this._npcIgnoreSet.delete(npcId);
         console.log(`⚓ NPC ${npcId} unclaimed`);
       };
 
@@ -842,6 +848,35 @@ export class ClientApplication {
 
           // Fallback: no target position (shouldn’t happen but guard anyway)
           this.renderSystem.flashCancel(flashPos);
+          return;
+        }
+
+        // ── Multi-NPC box-select move ──
+        if (action === 'attack' && this._selectedNpcIds.length > 0) {
+          const ids = [...this._selectedNpcIds];
+          this._selectedNpcIds = [];
+          this.renderSystem.selectedNpcIds = new Set();
+          this.renderSystem.clearMoveToHint();
+          const flashPos = this.inputManager.getMouseScreenPosition();
+          if (!target) { this.renderSystem.flashCancel(flashPos); return; }
+
+          const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const targetShip = ws ? this.findShipAtWorldPos(target, ws) : null;
+          const shipId = targetShip?.id ?? 0;
+
+          const spread = ids.length > 1 ? Math.min(20 * (ids.length - 1), 80) : 0;
+          for (let i = 0; i < ids.length; i++) {
+            const angle = (2 * Math.PI * i) / ids.length;
+            this.networkManager.sendNpcMoveToPos(ids[i],
+              target.x + Math.cos(angle) * spread,
+              target.y + Math.sin(angle) * spread, shipId);
+          }
+          this.renderSystem.flashInteract(flashPos);
+          if (shipId) {
+            console.log(`⚓ ${ids.length} NPCs → ship ${shipId} @ (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+          } else {
+            console.log(`🌊 ${ids.length} NPCs → world (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+          }
           return;
         }
 
@@ -1607,78 +1642,45 @@ export class ClientApplication {
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
-      //   — but if an NPC is hovered, open an NPC command radial instead
+      //   — but if an NPC is hovered, enter Move To mode directly
+      //   — if nothing is hovered, start a box-select drag
       this.inputManager.onGroupAssign = () => {
-        // ── Ctrl+click on an NPC → command radial ───────────────────────────
+        // ── Ctrl+click on an NPC → enter Move To mode immediately ───────────
         const hovNpcCtrl = this.renderSystem.getHoveredNpc();
         if (hovNpcCtrl) {
           const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myId = this.networkManager.getAssignedPlayerId();
           const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
           const myCompany = me?.companyId ?? 0;
-          const myIdCtrl = myId;
-          // Only command your own crew (for COMPANY_SOLO NPCs check ownerId)
           const isMyNpcCtrl = hovNpcCtrl.companyId !== COMPANY_UNCLAIMED && (
             hovNpcCtrl.companyId === COMPANY_SOLO
-              ? hovNpcCtrl.ownerId === myIdCtrl
+              ? hovNpcCtrl.ownerId === myId
               : hovNpcCtrl.companyId === myCompany && myCompany !== 0
           );
           if (!isMyNpcCtrl) return;
 
-          // Build radial options
-          const cmdOpts: Array<{ id: string; label: string }> = [];
-          if (hovNpcCtrl.assignedWeaponId !== 0) {
-            // At a module — show lock toggle
-            cmdOpts.push(hovNpcCtrl.locked
-              ? { id: 'unlock', label: '🔓 Unlock' }
-              : { id: 'lock',   label: '🔒 Lock at Post' });
-          }
-          cmdOpts.push({ id: 'move_to', label: '📍 Move To...' });
-
-          if (cmdOpts.length === 1 && cmdOpts[0].id === 'move_to') {
-            // Only one option — execute immediately
-            this._moveToNpcId = hovNpcCtrl.id;
-            this.renderSystem.setMoveToSourceNpc(hovNpcCtrl.id);
-            this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
-            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          // Ignored NPCs cannot be moved
+          if (this._npcIgnoreSet.has(hovNpcCtrl.id)) {
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            console.log(`⛔ NPC ${hovNpcCtrl.id} (${hovNpcCtrl.name}) ignores commands`);
             return;
           }
 
-          const mp = this.inputManager.getMouseScreenPosition();
-          this._radialMenu.open(mp.x, mp.y, cmdOpts);
-
-          // Wait for the next pointerup / mouseup to resolve the selection
-          const onUp = () => {
-            window.removeEventListener('pointerup', onUp);
-            const selected = this._radialMenu.getHoveredId();
-            this._radialMenu.close();
-            if (!selected) {
-              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
-              return;
-            }
-            const npc = ws?.npcs.find(n => n.id === hovNpcCtrl.id);
-            if (!npc) return;
-            if (selected === 'lock') {
-              this.networkManager.sendNpcLock(npc.id, true);
-              console.log(`🔒 Locking NPC ${npc.id} (${npc.name}) at post`);
-            } else if (selected === 'unlock') {
-              this.networkManager.sendNpcLock(npc.id, false);
-              console.log(`🔓 Unlocking NPC ${npc.id} (${npc.name})`);
-            } else if (selected === 'move_to') {
-              this._moveToNpcId = npc.id;
-              this.renderSystem.setMoveToSourceNpc(npc.id);
-              this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module, ship, or open water`);
-              console.log(`📍 Move To mode for NPC ${npc.id} (${npc.name})`);
-            }
-          };
-          window.addEventListener('pointerup', onUp);
+          // Enter Move To mode immediately (server clears task_locked on npc_move_to_pos)
+          this._selectedNpcIds = [];
+          this.renderSystem.selectedNpcIds = new Set();
+          this._moveToNpcId = hovNpcCtrl.id;
+          this.renderSystem.setMoveToSourceNpc(hovNpcCtrl.id);
+          this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           return;
         }
 
         // ── Default: cannon group assignment ────────────────────────────────
         const hovered = this.renderSystem.getHoveredModule();
         if (!hovered) {
-          console.warn(`⚠️ GroupAssign: no module hovered`);
+          // Nothing hovered — start box-select drag
+          this._startBoxSelect();
           return;
         }
         if (hovered.module.kind !== 'cannon' && hovered.module.kind !== 'swivel') {
@@ -1744,12 +1746,59 @@ export class ClientApplication {
       };
 
       // Left-click while mounted: Move To mode takes priority over cannon fire
-      this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null;
+      this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null || this._selectedNpcIds.length > 0;
 
-      // Right-click: cancel Move To mode before any other right-click handling
+      // Ctrl+right-click on an NPC: cycle normal → ignore → locked (at module) → normal
+      this.inputManager.onNpcStateCycle = () => {
+        const hovNpc = this.renderSystem.getHoveredNpc();
+        if (!hovNpc) {
+          // No NPC hovered — fall back to group-assign behaviour
+          if (this.inputManager) this.inputManager.onGroupAssign?.();
+          return;
+        }
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? null;
+        const myCompany = me?.companyId ?? 0;
+        const isMine = hovNpc.companyId !== 0 && (
+          hovNpc.companyId === 0 /* COMPANY_SOLO hack */ ? hovNpc.ownerId === myId
+            : hovNpc.companyId === myCompany && myCompany !== 0
+        ) || (hovNpc.ownerId !== 0 && hovNpc.ownerId === myId);
+        if (!isMine) return;
+
+        const isIgnored = this._npcIgnoreSet.has(hovNpc.id);
+        const isLocked  = hovNpc.locked;
+        const atModule  = hovNpc.assignedWeaponId !== 0;
+
+        if (!isIgnored && !isLocked) {
+          // Normal → Ignore commands
+          this._npcIgnoreSet.add(hovNpc.id);
+          console.log(`🚫 NPC ${hovNpc.id} (${hovNpc.name}) → ignore commands`);
+        } else if (isIgnored && !isLocked) {
+          if (atModule) {
+            // Ignore → Locked at station
+            this._npcIgnoreSet.delete(hovNpc.id);
+            this.networkManager.sendNpcLock(hovNpc.id, true);
+            console.log(`🔒 NPC ${hovNpc.id} (${hovNpc.name}) → locked at station`);
+          } else {
+            // No module — Ignore → Normal
+            this._npcIgnoreSet.delete(hovNpc.id);
+            console.log(`✅ NPC ${hovNpc.id} (${hovNpc.name}) → normal`);
+          }
+        } else if (isLocked) {
+          // Locked → Normal (unlock; also clear ignore)
+          this.networkManager.sendNpcLock(hovNpc.id, false);
+          this._npcIgnoreSet.delete(hovNpc.id);
+          console.log(`✅ NPC ${hovNpc.id} (${hovNpc.name}) → normal (unlocked)`);
+        }
+      };
+
+      // Right-click: cancel Move To / box-select mode before any other right-click handling
       this.inputManager.onBeforeRightClick = () => {
-        if (this._moveToNpcId !== null) {
+        if (this._moveToNpcId !== null || this._selectedNpcIds.length > 0) {
           this._moveToNpcId = null;
+          this._selectedNpcIds = [];
+          this.renderSystem.selectedNpcIds = new Set();
           this.renderSystem.clearMoveToHint();
           return true; // consume — don't aim, retarget, etc.
         }
@@ -3057,6 +3106,8 @@ export class ClientApplication {
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
       this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
       this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
+      this.renderSystem.npcIgnoreSet = this._npcIgnoreSet;
+      this.renderSystem.selectedNpcIds = new Set(this._selectedNpcIds);
 
       // Resolve local player once — reused by sword equip check, cursor cooldown ring, and UI render.
       const localPlayer = assignedPlayerId !== null
@@ -3677,6 +3728,84 @@ export class ClientApplication {
    * Find the first ship whose hull polygon contains the given world position.
    * Checks ALL ships (including the player’s own) so Move To can target any deck.
    */
+  /**
+   * Start a Ctrl+left-drag box-select.  Tracks mouse movement and, on release,
+   * selects all owned NPCs within the dragged screen rectangle.
+   */
+  private _startBoxSelect(): void {
+    const startPos = this.inputManager.getMouseScreenPosition();
+    let isDragging = false;
+
+    const onMove = (e: MouseEvent) => {
+      const canvasRect = this.canvas.getBoundingClientRect();
+      const sx = e.clientX - canvasRect.left;
+      const sy = e.clientY - canvasRect.top;
+      const dx = sx - startPos.x;
+      const dy = sy - startPos.y;
+      if (!isDragging && dx * dx + dy * dy > 64) isDragging = true;
+      if (isDragging) {
+        this.renderSystem.boxSelectRect = {
+          x1: Math.min(startPos.x, sx),
+          y1: Math.min(startPos.y, sy),
+          x2: Math.max(startPos.x, sx),
+          y2: Math.max(startPos.y, sy),
+        };
+      }
+    };
+
+    const onUp = (e: MouseEvent) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      const rect = this.renderSystem.boxSelectRect;
+      this.renderSystem.boxSelectRect = null;
+      if (!isDragging || !rect) return;
+
+      const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+      if (!ws) return;
+      const myId = this.networkManager.getAssignedPlayerId();
+      const me = myId !== null ? ws.players.find(p => p.id === myId) : null;
+      const myCompany = me?.companyId ?? 0;
+
+      const selected = ws.npcs.filter(npc => {
+        if (npc.companyId === COMPANY_UNCLAIMED) return false;
+        const isMyNpc = npc.companyId === COMPANY_SOLO
+          ? npc.ownerId === myId
+          : npc.companyId === myCompany && myCompany !== 0;
+        if (!isMyNpc || this._npcIgnoreSet.has(npc.id)) return false;
+
+        let worldPos = npc.position;
+        if (npc.shipId) {
+          const ship = ws.ships.find(s => s.id === npc.shipId);
+          if (ship && npc.localPosition) {
+            const cosR = Math.cos(ship.rotation);
+            const sinR = Math.sin(ship.rotation);
+            worldPos = Vec2.from(
+              ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+              ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
+            );
+          }
+        }
+        const sp = this.camera.worldToScreen(worldPos);
+        return sp.x >= rect.x1 && sp.x <= rect.x2 && sp.y >= rect.y1 && sp.y <= rect.y2;
+      });
+
+      const centre = Vec2.from((rect.x1 + rect.x2) / 2, (rect.y1 + rect.y2) / 2);
+      if (selected.length === 0) {
+        this.renderSystem.flashCancel(centre);
+        return;
+      }
+      this._moveToNpcId = null;
+      this._selectedNpcIds = selected.map(n => n.id);
+      this.renderSystem.selectedNpcIds = new Set(this._selectedNpcIds);
+      const label = selected.length === 1 ? selected[0].name : `${selected.length} crew`;
+      this.renderSystem.setMoveToHint(`Moving ${label} — click destination`);
+      this.renderSystem.flashInteract(centre);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
   private findShipAtWorldPos(pos: Vec2, worldState: WorldState): Ship | null {
     for (const ship of worldState.ships) {
       if (!ship.hull || ship.hull.length < 3) continue;
@@ -4372,9 +4501,11 @@ export class ClientApplication {
             e.preventDefault();
             break;
           }
-          // Cancel "Move To" targeting mode if active
-          if (this._moveToNpcId !== null) {
+          // Cancel "Move To" / box-select targeting mode if active
+          if (this._moveToNpcId !== null || this._selectedNpcIds.length > 0) {
             this._moveToNpcId = null;
+            this._selectedNpcIds = [];
+            this.renderSystem.selectedNpcIds = new Set();
             this.renderSystem.clearMoveToHint();
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
             e.preventDefault();
@@ -5201,6 +5332,7 @@ export class ClientApplication {
             this.uiManager?.openCrewMenuForNpc(npc);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           } else if (actionId === 'unclaim_npc' && isMyNpc) {
+            this._npcIgnoreSet.delete(npc.id);
             this.networkManager.sendNpcUnclaim(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`⚓ Unclaiming NPC ${npc.id} (${npc.name})`);
@@ -5276,6 +5408,10 @@ export class ClientApplication {
           this._radialMenu.close();
           if (selected === 'dismiss_npc' && moduleId !== null) {
             // Dismiss the NPC currently stationed at this cannon/swivel
+            // Also clear any client-side ignore/lock state for that NPC
+            const _ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+            const _npcAtMod = _ws?.npcs.find(n => n.assignedWeaponId === moduleId);
+            if (_npcAtMod) this._npcIgnoreSet.delete(_npcAtMod.id);
             this.networkManager.sendDismissNpc(moduleId);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`👋 dismiss NPC from module ${moduleId}`);

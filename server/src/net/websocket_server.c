@@ -5963,15 +5963,21 @@ int websocket_server_update(struct Sim* sim) {
                              * {"type":"dismiss_npc","moduleId":N} */
                             uint32_t dm_mod_id = 0;
                             { const char* dp = strstr(payload, "\"moduleId\":"); if (dp) dm_mod_id = (uint32_t)atoi(dp + 11); }
-                            if (dm_mod_id != 0) {
+                            WebSocketPlayer* dm_player = find_player(client->player_id);
+                            if (dm_mod_id != 0 && dm_player) {
                                 for (int _dmi = 0; _dmi < world_npc_count; _dmi++) {
                                     WorldNpc* _dn = &world_npcs[_dmi];
                                     if (!_dn->active || _dn->assigned_weapon_id != dm_mod_id) continue;
+                                    if (!NPC_OWNED_BY(_dn, dm_player)) {
+                                        log_info("🚫 dismiss_npc: player %u does not own NPC %u", client->player_id, _dn->id);
+                                        break;
+                                    }
                                     SimpleShip* dn_ship = find_ship(_dn->ship_id);
                                     _dn->assigned_weapon_id = 0;
                                     _dn->state              = WORLD_NPC_STATE_MOVING;
                                     _dn->target_local_x     = _dn->idle_local_x;
                                     _dn->target_local_y     = _dn->idle_local_y;
+                                    _dn->task_locked        = false; /* clear lock on dismiss */
                                     if (dn_ship) update_npc_cannon_sector(dn_ship, dn_ship->active_aim_angle);
                                     log_info("👋 dismiss_npc: NPC %u (%s) dismissed from module %u",
                                              _dn->id, _dn->name, dm_mod_id);

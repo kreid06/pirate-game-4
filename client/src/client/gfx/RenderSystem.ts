@@ -150,6 +150,12 @@ export class RenderSystem {
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
   public activeWeaponGroups: Set<number> = new Set();
+  /** NPC IDs whose command-ignore flag is set (client-side only).  Used to draw badge + block Move To. */
+  public npcIgnoreSet: Set<number> = new Set();
+  /** NPC IDs selected via Ctrl+drag box — rendered with highlight ring. */
+  public selectedNpcIds: Set<number> = new Set();
+  /** Screen-space rect being dragged for box selection (null when inactive). */
+  public boxSelectRect: { x1: number, y1: number, x2: number, y2: number } | null = null;
   /** Structure ID of the island cannon the local player is currently mounted to (for barrel rendering). */
   public islandCannonId: number | null = null;
   /** Live aim angle (world radians) for the mounted island cannon barrel. Null when not mounted. */
@@ -1779,6 +1785,151 @@ export class RenderSystem {
     ctx.fillStyle = '#ffe066';
     ctx.fillText(`📍 ${text}`, cw / 2, by + bh / 2);
     ctx.restore();
+  }
+
+  /** Draw the Ctrl+drag box-select rectangle while the player is dragging. */
+  private drawBoxSelectRect(): void {
+    const r = this.boxSelectRect;
+    if (!r) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle   = 'rgba(100,180,255,0.10)';
+    ctx.strokeStyle = 'rgba(100,180,255,0.85)';
+    ctx.lineWidth   = 1.5;
+    ctx.setLineDash([6, 3]);
+    ctx.beginPath();
+    ctx.rect(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * When NPCs are box-selected and the player hovers over a ship hull, draw the same
+   * gold boarding-highlight used by single-NPC Move To.
+   */
+  private drawMultiSelectHoverHighlight(worldState: WorldState, camera: Camera): void {
+    if (this.selectedNpcIds.size === 0 || !this.mouseWorldPos) return;
+
+    const now = performance.now();
+
+    const pointInPoly = (px: number, py: number, poly: Vec2[]): boolean => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y;
+        const xj = poly[j].x, yj = poly[j].y;
+        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+          inside = !inside;
+      }
+      return inside;
+    };
+
+    let hullHitShip: (typeof worldState.ships)[0] | null = null;
+    for (const s of worldState.ships) {
+      if (!s.hull || s.hull.length < 3) continue;
+      const dx  = this.mouseWorldPos.x - s.position.x;
+      const dy  = this.mouseWorldPos.y - s.position.y;
+      const cos = Math.cos(-s.rotation);
+      const sin = Math.sin(-s.rotation);
+      if (pointInPoly(dx * cos - dy * sin, dx * sin + dy * cos, s.hull)) {
+        hullHitShip = s;
+        break;
+      }
+    }
+    if (!hullHitShip) return;
+
+    const screenPos   = camera.worldToScreen(hullHitShip.position);
+    const cameraState = camera.getState();
+    const hull        = hullHitShip.hull!;
+    const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+    const glowAlpha   = 0.6  + 0.4  * glowPulse;
+    const ctx         = this.ctx;
+
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cameraState.zoom, cameraState.zoom);
+    ctx.rotate(hullHitShip.rotation - cameraState.rotation);
+
+    // Outer glow
+    ctx.shadowColor  = '#ffe066';
+    ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+    ctx.strokeStyle  = `rgba(255,220,60,${(glowAlpha * 0.55).toFixed(3)})`;
+    ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+    ctx.globalAlpha  = 1;
+    ctx.beginPath();
+    ctx.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // Inner crisp stroke
+    ctx.shadowBlur   = 0;
+    ctx.strokeStyle  = `rgba(255,240,130,${(glowAlpha * 0.9).toFixed(3)})`;
+    ctx.lineWidth    = 2.5 / cameraState.zoom;
+    ctx.globalAlpha  = glowAlpha;
+    ctx.beginPath();
+    ctx.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+    ctx.closePath();
+    ctx.stroke();
+
+    // Translucent amber fill
+    ctx.globalAlpha = 0.08 + 0.06 * glowPulse;
+    ctx.fillStyle   = '#ffe066';
+    ctx.beginPath();
+    ctx.moveTo(hull[0].x, hull[0].y);
+    for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.restore();
+
+    // Pulsing target ring at the mouse cursor (screen-space)
+    const dstScreen  = camera.worldToScreen(this.mouseWorldPos);
+    const ringPulse  = 0.65 + 0.35 * Math.sin(now / 220);
+    ctx.save();
+    ctx.globalAlpha  = 0.85 * ringPulse;
+    ctx.beginPath();
+    ctx.arc(dstScreen.x, dstScreen.y, 10 + (1 - ringPulse) * 4, 0, Math.PI * 2);
+    ctx.strokeStyle  = '#ffe066';
+    ctx.lineWidth    = 2;
+    ctx.stroke();
+    ctx.globalAlpha  = 0.95;
+    ctx.beginPath();
+    ctx.arc(dstScreen.x, dstScreen.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle    = '#fff8a0';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /** Draw a selection ring around each NPC in selectedNpcIds. Call after NPC rendering. */
+  drawSelectedNpcRings(worldState: WorldState, camera: Camera): void {
+    if (this.selectedNpcIds.size === 0) return;
+    const ctx = this.ctx;
+    for (const npc of worldState.npcs) {
+      if (!this.selectedNpcIds.has(npc.id)) continue;
+      let worldPos = npc.position;
+      if (npc.shipId) {
+        const ship = worldState.ships.find(s => s.id === npc.shipId);
+        if (ship && npc.localPosition) {
+          const cosR = Math.cos(ship.rotation);
+          const sinR = Math.sin(ship.rotation);
+          worldPos = Vec2.from(
+            ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+            ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
+          );
+        }
+      }
+      const sp = camera.worldToScreen(worldPos);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(100,200,255,0.9)';
+      ctx.lineWidth   = 2.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 18, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
   }
 
   /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
@@ -3538,6 +3689,12 @@ export class RenderSystem {
     this.drawLadderHoldRing();
     // Move To directive arrow line (above world, below UI menus)
     this.drawMoveToArrowLine(worldState, camera);
+    // Ship hull highlight when multi-select NPCs are pending a destination
+    this.drawMultiSelectHoverHighlight(worldState, camera);
+    // Box-select drag rectangle
+    this.drawBoxSelectRect();
+    // Selection rings for box-selected NPCs
+    this.drawSelectedNpcRings(worldState, camera);
     // Radial action menu (topmost)
     this._radialMenu?.render(this.ctx);
     // Move To targeting hint banner
@@ -14123,6 +14280,8 @@ export class RenderSystem {
     // (Role/state/weapon debug info is in the hover debug HUD instead.)
     const _showName = this.hoveredNpc?.id === npc.id
       || (this._showNpcNames && !_npcIsEnemy && !_npcIsNeutral);
+    // Show state badges when Ctrl is held (showGroupOverlay) or when the name is visible
+    const _showBadges = this.showGroupOverlay || _showName;
     if (_showName) {
       const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
       this.ctx.font = `${fontSize}px Georgia, serif`;
@@ -14134,19 +14293,28 @@ export class RenderSystem {
       this.ctx.fillRect(screenPos.x - tw / 2 - 3, nameY - fontSize, tw + 6, fontSize + 2);
       this.ctx.fillStyle = '#ffe066';
       this.ctx.fillText(npc.name, screenPos.x, nameY);
+    }
 
-      // Lock badge — small padlock icon above the NPC when task_locked
+    if (_showBadges) {
+      const badgeSize = Math.max(8, Math.min(12, 10 * cameraState.zoom));
+      const lx = screenPos.x + radius - 2;
+      let badgeY = screenPos.y - radius - badgeSize;
+
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'bottom';
+      this.ctx.font = `bold ${badgeSize + 2}px Georgia, serif`;
+
+      // Locked-at-station badge
       if (npc.locked) {
-        const lockSize = Math.max(8, Math.min(12, 10 * cameraState.zoom));
-        const lx = screenPos.x + radius - 2;
-        const ly = screenPos.y - radius - lockSize;
         this.ctx.fillStyle = '#ffdd00';
-        this.ctx.strokeStyle = '#222';
-        this.ctx.lineWidth = 1;
-        this.ctx.font = `bold ${lockSize + 2}px Georgia, serif`;
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'bottom';
-        this.ctx.fillText('🔒', lx, ly);
+        this.ctx.fillText('🔒', lx, badgeY);
+        badgeY -= badgeSize + 2;
+      }
+
+      // Ignore-commands badge (client-side flag)
+      if (this.npcIgnoreSet.has(npc.id)) {
+        this.ctx.fillStyle = '#ff5544';
+        this.ctx.fillText('🚫', lx, badgeY);
       }
     }
   }
@@ -15053,7 +15221,8 @@ export class RenderSystem {
       ownerName = ownerPlayer?.name ?? `Player #${npc.ownerId}`;
     }
 
-    const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
+    const ignoreFlag  = this.npcIgnoreSet.has(npc.id) ? '  🚫' : '';
+    const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}${ignoreFlag}`;
     const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
     const companyLabel = COMPANY_NAMES[npc.companyId]
       ?? this._cachedCompanies.find(c => c.id === npc.companyId)?.name
