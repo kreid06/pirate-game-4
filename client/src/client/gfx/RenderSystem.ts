@@ -13619,6 +13619,62 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
+  private drawShipNameLabel(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const name = ship.shipName;
+    const level = ship.levelStats?.shipLevel;
+    if (!name && level === undefined) return;
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const zoom = camera.getState().zoom;
+
+    // Place below the hull — 110px below ship center in world-scaled screen space
+    const labelY = screenPos.y + 110 * zoom;
+
+    this.ctx.save();
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'middle';
+
+    const fontSize = Math.max(10, 12 * zoom);
+    const pad = 5;
+
+    // Build the two lines
+    const nameLine = name || '';
+    const levelLine = level !== undefined ? `Lv. ${level}` : '';
+
+    // Measure both lines so the pill fits the widest
+    this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+    const nameMetrics  = nameLine  ? this.ctx.measureText(nameLine)  : null;
+    const levelMetrics = levelLine ? this.ctx.measureText(levelLine) : null;
+    const lineH = fontSize + 4;
+    const totalLines = (nameLine ? 1 : 0) + (levelLine ? 1 : 0);
+    const pillW = Math.max(nameMetrics?.width ?? 0, levelMetrics?.width ?? 0) + pad * 2;
+    const pillH = lineH * totalLines + pad;
+
+    // Dark pill background
+    this.ctx.fillStyle = 'rgba(0,0,0,0.60)';
+    this.ctx.beginPath();
+    this.ctx.roundRect(screenPos.x - pillW / 2, labelY - pad / 2, pillW, pillH, 5);
+    this.ctx.fill();
+
+    let curY = labelY + lineH / 2 - (totalLines === 2 ? lineH / 2 : 0);
+
+    if (nameLine) {
+      this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+      this.ctx.fillStyle = '#f0e0b0';
+      this.ctx.fillText(nameLine, screenPos.x, curY);
+      curY += lineH;
+    }
+    if (levelLine) {
+      this.ctx.font = `${fontSize * 0.85}px Georgia, serif`;
+      this.ctx.fillStyle = '#88ccff';
+      this.ctx.fillText(levelLine, screenPos.x, curY);
+    }
+
+    this.ctx.restore();
+  }
+
   private drawShipClaimFlag(ship: Ship, camera: Camera): void {
     const cf = ship.claimFlag;
     if (!cf) return;

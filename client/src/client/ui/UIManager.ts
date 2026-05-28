@@ -2231,7 +2231,7 @@ class HUDElement implements UIElement {
       const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
       const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
                                        (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation);
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel);
     }
 
     // Health / stamina bars above hotbar
@@ -2806,7 +2806,10 @@ class HUDElement implements UIElement {
     windAngle: number = 0,
     debugMode: boolean = false,
     shipSpeed: number = 0,
-    cameraRotation: number = 0
+    cameraRotation: number = 0,
+    shipName?: string,
+    shipLevel?: number,
+    shipWeight: number = 0
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
@@ -3032,25 +3035,139 @@ class HUDElement implements UIElement {
       ctx.restore();
     }
 
-    // ── Water % label + "WATER" tag ───────────────────────────────────────
-    const pct        = Math.round(waterFill * 100);
     // labelY is below the maximum rotated extent of the silhouette
-    const labelY     = cy + halfDiag + 6;
-    const labelColor = isCritical ? '#ff5555' : '#88bbee';
+    // (pushed down further if a ship name/level block is shown above it)
+    const nameBlockH = (shipName ? 13 : 0) + (shipLevel !== undefined ? 12 : 0);
+
+    // ── Ship name + level (between silhouette and bars) ───────────────────
+    if (shipName || shipLevel !== undefined) {
+      let nameLineY = cy + halfDiag + 6;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'top';
+      if (shipName) {
+        ctx.font      = 'bold 10px Georgia, serif';
+        ctx.fillStyle = '#f0e0b0';
+        ctx.fillText(shipName, cx, nameLineY);
+        nameLineY += 13;
+      }
+      if (shipLevel !== undefined) {
+        ctx.font      = '9px Georgia, serif';
+        ctx.fillStyle = '#88ccff';
+        ctx.fillText(`Lv. ${shipLevel}`, cx, nameLineY);
+      }
+    }
+
+    const labelY = cy + halfDiag + (nameBlockH > 0 ? nameBlockH + 10 : 6);
 
     ctx.save();
-    ctx.font         = 'bold 12px Georgia, serif';
+
+    // ── Two vertical bars: Water (left) and Weight (right) ────────────────
+    const weightRatio = Math.max(0, Math.min(1, shipWeight / 100));
+    const vBarW       = 20;
+    const vBarGap     = 4;   // 20 + 4 + 20 = 44 = iW
+    const vBarH       = 56;
+    const lBarX       = ix;
+    const rBarX       = ix + vBarW + vBarGap;
+    const weightCrit  = weightRatio > 0.90;
+    const weightWarn  = weightRatio > 0.70;
+
+    // Backgrounds
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(lBarX, labelY, vBarW, vBarH);
+    ctx.fillRect(rBarX, labelY, vBarW, vBarH);
+
+    // Water fill (bottom-up)
+    const waterFillH = Math.round(vBarH * waterFill);
+    ctx.fillStyle    = isCritical ? '#cc2222' : '#2266bb';
+    ctx.fillRect(lBarX, labelY + vBarH - waterFillH, vBarW, waterFillH);
+
+    // Weight fill (bottom-up)
+    const weightFillH = Math.round(vBarH * weightRatio);
+    ctx.fillStyle     = weightCrit ? '#cc2222' : weightWarn ? '#cc8811' : '#664422';
+    ctx.fillRect(rBarX, labelY + vBarH - weightFillH, vBarW, weightFillH);
+
+    // Borders
+    ctx.lineWidth   = 1;
+    ctx.strokeStyle = isCritical ? 'rgba(255,80,80,0.60)' : 'rgba(255,255,255,0.22)';
+    ctx.strokeRect(lBarX, labelY, vBarW, vBarH);
+    ctx.strokeStyle = weightCrit ? 'rgba(255,80,80,0.60)' : 'rgba(255,255,255,0.22)';
+    ctx.strokeRect(rBarX, labelY, vBarW, vBarH);
+
+    // Labels inside bars (rotated −90°)
+    ctx.fillStyle    = 'rgba(255,255,255,0.80)';
+    ctx.font         = 'bold 8px Georgia, serif';
     ctx.textAlign    = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle    = labelColor;
-    ctx.fillText(`${pct}%`, cx, labelY);
+    ctx.textBaseline = 'middle';
 
-    ctx.font      = '9px Georgia, serif';
-    ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
-    ctx.fillText('WATER', cx, labelY + 14);
+    ctx.save();
+    ctx.translate(lBarX + vBarW / 2, labelY + vBarH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('WATER', 0, 0);
+    ctx.restore();
 
-    // ── Deck health bar ───────────────────────────────────────────────────
-    const barY      = labelY + 28;
+    ctx.save();
+    ctx.translate(rBarX + vBarW / 2, labelY + vBarH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('WEIGHT', 0, 0);
+    ctx.restore();
+
+    // ── Icons below bars ──────────────────────────────────────────────────
+    const iconAreaY = labelY + vBarH + 5;
+    const iconSz    = 10;
+    const lIconCx   = lBarX + vBarW / 2;
+    const rIconCx   = rBarX + vBarW / 2;
+
+    // Teardrop (water icon)
+    {
+      const tx = lIconCx;
+      const ty = iconAreaY + iconSz * 0.55;
+      const r  = iconSz * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(tx, iconAreaY);
+      ctx.bezierCurveTo(tx + r * 0.9, ty - r * 0.1,  tx + r, ty + r * 0.5,  tx, ty + r);
+      ctx.bezierCurveTo(tx - r, ty + r * 0.5,  tx - r * 0.9, ty - r * 0.1,  tx, iconAreaY);
+      ctx.closePath();
+      ctx.fillStyle = isCritical ? '#ff6666' : '#4499dd';
+      ctx.fill();
+    }
+
+    // Anchor (weight icon)
+    {
+      const ax = rIconCx;
+      const ay = iconAreaY;
+      const ar = iconSz * 0.5;
+      ctx.strokeStyle = weightCrit ? '#ff6666' : '#aabbaa';
+      ctx.fillStyle   = weightCrit ? '#ff6666' : '#aabbaa';
+      ctx.lineWidth   = 1.3;
+      // Ring
+      ctx.beginPath();
+      ctx.arc(ax, ay + ar * 0.38, ar * 0.28, 0, Math.PI * 2);
+      ctx.stroke();
+      // Shaft
+      ctx.beginPath();
+      ctx.moveTo(ax, ay + ar * 0.66);
+      ctx.lineTo(ax, ay + ar * 1.72);
+      ctx.stroke();
+      // Crossbar
+      ctx.beginPath();
+      ctx.moveTo(ax - ar * 0.72, ay + ar * 0.92);
+      ctx.lineTo(ax + ar * 0.72, ay + ar * 0.92);
+      ctx.stroke();
+      // Bottom arc
+      ctx.beginPath();
+      ctx.arc(ax, ay + ar * 1.28, ar * 0.50, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.stroke();
+      // End dots
+      ctx.beginPath();
+      ctx.arc(ax - ar * 0.49, ay + ar * 1.70, ar * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(ax + ar * 0.49, ay + ar * 1.70, ar * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ── Deck health bar (horizontal) ──────────────────────────────────────
+    const barY      = iconAreaY + iconSz + 6;
     const barW      = iW;
     const barH      = 8;
     const plankCrit = plankRatio < 0.30;
