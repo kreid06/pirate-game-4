@@ -1891,8 +1891,8 @@ static void handle_chat_message(WebSocketPlayer* player,
     if (strcmp(channel, "global") == 0) {
         websocket_server_broadcast(msg);
     } else if (strcmp(channel, "local") == 0) {
-        /* Broadcast to players within 600 world units */
-        const float LOCAL_RANGE = 600.0f;
+        /* Broadcast to players within 1000 world units */
+        const float LOCAL_RANGE = 1000.0f;
         for (int i = 0; i < WS_MAX_CLIENTS; i++) {
             if (!players[i].active) continue;
             float dx = players[i].x - player->x;
