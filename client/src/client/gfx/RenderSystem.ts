@@ -1624,28 +1624,42 @@ export class RenderSystem {
 
     this.ctx.restore();
 
-    // Demolish hint: axe equipped + non-plank module → show "🪓 E – Demolish [kind]"
-    if (this.axeEquipped && kind !== 'plank') {
+    // Interact hint: "[E] – Interact" when in range, "Not in Range" when too far
+    {
       const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
       const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
+
+      const pi = this.playerInteractInfo;
+      let inRange = true;
+      if (pi) {
+        const dist = (pi.carrierId === modShip.id && pi.localPos)
+          ? Math.hypot((pi.localPos as any).x - mod.localPos.x, (pi.localPos as any).y - mod.localPos.y)
+          : Math.hypot(pi.worldPos.x - modWorldX, pi.worldPos.y - modWorldY);
+        inRange = dist <= 120;
+      }
+
       const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
-      const label = `🪓 E – Demolish ${kind}`;
+      const label  = inRange ? '[E] – Interact' : 'Not in Range';
       const labelX = hintScreen.x;
       const labelY = hintScreen.y - 42;
-      const tCtx = this.ctx;
+      const tCtx   = this.ctx;
       tCtx.save();
       tCtx.font = 'bold 13px Georgia, serif';
-      tCtx.textAlign = 'center';
-      const tw = tCtx.measureText(label).width;
-      tCtx.fillStyle = 'rgba(30,10,10,0.7)';
-      tCtx.strokeStyle = '#cc2222';
-      tCtx.lineWidth = 1.5;
+      tCtx.textAlign    = 'center';
+      tCtx.textBaseline = 'middle';
+      const tw      = tCtx.measureText(label).width;
+      const boxH    = 22;
+      const boxTop  = labelY - boxH / 2;
+      const textMid = labelY;
+      tCtx.fillStyle   = inRange ? 'rgba(10,20,30,0.72)'  : 'rgba(20,15,10,0.72)';
+      tCtx.strokeStyle = inRange ? 'rgba(130,105,55,0.8)' : 'rgba(90,70,40,0.55)';
+      tCtx.lineWidth   = 1.5;
       tCtx.beginPath();
-      tCtx.roundRect(labelX - tw / 2 - 8, labelY - 16, tw + 16, 22, 4);
+      tCtx.roundRect(labelX - tw / 2 - 8, boxTop, tw + 16, boxH, 4);
       tCtx.fill();
       tCtx.stroke();
-      tCtx.fillStyle = '#ffcccc';
-      tCtx.fillText(label, labelX, labelY);
+      tCtx.fillStyle = inRange ? '#e8dfc0' : '#888070';
+      tCtx.fillText(label, labelX, textMid);
       tCtx.restore();
     }
   }

@@ -207,8 +207,8 @@ export class ClientApplication {
   private _ladderHoldIsExtended = false;
   /** True if player was on the ladder's ship when E was pressed. */
   private _ladderHoldOnShip = false;
-  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | 'npc' | 'structure' | null */
-  private _interactKind: 'ladder' | 'mount' | 'npc' | 'structure' | null = null;
+  /** What kind of module the current E-hold targets: 'ladder' | 'module' | 'mount' | 'npc' | 'structure' | null */
+  private _interactKind: 'ladder' | 'module' | 'mount' | 'npc' | 'structure' | null = null;
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
@@ -4988,6 +4988,8 @@ export class ClientApplication {
                   radialOpts.push({ id: 'dismiss_npc', label: `Dismiss ${npcAtGun.name}` });
                 }
               }
+              // Demolish option — always available when on own ship (server validates ownership)
+              radialOpts.push({ id: 'demolish', label: '🪓 Demolish' });
               this._radialMenu.open(mp.x, mp.y, radialOpts);
             }, 300);
             break;
@@ -5014,6 +5016,7 @@ export class ClientApplication {
                   extendedAtPress
                     ? { id: 'retract', label: 'Retract' }
                     : { id: 'extend',  label: 'Extend'  },
+                  { id: 'demolish', label: '🪓 Demolish' },
                 ]);
               } else if (extendedAtPress) {
                 this._radialMenu.open(mp.x, mp.y, [
@@ -5029,6 +5032,24 @@ export class ClientApplication {
             break;
           }
 
+          // Generic module: open Demolish radial when on own ship
+          if (meE.carrierId === hov.ship.id) {
+            const modKindLabel = hov.module.kind.charAt(0).toUpperCase() + hov.module.kind.slice(1);
+            this._interactKind = 'module';
+            this._suppressLadderInteract = true;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: 'demolish', label: `🪓 Demolish ${modKindLabel}` },
+              ]);
+            }, 400);
+            break;
+          }
           console.warn(`🪜 E: hovered module kind '${hov.module.kind}' has no interact handler`);
           break;
         }
@@ -5420,6 +5441,10 @@ export class ClientApplication {
             this.networkManager.sendDismissNpc(moduleId);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`👋 dismiss NPC from module ${moduleId}`);
+          } else if (selected === 'demolish' && moduleId !== null && shipId !== null) {
+            this.networkManager.sendDemolishModule(shipId, moduleId);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`🪓 [DEMOLISH] module ${moduleId} on ship ${shipId}`);
           } else if (selected) {
             if (doMountAction()) {
               this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
@@ -5428,6 +5453,33 @@ export class ClientApplication {
             }
           } else {
             console.log('🎮 radial: cancelled (centre dead zone)');
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          }
+        }
+        return;
+      }
+
+      // ── GENERIC MODULE (plank / seat / custom / etc.) — Demolish only ───
+      if (interactKind === 'module') {
+        if (this._ladderHoldTimer !== null) {
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          // Tap: no default action — require hold to confirm demolish
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        } else if (this._radialMenu.isOpen) {
+          const selected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          if (selected === 'demolish' && moduleId !== null && shipId !== null) {
+            if (!isInRange()) {
+              console.warn('🪓 module demolish cancelled: moved out of range');
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.networkManager.sendDemolishModule(shipId, moduleId);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🪓 [DEMOLISH] module ${moduleId} on ship ${shipId}`);
+            }
+          } else {
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
           }
         }
@@ -5485,6 +5537,10 @@ export class ClientApplication {
           // extend always uses toggle_ladder — module_interact on retracted = climb attempt
           this.networkManager.sendToggleLadder(moduleId);
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+        } else if (selected === 'demolish' && shipId !== null) {
+          this.networkManager.sendDemolishModule(shipId, moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🪓 [DEMOLISH] ladder ${moduleId} on ship ${shipId}`);
         } else if (selected?.startsWith('remove_flag_')) {
           // ── Remove claim flag from ship ──────────────────────────────────
           const flagShipId = parseInt(selected.replace('remove_flag_', ''), 10);

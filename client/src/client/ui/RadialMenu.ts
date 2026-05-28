@@ -82,7 +82,8 @@ export class RadialMenu {
     const angle = Math.atan2(dy, dx);
     const n     = this._options.length;
     const slice = (Math.PI * 2) / n;
-    const base  = -Math.PI / 2; // options start from top
+    // n=2: rotate 90° so options sit top/bottom rather than left/right
+    const base  = n === 2 ? -Math.PI : -Math.PI / 2;
 
     let bestIdx = 0;
     let bestDiff = Infinity;
@@ -108,7 +109,8 @@ export class RadialMenu {
     const { x: cx, y: cy } = this._center;
     const n            = this._options.length;
     const slice        = (Math.PI * 2) / n;
-    const base         = -Math.PI / 2;
+    // n=2: rotate 90° so options sit top/bottom rather than left/right
+    const base         = n === 2 ? -Math.PI : -Math.PI / 2;
     const g            = GAP_PX / 2; // half-gap: perpendicular distance from boundary to slice edge
     const isCancelling = this._hoveredId === null;
 

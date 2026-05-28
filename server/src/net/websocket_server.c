@@ -7692,6 +7692,122 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                 }
 
+                            } else if (strcmp(cmd_name, "addxp") == 0) {
+                                /* /addxp <playername|id> <amount>
+                                 * Adds XP to a player. */
+                                char axp_target[64] = "";
+                                char axp_amt_str[32] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++;   /* skip cmd name */
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) axp_target[ai++] = *p++;
+                                    axp_target[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != '\0' && ai < 31) axp_amt_str[ai++] = *p++;
+                                    axp_amt_str[ai] = '\0';
+                                }
+                                if (axp_target[0] == '\0' || axp_amt_str[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\",\"success\":false,"
+                                        "\"text\":\"Usage: /addxp <playername|id> <amount>\"}");
+                                } else {
+                                    uint32_t axp_amount = (uint32_t)strtoul(axp_amt_str, NULL, 10);
+                                    /* Find target player by id or case-insensitive name */
+                                    WebSocketPlayer *axp_pl = NULL;
+                                    int axp_is_num = (axp_target[0] >= '0' && axp_target[0] <= '9');
+                                    if (axp_is_num) {
+                                        unsigned int axp_id = (unsigned int)atoi(axp_target);
+                                        for (int pi = 0; pi < WS_MAX_CLIENTS && !axp_pl; pi++)
+                                            if (players[pi].active && players[pi].player_id == axp_id)
+                                                axp_pl = &players[pi];
+                                    } else {
+                                        char axp_ln[64]; int axp_li = 0;
+                                        while (axp_target[axp_li] && axp_li < 63) {
+                                            axp_ln[axp_li] = (axp_target[axp_li] >= 'A' && axp_target[axp_li] <= 'Z')
+                                                ? axp_target[axp_li] + 32 : axp_target[axp_li]; axp_li++; }
+                                        axp_ln[axp_li] = '\0';
+                                        for (int pi = 0; pi < WS_MAX_CLIENTS && !axp_pl; pi++) {
+                                            if (!players[pi].active) continue;
+                                            char axp_lpn[64]; int pj = 0;
+                                            while (players[pi].name[pj] && pj < 63) {
+                                                axp_lpn[pj] = (players[pi].name[pj] >= 'A' && players[pi].name[pj] <= 'Z')
+                                                    ? players[pi].name[pj] + 32 : players[pi].name[pj]; pj++; }
+                                            axp_lpn[pj] = '\0';
+                                            if (strstr(axp_lpn, axp_ln)) axp_pl = &players[pi];
+                                        }
+                                    }
+                                    if (!axp_pl) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Player not found: %s\"}", axp_target);
+                                    } else {
+                                        player_apply_xp(axp_pl, axp_amount);
+                                        log_info("⭐ Admin %u gave %u XP to player %u (%s) — total: %u",
+                                                 client->player_id, axp_amount, axp_pl->player_id,
+                                                 axp_pl->name, axp_pl->player_xp);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":true,"
+                                            "\"text\":\"Gave %u XP to %s (total: %u).\"}",
+                                            axp_amount, axp_pl->name, axp_pl->player_xp);
+                                    }
+                                }
+
+                            } else if (strcmp(cmd_name, "addshipxp") == 0) {
+                                /* /addshipxp <shipid> <amount>
+                                 * Adds XP to a ship. */
+                                char asxp_id_str[32] = "";
+                                char asxp_amt_str[32] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++;   /* skip cmd name */
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 31) asxp_id_str[ai++] = *p++;
+                                    asxp_id_str[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != '\0' && ai < 31) asxp_amt_str[ai++] = *p++;
+                                    asxp_amt_str[ai] = '\0';
+                                }
+                                if (asxp_id_str[0] == '\0' || asxp_amt_str[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\",\"success\":false,"
+                                        "\"text\":\"Usage: /addshipxp <shipid> <amount>\"}");
+                                } else {
+                                    uint32_t asxp_ship_id = (uint32_t)strtoul(asxp_id_str, NULL, 10);
+                                    uint32_t asxp_amount  = (uint32_t)strtoul(asxp_amt_str, NULL, 10);
+                                    struct Ship* asxp_sim_ship = sim_get_ship(global_sim, (entity_id)asxp_ship_id);
+                                    if (!asxp_sim_ship) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Ship %u not found.\"}", asxp_ship_id);
+                                    } else {
+                                        asxp_sim_ship->level_stats.xp += asxp_amount;
+                                        uint16_t asxp_ship_lvl = ship_level_total_points(&asxp_sim_ship->level_stats);
+                                        uint32_t asxp_next_cost = (asxp_ship_lvl < SHIP_LEVEL_TOTAL_POINT_CAP)
+                                            ? SHIP_LEVEL_XP_BASE * (uint32_t)(asxp_ship_lvl + 1) : 0u;
+                                        log_info("⭐ Admin %u gave %u ship XP to ship %u — total: %u",
+                                                 client->player_id, asxp_amount, asxp_ship_id,
+                                                 asxp_sim_ship->level_stats.xp);
+                                        /* Broadcast updated XP to all clients */
+                                        char asxp_msg[256];
+                                        snprintf(asxp_msg, sizeof(asxp_msg),
+                                            "{\"type\":\"SHIP_LEVEL_UP\",\"shipId\":%u,"
+                                            "\"attribute\":\"none\",\"level\":0,\"xp\":%u,"
+                                            "\"shipLevel\":%u,\"totalCap\":%u,\"nextUpgradeCost\":%u}",
+                                            asxp_ship_id, asxp_sim_ship->level_stats.xp,
+                                            asxp_ship_lvl, SHIP_LEVEL_TOTAL_POINT_CAP, asxp_next_cost);
+                                        websocket_server_broadcast(asxp_msg);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":true,"
+                                            "\"text\":\"Gave %u XP to ship %u (total: %u).\"}",
+                                            asxp_amount, asxp_ship_id, asxp_sim_ship->level_stats.xp);
+                                    }
+                                }
+
                             } else {
                                 snprintf(response, sizeof(response),
                                     "{\"type\":\"command_response\","
