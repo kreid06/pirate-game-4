@@ -4564,8 +4564,9 @@ export class ClientApplication {
         }
 
         case 't':
-        case 'T': {
-          // Open chat input (T to talk)
+        case 'T':
+        case 'Enter': {
+          // Open chat input (T or Enter to talk)
           if (!this.uiManager.isAnyMenuOpen()
             && !this.commandConsole.visible
             && !this.chatBox.isOpen) {
