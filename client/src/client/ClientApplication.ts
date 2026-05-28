@@ -3207,6 +3207,7 @@ export class ClientApplication {
         windAngle: this.networkManager.windAngle,
         debugMode: this.uiManager.isDebugMode,
         combatMode: this.combatMode,
+        altHeld: this.inputManager?.isAltHeld() ?? false,
       });
 
       // Crafting menu (rendered on top of all other UI)

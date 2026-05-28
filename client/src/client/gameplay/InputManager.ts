@@ -217,6 +217,10 @@ export class InputManager {
   public isCtrlHeld(): boolean {
     return this.inputState.pressedKeys.has('ControlLeft') || this.inputState.pressedKeys.has('ControlRight');
   }
+
+  public isAltHeld(): boolean {
+    return this.inputState.pressedKeys.has('AltLeft') || this.inputState.pressedKeys.has('AltRight');
+  }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
   private lastRudderState: { left: boolean; right: boolean; backward: boolean } = { left: false, right: false, backward: false };

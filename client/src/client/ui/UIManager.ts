@@ -59,6 +59,8 @@ export interface UIRenderContext {
   debugMode?: boolean;
   /** True when the player has combat mode enabled (Z key). */
   combatMode?: boolean;
+  /** True when Alt is held — used for detail overlays (e.g. ship IDs on map). */
+  altHeld?: boolean;
 }
 
 /**
@@ -591,7 +593,7 @@ export class UIManager {
       const ws = context.worldState;
       const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
       const companyId = localPlayer?.companyId ?? 0;
-      this.worldMapScreen.render(ctx, ws.ships, this._islands, ws.players, context.assignedPlayerId, companyId);
+      this.worldMapScreen.render(ctx, ws.ships, this._islands, ws.players, context.assignedPlayerId, companyId, context.altHeld ?? false);
     }
 
     // Respawn screen — rendered last so it covers everything

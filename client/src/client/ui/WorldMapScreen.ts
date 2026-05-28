@@ -121,6 +121,7 @@ export class WorldMapScreen {
     players: Player[],
     localPlayerId: number | null | undefined,
     localCompanyId: number,
+    altHeld = false,
   ): void {
     if (!this.visible) return;
 
@@ -246,12 +247,16 @@ export class WorldMapScreen {
       ctx.stroke();
       ctx.restore();
 
-      // Ship label
-      if (toScreenLen(1) > 0.04) {
-        ctx.textAlign = 'center';
-        ctx.font = `${Math.max(8, Math.min(12, toScreenLen(60)))}px Georgia, serif`;
-        ctx.fillStyle = isFriendly ? '#aaccff' : '#ffaaaa';
-        ctx.fillText(`Ship ${ship.id}`, sx, sy + r + 12);
+      // Ship label — always visible, fixed 11px size so it reads at every zoom level
+      const shipLabel = (ship as any).shipName || `Ship ${ship.id}`;
+      ctx.textAlign = 'center';
+      ctx.font = 'bold 11px Georgia, serif';
+      ctx.fillStyle = isFriendly ? '#aaccff' : '#ffaaaa';
+      ctx.fillText(shipLabel, sx, sy + r + 13);
+      if (altHeld) {
+        ctx.font = '9px Georgia, serif';
+        ctx.fillStyle = isFriendly ? 'rgba(170,204,255,0.65)' : 'rgba(255,170,170,0.65)';
+        ctx.fillText(`#${ship.id}`, sx, sy + r + 24);
       }
     }
 
@@ -308,7 +313,7 @@ export class WorldMapScreen {
 
     ctx.font = '12px Georgia, serif';
     ctx.fillStyle = '#556677';
-    ctx.fillText('Drag to pan  •  Scroll to zoom  •  M or Esc to close', 16, 50);
+    ctx.fillText('Drag to pan  •  Scroll to zoom  •  Alt for details  •  M or Esc to close', 16, 50);
 
     // Zoom indicator
     ctx.textAlign = 'right';
