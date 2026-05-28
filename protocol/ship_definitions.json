@@ -99,7 +99,9 @@
         "snap_points": [
           { "x": 300, "y": 0, "type": "ladder" },
           { "x": 0, "y": 0, "type": "ladder" },
-          { "x": -300, "y": 0, "type": "ladder" }
+          { "x": -300, "y": 0, "type": "ladder" },
+          { "x": 220, "y": 0, "type": "ramp" },
+          { "x": -140, "y": 0, "type": "ramp" }
         ]
       },
       {
@@ -116,7 +118,9 @@
         "snap_points": [
           { "x": 300, "y": 0, "type": "ladder" },
           { "x": 0, "y": 0, "type": "ladder" },
-          { "x": -300, "y": 0, "type": "ladder" }
+          { "x": -300, "y": 0, "type": "ladder" },
+          { "x": 220, "y": 0, "type": "ramp" },
+          { "x": -140, "y": 0, "type": "ramp" }
         ]
       }
     ]

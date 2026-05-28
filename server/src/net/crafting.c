@@ -117,6 +117,7 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         { "craft_wood_ceiling",  ITEM_WOOD_CEILING,  1, { {ITEM_WOOD,  15}, {0,0},            {0,0} }, 1, false },
         { "craft_plank",         ITEM_PLANK,         1, { {ITEM_WOOD,  30}, {0,0},            {0,0} }, 1, false },
         { "craft_deck",          ITEM_DECK,          1, { {ITEM_WOOD,  75}, {0,0},            {0,0} }, 1, false },
+        { "craft_ramp",          ITEM_RAMP,          1, { {ITEM_WOOD,  20}, {0,0},            {0,0} }, 1, true  },
         { "craft_helm_kit",      ITEM_HELM,          1, { {ITEM_WOOD,  10}, {0,0},            {0,0} }, 1, false },
         /* ── Workbench recipes (require workbench proximity) ─────────────── */
         { "craft_sail",          ITEM_SAIL,          1, { {ITEM_WOOD,  40}, {ITEM_FIBER, 100},{0,0} }, 2, true  },

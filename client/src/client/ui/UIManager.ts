@@ -2261,17 +2261,33 @@ class HUDElement implements UIElement {
       : null;
 
     if (playerShip != null) {
-      // Compute deck health ratio from the ship's deck module(s)
+      // Compute deck health ratio from the ship's deck module(s).
+      // Also build per-deck ratios for the multi-bar HUD display.
       const decks = playerShip.modules.filter(m => m.kind === 'deck');
       let deckRatio = 1;
+      const deckRatios: number[] = [];
       if (decks.length > 0) {
+        // Accumulate hp/maxHp sums per deck level for per-bar display
+        const perDeckHp:    number[] = [];
+        const perDeckMax:   number[] = [];
         let totalHp = 0, totalMax = 0;
         for (const m of decks) {
           const d = m.moduleData as { health?: number; maxHealth?: number } | undefined;
-          totalHp  += d?.health    ?? 0;
-          totalMax += d?.maxHealth ?? 10000;
+          const hp    = d?.health    ?? 0;
+          const maxHp = d?.maxHealth ?? 10000;
+          totalHp  += hp;
+          totalMax += maxHp;
+          const di = m.deckId ?? 0; // 0 = lower deck, 1 = upper deck
+          perDeckHp[di]  = (perDeckHp[di]  ?? 0) + hp;
+          perDeckMax[di] = (perDeckMax[di] ?? 0) + maxHp;
         }
         deckRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
+        // Build ratios array indexed by deck level
+        const maxDi = perDeckMax.length;
+        for (let di = 0; di < maxDi; di++) {
+          const m = perDeckMax[di] ?? 0;
+          deckRatios[di] = m > 0 ? Math.max(0, Math.min(1, (perDeckHp[di] ?? 0) / m)) : 1;
+        }
       }
       const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
       const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
@@ -2291,7 +2307,7 @@ class HUDElement implements UIElement {
       const shipRawKg   = _modKg + _bodyKg + _invKg;
       const _shipWeight = Math.min(100, (shipRawKg / SHIP_WEIGHT_CAP) * 100);
 
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel, _shipWeight, shipRawKg, SHIP_WEIGHT_CAP);
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel, _shipWeight, shipRawKg, SHIP_WEIGHT_CAP, deckRatios);
     }
 
     // Health / stamina bars above hotbar
@@ -3237,6 +3253,9 @@ class HUDElement implements UIElement {
     shipWeight: number = 0,
     shipWeightKg: number = 0,
     shipWeightCap: number = 6000,
+    /** Per-deck health ratios indexed by deck level (0=lower, 1=upper). When provided with 2+
+     *  entries, separate labelled bars are drawn instead of the single combined DECK bar. */
+    deckRatios: number[] = [],
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
@@ -3610,39 +3629,57 @@ class HUDElement implements UIElement {
       ctx.fill();
     }
 
-    // ── Deck health bar (horizontal) ──────────────────────────────────────
+    // ── Deck health bar(s) (horizontal) ───────────────────────────────────
     const barY      = iconAreaY + iconSz + 6;
     const barW      = iW;
     const barH      = 8;
-    const plankCrit = plankRatio < 0.30;
-    const plankWarn = plankRatio < 0.60;
-    const barColor  = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
 
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    ctx.fillRect(ix, barY, barW, barH);
+    // When per-deck ratios are supplied (brigantine: index 0=lower, 1=upper),
+    // draw a separate labelled bar for each deck. Otherwise fall back to the
+    // combined plankRatio with the generic "DECK" label.
+    const deckBars: { label: string; ratio: number; flashKey: string }[] =
+      deckRatios.length >= 2
+        ? deckRatios.map((r, i) => ({
+            label:    i === 0 ? 'LOWER' : 'UPPER',
+            ratio:    r ?? 1,
+            flashKey: `ship-deck-${i}`,
+          }))
+        : [{ label: 'DECK', ratio: plankRatio, flashKey: 'ship-deck' }];
 
-    ctx.fillStyle = barColor;
-    ctx.fillRect(ix, barY, Math.round(barW * plankRatio), barH);
-    this._tickFlash('ship-deck', plankRatio);
-    const _dkFa = this._flashAlpha('ship-deck');
-    if (_dkFa > 0) {
-      ctx.fillStyle = `rgba(255,255,255,${_dkFa.toFixed(2)})`;
-      ctx.fillRect(ix, barY, barW, barH);
+    let curBarY = barY;
+    for (const bar of deckBars) {
+      const isCrit = bar.ratio < 0.30;
+      const isWarn = bar.ratio < 0.60;
+      const color  = isCrit ? '#dd3333' : isWarn ? '#dd9922' : '#33aa55';
+
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(ix, curBarY, barW, barH);
+
+      ctx.fillStyle = color;
+      ctx.fillRect(ix, curBarY, Math.round(barW * bar.ratio), barH);
+      this._tickFlash(bar.flashKey, bar.ratio);
+      const _dkFa = this._flashAlpha(bar.flashKey);
+      if (_dkFa > 0) {
+        ctx.fillStyle = `rgba(255,255,255,${_dkFa.toFixed(2)})`;
+        ctx.fillRect(ix, curBarY, barW, barH);
+      }
+
+      ctx.strokeStyle = isCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(ix, curBarY, barW, barH);
+
+      const pct = Math.round(bar.ratio * 100);
+      ctx.font         = '9px Georgia, serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = isCrit ? '#ff5555' : '#778866';
+      ctx.fillText(bar.label, ix, curBarY + barH + 3);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = isCrit ? '#ff5555' : '#aabbaa';
+      ctx.fillText(`${pct}%`, ix + barW, curBarY + barH + 3);
+
+      curBarY += barH + 16; // bar(8) + label line(~10) + gap(~6)
     }
-
-    ctx.strokeStyle = plankCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
-    ctx.lineWidth   = 1;
-    ctx.strokeRect(ix, barY, barW, barH);
-
-    const hullPct = Math.round(plankRatio * 100);
-    ctx.font         = '9px Georgia, serif';
-    ctx.textAlign    = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle    = plankCrit ? '#ff5555' : '#778866';
-    ctx.fillText('DECK', ix, barY + barH + 3);
-    ctx.textAlign = 'right';
-    ctx.fillStyle = plankCrit ? '#ff5555' : '#aabbaa';
-    ctx.fillText(`${hullPct}%`, ix + barW, barY + barH + 3);
 
     // ── Wind / force debug panel (left of silhouette, debug mode only) ────
     if (debugMode) {
@@ -3763,18 +3800,27 @@ class HUDElement implements UIElement {
         }
       }
 
-      // Deck integrity horizontal bar
-      if (_mx >= ix && _mx <= ix + barW && _my >= barY && _my <= barY + barH + 14) {
-        if (this._ttHit('ship-deck')) {
-          const dkDesc = plankCrit
+      // Deck integrity bar(s) tooltip — hit-test the full stacked bar region
+      const deckBarsEndY = barY + deckBars.length * (barH + 16);
+      if (_mx >= ix && _mx <= ix + barW && _my >= barY && _my <= deckBarsEndY) {
+        const hoveredBar = deckBars.find((_, i) => {
+          const by = barY + i * (barH + 16);
+          return _my >= by && _my <= by + barH + 16;
+        }) ?? deckBars[0];
+        if (hoveredBar && this._ttHit('ship-deck')) {
+          const isCrit  = hoveredBar.ratio < 0.30;
+          const isWarn  = hoveredBar.ratio < 0.60;
+          const dkDesc  = isCrit
             ? 'Deck is critically damaged. Board repairs recommended immediately.'
-            : plankWarn ? 'Deck integrity is low. Repair planks to restore structural strength.'
+            : isWarn ? 'Deck integrity is low. Repair planks to restore structural strength.'
             : 'Deck is in good condition.';
+          const col     = isCrit ? '#dd3333' : isWarn ? '#dd9922' : '#33aa55';
+          const outline = isCrit ? '#ff4444' : isWarn ? '#ffaa22' : '#66cc88';
           this._drawStatTooltip(ctx, canvas, ix + barW / 2, barY,
-            'Deck Integrity',
-            barColor,
-            plankCrit ? '#ff4444' : plankWarn ? '#ffaa22' : '#66cc88',
-            `${hullPct}%`,
+            `${hoveredBar.label} Deck Integrity`,
+            col,
+            outline,
+            `${Math.round(hoveredBar.ratio * 100)}%`,
             dkDesc, [],
           );
         }

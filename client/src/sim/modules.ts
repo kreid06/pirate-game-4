@@ -13,6 +13,7 @@ export type ModuleKind =
   | 'plank'          // Ship plank - structural hull component
   | 'deck'           // Ship deck - interior floor surface
   | 'swivel'         // Swivel gun - fast, anti-personnel edge weapon
+  | 'ramp'           // Deck ramp - connects lower and upper deck levels
   | 'custom';        // User-defined module types
 
 /**
@@ -29,6 +30,7 @@ export enum ModuleTypeId {
   PLANK = 6,
   DECK = 7,
   SWIVEL = 8,
+  RAMP = 9,
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -47,6 +49,7 @@ export const MODULE_TYPE_MAP = {
       case 'plank': return ModuleTypeId.PLANK;
       case 'deck': return ModuleTypeId.DECK;
       case 'swivel': return ModuleTypeId.SWIVEL;
+      case 'ramp': return ModuleTypeId.RAMP;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -61,6 +64,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.PLANK: return 'plank';
       case ModuleTypeId.DECK: return 'deck';
       case ModuleTypeId.SWIVEL: return 'swivel';
+      case ModuleTypeId.RAMP: return 'ramp';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }

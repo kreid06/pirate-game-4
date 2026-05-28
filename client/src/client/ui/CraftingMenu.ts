@@ -261,6 +261,18 @@ const RECIPES: Recipe[] = [
     ],
   },
   {
+    id: 'craft_ramp',
+    category: 'Ship',
+    outputName: 'Ramp',
+    outputCount: 1,
+    symbol: '⟋',
+    color: '#7a5c2a',
+    borderColor: '#4a3410',
+    ingredients: [
+      { label: 'Wood', count: 20 },
+    ],
+  },
+  {
     id: 'craft_sail',
     category: 'Ship',
     outputName: 'Sail',
@@ -665,6 +677,7 @@ export class CraftingMenu {
         const KIND_MAP: Record<string, ItemKind> = {
           craft_plank:       'plank',
           craft_deck:        'deck',
+          craft_ramp:        'ramp',
           craft_sail:        'sail',
           craft_helm_kit:    'helm_kit',
           craft_cannon:      'cannon',

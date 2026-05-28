@@ -607,17 +607,20 @@ int world_load(const char *path) {
                                 }
                             } else {
                                 /* Finished ship: modules were created by websocket_server_create_ship;
-                                 * match saved modules by type + position to restore health. */
-                                while ((mobj = next_json_object(&marr)) != NULL
-                                       && mi < s->module_count) {
-                                    unsigned mtype = 0, mhealth = 0, mmax = 0;
-                                    float mlx = 0, mly = 0;
+                                 * match saved modules by type + position to restore health.
+                                 * Dynamically-placed modules (ramps) have no default slot — add them. */
+                                while ((mobj = next_json_object(&marr)) != NULL) {
+                                    unsigned mtype = 0, mhealth = 0, mmax = 0, msaved_id = 0;
+                                    float mlx = 0, mly = 0, mlr = 0;
+                                    ws_json_uint(mobj,  "id",         &msaved_id);
                                     ws_json_uint(mobj,  "type",       &mtype);
                                     ws_json_float(mobj, "lx",         &mlx);
                                     ws_json_float(mobj, "ly",         &mly);
+                                    ws_json_float(mobj, "lr",         &mlr);
                                     ws_json_uint(mobj,  "health",     &mhealth);
                                     ws_json_uint(mobj,  "max_health", &mmax);
 
+                                    bool matched = false;
                                     /* Match module by type + approximate position */
                                     for (uint8_t k = 0; k < s->module_count; k++) {
                                         ShipModule *m = &s->modules[k];
@@ -625,9 +628,50 @@ int world_load(const char *path) {
                                         float dx = (float)m->local_pos.x / 65536.0f - mlx;
                                         float dy = (float)m->local_pos.y / 65536.0f - mly;
                                         if (dx * dx + dy * dy > 0.01f) continue;
-                                        m->health = (int32_t)mhealth;
+                                        m->health    = (int32_t)mhealth;
+                                        m->local_rot = (q16_t)(int32_t)(mlr * 65536.0f);
                                         if (mmax > 0) m->max_health = (int32_t)mmax;
+                                        matched = true;
                                         break;
+                                    }
+
+                                    /* Dynamically-placed modules (e.g. ramps) have no default
+                                     * slot — add them to both SimpleShip and sim layers. */
+                                    if (!matched && mhealth > 0) {
+                                        Vec2Q16 pos = {
+                                            (q16_t)(int32_t)(mlx * 65536.0f),
+                                            (q16_t)(int32_t)(mly * 65536.0f)
+                                        };
+                                        q16_t rot = (q16_t)(int32_t)(mlr * 65536.0f);
+                                        /* Derive a safe ID: use offset from saved id + new seq */
+                                        uint8_t offset = msaved_id ? (uint8_t)(msaved_id & 0xFF) : 0xFF;
+                                        uint16_t new_mid = (uint16_t)((s->ship_seq << 8) | offset);
+                                        /* Avoid ID collision with already-created modules */
+                                        bool id_used = false;
+                                        for (uint8_t k = 0; k < s->module_count; k++) {
+                                            if (s->modules[k].id == new_mid) { id_used = true; break; }
+                                        }
+                                        if (id_used) {
+                                            uint16_t max_id = 0;
+                                            for (uint8_t k = 0; k < s->module_count; k++)
+                                                if (s->modules[k].id > max_id) max_id = s->modules[k].id;
+                                            new_mid = max_id + 1;
+                                        }
+                                        ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
+                                        new_mod.health     = (int32_t)mhealth;
+                                        new_mod.max_health = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                        if (s->module_count < MAX_MODULES_PER_SHIP)
+                                            s->modules[s->module_count++] = new_mod;
+                                        /* Mirror into sim layer */
+                                        if (global_sim) {
+                                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                                if ((uint32_t)global_sim->ships[si].id != new_id) continue;
+                                                struct Ship *sim_s = &global_sim->ships[si];
+                                                if (sim_s->module_count < MAX_MODULES_PER_SHIP)
+                                                    sim_s->modules[sim_s->module_count++] = new_mod;
+                                                break;
+                                            }
+                                        }
                                     }
                                     free(mobj);
                                     mi++;

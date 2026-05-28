@@ -559,14 +559,182 @@ static float module_collision_radius(ModuleTypeId type) {
 // ── Dock physics (shipyard CCD solver) ──────────────────────────────────────
 #include "net/dock_physics.h"
 
+/* Forward-declare find_module_by_id — defined in module_interactions.c and
+ * header included later in this file. We need it for the plank-gap check in
+ * resolve_player_hull_containment which is defined before that include. */
+ShipModule* find_module_by_id(SimpleShip* ship, uint32_t module_id);
+
+
+/**
+ * Map a hull edge (identified by its destination vertex index `i` in the
+ * per-polygon loop) to one of the 10 plank slots (0-9).
+ *
+ * Vertex layout for a 47-vertex brigantine hull:
+ *   0..12  — bow curve      (13 verts)  → plank slot 0
+ *   13..24 — stbd straight  (12 verts)  → slots 2/3/4 (4 edges each)
+ *   25..36 — stern curve    (12 verts)  → slot 5
+ *   37..46 — port straight  (10 verts)  → slots 7/8/9  (+closing edge i=0 → slot 9)
+ *
+ * Slots 1 (bow_stbd) and 6 (stern_port) are the same physical curves
+ * rendered in reverse; plank health for those slots is checked separately
+ * in hull_section_plank_alive().
+ */
+static int hull_edge_to_plank_slot(int edge_i, int nv) {
+    if (edge_i >= 1  && edge_i <= 12) return 0;   // bow curve
+    if (edge_i >= 13 && edge_i <= 16) return 2;   // stbd seg 0
+    if (edge_i >= 17 && edge_i <= 20) return 3;   // stbd seg 1
+    if (edge_i >= 21 && edge_i <= 24) return 4;   // stbd seg 2
+    if (edge_i >= 25 && edge_i <= 36) return 5;   // stern curve
+    if (edge_i >= 37 && edge_i <= 40) return 7;   // port seg 0
+    if (edge_i >= 41 && edge_i <= 44) return 8;   // port seg 1
+    if (edge_i == 0 || (edge_i >= 45 && edge_i < nv)) return 9; // port seg 2 + close
+    return -1;
+}
+
+/** Returns the "twin" plank slot for bow/stern dual-plank sections, or -1. */
+static int hull_plank_twin_slot(int slot) {
+    if (slot == 0) return 1; // bow_port ↔ bow_stbd
+    if (slot == 5) return 6; // stern_stbd ↔ stern_port
+    return -1;
+}
+
+/**
+ * True if at least one of the plank(s) guarding hull slot `slot` is alive.
+ * For bow (slots 0/1) and stern (slots 5/6) both faces are checked — the
+ * section is only passable if ALL covering planks are destroyed.
+ */
+static bool hull_section_plank_alive(const SimpleShip* ship, int slot) {
+    if (slot < 0 || slot > 9) return true; // unknown → treat as solid
+    module_id_t mid = MID(ship->ship_seq, MODULE_OFFSET_PLANK(slot));
+    ShipModule* m = find_module_by_id((SimpleShip*)(uintptr_t)ship, mid);
+    if (m && m->health > 0) return true;
+    // Check twin (bow/stern have a mirrored plank on the other face).
+    int twin = hull_plank_twin_slot(slot);
+    if (twin >= 0) {
+        module_id_t twin_mid = MID(ship->ship_seq, MODULE_OFFSET_PLANK(twin));
+        ShipModule* tm = find_module_by_id((SimpleShip*)(uintptr_t)ship, twin_mid);
+        if (tm && tm->health > 0) return true;
+    }
+    return false; // all covering planks are gone — gap in the hull
+}
+
+/**
+ * Push (new_local_x, new_local_y) back inside the ship's hull polygon if it
+ * has crossed an edge or is within INSET of one.  Used on the lower deck so
+ * the hull/planks act as solid walls.
+ *
+ * A hull section is skipped (gap) when ALL plank modules covering that edge
+ * have been destroyed, letting the player fall through the breach.
+ *
+ * Padding: INSET = PLAYER_RADIUS (body) + PLANK_THICKNESS (visual clearance).
+ * This keeps the player's sprite fully clear of the visible plank line.
+ */
+static void resolve_player_hull_containment(const SimpleShip* ship,
+                                            float* new_local_x, float* new_local_y)
+{
+    const float PLAYER_RADIUS   = 8.0f;
+    const float PLANK_THICKNESS = 10.0f;
+    const float INSET           = PLAYER_RADIUS + PLANK_THICKNESS;
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+    if (!sim_ship || sim_ship->hull_vertex_count < 3) return;
+
+    const uint8_t n = sim_ship->hull_vertex_count;
+
+    // Cache hull as client-px float coords (small fixed buffer; hull is ≤64 vtx).
+    float hx[64], hy[64];
+    uint8_t nv = n < 64 ? n : 64;
+    for (uint8_t i = 0; i < nv; i++) {
+        hx[i] = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].x));
+        hy[i] = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].y));
+    }
+
+    // Compute polygon signed area to determine winding (CCW positive).
+    float signed_area2 = 0.0f;
+    for (uint8_t i = 0, j = nv - 1; i < nv; j = i++) {
+        signed_area2 += (hx[j] * hy[i] - hx[i] * hy[j]);
+    }
+    float ccw_sign = (signed_area2 >= 0.0f) ? 1.0f : -1.0f;
+
+    // Two passes so corner pushback resolves cleanly.
+    for (int iter = 0; iter < 2; iter++) {
+        float px = *new_local_x, py = *new_local_y;
+
+        // 1) Point-in-polygon ray cast (horizontal +x ray).
+        bool inside = false;
+        for (uint8_t i = 0, j = nv - 1; i < nv; j = i++) {
+            float ax = hx[j], ay = hy[j];
+            float bx = hx[i], by = hy[i];
+            if ((ay > py) != (by > py)) {
+                float xi = ax + (py - ay) * (bx - ax) / (by - ay);
+                if (px < xi) inside = !inside;
+            }
+        }
+
+        // 2) Find the closest point on the polygon boundary, remembering the
+        //    edge index so we can look up which plank guards it.
+        float best_dist2  = 1e30f;
+        float best_cx     = px,   best_cy = py;
+        float best_nx     = 0.0f, best_ny = 0.0f;
+        int   best_edge_i = -1;
+        for (int i = 0, j = nv - 1; i < nv; j = i++) {
+            float ax = hx[j], ay = hy[j];
+            float bx = hx[i], by = hy[i];
+            float ex = bx - ax, ey = by - ay;
+            float elen2 = ex * ex + ey * ey;
+            if (elen2 < 0.0001f) continue;
+            float t = ((px - ax) * ex + (py - ay) * ey) / elen2;
+            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            float cx = ax + t * ex;
+            float cy = ay + t * ey;
+            float ddx = px - cx, ddy = py - cy;
+            float d2  = ddx * ddx + ddy * ddy;
+            if (d2 < best_dist2) {
+                best_dist2  = d2;
+                best_cx     = cx;
+                best_cy     = cy;
+                best_edge_i = i;
+                float elen = sqrtf(elen2);
+                best_nx = -ey * ccw_sign / elen;
+                best_ny =  ex * ccw_sign / elen;
+            }
+        }
+
+        // 3) Check if the nearest plank is still alive.
+        //    If the section is breached, skip containment → player falls out.
+        int plank_slot = hull_edge_to_plank_slot(best_edge_i, nv);
+        if (!hull_section_plank_alive(ship, plank_slot)) continue;
+
+        float dist = sqrtf(best_dist2);
+
+        if (!inside) {
+            // Outside the hull: snap to boundary and step inward by INSET.
+            *new_local_x = best_cx + best_nx * INSET;
+            *new_local_y = best_cy + best_ny * INSET;
+        } else if (dist < INSET) {
+            // Inside but within INSET of the wall: push inward by the deficit.
+            float push = INSET - dist;
+            *new_local_x = px + best_nx * push;
+            *new_local_y = py + best_ny * push;
+        }
+        // else: comfortably inside, nothing to do.
+    }
+}
 
 /**
  * Resolve player-vs-module collisions in ship-local space.
  * Pushes (new_local_x, new_local_y) out of any module it overlaps.
  * Skips the module the player is currently mounted to.
+ *
+ * Per-deck filtering:
+ *   - Upper deck (deck_level=1): collides with helms / cannons / masts / swivels.
+ *     Planks are passable (the hull-polygon boundary handles edge containment).
+ *   - Lower deck (deck_level=0): passes through upper-deck modules but still
+ *     collides with masts (they span every deck). Hull boundary is enforced
+ *     by resolve_player_hull_containment(), so planks/hull act as walls.
  */
 static void resolve_player_module_collisions(const SimpleShip* ship,
                                              module_id_t mounted_module_id,
+                                             uint8_t player_deck_level,
                                              float* new_local_x, float* new_local_y)
 {
     const float PLAYER_RADIUS = 8.0f; // client pixels — matches sim radius
@@ -577,8 +745,89 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
         // Skip modules the player is mounted to
         if (mod->id == mounted_module_id) continue;
 
+        // ── Ramps: U-shape collision on the lower deck ─────────────────────
+        // The three closed sides (−X "top/light" face and the ±Y sides) act
+        // as walls; the +X "bottom/dark" face is OPEN so a lower-deck player
+        // can walk in to start the climb. Once the client's state machine
+        // flips the player onto the upper deck, this filter stops applying
+        // and they pass through freely.
+        if (mod->type_id == MODULE_TYPE_RAMP) {
+            if (player_deck_level != 0) continue;     // upper deck: walk over
+            if (mod->health == 0)       continue;     // broken ramp: no walls
+
+            float ramp_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+            float ramp_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+            float ramp_rot = Q16_TO_FLOAT(mod->local_rot);
+            float dx = *new_local_x - ramp_x;
+            float dy = *new_local_y - ramp_y;
+            float c_r = cosf(-ramp_rot), s_r = sinf(-ramp_rot);
+            float rlx = dx * c_r - dy * s_r;
+            float rly = dx * s_r + dy * c_r;
+
+            // Ramp half-extents in ramp-local pixels. Kept slightly smaller
+            // than the client's state-machine snap zone (±35) so the climb
+            // transition fires before the player presses into a wall.
+            const float HX = 22.0f;
+            const float HY = 22.0f;
+
+            // Three axis-aligned wall segments (the +X edge is intentionally absent):
+            //   { ax, ay, bx, by }
+            const float walls[3][4] = {
+                { -HX, -HY, -HX,  HY }, // −X wall (top of ramp)
+                { -HX,  HY,  HX,  HY }, // +Y wall (right side)
+                { -HX, -HY,  HX, -HY }, // −Y wall (left side)
+            };
+
+            for (int w = 0; w < 3; w++) {
+                float ax = walls[w][0], ay = walls[w][1];
+                float bx = walls[w][2], by = walls[w][3];
+                float cx, cy;
+                if (ax == bx) {
+                    cx = ax;
+                    float lo = (ay < by) ? ay : by, hi = (ay < by) ? by : ay;
+                    cy = (rly < lo) ? lo : (rly > hi) ? hi : rly;
+                } else {
+                    cy = ay;
+                    float lo = (ax < bx) ? ax : bx, hi = (ax < bx) ? bx : ax;
+                    cx = (rlx < lo) ? lo : (rlx > hi) ? hi : rlx;
+                }
+                float ddx = rlx - cx;
+                float ddy = rly - cy;
+                float d2 = ddx * ddx + ddy * ddy;
+                if (d2 < PLAYER_RADIUS * PLAYER_RADIUS) {
+                    float d = sqrtf(d2);
+                    if (d > 0.001f) {
+                        float push = PLAYER_RADIUS - d;
+                        rlx += (ddx / d) * push;
+                        rly += (ddy / d) * push;
+                    } else {
+                        // Player center exactly on wall: push along outward normal
+                        if (ax == bx) rlx += (ax > 0 ? PLAYER_RADIUS : -PLAYER_RADIUS);
+                        else          rly += (ay > 0 ? PLAYER_RADIUS : -PLAYER_RADIUS);
+                    }
+                }
+            }
+
+            // Rotate corrected ramp-local position back into ship-local
+            float bc = cosf(ramp_rot), bs = sinf(ramp_rot);
+            *new_local_x = ramp_x + rlx * bc - rly * bs;
+            *new_local_y = ramp_y + rlx * bs + rly * bc;
+            continue;
+        }
+
+        // Decide this module's collision radius based on deck level.
+        // Planks are passable on both decks — the hull-polygon containment
+        // pass (lower-deck) and the open ocean (upper-deck) handle the boundary.
+        if (mod->type_id == MODULE_TYPE_PLANK) continue;
+
         float mod_radius = module_collision_radius(mod->type_id);
-        if (mod_radius <= 0.0f) continue; // passable
+        if (mod_radius <= 0.0f) continue; // passable (ladder / deck / seat)
+
+        // Per-deck filtering: on lower deck only masts collide
+        // (cannons / helms / swivels live on the upper deck).
+        if (player_deck_level == 0 && mod->type_id != MODULE_TYPE_MAST) {
+            continue;
+        }
 
         // Module position in ship-local client pixels
         float mod_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
@@ -656,6 +905,7 @@ static const float ITEM_WEIGHT_KG[64] = {
     [12] = 15.0f, // ITEM_IRON_ARMOR
     [13] = 20.0f, // ITEM_DECK
     [14] = 50.0f, // ITEM_SWIVEL
+    [37] = 10.0f, // ITEM_RAMP
     [15] = 2.0f,  // ITEM_AXE
     [16] = 10.0f, // ITEM_WOODEN_FLOOR
     [17] = 30.0f, // ITEM_WORKBENCH
@@ -735,6 +985,7 @@ void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local
     player->local_x = local_x;
     player->local_y = local_y;
     player->movement_state = PLAYER_STATE_WALKING;
+    player->deck_level = 1; // Boarding always lands the player on the upper deck
     
     // Update world position to match ship
     ship_local_to_world(ship, player->local_x, player->local_y, &player->x, &player->y);
@@ -5074,6 +5325,198 @@ int websocket_server_update(struct Sim* sim) {
                                                 log_info("🔨 Player %u placed deck on ship %u",
                                                          player->player_id, sim_ship->id);
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_placed\"}");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "player_set_deck") == 0) {
+                            // PLAYER_SET_DECK: client notifies server when local deck-level
+                            // state machine transitions (fall through hole / climb ramp).
+                            // Payload: {"type":"player_set_deck","deckLevel":0|1}
+                            // Server validates: player must be on a ship near a ramp
+                            // snap-point, with the correct ramp face for the requested
+                            // direction (or an empty hole for falling).
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* sd_player = find_player(client->player_id);
+                                if (sd_player) {
+                                    const char* p_dl = strstr(payload, "\"deckLevel\":");
+                                    if (p_dl) {
+                                        int dl = 1;
+                                        sscanf(p_dl + 12, "%d", &dl);
+                                        if (dl < 0) dl = 0;
+                                        if (dl > 1) dl = 1;
+
+                                        bool allow = false;
+                                        if ((uint8_t)dl == sd_player->deck_level) {
+                                            allow = true; // no-op
+                                        } else if (sd_player->parent_ship_id != 0 && global_sim) {
+                                            struct Ship* sh = NULL;
+                                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                                if (global_sim->ships[si].id == sd_player->parent_ship_id) {
+                                                    sh = &global_sim->ships[si]; break;
+                                                }
+                                            }
+                                            if (sh) {
+                                                // Snap points in CLIENT-px ship-local
+                                                // (must match RenderSystem.RAMP_SNAP_POINTS + place_ramp)
+                                                const float snap_x[2] = { 220.0f, -140.0f };
+                                                const float snap_y[2] = {   0.0f,    0.0f };
+                                                const float ZONE = 27.0f; // matches ramp visual half-extent (25) + 2 px network jitter cushion
+                                                const float MATCH_TOL_SRV = CLIENT_TO_SERVER(20.0f);
+                                                float plx = sd_player->local_x;
+                                                float ply = sd_player->local_y;
+                                                for (int spi = 0; spi < 2 && !allow; spi++) {
+                                                    float dx = plx - snap_x[spi];
+                                                    float dy = ply - snap_y[spi];
+                                                    if (fabsf(dx) >= ZONE || fabsf(dy) >= ZONE) continue;
+
+                                                    // Find a ramp module at this snap point
+                                                    ShipModule* ramp = NULL;
+                                                    float snap_lx_srv = CLIENT_TO_SERVER(snap_x[spi]);
+                                                    float snap_ly_srv = CLIENT_TO_SERVER(snap_y[spi]);
+                                                    for (uint8_t m = 0; m < sh->module_count; m++) {
+                                                        if (sh->modules[m].type_id != MODULE_TYPE_RAMP) continue;
+                                                        float mx = Q16_TO_FLOAT(sh->modules[m].local_pos.x);
+                                                        float my = Q16_TO_FLOAT(sh->modules[m].local_pos.y);
+                                                        if (fabsf(mx - snap_lx_srv) < MATCH_TOL_SRV &&
+                                                            fabsf(my - snap_ly_srv) < MATCH_TOL_SRV) {
+                                                            ramp = &sh->modules[m]; break;
+                                                        }
+                                                    }
+
+                                                    if (dl == 0) {
+                                                        // Upper → Lower (fall): empty hole always OK;
+                                                        // with ramp, only from top/light face (rlx > 0).
+                                                        if (!ramp) { allow = true; }
+                                                        else {
+                                                            float rrot = Q16_TO_FLOAT(ramp->local_rot);
+                                                            float rlx = dx * cosf(-rrot) - dy * sinf(-rrot);
+                                                            if (rlx > 0) allow = true;
+                                                        }
+                                                    } else {
+                                                        // Lower → Upper (climb): requires ramp,
+                                                        // only from bottom/dark face (rlx < 0).
+                                                        if (ramp) {
+                                                            float rrot = Q16_TO_FLOAT(ramp->local_rot);
+                                                            float rlx = dx * cosf(-rrot) - dy * sinf(-rrot);
+                                                            if (rlx < 0) allow = true;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        if (allow) {
+                                            sd_player->deck_level = (uint8_t)dl;
+                                        } else {
+                                            log_debug("player_set_deck rejected: player=%u current=%u requested=%d",
+                                                      (unsigned)client->player_id,
+                                                      (unsigned)sd_player->deck_level, dl);
+                                        }
+                                    }
+                                }
+                            }
+                            response[0] = '\0'; // No reply needed
+                        } else if (strcmp(msg_type, "place_ramp") == 0) {
+                            // PLACE RAMP: add a ramp module at the specified snap-point index.
+                            // Payload: {"type":"place_ramp","shipId":N,"snapIndex":0|1}
+                            // Consumes 1 ITEM_RAMP from the player's inventory.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int ramp_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_RAMP &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            ramp_slot = s; break;
+                                        }
+                                    }
+                                    if (ramp_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_ramp\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        // Parse shipId, snapIndex, rotation
+                                        uint16_t target_ship_id = player->parent_ship_id;
+                                        int snap_index = 0;
+                                        float ramp_rotation = 0.0f;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        const char* p_si  = strstr(payload, "\"snapIndex\":");
+                                        const char* p_rot = strstr(payload, "\"rotation\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                        if (p_si)  { sscanf(p_si + 12, "%d", &snap_index); }
+                                        if (p_rot) { sscanf(p_rot + 11, "%f", &ramp_rotation); }
+                                        if (snap_index < 0 || snap_index > 1) snap_index = 0;
+
+                                        // Snap-point local positions (client-px, must match RenderSystem.RAMP_SNAP_POINTS)
+                                        float snap_x_client[2] = { 220.0f, -140.0f };
+                                        float snap_y_client[2] = {   0.0f,    0.0f };
+                                        float local_x = CLIENT_TO_SERVER(snap_x_client[snap_index]);
+                                        float local_y = CLIENT_TO_SERVER(snap_y_client[snap_index]);
+
+                                        struct Ship* ramp_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                ramp_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        SimpleShip* ramp_simple = find_ship(target_ship_id);
+                                        if (!ramp_sim || !ramp_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (ramp_sim->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            // Check if a ramp already occupies this snap point (within tolerance)
+                                            bool occupied = false;
+                                            float tol = CLIENT_TO_SERVER(20.0f);
+                                            for (uint8_t m = 0; m < ramp_sim->module_count; m++) {
+                                                if (ramp_sim->modules[m].type_id != MODULE_TYPE_RAMP) continue;
+                                                float rx = Q16_TO_FLOAT(ramp_sim->modules[m].local_pos.x);
+                                                float ry = Q16_TO_FLOAT(ramp_sim->modules[m].local_pos.y);
+                                                if (fabsf(rx - local_x) < tol && fabsf(ry - local_y) < tol) {
+                                                    occupied = true; break;
+                                                }
+                                            }
+                                            if (occupied) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"ramp_already_present\"}");
+                                            } else {
+                                                uint16_t max_id = 0;
+                                                for (uint8_t m = 0; m < ramp_sim->module_count; m++)
+                                                    if (ramp_sim->modules[m].id > max_id) max_id = ramp_sim->modules[m].id;
+                                                for (uint8_t m = 0; m < ramp_simple->module_count; m++)
+                                                    if (ramp_simple->modules[m].id > max_id) max_id = ramp_simple->modules[m].id;
+                                                uint16_t new_id = max_id + 1;
+
+                                                ShipModule nr;
+                                                memset(&nr, 0, sizeof(ShipModule));
+                                                nr.id          = new_id;
+                                                nr.type_id     = MODULE_TYPE_RAMP;
+                                                nr.local_pos.x = Q16_FROM_FLOAT(local_x);
+                                                nr.local_pos.y = Q16_FROM_FLOAT(local_y);
+                                                nr.local_rot   = Q16_FROM_FLOAT(ramp_rotation);
+                                                nr.state_bits  = MODULE_STATE_ACTIVE;
+                                                nr.health      = 8000;
+                                                nr.max_health  = 8000;
+
+                                                ramp_sim->modules[ramp_sim->module_count++]     = nr;
+                                                ramp_simple->modules[ramp_simple->module_count++] = nr;
+
+                                                player->inventory.slots[ramp_slot].quantity--;
+                                                if (player->inventory.slots[ramp_slot].quantity == 0)
+                                                    player->inventory.slots[ramp_slot].item = ITEM_NONE;
+
+                                                log_info("🪜 Player %u placed ramp %u (snap %d) on ship %u",
+                                                         player->player_id, new_id, snap_index, ramp_sim->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"ramp_placed\",\"ramp_id\":%u}",
+                                                    new_id);
                                             }
                                         }
                                     }
@@ -10079,8 +10522,13 @@ void websocket_server_tick(float dt) {
                             /* Module / NPC collision (only matters on-deck, harmless off it) */
                             resolve_player_module_collisions(_zship,
                                 ws_player->is_mounted ? ws_player->mounted_module_id : 0,
+                                ws_player->deck_level,
                                 &_znlx, &_znly);
                             resolve_player_npc_collisions(_zship, &_znlx, &_znly);
+                            /* Lower-deck: keep player inside the hull polygon */
+                            if (ws_player->deck_level == 0) {
+                                resolve_player_hull_containment(_zship, &_znlx, &_znly);
+                            }
                             /* Derive world position */
                             float _znwx, _znwy;
                             ship_local_to_world(_zship, _znlx, _znly, &_znwx, &_znwy);
@@ -10180,11 +10628,22 @@ void websocket_server_tick(float dt) {
                             // Resolve collisions with ship modules (helm, mast, cannon)
                             resolve_player_module_collisions(player_ship,
                                 ws_player->is_mounted ? ws_player->mounted_module_id : 0,
+                                ws_player->deck_level,
                                 &new_local_x, &new_local_y);
                             resolve_player_npc_collisions(player_ship, &new_local_x, &new_local_y);
 
-                            // Check if player would walk off the deck (hull boundary)
-                            if (is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
+                            // On the lower deck the hull/planks act as a solid wall:
+                            // keep the player strictly inside the hull polygon so they
+                            // can't walk overboard from below deck.
+                            if (ws_player->deck_level == 0) {
+                                resolve_player_hull_containment(player_ship,
+                                                                &new_local_x, &new_local_y);
+                            }
+
+                            // Upper-deck only: walking off the hull edge dismounts into water.
+                            // Lower-deck players are contained above and never trip this path.
+                            if (ws_player->deck_level != 0 &&
+                                is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
                                 // Player walked off the edge - dismount into water
                                 log_info("🌊 Player %u walked off the deck of ship %u (tick movement)", 
                                          ws_player->player_id, player_ship->ship_id);

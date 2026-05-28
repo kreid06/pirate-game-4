@@ -29,6 +29,7 @@ export type ItemKind =
   | 'iron_shield'
   | 'deck'
   | 'swivel'
+  | 'ramp'
   | 'axe'
   | 'wooden_floor'
   | 'workbench'
@@ -90,6 +91,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   wooden_shield: { kind: 'wooden_shield', name: 'Wooden Shield', category: 'shield',   maxStack: 1,  color: '#c8a46e', borderColor: '#8a6030', symbol: 'D',  description: 'A light wooden shield for blocking attacks.',                                        weight: 5   },
   iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D',  description: 'A sturdy iron shield for reliable defense.',                                         weight: 10  },
   swivel:        { kind: 'swivel',        name: 'Swivel Gun',    category: 'building', maxStack: 9,  color: '#7a4a2a', borderColor: '#4a2810', symbol: '\u2023', description: 'A fast anti-personnel swivel gun. Place anywhere on the ship rail.',            weight: 12  },
+  ramp:          { kind: 'ramp',          name: 'Ramp',          category: 'building', maxStack: 9,  color: '#7a5c2a', borderColor: '#4a3410', symbol: '\u27cb', description: 'A wooden ramp connecting the lower and upper ship decks.',                   weight: 10  },
   axe:           { kind: 'axe',           name: 'Axe',           category: 'tool',     maxStack: 1,  color: '#8b5e2a', borderColor: '#5c3a10', symbol: '\uD83E\uDE93', description: 'Chop wood resources on islands. Equip and press E near a tree.',           weight: 4   },
   wooden_floor:  { kind: 'wooden_floor',  name: 'Wooden Floor',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u229f',      description: 'Place on island ground as a foundation for workbenches.',               weight: 8   },
   workbench:     { kind: 'workbench',     name: 'Workbench',     category: 'building', maxStack: 5,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u2692',      description: 'Crafting station. Place on a wooden floor and press E to open.',       weight: 15  },
@@ -136,6 +138,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   21: 'iron_shield',
   13: 'deck',
   14: 'swivel',
+  37: 'ramp',
   15: 'axe',
   16: 'wooden_floor',
   17: 'workbench',

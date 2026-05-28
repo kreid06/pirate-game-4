@@ -140,13 +140,25 @@ export class RenderSystem {
   /** Whether deck placement build mode is active (deck item held). */
   private deckBuildMode: boolean = false;
   /** Whether the deck ghost is hovered in deck build mode. */
-  private hoveredDeckSlot: { ship: Ship } | null = null;
+  private hoveredDeckSlot: { ship: Ship; deckLevel: number } | null = null;
+  /** Whether ramp placement build mode is active (ramp item held). */
+  private rampBuildMode: boolean = false;
+  /** The ramp snap point slot currently under the cursor in ramp build mode. */
+  private hoveredRampSlot: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
   /** Camera mode badge to overlay on screen. 'free' | 'rotate' | null. */
   public cameraMode: 'free' | 'rotate' | null = null;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
   public localPlayerId: number | null = null;
+  /** Ship ID whose upper deck is semi-transparent because the local player is in a hole on the lower deck. */
+  private _lowerDeckShipId: number | null = null;
+  /** Which deck the local player is on: 1 = upper deck (default), 0 = lower deck. */
+  private _playerDeckLevel: number = 1;
+  /** Optional callback fired whenever _playerDeckLevel changes (so ClientApplication can notify the server). */
+  public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
+  /** Current ramp facing index in build mode: 0=+x, 1=+y, 2=-x, 3=-y (top/light end direction). */
+  private rampFacing: number = 0;
   /** Player position info used by the hover tooltip to determine interact range. */
   public playerInteractInfo: { worldPos: Vec2; localPos: Vec2 | null; carrierId: number | null } | null = null;
   /** Weapon control groups — set by ClientApplication each frame. Null when not on helm. */
@@ -1583,6 +1595,8 @@ export class RenderSystem {
         const w = modData.length || 20;
         const h = modData.width  || 10;
         ctx.rect(-w / 2, -h / 2, w, h);
+      } else if (kind === 'ramp') {
+        ctx.rect(-25, -25, 50, 50);
       } else {
         ctx.rect(-10, -10, 20, 20);
       }
@@ -2205,8 +2219,34 @@ export class RenderSystem {
   }
 
   /** Get the ship whose deck slot is hovered (only in deck build mode) */
-  getHoveredDeckSlot(): { ship: Ship } | null {
+  getHoveredDeckSlot(): { ship: Ship; deckLevel: number } | null {
     return this.hoveredDeckSlot;
+  }
+
+  /** Enable or disable ramp placement build mode */
+  setRampBuildMode(active: boolean): void {
+    this.rampBuildMode = active;
+    if (!active) this.hoveredRampSlot = null;
+  }
+
+  /** Whether ramp build mode is currently active */
+  isInRampBuildMode(): boolean {
+    return this.rampBuildMode;
+  }
+
+  /** Advance the ramp facing by 90° (cycles 0→1→2→3→0). Call on R key in ramp build mode. */
+  cycleRampFacing(): void {
+    this.rampFacing = (this.rampFacing + 1) % 4;
+  }
+
+  /** Returns the current ramp rotation in radians (0, π/2, π, or 3π/2). */
+  getRampFacingRadians(): number {
+    return this.rampFacing * Math.PI / 2;
+  }
+
+  /** Get the ramp snap slot currently hovered (only in ramp build mode) */
+  getHoveredRampSlot(): { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null {
+    return this.hoveredRampSlot;
   }
 
   // ── Island structure management ────────────────────────────────────────────
@@ -3460,6 +3500,10 @@ export class RenderSystem {
           // Helm renders as a circle with radius 8
           width = 16;
           height = 16;
+        } else if (moduleKind === 'ramp') {
+          // Ramp renders as a 50×50 square (matches visual footprint)
+          width = 50;
+          height = 50;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -3734,6 +3778,13 @@ export class RenderSystem {
       this.detectHoveredDeckSlot(worldState);
     } else {
       this.hoveredDeckSlot = null;
+    }
+
+    // In ramp build mode, detect which snap point is under the cursor
+    if (this.rampBuildMode) {
+      this.detectHoveredRampSlot(worldState);
+    } else {
+      this.hoveredRampSlot = null;
     }
 
     // Draw background elements
@@ -7927,10 +7978,82 @@ export class RenderSystem {
     // 6: sail fibers
     // 7: sail masts
     
+    // Deck-level state machine: fall through empty holes, climb back up via ramp modules
+    this._lowerDeckShipId = null;
+    {
+      const _prevDeckLevel = this._playerDeckLevel;
+      const _lp = renderPlayers.find(p => p.id === this.localPlayerId);
+      if (_lp && _lp.carrierId !== 0) {
+        const _cs = renderShips.find(s => s.id === _lp.carrierId);
+        if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1)) {
+          // Player ship-local position
+          const _dx = _lp.position.x - _cs.position.x;
+          const _dy = _lp.position.y - _cs.position.y;
+          const _cos = Math.cos(-_cs.rotation);
+          const _sin = Math.sin(-_cs.rotation);
+          const _lx = _dx * _cos - _dy * _sin;
+          const _ly = _dx * _sin + _dy * _cos;
+
+          // Detection radius around each snap-point (px in ship-local).
+          // Matches the ramp's visual footprint (±25) so the transition fires
+          // exactly when the player enters the rendered ramp tile.
+          const _ZONE = 25;
+
+          if (this._playerDeckLevel === 1) {
+            // Upper deck — fall through empty holes, or enter a ramp from its top (light) face
+            const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
+              const drx = _lx - sp.x, dry = _ly - sp.y;
+              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              const rampMod = _cs.modules.find(
+                m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+              );
+              if (!rampMod) return true; // empty hole — always fall
+              // With ramp: only descend from the top/light face (ramp-local x > 0)
+              const rlx = drx * Math.cos(-rampMod.localRot) - dry * Math.sin(-rampMod.localRot);
+              return rlx > 0;
+            });
+            if (falling) this._playerDeckLevel = 0;
+          }
+
+          if (this._playerDeckLevel === 0) {
+            // Lower deck — climb back up via the bottom/dark face of a ramp
+            const climbing = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
+              const drx = _lx - sp.x, dry = _ly - sp.y;
+              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              const rampMod = _cs.modules.find(
+                m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+              );
+              if (!rampMod) return false;
+              // Only climb from the bottom/dark face (ramp-local x < 0)
+              const rlx = drx * Math.cos(-rampMod.localRot) - dry * Math.sin(-rampMod.localRot);
+              return rlx < 0;
+            });
+            if (climbing) {
+              this._playerDeckLevel = 1;
+            } else {
+              this._lowerDeckShipId = _cs.id;
+            }
+          }
+        } else {
+          // No upper deck on this ship — reset to surface
+          this._playerDeckLevel = 1;
+        }
+      } else {
+        // Not on a ship — reset to surface
+        this._playerDeckLevel = 1;
+      }
+
+      // Notify server when the level changed (so per-deck collision filter stays in sync)
+      if (this._playerDeckLevel !== _prevDeckLevel && this.onDeckLevelChange) {
+        this.onDeckLevelChange(this._playerDeckLevel);
+      }
+    }
+
     // Queue ship wakes + hulls (layer 1)
     for (const ship of renderShips) {
       this.queueRenderItem(1, 'ship-wake', () => this.drawShipWake(ship, camera), -2);
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
+      this.queueRenderItem(1, `lower-deck-floor-${ship.id}`, () => this.drawLowerDeckFloor(ship, camera), 1);
       // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
       if (ship.shipType === SHIP_TYPE_GHOST) {
         this.queueRenderItem(1, `ghost-fog-${ship.id}`, () => this.drawGhostFogAura(ship, camera), -1);
@@ -7950,8 +8073,17 @@ export class RenderSystem {
       const isLocal = player.id === this.localPlayerId;
       // Also render above planks when on a scaffolded ship (building in shipyard) even without explicit build mode
       const onScaffoldedShip = isLocal && player.carrierId !== 0 && this._scaffoldedShips.has(player.carrierId);
+      const onLowerDeck = isLocal && this._lowerDeckShipId !== null;
       if (isLocal && (inBuildMode || onScaffoldedShip)) {
         this.queueRenderItem(3, 'players', () => this.drawPlayer(player, worldState, camera), 5);
+      } else if (onLowerDeck) {
+        // Player is on the lower deck — render below planks, clipped to hull polygon
+        const _cs = renderShips.find(s => s.id === this._lowerDeckShipId);
+        if (_cs) {
+          this.queueRenderItem(1, 'players', () => this._drawPlayerWithHullClip(player, _cs, worldState, camera), 2);
+        } else {
+          this.queueRenderItem(1, 'players', () => this.drawPlayer(player, worldState, camera), 2);
+        }
       } else {
         this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
       }
@@ -7977,12 +8109,16 @@ export class RenderSystem {
 
     // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
     for (const ship of renderShips) {
-      this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(3, 'plank-status', _da(() => this.drawPlankStatusIcons(ship, camera)), 2);
     }
 
     // Burning module fire overlays — drawn above module graphics
     for (const ship of renderShips) {
-      this.queueRenderItem(4, `fire-modules-${ship.id}`, () => this.drawBurningModules(ship, camera), 5);
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(4, `fire-modules-${ship.id}`, _da(() => this.drawBurningModules(ship, camera)), 5);
     }
 
     // Ghost placement plan markers — visible in build menu mode, B-key mode, or hotbar build mode
@@ -8023,22 +8159,30 @@ export class RenderSystem {
         this.queueRenderItem(3, 'deck-ghost', () => this.drawMissingDeckGhost(ship, camera), 0);
       }
     }
-    
-    // Queue cannons, swivel guns, and steering wheels (layers 4-6)
+
+    // In ramp build mode, overlay ghost ramp outlines at snap points (layer 3)
+    if (this.rampBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(3, `ramp-ghost-${ship.id}`, () => this.drawRampSnapGhosts(ship, camera), 0);
+      }
+    }
+
     for (const ship of renderShips) {
-      this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
-      this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
-      this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
-      this.queueRenderItem(4, 'swivel-aim-guides', () => this.drawSwivelAimGuide(ship, worldState, camera), 1);
-      this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(4, 'cannons', _da(() => this.drawShipCannons(ship, camera)));
+      this.queueRenderItem(4, 'swivel-guns', _da(() => this.drawShipSwivelGuns(ship, camera)));
+      this.queueRenderItem(4, 'cannon-aim-guides', _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, 'swivel-aim-guides', _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, 'rudder', _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
-        this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
+        this.queueRenderItem(5, `cannon-groups-${ship.id}`, _da(() => this.drawCannonGroupOverlay(ship, camera)));
       }
       // Reload indicators always drawn above group overlay (layer 6)
-      this.queueRenderItem(6, `cannon-reload-${ship.id}`, () => this.drawCannonReloadIndicators(ship, camera));
-      this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
-      this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
-      this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
+      this.queueRenderItem(6, `cannon-reload-${ship.id}`, _da(() => this.drawCannonReloadIndicators(ship, camera)));
+      this.queueRenderItem(5, 'steering-wheels', _da(() => this.drawShipSteeringWheels(ship, camera)));
+      this.queueRenderItem(5, 'ladders', _da(() => this.drawShipLadders(ship, camera)));
+      this.queueRenderItem(5, 'sail-ropes', _da(() => this.drawShipSailRopes(ship, camera)));
     }
 
     // Island cannon trajectory guide (same layer as ship cannon aim guides)
@@ -8048,7 +8192,9 @@ export class RenderSystem {
     
     // Queue sail fibers (layer 6)
     for (const ship of renderShips) {
-      this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(6, 'sail-fibers', _da(() => this.drawShipSailFibers(ship, camera)));
     }
 
     // Queue island cannon reload indicators at layer 6 — same z-level as ship cannon reload
@@ -8058,7 +8204,9 @@ export class RenderSystem {
 
     // Queue sail masts (layer 7)
     for (const ship of renderShips) {
-      this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(7, 'sail-masts', _da(() => this.drawShipSailMasts(ship, camera)));
     }
     
     // Queue cannonballs (layer 8 - on top of everything)
@@ -8704,7 +8852,8 @@ export class RenderSystem {
     if (phase1Alpha <= 0) return; // fully faded — nothing to draw
     
     this.ctx.save();
-    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? 0.4 : 1.0;
+    if (phase1Alpha * _deckAlpha < 1) this.ctx.globalAlpha = phase1Alpha * _deckAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -8714,7 +8863,9 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     
     this.ctx.strokeStyle = '#8B4513'; // Brown
-    this.ctx.fillStyle = '#DEB887'; // BurlyWood
+    // Upper deck (deckId=1) is lighter; lower deck only is a darker warm wood
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    this.ctx.fillStyle = hasUpperDeck ? '#DEB887' : '#A87040'; // BurlyWood : darker lower-deck wood
 
     // Ghost ship: dark spectral hull with cyan edge glow
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
@@ -8773,19 +8924,35 @@ export class RenderSystem {
 
       // Darken hull fill colour to reflect deck damage (mirrors plank darkenByDamage).
       if (!isGhost && hasDeck) {
-        const deckMod = ship.modules.find(m => m.kind === 'deck');
-        const dmd = deckMod?.moduleData as any;
+        const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                     ?? ship.modules.find(m => m.kind === 'deck');
+        const baseHullColor = hasUpperDeck ? '#DEB887' : '#A87040';
+        const dmd = topDeck?.moduleData as any;
         if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
           const deckHealthRatio = Math.max(0, dmd.health / dmd.maxHealth);
-          this.ctx.fillStyle = this.darkenByDamage('#DEB887', deckHealthRatio);
+          this.ctx.fillStyle = this.darkenByDamage(baseHullColor, deckHealthRatio);
         }
       }
 
+      // Hull fill — punch real transparent holes at deck openings when upper deck present
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
-      this.ctx.fill();
+      if (!isGhost && hasUpperDeck) {
+        // Add hole sub-paths; evenodd rule makes overlapping areas transparent
+        for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+          this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+        }
+        this.ctx.fill('evenodd');
+        // Re-build hull-only path for stroke so hole rects aren't outlined
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+      } else {
+        this.ctx.fill();
+      }
       this.ctx.stroke();
 
       // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
@@ -8938,7 +9105,8 @@ export class RenderSystem {
     // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
     const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
     const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) * ghostHealthFade : phase1Alpha;
-    if (baseAlpha < 1) this.ctx.globalAlpha = baseAlpha;
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? 0.4 : 1.0;
+    if (baseAlpha * _deckAlpha < 1) this.ctx.globalAlpha = baseAlpha * _deckAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -8949,6 +9117,22 @@ export class RenderSystem {
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
     const shipHasDeck = ship.modules.some(m => m.kind === 'deck');
+    const shipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    // Lower-deck-only planks are a darker warm wood; upper deck uses the standard lighter tone
+    const plankBaseColor  = shipHasUpperDeck ? '#8B7355' : '#6B5232';
+    const plankStrokeBase = shipHasUpperDeck ? '#4A3020' : '#3A2010';
+
+    // Clip to hull shape minus deck holes so planks don't draw over transparent openings
+    if (shipHasUpperDeck && ship.hull.length >= 3) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+      this.ctx.clip('evenodd');
+    }
 
     if (!shipHasDeck) {
       // ── Skeleton mode: fill hull sections (between ribs/keel/hull-edge)
@@ -9002,10 +9186,10 @@ export class RenderSystem {
       // Ghost planks: dark semi-transparent with cyan tinge; pulsed by health
       const fillColor   = isGhostShip
         ? this.darkenByDamage('#1a2a3a', healthRatio)
-        : this.darkenByDamage('#8B7355', healthRatio);
+        : this.darkenByDamage(plankBaseColor, healthRatio);
       const strokeColor = isGhostShip
         ? this.darkenByDamage('#003055', healthRatio)
-        : this.darkenByDamage('#4A3020', healthRatio);
+        : this.darkenByDamage(plankStrokeBase, healthRatio);
 
       if (isGhostShip) {
         this.ctx.shadowColor = '#00eeff';
@@ -9536,13 +9720,33 @@ export class RenderSystem {
     }
 
     // ── DECK status ──────────────────────────────────────────────────────────
-    const deckMod = ship.modules.find(m => m.kind === 'deck');
-    if (!deckMod) {
+    const upperDeckMod = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1);
+    const lowerDeckMod = ship.modules.find(m => m.kind === 'deck' && m.deckId === 0);
+    const anyDeckMod   = upperDeckMod ?? lowerDeckMod;
+    if (!anyDeckMod) {
       // No deck present — draw a persistent orange warning at ship center
       this.drawMissingDeckIcon(0, 0, 22);
+    } else if (upperDeckMod) {
+      // Upper deck installed — show upper bar and a lower deck bar (depleted if absent)
+      const udmd = upperDeckMod.moduleData as any;
+      if (udmd && typeof udmd.health === 'number' && typeof udmd.maxHealth === 'number'
+          && udmd.maxHealth > 0 && udmd.health < udmd.maxHealth) {
+        this.drawDeckHealthBar(0, -5, udmd.health / udmd.maxHealth);
+      }
+      // Lower deck bar: show actual health or 0 (depleted) if lower deck missing
+      if (lowerDeckMod) {
+        const ldmd = lowerDeckMod.moduleData as any;
+        if (ldmd && typeof ldmd.health === 'number' && typeof ldmd.maxHealth === 'number'
+            && ldmd.maxHealth > 0 && ldmd.health < ldmd.maxHealth) {
+          this.drawDeckHealthBar(0, 5, ldmd.health / ldmd.maxHealth);
+        }
+      } else {
+        // No lower deck — show it as fully depleted
+        this.drawDeckHealthBar(0, 5, 0);
+      }
     } else {
-      // Deck present but damaged — draw a health bar at ship center
-      const dmd = deckMod.moduleData as any;
+      // Only lower deck present — show its bar at centre
+      const dmd = lowerDeckMod!.moduleData as any;
       if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number'
           && dmd.maxHealth > 0 && dmd.health < dmd.maxHealth) {
         this.drawDeckHealthBar(0, 0, dmd.health / dmd.maxHealth);
@@ -10094,8 +10298,12 @@ export class RenderSystem {
     if (!this.mouseWorldPos) return;
 
     for (const ship of worldState.ships) {
-      const deckPresent = ship.modules.some(m => m.kind === 'deck');
-      if (deckPresent) continue;
+      const decks = ship.modules.filter(m => m.kind === 'deck');
+      const hasLower = decks.some(m => m.deckId === 0);
+      const hasUpper = decks.some(m => m.deckId === 1);
+      // Determine which deck level is placeable: lower first, then upper
+      const missingLevel = !hasLower ? 0 : !hasUpper ? 1 : -1;
+      if (missingLevel === -1) continue; // both decks already present
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -10106,83 +10314,417 @@ export class RenderSystem {
 
       // Hit-test against the ship's walkable deck area (slightly inset from full hull)
       if (Math.abs(localX) <= 280 && Math.abs(localY) <= 75) {
-        this.hoveredDeckSlot = { ship };
+        this.hoveredDeckSlot = { ship, deckLevel: missingLevel };
         return;
       }
     }
   }
 
   /**
-   * Draw a ghost deck outline when the deck module is missing (deck build mode).
+   * Draw ghost deck outlines for any missing deck levels (deck build mode).
+   * Lower deck (deckId=0) uses brown/wood tones; upper deck (deckId=1) uses
+   * amber/gold tones with a dashed border to distinguish the two layers.
    */
   private drawMissingDeckGhost(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    const deckPresent = ship.modules.some(m => m.kind === 'deck');
-    if (deckPresent) return;
+    const decks    = ship.modules.filter(m => m.kind === 'deck');
+    const hasLower = decks.some(m => m.deckId === 0);
+    const hasUpper = decks.some(m => m.deckId === 1);
+    if (hasLower && hasUpper) return; // both present — nothing to draw
 
     this.ctx.save();
-    const screenPos = camera.worldToScreen(ship.position);
+    const screenPos  = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
     const lw = 1.5 / cameraState.zoom;
-    const isHovered = this.hoveredDeckSlot?.ship === ship;
+    const w  = 480, h = 120, r = 12;
+    const x  = -240, y = -60;
 
-    // Deck ghost: rounded rectangle covering walkable area
-    const w = 480; // half-width total
-    const h = 120; // half-height total
-    const r = 12;  // corner radius
-    const x = -240;
-    const y = -60;
+    const drawLevel = (deckLevel: number, isPresent: boolean): void => {
+      if (isPresent) return;
+      const isHovered = this.hoveredDeckSlot?.ship === ship
+                     && this.hoveredDeckSlot?.deckLevel === deckLevel;
+      const isUpper   = deckLevel === 1;
 
-    this.ctx.beginPath();
-    this.ctx.moveTo(x + r, y);
-    this.ctx.lineTo(x + w - r, y);
-    this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    this.ctx.lineTo(x + w, y + h - r);
-    this.ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    this.ctx.lineTo(x + r, y + h);
-    this.ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    this.ctx.lineTo(x, y + r);
-    this.ctx.quadraticCurveTo(x, y, x + r, y);
-    this.ctx.closePath();
+      // Color palette: lower=wood-brown, upper=amber-gold
+      const fillBase    = isUpper ? 'rgba(180,150,40,0.14)' : 'rgba(140,80,30,0.12)';
+      const fillHover   = isUpper ? 'rgba(200,165,45,0.32)' : 'rgba(180,110,40,0.30)';
+      const strokeBase  = isUpper ? 'rgba(210,175,55,0.65)' : 'rgba(200,120,50,0.55)';
+      const strokeHover = isUpper ? '#ddcc33'                : '#dd8833';
+      const plankBase   = isUpper ? 'rgba(200,170,60,0.28)' : 'rgba(180,110,50,0.25)';
+      const plankHover  = isUpper ? 'rgba(210,185,80,0.50)' : 'rgba(220,150,80,0.45)';
+      const ringCol     = isUpper ? '#ffee77'                : '#ffbb66';
+      const labelCol    = isHovered ? '#ffffff'
+                                    : (isUpper ? 'rgba(220,200,100,0.70)' : 'rgba(200,150,80,0.65)');
 
-    this.ctx.fillStyle   = isHovered ? 'rgba(180,110,40,0.30)' : 'rgba(140,80,30,0.12)';
-    this.ctx.strokeStyle = isHovered ? '#dd8833' : 'rgba(200,120,50,0.55)';
-    this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
-    this.ctx.fill();
-    this.ctx.stroke();
-
-    // Draw deck plank lines for visual clarity
-    this.ctx.strokeStyle = isHovered ? 'rgba(220,150,80,0.45)' : 'rgba(180,110,50,0.25)';
-    this.ctx.lineWidth   = lw * 0.8;
-    const plankSpacing = 20;
-    for (let py2 = y + plankSpacing; py2 < y + h; py2 += plankSpacing) {
+      // Rounded-rect path
       this.ctx.beginPath();
-      this.ctx.moveTo(x + 2, py2);
-      this.ctx.lineTo(x + w - 2, py2);
+      this.ctx.moveTo(x + r, y);
+      this.ctx.lineTo(x + w - r, y);
+      this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      this.ctx.lineTo(x + w, y + h - r);
+      this.ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      this.ctx.lineTo(x + r, y + h);
+      this.ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      this.ctx.lineTo(x, y + r);
+      this.ctx.quadraticCurveTo(x, y, x + r, y);
+      this.ctx.closePath();
+
+      this.ctx.fillStyle   = isHovered ? fillHover   : fillBase;
+      this.ctx.strokeStyle = isHovered ? strokeHover : strokeBase;
+      this.ctx.lineWidth   = isHovered ? lw * 2      : lw;
+      if (isUpper) this.ctx.setLineDash([6 / cameraState.zoom, 4 / cameraState.zoom]);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      // Plank lines
+      this.ctx.strokeStyle = isHovered ? plankHover : plankBase;
+      this.ctx.lineWidth   = lw * 0.8;
+      const plankSpacing = 20;
+      for (let py2 = y + plankSpacing; py2 < y + h; py2 += plankSpacing) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(x + 2, py2);
+        this.ctx.lineTo(x + w - 2, py2);
+        this.ctx.stroke();
+      }
+
+      // Centred label
+      const fontSize = Math.max(9, Math.round(11 / cameraState.zoom));
+      this.ctx.font          = `bold ${fontSize}px Georgia, serif`;
+      this.ctx.fillStyle     = labelCol;
+      this.ctx.textAlign     = 'center';
+      this.ctx.textBaseline  = 'middle';
+      this.ctx.fillText(deckLevel === 0 ? '[ LOWER DECK ]' : '[ UPPER DECK ]', 0, 0);
+
+      // Hover: outer glow ring
+      if (isHovered) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(x + r - 6, y - 6);
+        this.ctx.lineTo(x + w - r + 6, y - 6);
+        this.ctx.quadraticCurveTo(x + w + 6, y - 6, x + w + 6, y + r - 6);
+        this.ctx.lineTo(x + w + 6, y + h - r + 6);
+        this.ctx.quadraticCurveTo(x + w + 6, y + h + 6, x + w - r + 6, y + h + 6);
+        this.ctx.lineTo(x + r - 6, y + h + 6);
+        this.ctx.quadraticCurveTo(x - 6, y + h + 6, x - 6, y + h - r + 6);
+        this.ctx.lineTo(x - 6, y + r - 6);
+        this.ctx.quadraticCurveTo(x - 6, y - 6, x + r - 6, y - 6);
+        this.ctx.closePath();
+        this.ctx.strokeStyle = ringCol;
+        this.ctx.lineWidth   = lw * 1.5;
+        this.ctx.stroke();
+      }
+    };
+
+    drawLevel(0, hasLower);
+    drawLevel(1, hasUpper);
+
+    this.ctx.restore();
+  }
+
+  // Ramp snap point positions on the brigantine (ship-local x, y=0)
+  private static readonly RAMP_SNAP_POINTS: { x: number; y: number }[] = [
+    { x: 220, y: 0 },   // forward ramp (near bow quarter)
+    { x: -140, y: 0 },  // aft ramp (near stern quarter)
+  ];
+
+  /**
+   * Detect which ramp snap point the cursor is nearest to (within hover radius).
+   * Skips snap points that already have a ramp module.
+   */
+  private detectHoveredRampSlot(worldState: WorldState): void {
+    this.hoveredRampSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    const HALF = 25; // ramp is a 50×50 square (±25 in each axis)
+
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < RenderSystem.RAMP_SNAP_POINTS.length; i++) {
+        const sp = RenderSystem.RAMP_SNAP_POINTS[i];
+        // Skip snap points already occupied by a ramp module
+        const occupied = ship.modules.some(
+          m => m.kind === 'ramp'
+            && Math.abs(m.localPos.x - sp.x) < 20
+            && Math.abs(m.localPos.y - sp.y) < 20
+        );
+        if (occupied) continue;
+
+        if (Math.abs(localX - sp.x) <= HALF && Math.abs(localY - sp.y) <= HALF) {
+          this.hoveredRampSlot = { ship, snapIndex: i, localPos: sp };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Draw deck holes at the ramp snap points on the top deck (deckId=1).
+   * Holes are always open when the top deck is present.
+   * - No ramp placed: dark empty shaft opening
+   * - Ramp placed:    dark hole with horizontal step lines
+   */
+
+  /**
+   * Draw a player sprite clipped to the ship hull polygon.
+   * Used when the player is on the lower deck so they can't visually overflow the hull boundary.
+   */
+  private _drawPlayerWithHullClip(player: Player, ship: Ship, worldState: WorldState, camera: Camera): void {
+    const screenPos = camera.worldToScreen(ship.position);
+    const camState  = camera.getState();
+    const angle     = ship.rotation - camState.rotation;
+    const cos       = Math.cos(angle);
+    const sin       = Math.sin(angle);
+    const zoom      = camState.zoom;
+
+    this.ctx.save();
+    if (ship.hull.length >= 3) {
+      this.ctx.beginPath();
+      for (let i = 0; i < ship.hull.length; i++) {
+        const sx = screenPos.x + (ship.hull[i].x * cos - ship.hull[i].y * sin) * zoom;
+        const sy = screenPos.y + (ship.hull[i].x * sin + ship.hull[i].y * cos) * zoom;
+        if (i === 0) this.ctx.moveTo(sx, sy);
+        else         this.ctx.lineTo(sx, sy);
+      }
+      this.ctx.closePath();
+      this.ctx.clip();
+    }
+    this.drawPlayer(player, worldState, camera);
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw the lower deck (deckId=0) surface visible through the 50×50 hull holes.
+   * Runs at layer 1, sub-priority 1 — after hull fill, before planks.
+   * If the lower deck is missing, renders a dark void so the gap reads as depth.
+   */
+  private drawLowerDeckFloor(ship: Ship, camera: Camera): void {
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    if (!hasUpperDeck) return;
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const isPlayerBelow = this._lowerDeckShipId === ship.id;
+    const hasLowerDeck  = ship.modules.some(m => m.kind === 'deck' && m.deckId === 0);
+
+    this.ctx.save();
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1 / cameraState.zoom;
+
+    const drawRampVisual = (sp: { x: number; y: number }, localRot: number) => {
+      this.drawRampVisualAt(sp, localRot, lw, 1.0);
+    };
+
+    if (isPlayerBelow && ship.hull.length >= 3) {
+      // Player is on lower deck — render full hull-clipped floor then ramps on top
+      this.ctx.save();
+      this.ctx.beginPath();
+      for (let i = 0; i < ship.hull.length; i++) {
+        if (i === 0) this.ctx.moveTo(ship.hull[i].x, ship.hull[i].y);
+        else         this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      }
+      this.ctx.closePath();
+      this.ctx.clip();
+
+      if (hasLowerDeck) {
+        this.ctx.fillStyle = '#5c3d1e';
+        this.ctx.fill();
+
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const v of ship.hull) {
+          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        }
+        this.ctx.strokeStyle = '#3d2610';
+        this.ctx.lineWidth = lw;
+        for (let y = minY + 12; y < maxY; y += 12) {
+          this.ctx.beginPath();
+          this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
+          this.ctx.stroke();
+        }
+      } else {
+        this.ctx.fillStyle = '#1a0e06';
+        this.ctx.fill();
+      }
+      this.ctx.restore();
+
+      // Draw placed ramps over the floor (outside the hull clip)
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        const rampMod = ship.modules.find(
+          m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+        );
+        if (rampMod) drawRampVisual(sp, rampMod.localRot);
+      }
+    } else {
+      // Normal (above-deck) view: only draw inside the 50×50 hole squares
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        const rx = sp.x - 25, ry = sp.y - 25;
+        const rampMod = ship.modules.find(
+          m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+        );
+
+        if (rampMod) {
+          drawRampVisual(sp, rampMod.localRot);
+        } else if (hasLowerDeck) {
+          this.ctx.fillStyle = '#5c3d1e';
+          this.ctx.fillRect(rx, ry, 50, 50);
+          this.ctx.strokeStyle = '#3d2610';
+          this.ctx.lineWidth = lw;
+          for (let p = 1; p < 5; p++) {
+            const yy = ry + (p / 5) * 50;
+            this.ctx.beginPath();
+            this.ctx.moveTo(rx, yy); this.ctx.lineTo(rx + 50, yy);
+            this.ctx.stroke();
+          }
+          this.ctx.strokeStyle = '#3d2608';
+          this.ctx.lineWidth = lw * 2;
+          this.ctx.strokeRect(rx, ry, 50, 50);
+        } else {
+          const grad = this.ctx.createLinearGradient(rx, ry, rx, ry + 50);
+          grad.addColorStop(0, '#1a0e06');
+          grad.addColorStop(1, '#2d1a0a');
+          this.ctx.fillStyle = grad;
+          this.ctx.fillRect(rx, ry, 50, 50);
+          this.ctx.strokeStyle = '#3d2608';
+          this.ctx.lineWidth = lw * 2;
+          this.ctx.strokeRect(rx, ry, 50, 50);
+        }
+      }
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Shared ramp visual — draws a placed ramp (or preview) in its own rotated frame.
+   * Caller must have already applied ship-local transform.
+   * −x end (ramp-local) = top/light (upper-deck entry face).
+   * +x end = bottom/dark (lower-deck climbable face).
+   */
+  private drawRampVisualAt(
+    sp: { x: number; y: number },
+    localRot: number,
+    lw: number,
+    alpha: number = 1.0,
+  ): void {
+    this.ctx.save();
+    this.ctx.translate(sp.x, sp.y);
+    this.ctx.rotate(localRot);
+    if (alpha !== 1.0) this.ctx.globalAlpha *= alpha;
+
+    const grad = this.ctx.createLinearGradient(-25, 0, 25, 0);
+    grad.addColorStop(0, '#b07d42');
+    grad.addColorStop(1, '#2e1a08');
+    this.ctx.fillStyle = grad;
+    this.ctx.fillRect(-25, -25, 50, 50);
+
+    const numSteps = 6;
+    for (let s = 0; s < numSteps; s++) {
+      const t  = (s + 0.5) / numSteps;
+      const sx = -25 + t * 50;
+      this.ctx.strokeStyle = `rgba(0,0,0,${(0.30 + t * 0.40).toFixed(2)})`;
+      this.ctx.lineWidth   = lw * 1.5;
+      this.ctx.beginPath();
+      this.ctx.moveTo(sx, -25);
+      this.ctx.lineTo(sx, 25);
       this.ctx.stroke();
     }
 
-    if (isHovered) {
-      // Outer highlight ring
-      this.ctx.beginPath();
-      this.ctx.moveTo(x + r - 6, y - 6);
-      this.ctx.lineTo(x + w - r + 6, y - 6);
-      this.ctx.quadraticCurveTo(x + w + 6, y - 6, x + w + 6, y + r - 6);
-      this.ctx.lineTo(x + w + 6, y + h - r + 6);
-      this.ctx.quadraticCurveTo(x + w + 6, y + h + 6, x + w - r + 6, y + h + 6);
-      this.ctx.lineTo(x + r - 6, y + h + 6);
-      this.ctx.quadraticCurveTo(x - 6, y + h + 6, x - 6, y + h - r + 6);
-      this.ctx.lineTo(x - 6, y + r - 6);
-      this.ctx.quadraticCurveTo(x - 6, y - 6, x + r - 6, y - 6);
-      this.ctx.closePath();
-      this.ctx.strokeStyle = '#ffbb66';
-      this.ctx.lineWidth   = lw * 1.5;
-      this.ctx.stroke();
+    this.ctx.strokeStyle = '#5a3210';
+    this.ctx.lineWidth   = lw * 2;
+    this.ctx.strokeRect(-25, -25, 50, 50);
+
+    this.ctx.strokeStyle = 'rgba(220,160,80,0.65)';
+    this.ctx.lineWidth   = lw * 2.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(25, -25);
+    this.ctx.lineTo(25, 25);
+    this.ctx.stroke();
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw ghost ramp outlines at all available snap points on a ship (ramp build mode).
+   * Shows a gradient preview matching the current rampFacing — light (top) to dark (bottom).
+   */
+  private drawRampSnapGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    this.ctx.save();
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+    const facingAngle = this.rampFacing * Math.PI / 2;
+
+    for (let i = 0; i < RenderSystem.RAMP_SNAP_POINTS.length; i++) {
+      const sp = RenderSystem.RAMP_SNAP_POINTS[i];
+
+      // Skip occupied snap points
+      const occupied = ship.modules.some(
+        m => m.kind === 'ramp'
+          && Math.abs(m.localPos.x - sp.x) < 20
+          && Math.abs(m.localPos.y - sp.y) < 20
+      );
+      if (occupied) continue;
+
+      const isHovered = this.hoveredRampSlot?.ship === ship
+                     && this.hoveredRampSlot?.snapIndex === i;
+
+      if (isHovered) {
+        // Hovered: draw the exact same visual as a placed ramp so the
+        // highlight footprint matches the eventual placement 1:1.
+        this.drawRampVisualAt(sp, facingAngle, lw, 1.0);
+
+        // Add an outer glow ring + rotate hint, positioned relative to the
+        // unrotated snap point so it always sits around the 50×50 footprint.
+        this.ctx.save();
+        this.ctx.translate(sp.x, sp.y);
+        this.ctx.rotate(facingAngle);
+        this.ctx.strokeStyle = '#ffee88';
+        this.ctx.lineWidth   = lw * 1.5;
+        this.ctx.strokeRect(-31, -31, 62, 62);
+
+        const fontSize = Math.max(7, Math.round(9 / cameraState.zoom));
+        this.ctx.font         = `bold ${fontSize}px Georgia, serif`;
+        this.ctx.fillStyle    = '#ffffffcc';
+        this.ctx.textAlign    = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('R: rotate', 0, -34);
+        this.ctx.restore();
+      } else {
+        // Unhovered: faded preview using the same visual at reduced opacity,
+        // plus a dashed outline so empty slots are still legible.
+        this.drawRampVisualAt(sp, facingAngle, lw, 0.30);
+
+        this.ctx.save();
+        this.ctx.translate(sp.x, sp.y);
+        this.ctx.rotate(facingAngle);
+        this.ctx.strokeStyle = 'rgba(200,150,60,0.60)';
+        this.ctx.lineWidth   = lw;
+        this.ctx.setLineDash([5 / cameraState.zoom, 3 / cameraState.zoom]);
+        this.ctx.strokeRect(-25, -25, 50, 50);
+        this.ctx.setLineDash([]);
+        this.ctx.restore();
+      }
     }
 
     this.ctx.restore();

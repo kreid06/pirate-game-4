@@ -281,6 +281,7 @@ typedef enum {
     ITEM_CLAIM_FLAG    = 29,  /* Claiming flag — plant on enemy ship OR contested island territory */
     ITEM_FLAG_FORT     = 35,  /* Flag fort — claims radius around it (40 wood + 40 stone) */
     ITEM_COMPANY_FORTRESS = 36, /* Company fortress — claims whole island, 15-min build (100w+100s+20m) */
+    ITEM_RAMP          = 37,  /* Wooden ramp — connects lower and upper deck levels */
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
     ITEM_CLOTH_SHIRT   = 31,  /* torso slot — 20 armour */
@@ -606,6 +607,12 @@ typedef struct WebSocketPlayer {
     /* Dynamic AOI view radius (server units). Updated from client input each frame.
      * Used to tune what entities are relevant to this player. 0 = unknown/default. */
     float view_radius;
+
+    /* Which deck the player is currently standing on (0 = lower, 1 = upper).
+     * Driven by client's deck-level state machine (ramp fall/climb). Used by
+     * server collision filtering: on lower deck, the player passes through
+     * upper-deck modules (cannons, helm) but always collides with masts. */
+    uint8_t deck_level;
 } WebSocketPlayer;
 
 struct WebSocketStats {

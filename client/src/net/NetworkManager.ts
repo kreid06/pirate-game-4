@@ -96,6 +96,8 @@ export enum MessageType {
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
+  PLACE_RAMP = 'place_ramp',
+  PLAYER_SET_DECK = 'player_set_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
   CREW_ASSIGN = 'crew_assign',
   NPC_RECRUIT = 'npc_recruit',
@@ -429,6 +431,21 @@ interface ReplaceHelmMessage extends NetworkMessage {
 interface PlaceDeckMessage extends NetworkMessage {
   type: MessageType.PLACE_DECK;
   timestamp: number;
+  deck_level?: number;
+}
+
+interface PlaceRampMessage extends NetworkMessage {
+  type: MessageType.PLACE_RAMP;
+  timestamp: number;
+  shipId: number;
+  snapIndex: number;
+  rotation: number;  // ramp facing in radians (0, π/2, π, 3π/2)
+}
+
+interface PlayerSetDeckMessage extends NetworkMessage {
+  type: MessageType.PLAYER_SET_DECK;
+  timestamp: number;
+  deckLevel: number; // 0 = lower deck, 1 = upper deck
 }
 
 interface PlaceSwivelAtMessage extends NetworkMessage {
@@ -494,7 +511,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlayerSetDeckMessage;
 
 /**
  * Main network manager class
@@ -1575,9 +1592,28 @@ export class NetworkManager {
    * Request the server to place a missing deck module on the player's ship.
    * Consumes 1 ITEM_DECK from the player's inventory.
    */
-  sendPlaceDeck(): void {
+  sendPlaceDeck(deckLevel: number = 0): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now() });
+    this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now(), deck_level: deckLevel });
+  }
+
+  /**
+   * Request the server to place a ramp at the given snap-point index on the player's ship.
+   * Consumes 1 ITEM_RAMP from the player's inventory.
+   */
+  sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_RAMP, timestamp: Date.now(), shipId, snapIndex, rotation });
+  }
+
+  /**
+   * Notify the server when the local player's deck-level state machine
+   * transitions (fall through hole / climb ramp). The server uses this to
+   * filter per-deck module collisions (lower deck → only masts collide).
+   */
+  sendPlayerSetDeck(deckLevel: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLAYER_SET_DECK, timestamp: Date.now(), deckLevel });
   }
 
   /**

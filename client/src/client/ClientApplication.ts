@@ -367,6 +367,12 @@ export class ClientApplication {
       await this.renderSystem.initialize();
       this.renderSystem.setRadialMenu(this._radialMenu);
 
+      // Mirror deck-level transitions to the server so its per-deck collision
+      // filter (lower deck = only masts block movement) stays in sync.
+      this.renderSystem.onDeckLevelChange = (deckLevel: number) => {
+        this.networkManager.sendPlayerSetDeck(deckLevel);
+      };
+
       // Initialize rename dialog (needs canvas to position the HTML input overlay)
       this.renameDialog = new ShipRenameDialog(this.canvas);
       this.renameDialog.onConfirm = (shipId, name) => {
@@ -1377,6 +1383,10 @@ export class ClientApplication {
         }
       };
 
+      this.inputManager.onCycleRampFacing = () => {
+        this.renderSystem.cycleRampFacing();
+      };
+
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
       this.inputManager.onRepairSail = () => {
         const damagedMast = this.renderSystem.getHoveredDamagedMast();
@@ -1495,11 +1505,20 @@ export class ClientApplication {
           this.networkManager.sendReplaceHelm(helmSlot.ship.id);
           return;
         }
-        // Deck replacement (high priority — only one deck per ship)
+        // Deck placement — lower deck first, upper deck once lower is present
         const deckSlot = this.renderSystem.getHoveredDeckSlot();
         if (deckSlot) {
-          console.log(`🪵 [BUILD] Placing deck on ship ${deckSlot.ship.id}`);
-          this.networkManager.sendPlaceDeck();
+          const lvlName = deckSlot.deckLevel === 0 ? 'lower' : 'upper';
+          console.log(`🪵 [BUILD] Placing ${lvlName} deck on ship ${deckSlot.ship.id}`);
+          this.networkManager.sendPlaceDeck(deckSlot.deckLevel);
+          return;
+        }
+        // Ramp placement — snaps to predefined snap points on the ship
+        const rampSlot = this.renderSystem.getHoveredRampSlot();
+        if (rampSlot) {
+          const facing = this.renderSystem.getRampFacingRadians();
+          console.log(`🪜 [BUILD] Placing ramp at snap ${rampSlot.snapIndex} (${rampSlot.localPos.x},${rampSlot.localPos.y}) facing ${facing.toFixed(2)}rad on ship ${rampSlot.ship.id}`);
+          this.networkManager.sendPlaceRamp(rampSlot.ship.id, rampSlot.snapIndex, facing);
           return;
         }
         // Mast placement build mode
@@ -3881,6 +3900,7 @@ export class ClientApplication {
     const inSwivelBuildMode  = activeItem === 'swivel';
     const inHelmBuildMode   = activeItem === 'helm_kit';
     const inDeckBuildMode   = activeItem === 'deck';
+    const inRampBuildMode   = activeItem === 'ramp';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress' || activeItem === 'claim_flag');
@@ -3928,8 +3948,10 @@ export class ClientApplication {
     this.renderSystem.setSwivelBuildMode(!this.explicitBuildMode && inSwivelBuildMode);
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
+    this.renderSystem.setRampBuildMode(!this.explicitBuildMode && inRampBuildMode);
+    if (this.inputManager) this.inputManager.inRampBuildMode = !this.explicitBuildMode && inRampBuildMode;
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || this.islandBuildMode
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
   }
 
