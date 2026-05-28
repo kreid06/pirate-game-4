@@ -227,7 +227,13 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                      ({  ShipModule* _m = find_module_by_id(find_ship(player->parent_ship_id), player->mounted_module_id);
                          _m && _m->type_id == MODULE_TYPE_CANNON; });
 
+    log_info("🎯 handle_cannon_aim ENTRY: player=%u parent_ship=%u is_mounted=%d mounted_module=%u at_helm=%d at_cannon=%d angle=%.3f groups=%d",
+             player->player_id, player->parent_ship_id, player->is_mounted ? 1 : 0,
+             player->mounted_module_id, at_helm ? 1 : 0, at_cannon ? 1 : 0,
+             aim_angle, active_group_count);
+
     if (!at_helm && !at_cannon) {
+        log_info("🎯 handle_cannon_aim EARLY-RETURN: not at helm or cannon");
         return; // Not at a valid control station
     }
 
@@ -401,16 +407,21 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 }
             }
             if (!in_active_pass2) {
-                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE) {
-                    log_info("🔫 P2 c%u: SKIP haltfire (not in active list)", cannon->id);
-                    continue;
-                }
-                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) {
-                    log_info("🔫 P2 c%u: SKIP targetfire (not in active list)", cannon->id);
-                    continue;
+                /* Player directly mounted to this cannon overrides group mode:
+                 * they are physically manning it and their cursor IS the aim. */
+                bool player_at_this_cannon = at_cannon && cannon->id == player->mounted_module_id;
+                if (!player_at_this_cannon) {
+                    if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE) {
+                        log_info("🔫 P2 c%u: SKIP haltfire (not in active list)", cannon->id);
+                        continue;
+                    }
+                    if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) {
+                        log_info("🔫 P2 c%u: SKIP targetfire (not in active list)", cannon->id);
+                        continue;
+                    }
                 }
             }
-        } else if (player_has_groups) {
+        } else if (player_has_groups && !at_cannon) {
             log_info("🔫 P2 c%u: SKIP ungrouped cannon in group mode", cannon->id);
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
@@ -459,17 +470,21 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
          * group as active.  This overrides the stored mode to handle the race where the aim
          * message arrives before the cannon_group_config that switches the group to AIMING. */
         if (!in_active_pass2) {
-            bool in_haltfire = false;
-            for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-                WeaponGroup* wg = &ship->weapon_groups[WG_CID(player->company_id)][g];
-                if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
-                for (int ci = 0; ci < wg->weapon_count; ci++) {
-                    if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+            /* Player directly mounted to this cannon overrides haltfire — they're manning it. */
+            bool player_at_this_cannon = at_cannon && cannon->id == player->mounted_module_id;
+            if (!player_at_this_cannon) {
+                bool in_haltfire = false;
+                for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
+                    WeaponGroup* wg = &ship->weapon_groups[WG_CID(player->company_id)][g];
+                    if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
+                    for (int ci = 0; ci < wg->weapon_count; ci++) {
+                        if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+                    }
                 }
-            }
-            if (in_haltfire) {
-                log_info("🔫 P2 c%u: SKIP in_haltfire check", cannon->id);
-                continue;
+                if (in_haltfire) {
+                    log_info("🔫 P2 c%u: SKIP in_haltfire check", cannon->id);
+                    continue;
+                }
             }
         }
 

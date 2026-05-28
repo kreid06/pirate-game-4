@@ -3617,12 +3617,16 @@ export class ClientApplication {
             }
             // For helm: seed sail openness from the first mast so W works immediately
             let initialSailOpenness: number | undefined;
+            let initialSailAngleDeg: number | undefined;
             if (moduleKind === 'helm') {
               const mast = ship?.modules.find(m => m.kind === 'mast');
               const mastData = mast?.moduleData as any;
               if (typeof mastData?.openness === 'number') initialSailOpenness = mastData.openness;
+              if (typeof mastData?.angle === 'number') {
+                initialSailAngleDeg = Math.max(-60, Math.min(60, Math.round(mastData.angle * 180 / Math.PI)));
+              }
             }
-            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId, initialSailOpenness);
+            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId, initialSailOpenness, undefined, undefined, initialSailAngleDeg);
             // Zoom out when mounting the helm
             if (moduleKind === 'helm') {
               this.preHelmZoom = this.camera.getState().zoom;
@@ -5873,6 +5877,12 @@ export class ClientApplication {
         // Seed sail openness for helm so W works on first mount
         moduleKind.toUpperCase() === 'HELM' && worldState
           ? (() => { const mast = worldState.ships.find(s => s.id === shipId)?.modules.find(m => m.kind === 'mast'); return (mast?.moduleData as any)?.openness as number | undefined; })()
+          : undefined,
+        undefined,
+        undefined,
+        // Seed sail angle for helm so rotation controls start correctly
+        moduleKind.toUpperCase() === 'HELM' && worldState
+          ? (() => { const mast = worldState.ships.find(s => s.id === shipId)?.modules.find(m => m.kind === 'mast'); const a = (mast?.moduleData as any)?.angle; return typeof a === 'number' ? Math.max(-60, Math.min(60, Math.round(a * 180 / Math.PI))) : undefined; })()
           : undefined
       );
 

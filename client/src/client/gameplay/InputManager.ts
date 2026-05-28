@@ -583,7 +583,7 @@ export class InputManager {
   private islandCannonFacingAngle: number = 0;
   private islandCannonDesiredAimAngle: number = 0;
 
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number): void {
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number, initialSailAngle?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
     this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
@@ -607,13 +607,14 @@ export class InputManager {
         const seeded = initialSailOpenness ?? 100;
         this.currentSailOpenness = seeded;
         this.lastSailOpenness    = seeded;
-        this.currentSailAngle = 0;
-        this.lastSailAngle = 0;
+        const seededAngle = initialSailAngle !== undefined ? initialSailAngle : 0;
+        this.currentSailAngle = seededAngle;
+        this.lastSailAngle = seededAngle;
         this.lastRudderState = { left: false, right: false, backward: false };
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
         this.activeAmmoGroup = 'cannon';
-        console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
+        console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}%, angle to ${seededAngle}° on mount`);
       } else if (this.mountKind === 'swivel') {
         // Swivel uses its own ammo types (10=grapeshot, 11=liquid flame, 12=canister shot)
         this.selectedAmmoType = 10;
