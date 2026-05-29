@@ -149,6 +149,8 @@ export class RenderSystem {
   private deckBuildMode: boolean = false;
   /** Whether the deck ghost is hovered in deck build mode. */
   private hoveredDeckSlot: { ship: Ship; deckLevel: number } | null = null;
+  /** Which deck level the player has manually selected with T (0=lower, 1=upper, -1=auto). */
+  private deckLevelOverride: number = -1;
   /** Whether ramp placement build mode is active (ramp item held). */
   private rampBuildMode: boolean = false;
   private hatchBuildMode: boolean = false;
@@ -2235,7 +2237,15 @@ export class RenderSystem {
    */
   setDeckBuildMode(active: boolean): void {
     this.deckBuildMode = active;
-    if (!active) this.hoveredDeckSlot = null;
+    if (!active) {
+      this.hoveredDeckSlot = null;
+      this.deckLevelOverride = -1; // reset selection on exit
+    }
+  }
+
+  /** Cycle the selected deck level between 0 (lower) and 1 (upper). Only meaningful when both levels are missing. */
+  cycleDeckLevel(): void {
+    this.deckLevelOverride = this.deckLevelOverride === 1 ? 0 : 1;
   }
 
   /** Whether deck build mode is currently active */
@@ -10628,9 +10638,16 @@ export class RenderSystem {
       const decks = ship.modules.filter(m => m.kind === 'deck');
       const hasLower = decks.some(m => m.deckId === 0);
       const hasUpper = decks.some(m => m.deckId === 1);
-      // Determine which deck level is placeable: lower first, then upper
-      const missingLevel = !hasLower ? 0 : !hasUpper ? 1 : -1;
-      if (missingLevel === -1) continue; // both decks already present
+      if (hasLower && hasUpper) continue; // both present — nothing to place
+
+      // When both are missing, respect the T-key override; default to lower (0) first.
+      // When only one is missing, always use that one.
+      let missingLevel: number;
+      if (!hasLower && !hasUpper) {
+        missingLevel = this.deckLevelOverride >= 0 ? this.deckLevelOverride : 0;
+      } else {
+        missingLevel = !hasLower ? 0 : 1;
+      }
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;

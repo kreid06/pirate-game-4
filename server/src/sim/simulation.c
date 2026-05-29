@@ -2025,17 +2025,32 @@ static int hull_vertex_to_plank_index(int v) {
     return 9;              // port_front
 }
 
+// Returns true when no living upper-deck (deck_id==1) deck module exists.
+// Used to gate lower-deck module targeting until top deck is breached.
+static bool upper_deck_destroyed(const struct Ship* ship) {
+    for (uint8_t m = 0; m < ship->module_count; m++) {
+        if (ship->modules[m].type_id == MODULE_TYPE_DECK &&
+            ship->modules[m].deck_id  == 1 &&
+            ship->modules[m].health   >  0)
+            return false;
+    }
+    return true; // no living upper-deck module
+}
+
 // Find the simulation module index that a breaching cannonball hits.
 // Uses original hit radius - projectiles must actually be inside the hull to hit modules.
 // lx/ly are in ship-local server units.
+// target_deck: 0=lower, 1=upper. Modules with deck_id==255 (deck-independent) are always eligible.
 // Returns -1 if no module is close enough.
-static int find_module_hit(const struct Ship* ship, float lx, float ly) {
+static int find_module_hit(const struct Ship* ship, float lx, float ly, uint8_t target_deck) {
     for (int m = 0; m < ship->module_count; m++) {
         const ShipModule* mod = &ship->modules[m];
         if (mod->type_id != MODULE_TYPE_CANNON &&
             mod->type_id != MODULE_TYPE_MAST   &&
             mod->type_id != MODULE_TYPE_HELM)   continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+        // Only hit modules on the target deck; deck-independent (255) are always eligible.
+        if (mod->deck_id != 255 && mod->deck_id != target_deck) continue;
 
         // Use original tight hit radius - projectile must be truly inside
         float radius;
@@ -2573,13 +2588,15 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                 if (removed) { continue; }
 
-                // ---- Deck pass-through: damage deck once per hull entry (priority) ----
-                // Use the actual deck module id as the sentinel in last_hit_module_id to avoid
-                // double-hitting if the projectile re-enters the hull bounds this tick.
-                // Find the deck module id first.
+                // ---- Deck pass-through: damage the correct deck layer once per hull entry ----
+                // Upper deck (deck_id==1) takes hits while it lives; once destroyed the lower
+                // deck (deck_id==0) becomes the target.  last_hit_module_id acts as a sentinel
+                // to avoid double-hitting on the same hull entry.
+                uint8_t  _target_deck_id = upper_deck_destroyed(ship) ? 0 : 1;
                 uint16_t _deck_mid = 0;
                 for (uint8_t _dm = 0; _dm < ship->module_count; _dm++) {
-                    if (ship->modules[_dm].type_id == MODULE_TYPE_DECK) {
+                    if (ship->modules[_dm].type_id == MODULE_TYPE_DECK &&
+                        ship->modules[_dm].deck_id  == _target_deck_id) {
                         _deck_mid = ship->modules[_dm].id; break;
                     }
                 }
@@ -2587,6 +2604,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     for (uint8_t m = 0; m < ship->module_count; m++) {
                         ShipModule* deck = &ship->modules[m];
                         if (deck->type_id != MODULE_TYPE_DECK) continue;
+                        if (deck->deck_id  != _target_deck_id) continue;
                         if (deck->health <= 0) break;
 
                         proj->last_hit_module_id = _deck_mid; // mark deck as hit for this pass
@@ -2619,6 +2637,73 @@ void handle_projectile_collisions(struct Sim* sim) {
                             if (attacker)
                                 attacker->level_stats.xp += 10u + (uint32_t)(deck_dmg / 100.0f);
                         }
+
+                        // Cascade: deck destroyed → remove all modules on that deck.
+                        // Iterate backwards so memmove removals don't shift unvisited indices.
+                        if (deck->health <= 0) {
+                            uint8_t _cdk = deck->deck_id;
+                            log_info("💀 Deck %u destroyed on ship %u — cascading destruction", _cdk, ship->id);
+                            for (int _cm = (int)ship->module_count - 1; _cm >= 0; _cm--) {
+                                ShipModule* cm = &ship->modules[_cm];
+                                if (cm->deck_id  != _cdk)               continue;
+                                if (cm->type_id  == MODULE_TYPE_DECK)    continue; // deck stays as health marker
+                                if (cm->type_id  == MODULE_TYPE_GUNPORT) continue; // hull structure — exempt
+                                if (cm->type_id  == MODULE_TYPE_MAST)    continue; // sails — exempt
+                                if (cm->type_id  == MODULE_TYPE_LADDER)  continue; // stern ladder — exempt
+                                if (cm->type_id  == MODULE_TYPE_PLANK)   continue; // hull planks — exempt
+                                if (cm->type_id  == MODULE_TYPE_RAMP)    continue; // ramp — survives until both decks gone
+                                if (cm->state_bits & MODULE_STATE_DESTROYED) continue;
+
+                                log_info("  💥 Cascading — removing module %u (type %d)", cm->id, cm->type_id);
+                                if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                                    struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                                    ev->ship_id         = ship->id;
+                                    ev->module_id       = cm->id;
+                                    ev->is_breach       = false;
+                                    ev->is_sink         = false;
+                                    ev->destroyed       = true;
+                                    ev->damage_dealt    = Q16_TO_FLOAT(cm->health);
+                                    ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                                    ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                                    ev->shooter_ship_id = proj->firing_ship_id;
+                                }
+                                memmove(&ship->modules[_cm], &ship->modules[_cm + 1],
+                                        (ship->module_count - _cm - 1) * sizeof(ShipModule));
+                                ship->module_count--;
+                            }
+
+                            // If both decks are now gone, destroy all ramps.
+                            bool _upper_gone = true, _lower_gone = true;
+                            for (uint8_t _dm = 0; _dm < ship->module_count; _dm++) {
+                                if (ship->modules[_dm].type_id != MODULE_TYPE_DECK) continue;
+                                if (ship->modules[_dm].health <= 0) continue;
+                                if (ship->modules[_dm].deck_id == 1) _upper_gone = false;
+                                if (ship->modules[_dm].deck_id == 0) _lower_gone = false;
+                            }
+                            if (_upper_gone && _lower_gone) {
+                                log_info("💀 Both decks destroyed on ship %u — removing ramps", ship->id);
+                                for (int _rm = (int)ship->module_count - 1; _rm >= 0; _rm--) {
+                                    ShipModule* rm = &ship->modules[_rm];
+                                    if (rm->type_id != MODULE_TYPE_RAMP) continue;
+                                    if (rm->state_bits & MODULE_STATE_DESTROYED) continue;
+                                    if (sim->hit_event_count < MAX_HIT_EVENTS) {
+                                        struct HitEvent* ev = &sim->hit_events[sim->hit_event_count++];
+                                        ev->ship_id         = ship->id;
+                                        ev->module_id       = rm->id;
+                                        ev->is_breach       = false;
+                                        ev->is_sink         = false;
+                                        ev->destroyed       = true;
+                                        ev->damage_dealt    = Q16_TO_FLOAT(rm->health);
+                                        ev->hit_x           = Q16_TO_FLOAT(proj->position.x);
+                                        ev->hit_y           = Q16_TO_FLOAT(proj->position.y);
+                                        ev->shooter_ship_id = proj->firing_ship_id;
+                                    }
+                                    memmove(&ship->modules[_rm], &ship->modules[_rm + 1],
+                                            (ship->module_count - _rm - 1) * sizeof(ShipModule));
+                                    ship->module_count--;
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -2635,7 +2720,9 @@ void handle_projectile_collisions(struct Sim* sim) {
                     removed = true;
                 }
 
-                int hit_m = find_module_hit(ship, lx, ly);
+                // Gate interior module hits to the correct deck layer.
+                uint8_t _mod_target_deck = upper_deck_destroyed(ship) ? 0 : 1;
+                int hit_m = find_module_hit(ship, lx, ly, _mod_target_deck);
                 if (!removed && hit_m >= 0) {
                     ShipModule* hit_mod = &ship->modules[hit_m];
                     uint16_t mod_id = hit_mod->id;

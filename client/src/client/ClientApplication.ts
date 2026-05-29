@@ -4790,9 +4790,24 @@ export class ClientApplication {
         }
 
         case 't':
-        case 'T':
+        case 'T': {
+          // In deck build mode: cycle between lower/upper deck snap point
+          if (this.renderSystem.isInDeckBuildMode()) {
+            this.renderSystem.cycleDeckLevel();
+            e.preventDefault();
+            break;
+          }
+          // Otherwise open chat input
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.commandConsole.visible
+            && !this.chatBox.isOpen) {
+            this.chatBox.open();
+            e.preventDefault();
+          }
+          break;
+        }
         case 'Enter': {
-          // Open chat input (T or Enter to talk)
+          // Open chat input
           if (!this.uiManager.isAnyMenuOpen()
             && !this.commandConsole.visible
             && !this.chatBox.isOpen) {
