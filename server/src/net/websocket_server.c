@@ -823,15 +823,28 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
         float mod_radius = module_collision_radius(mod->type_id);
         if (mod_radius <= 0.0f) continue; // passable (ladder / deck / seat)
 
-        // Per-deck filtering: masts span all decks and always collide.
-        // Cannons always block player movement regardless of deck_id — broadside
-        // cannons are at deck-edge level and act as physical obstacles on both decks.
-        // Other upper-deck modules (helm, swivel) are skipped on the lower deck.
+        // Per-deck filtering: deck-independent modules (deck_id=255, e.g. masts)
+        // collide on all decks.  Deck-specific modules only collide when the
+        // player is on the same deck.
+        //
+        // Lower deck (player_deck_level=0): only masts (deck-independent) and
+        //   cannons collide; everything else (helm, swivel, etc.) is skipped.
+        //   Cannons are kept because broadside cannons sit at deck-edge level
+        //   and historically acted as physical obstacles on both decks.
+        //   NOTE: the symmetric upper-deck filter now skips lower-deck cannons,
+        //   so a cannon placed on deck 0 will NOT push an upper-deck player.
+        //
+        // Upper deck (player_deck_level=1): skip any module explicitly tagged
+        //   as a lower-deck module (deck_id=0).  Deck-independent modules
+        //   (deck_id=255) still collide on every deck.
         if (player_deck_level == 0) {
             if (mod->type_id != MODULE_TYPE_MAST &&
                 mod->type_id != MODULE_TYPE_CANNON) {
                 continue;
             }
+        } else if (player_deck_level == 1) {
+            // Skip modules that belong exclusively to the lower deck.
+            if (mod->deck_id == 0) continue;
         }
 
         // Module position in ship-local client pixels
@@ -5463,14 +5476,19 @@ int websocket_server_update(struct Sim* sim) {
                                                 // (must match RenderSystem.RAMP_SNAP_POINTS + place_ramp)
                                                 const float snap_x[2] = { 220.0f, -140.0f };
                                                 const float snap_y[2] = {   0.0f,    0.0f };
-                                                const float ZONE = 27.0f; // matches ramp visual half-extent (25) + 2 px network jitter cushion
+                                                // Both fall and climb use the same zone (matches ramp visual
+                                                // half-extent 25 + 2 px network-jitter cushion = 27).
+                                                const float FALL_ZONE  = 22.0f;
+                                                const float CLIMB_ZONE = 22.0f;
                                                 const float MATCH_TOL_SRV = CLIENT_TO_SERVER(20.0f);
                                                 float plx = sd_player->local_x;
                                                 float ply = sd_player->local_y;
+                                                // Choose the appropriate zone for the requested direction.
+                                                const float zone = (dl == 0) ? FALL_ZONE : CLIMB_ZONE;
                                                 for (int spi = 0; spi < 2 && !allow; spi++) {
                                                     float dx = plx - snap_x[spi];
                                                     float dy = ply - snap_y[spi];
-                                                    if (fabsf(dx) >= ZONE || fabsf(dy) >= ZONE) continue;
+                                                    if (fabsf(dx) >= zone || fabsf(dy) >= zone) continue;
 
                                                     // Find a ramp module at this snap point
                                                     ShipModule* ramp = NULL;

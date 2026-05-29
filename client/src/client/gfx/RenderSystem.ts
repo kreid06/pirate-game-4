@@ -3599,7 +3599,10 @@ export class RenderSystem {
         if (_pass2Kind === 'gunport' && this._playerDeckLevel !== 0) continue;
         // Planks are interactable from any deck level (build/repair from either deck)
         // All other modules: block cross-deck interaction (deck-independent modules allowed everywhere)
-        if (_pass2Kind !== 'plank' && _pass2Kind !== 'gunport'
+        // Exception: during weapon-group overlay mode (Ctrl held), cannons/swivels are
+        // hoverable across decks so the player can assign groups from either deck.
+        const _crossDeckGroupMode = this.showGroupOverlay && (_pass2Kind === 'cannon' || _pass2Kind === 'swivel');
+        if (!_crossDeckGroupMode && _pass2Kind !== 'plank' && _pass2Kind !== 'gunport'
             && module.deckId !== 255 && module.deckId !== this._playerDeckLevel) continue;
 
         const moduleKind = _pass2Kind;
@@ -8149,7 +8152,8 @@ export class RenderSystem {
           // Detection radius around each snap-point (px in ship-local).
           // Matches the ramp's visual footprint (±25) so the transition fires
           // exactly when the player enters the rendered ramp tile.
-          const _ZONE = 25;
+          // Both fall and climb use the same zone for consistent behaviour.
+          const _ZONE = 20;
 
           if (this._playerDeckLevel === 1) {
             // Upper deck — fall through empty holes, or enter a ramp from its top (light) face

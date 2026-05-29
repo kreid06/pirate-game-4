@@ -2206,7 +2206,7 @@ class HUDElement implements UIElement {
     // Player bars sit above the hotbar (same constants as renderPlayerBars)
     const _barsH = 4 * 2 + 6 + 3 + 10 * 2 + 3; // PPPAD*2 + XP_H + GAP + BAR_H*2 + GAP = 40
     const BOX_W  = 220;
-    const BOX_H  = _hbH + _barsH + 4; // 76 + 40 + 4 = 120
+    const BOX_H  = _hbH + _barsH + 4 + 16; // 76 + 40 + 4 + 16 = 136 (extra row for deck info)
     const BX     = Math.max(8, _hbX - BOX_W - 6);
     const BY     = _hbY - _barsH - 4;
 
@@ -2243,14 +2243,21 @@ class HUDElement implements UIElement {
     ctx.fillStyle = '#aaffcc';
     ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52);
 
-    // Ship / velocity
+    // Ship + current deck
     ctx.fillStyle = '#cccccc';
-    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '—'}  Vel ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 68);
+    const _deckLabel = player.onDeck
+      ? (player.deckId === 0 ? 'Lower deck' : 'Upper deck')
+      : 'Off ship';
+    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '\u2014'}  ${_deckLabel}`, BX + 10, BY + 68);
+
+    // Velocity
+    ctx.fillStyle = '#bbbbbb';
+    ctx.fillText(`Vel  ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 84);
 
     // Network bandwidth
     const ns = context.networkStats;
     ctx.fillStyle = '#aaaaaa';
-    ctx.fillText(`↑${(ns.bytesSent / 1024).toFixed(1)}KB ↓${(ns.bytesReceived / 1024).toFixed(1)}KB loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 84);
+    ctx.fillText(`\u2191${(ns.bytesSent / 1024).toFixed(1)}KB \u2193${(ns.bytesReceived / 1024).toFixed(1)}KB loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 100);
 
     ctx.restore();
 

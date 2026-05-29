@@ -16,6 +16,9 @@ export interface RadialOption {
    *  (getHoveredId returns null while hovering a disabled slice, but the
    *  slice is still hover-detected so its tooltip can render). */
   disabled?: boolean;
+  /** When true the slice is rendered with a distinct highlight (e.g. the currently
+   *  active/selected option) so the user can quickly identify their current choice. */
+  highlighted?: boolean;
   /** Optional multi-line tooltip rendered below the radial when the slice
    *  is hovered. Each entry is one line. */
   tooltip?: string[];
@@ -121,6 +124,7 @@ export class RadialMenu {
       const opt       = this._options[i];
       const isHovered = i === this._hoveredIdx;
       const isDisabled = opt.disabled === true;
+      const isHighlighted = opt.highlighted === true && !isDisabled;
 
       ctx.beginPath();
 
@@ -164,11 +168,21 @@ export class RadialMenu {
           ctx.fillStyle   = 'rgba(50, 50, 50, 0.85)';
           ctx.strokeStyle = 'rgba(140, 60, 60, 0.85)';
           ctx.lineWidth   = 2;
+        } else if (isHighlighted) {
+          // Highlighted + hovered: bright teal/blue — clearly active
+          ctx.fillStyle   = 'rgba(20, 120, 185, 0.95)';
+          ctx.strokeStyle = 'rgba(80, 200, 255, 1.0)';
+          ctx.lineWidth   = 2;
         } else {
           ctx.fillStyle   = 'rgba(200, 145, 20, 0.90)';
           ctx.strokeStyle = 'rgba(255, 220, 80, 1.0)';
           ctx.lineWidth   = 2;
         }
+      } else if (isHighlighted) {
+        // Highlighted + not hovered: teal tint to mark current selection
+        ctx.fillStyle   = 'rgba(15, 65, 100, 0.88)';
+        ctx.strokeStyle = 'rgba(60, 170, 220, 0.75)';
+        ctx.lineWidth   = 1.5;
       } else if (isDisabled) {
         ctx.fillStyle   = 'rgba(14, 18, 26, 0.55)';
         ctx.strokeStyle = 'rgba(90, 70, 40, 0.40)';
@@ -189,6 +203,8 @@ export class RadialMenu {
       ctx.font         = isHovered ? 'bold 11px Georgia, serif' : '10px Georgia, serif';
       if (isDisabled) {
         ctx.fillStyle  = isHovered ? 'rgba(220, 170, 170, 0.85)' : 'rgba(140, 130, 110, 0.45)';
+      } else if (isHighlighted) {
+        ctx.fillStyle  = isHovered ? '#e8f4ff' : 'rgba(120, 210, 255, 0.90)';
       } else {
         ctx.fillStyle  = isHovered ? '#fff8e0' : 'rgba(200, 185, 140, 0.85)';
       }

@@ -211,6 +211,10 @@ export class ClientApplication {
   private _ladderHoldOnShip = false;
   /** What kind of module the current E-hold targets: 'ladder' | 'module' | 'mount' | 'npc' | 'structure' | null */
   private _interactKind: 'ladder' | 'module' | 'mount' | 'npc' | 'structure' | null = null;
+  /** Cannon ID for the weapon-group sub-radial opened after selecting "Weapon Group" from the mount radial. */
+  private _weaponGroupSubMenuCannonId: number | null = null;
+  /** Selected radial option snapshotted by a left-click on the open radial; consumed by the next E keyup. */
+  private _radialClickSelected: string | null = null;
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
@@ -1881,6 +1885,8 @@ export class ClientApplication {
 
       // Left-click while mounted: Move To mode takes priority over cannon fire
       this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null || this._selectedNpcIds.length > 0;
+      // Suppress all InputManager mouse logic while the radial menu is open.
+      this.inputManager.onBeforeMouseInput = () => this._radialMenu.isOpen;
 
       // Ctrl+right-click on an NPC: cycle normal → ignore → locked (at module) → normal
       this.inputManager.onNpcStateCycle = () => {
@@ -4559,11 +4565,80 @@ export class ClientApplication {
       this._radialMenu.updateMouse(screenX, screenY);
     });
 
-    // Close the radial menu immediately on any mouse click (left or right) so
-    // it can never remain accidentally open after the player clicks away.
+    // Mouse-click handling when the radial menu is open:
+    //   Left-click  → snapshot the hovered option; executed when E is released.
+    //   Right-click → cancel the interaction immediately.
+    // All other game mouse logic is suppressed by onBeforeMouseInput while the radial is open.
     this.canvas.addEventListener('mousedown', (event) => {
       if (this._radialMenu.isOpen && (event.button === 0 || event.button === 2)) {
-        this._radialMenu.close();
+        // ── Weapon Group sub-menu: read selection before closing ─────────────
+        if (this._weaponGroupSubMenuCannonId !== null) {
+          const _wgSelected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          const _wgCannonId = this._weaponGroupSubMenuCannonId;
+          this._weaponGroupSubMenuCannonId = null;
+          if (_wgSelected && _wgSelected.startsWith('wg_toggle_')) {
+            const _wgGroup = parseInt(_wgSelected.replace('wg_toggle_', ''), 10);
+            if (!isNaN(_wgGroup)) {
+              const _wgState = this.controlGroups.get(_wgGroup);
+              if (_wgState) {
+                if (_wgState.cannonIds.includes(_wgCannonId)) {
+                  _wgState.cannonIds = _wgState.cannonIds.filter(id => id !== _wgCannonId);
+                  console.log(`❌ Cannon ${_wgCannonId} removed from group G${_wgGroup}`);
+                } else {
+                  // Remove from any other group first (cannon belongs to at most one group)
+                  for (const [_gi, _s] of this.controlGroups) {
+                    if (_s.cannonIds.includes(_wgCannonId)) {
+                      _s.cannonIds = _s.cannonIds.filter(id => id !== _wgCannonId);
+                      this.networkManager.sendCannonGroupConfig(_gi, _s.mode, _s.cannonIds, _s.targetId > 0 ? _s.targetId : 0);
+                    }
+                  }
+                  _wgState.cannonIds.push(_wgCannonId);
+                  console.log(`🎯 Cannon ${_wgCannonId} → group G${_wgGroup}`);
+                }
+                this.networkManager.sendCannonGroupConfig(_wgGroup, _wgState.mode, _wgState.cannonIds, _wgState.targetId > 0 ? _wgState.targetId : 0);
+                this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              }
+            }
+          }
+          if (this._ladderHoldTimer !== null) {
+            clearTimeout(this._ladderHoldTimer);
+            this._ladderHoldTimer = null;
+            this.renderSystem.stopLadderHoldRing();
+          }
+          return;
+        }
+
+        if (event.button === 2) {
+          // Right-click: cancel — close radial and flash cancel on next E release
+          this._radialMenu.close();
+          this._radialClickSelected = null;
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        } else {
+          const _hovId = this._radialMenu.getHoveredId();
+          // Special case: 'weapon_group' opens its sub-menu immediately rather than
+          // waiting for E release, since the user has already clicked to confirm.
+          if (_hovId === 'weapon_group' && this._ladderHoldModuleId !== null) {
+            const _wgModuleId = this._ladderHoldModuleId;
+            this._radialMenu.close();
+            this._interactKind = null; // E keyup should be a no-op after this
+            this._weaponGroupSubMenuCannonId = _wgModuleId;
+            const _wgMp = this.inputManager.getMouseScreenPosition();
+            const _wgOpts: RadialOption[] = [];
+            for (let _g = 0; _g < 10; _g++) {
+              const _gs = this.controlGroups.get(_g);
+              if (!_gs) continue;
+              const _inGrp = _gs.cannonIds.includes(_wgModuleId);
+              _wgOpts.push({ id: `wg_toggle_${_g}`, label: _inGrp ? `✖ G${_g} Remove` : `+ G${_g} Add`, highlighted: _inGrp });
+            }
+            this._radialMenu.open(_wgMp.x, _wgMp.y, _wgOpts);
+          } else {
+            // Left-click: snapshot the hovered selection; E keyup will execute it
+            this._radialClickSelected = _hovId;
+            this._radialMenu.close();
+          }
+        }
+
         // Cancel the hold timer too if still counting down
         if (this._ladderHoldTimer !== null) {
           clearTimeout(this._ladderHoldTimer);
@@ -5158,6 +5233,8 @@ export class ClientApplication {
                 if (npcAtGun) {
                   radialOpts.push({ id: 'dismiss_npc', label: `Dismiss ${npcAtGun.name}` });
                 }
+                // Weapon Group assignment shortcut
+                radialOpts.push({ id: 'weapon_group', label: '🎯 Weapon Group' });
               }
               // Demolish option — always available when on own ship (server validates ownership)
               radialOpts.push({ id: 'demolish', label: '🪓 Demolish' });
@@ -5378,6 +5455,16 @@ export class ClientApplication {
       this._interactKind = null;
       this._ladderHoldWasMounted = false;
 
+      // Helper to resolve the radial selection from either the still-open radial (E-hold
+      // release) or a prior left-click snapshot (_radialClickSelected set in mousedown).
+      const _hasRadialPending = () => this._radialMenu.isOpen || this._radialClickSelected !== null;
+      const _resolveRadialSelected = (): string | null => {
+        if (this._radialMenu.isOpen) return this._radialMenu.getHoveredId();
+        const s = this._radialClickSelected;
+        this._radialClickSelected = null;
+        return s;
+      };
+
       // Range validation: re-check player ↔ module distance at confirmation time.
       // The target was locked in at keydown (hover) so continued hover is NOT required,
       // but the player must still be within interaction range so they can't reach across
@@ -5495,8 +5582,8 @@ export class ClientApplication {
             this.uiManager.salvageMenu.open(structId, loot);
           }
           // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
-        } else if (this._radialMenu.isOpen) {
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
@@ -5581,9 +5668,9 @@ export class ClientApplication {
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
           defaultNpcAction();
-        } else if (this._radialMenu.isOpen) {
-          // Hold released with radial open — execute selected option or cancel
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          // Hold released (or left-click) with radial pending — execute selected option or cancel
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if (selected) { executeNpcAction(selected); }
           else { this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition()); }
@@ -5619,9 +5706,9 @@ export class ClientApplication {
           if (doMountAction()) {
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           }
-        } else if (this._radialMenu.isOpen) {
-          // Hold — execute selected option or cancel if centre dead zone
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          // Hold (or left-click) — execute selected option or cancel if null/dead-zone
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if (selected === 'dismiss_npc' && moduleId !== null) {
             // Dismiss the NPC currently stationed at this cannon/swivel
@@ -5636,6 +5723,18 @@ export class ClientApplication {
             this.networkManager.sendDemolishModule(shipId, moduleId);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`🪓 [DEMOLISH] module ${moduleId} on ship ${shipId}`);
+          } else if (selected === 'weapon_group' && moduleId !== null) {
+            // Open weapon group sub-menu — closed by mousedown, processed there
+            this._weaponGroupSubMenuCannonId = moduleId;
+            const _wgMp = this.inputManager.getMouseScreenPosition();
+            const _wgOpts: RadialOption[] = [];
+            for (let _g = 0; _g < 10; _g++) {
+              const _gs = this.controlGroups.get(_g);
+              if (!_gs) continue;
+              const _inGrp = _gs.cannonIds.includes(moduleId);
+              _wgOpts.push({ id: `wg_toggle_${_g}`, label: _inGrp ? `✖ G${_g} Remove` : `+ G${_g} Add`, highlighted: _inGrp });
+            }
+            this._radialMenu.open(_wgMp.x, _wgMp.y, _wgOpts);
           } else if (selected) {
             if (doMountAction()) {
               this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
@@ -5675,8 +5774,8 @@ export class ClientApplication {
             // Tap: no default action — require hold to confirm demolish
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
           }
-        } else if (this._radialMenu.isOpen) {
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if ((selected === 'open_gunport' || selected === 'close_gunport') && moduleId !== null && shipId !== null) {
             if (!isInRange()) {
@@ -5727,9 +5826,9 @@ export class ClientApplication {
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
-      } else if (this._radialMenu.isOpen) {
-        // Radial was open — execute selected option or cancel if centre dead zone / out of range
-        const selected = this._radialMenu.getHoveredId();
+      } else if (_hasRadialPending()) {
+        // Radial was open (or left-click snapshot) — execute selected option or cancel
+        const selected = _resolveRadialSelected();
         this._radialMenu.close();
 
         if (!selected || moduleId === null) {

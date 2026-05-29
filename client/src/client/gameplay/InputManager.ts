@@ -130,6 +130,8 @@ export class InputManager {
   public onAimEnd: (() => void) | null = null;
   /** Called at the very start of any right-click (button 2 down). Return true to consume the event and skip all other right-click handling. */
   public onBeforeRightClick: (() => boolean) | null = null;
+  /** Called before any mouse-down is processed (any button). Return true to suppress all input logic for that click (e.g. when a radial menu is open). */
+  public onBeforeMouseInput: (() => boolean) | null = null;
   /** Called at the very start of any left-click (button 0 down, after UI/shift/ctrl checks).
    *  Return true to consume the event — fires onActionEvent('attack') then skips all other handling. */
   public onBeforeLeftClick: (() => boolean) | null = null;
@@ -1493,6 +1495,8 @@ export class InputManager {
   
   private onMouseDown(event: MouseEvent): void {
     event.preventDefault();
+    // Allow external code (e.g. radial menu) to consume mouse-down events entirely.
+    if (this.onBeforeMouseInput && this.onBeforeMouseInput()) return;
     
     if (event.button === 0) { // Left mouse button
       // Free camera mode: left-drag pans (or Shift+left-drag rotates); skip all game logic
