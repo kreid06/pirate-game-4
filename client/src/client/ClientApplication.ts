@@ -31,6 +31,7 @@ import { RadialMenu, type RadialOption } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
+import { ConfirmDialog }    from './ui/ConfirmDialog.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { CommandConsole } from './ui/CommandConsole.js';
 import { ChatBox } from './ui/ChatBox.js';
@@ -243,6 +244,8 @@ export class ClientApplication {
   private shipyardMenu = new ShipyardMenu();
   /** Custom rename dialog — replaces window.prompt() for ship naming. */
   private renameDialog!: ShipRenameDialog;
+  /** Generic confirm dialog — replaces window.confirm() calls. */
+  private confirmDialog = new ConfirmDialog();
   /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
   private pauseMenu = new PauseMenu();
   /** Terminal command bar — opened by / when no other menu is up. */
@@ -1757,6 +1760,7 @@ export class ClientApplication {
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
         // Rename dialog is topmost — check first
+        if (this.confirmDialog.handleClick(x, y)) return true;
         if (this.renameDialog?.handleClick(x, y)) return true;
         if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         const _wsClick = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
@@ -2149,6 +2153,16 @@ export class ClientApplication {
 
       this.uiManager.setShipRenameRequestCallback((shipId, currentName) => {
         this.renameDialog.open(shipId, currentName);
+      });
+
+      // Wire deck demolish buttons in the ship menu — confirm before sending to server
+      this.uiManager.setShipDemolishDeckCallback((shipId, moduleId, deckLevel) => {
+        const deckName = deckLevel === 1 ? 'Upper' : 'Lower';
+        this.confirmDialog.open(
+          `Demolish ${deckName} Deck?`,
+          `This will destroy all modules on the ${deckName.toLowerCase()} deck. This cannot be undone.`,
+          () => { this.networkManager.sendDemolishModule(shipId, moduleId); },
+        );
       });
 
       // Wire Leave Company button in the company menu — moves player back to Solo
@@ -3371,6 +3385,14 @@ export class ClientApplication {
       // Shipyard construction menu
       if (this.shipyardMenu.visible) {
         this.shipyardMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
+      // Confirm dialog — above all other UI
+      if (this.confirmDialog.visible) {
+        this.confirmDialog.render(
           this.renderSystem.getContext(),
           this.canvas.width,
           this.canvas.height,
@@ -4679,6 +4701,9 @@ export class ClientApplication {
     window.addEventListener('keydown', (e) => {
       // Only handle if not typing in an input field
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      // Confirm dialog intercepts all keys while open
+      if (this.confirmDialog.handleKey(e)) return;
 
       // Route Space / Enter to UIManager for minigame handling first
       if (this.uiManager?.handleKeyDown(e.key)) {

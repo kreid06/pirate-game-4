@@ -88,6 +88,9 @@ export class ShipMenu {
   /** Called when the player clicks an affordable upgrade row. */
   public onUpgradeRequest?: (shipId: number, attribute: string) => void;
 
+  /** Called when the player confirms deck demolish from the decks section. */
+  public onDemolishDeck?: (shipId: number, moduleId: number, deckLevel: number) => void;
+
   /** Called when the player clicks an NPC row in the crew section. */
   public onNpcClick?: (npc: import('../../sim/Types.js').Npc) => void;
 
@@ -103,6 +106,7 @@ export class ShipMenu {
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
+  private _deckDemolishAreas: Array<{ moduleId: number; deckLevel: number; x: number; y: number; w: number; h: number }> = [];
   private _panelX = 0;
   private _panelY = 0;
   private _currentShipId = 0;
@@ -175,6 +179,14 @@ export class ShipMenu {
       if (x >= area.x && x <= area.x + area.w &&
           y >= area.y && y <= area.y + area.h) {
         this.onNpcClick?.(area.npc);
+        return true;
+      }
+    }
+    // Check deck demolish button hit areas
+    for (const area of this._deckDemolishAreas) {
+      if (x >= area.x && x <= area.x + area.w &&
+          y >= area.y && y <= area.y + area.h) {
+        this.onDemolishDeck?.(this._currentShipId, area.moduleId, area.deckLevel);
         return true;
       }
     }
@@ -270,6 +282,7 @@ export class ShipMenu {
     cur = this._identity(ctx, px, cur, ship, worldState.companies ?? []);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._statsSection(ctx, px, cur, ship, worldState);
+    cur = this._decksSection(ctx, px, cur, ship);
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
     const crewMaxH = py + PANEL_H - cur - 4;
     this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3, Math.max(60, crewMaxH));
@@ -490,6 +503,105 @@ export class ShipMenu {
     );
 
     return py + sectionH + 8;
+  }
+
+  private _decksSection(
+    ctx:  CanvasRenderingContext2D,
+    px:   number, py: number,
+    ship: NonNullable<ReturnType<WorldState['ships']['find']>>,
+  ): number {
+    this._deckDemolishAreas = [];
+    py = this._sectionHeader(ctx, px, py, 'DECKS', '');
+
+    const DECK_NAMES: Record<number, string> = { 0: 'Lower Deck', 1: 'Upper Deck' };
+    // Upper deck first (deckId=1), then lower (deckId=0)
+    for (const deckLevel of [1, 0]) {
+      const mod  = ship.modules.find(m => m.kind === 'deck' && m.deckId === deckLevel);
+      const isStripe = deckLevel === 0;
+
+      if (isStripe) {
+        ctx.fillStyle = BG_STRIPE;
+        ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H * 2);
+      }
+
+      // Row 1: label + HP bar + [Demolish] button
+      const barW    = PANEL_W - PAD * 2 - 104 - 80; // leave 80px for demolish btn
+      const barX    = px + PAD + 96;
+      const btnW    = 70;
+      const btnH    = ROW_H - 4;
+      const btnX    = px + PANEL_W - PAD - btnW;
+      const btnY    = py + 2;
+
+      ctx.font = '12px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = mod ? TEXT_DIM : '#445';
+      ctx.fillText(DECK_NAMES[deckLevel], px + PAD + 8, py + ROW_H / 2);
+
+      if (mod) {
+        const md       = (mod.moduleData as any) ?? {};
+        const hp       = Math.max(0, md.health    ?? 10000);
+        const maxHp    = Math.max(1, md.maxHealth ?? 10000);
+        const tgtHp    = Math.max(0, md.targetHealth ?? hp);
+        const hpPct    = hp    / maxHp;
+        const qualPct  = tgtHp / maxHp;
+
+        // HP bar
+        const barColor = hpPct >= 0.7 ? GREEN : hpPct >= 0.3 ? ORANGE : RED;
+        ctx.fillStyle = '#1a1a28';
+        ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+        ctx.fillStyle = barColor;
+        ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * hpPct), BAR_H);
+        // Quality overlay (lighter shade)
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * qualPct), BAR_H);
+        ctx.strokeStyle = '#334';
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+
+        // HP% label inside bar
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = TEXT_HEAD;
+        ctx.fillText(`${Math.round(hpPct * 100)}%`, barX + barW - 2, py + ROW_H / 2);
+
+        // Condition label (row 2)
+        const condLabel = qualPct >= 0.7 ? 'Good' : qualPct >= 0.3 ? 'Damaged' : 'Critical';
+        const condColor = qualPct >= 0.7 ? GREEN   : qualPct >= 0.3 ? ORANGE   : RED;
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText('Condition:', px + PAD + 8, py + ROW_H + ROW_H / 2);
+        ctx.fillStyle = condColor;
+        ctx.fillText(condLabel, barX, py + ROW_H + ROW_H / 2);
+        // Quality % next to condition
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText(`  (${Math.round(qualPct * 100)}% quality)`, barX + 48, py + ROW_H + ROW_H / 2);
+
+        // [Demolish] button
+        ctx.fillStyle = 'rgba(160,30,30,0.75)';
+        ctx.fillRect(btnX, btnY, btnW, btnH);
+        ctx.strokeStyle = '#cc3333';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(btnX, btnY, btnW, btnH);
+        ctx.font = 'bold 11px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffaaaa';
+        ctx.fillText('Demolish', btnX + btnW / 2, btnY + btnH / 2);
+        this._deckDemolishAreas.push({ moduleId: mod.id, deckLevel, x: btnX, y: btnY, w: btnW, h: btnH });
+
+        py += ROW_H * 2;
+      } else {
+        // Deck not installed
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#445';
+        ctx.fillText('[ not installed ]', barX, py + ROW_H / 2);
+        py += ROW_H;
+      }
+    }
+    return py + 6;
   }
 
   private _hullAmmo(

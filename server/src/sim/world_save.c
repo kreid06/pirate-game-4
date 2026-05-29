@@ -7,7 +7,9 @@
  *   "ships":   [ { id, seq, type, company, x, y, rot, vx, vy, av,
  *                  sail_openness, sail_angle, ammo, infinite_ammo,
  *                  is_sinking,
- *                  "modules": [ { id, type, lx, ly, lr, health, max_health } ] } ],
+ *                  "modules": [ { id, type, lx, ly, lr, health, max_health } ],
+ *                  "weapon_groups": [...],
+ *                  "level_stats": { xp, w, r, d, c, s } } ],
  *   "world_npcs": [ { id, name, role, company, x, y, rot,
  *                     ship_id, lx, ly, health, max_health, level, xp,
  *                     stat_health, stat_damage, stat_stamina, stat_weight } ],
@@ -26,6 +28,7 @@
 #include <errno.h>
 
 #include "sim/world_save.h"
+#include "sim/ship_level.h"
 #include "net/websocket_server_internal.h"
 #include "net/module_interactions.h"
 #include "sim/island.h"
@@ -239,7 +242,28 @@ int world_save(const char *path) {
                 fprintf(f, "]}");
             }
         }
-        fprintf(f, "\n      ]\n    }");
+        fprintf(f, "\n      ]");
+        /* Ship level stats — sourced from the authoritative sim layer */
+        if (global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if ((uint32_t)global_sim->ships[si].id != (uint32_t)s->ship_id) continue;
+                const ShipLevelStats *ls = &global_sim->ships[si].level_stats;
+                fprintf(f,
+                    ",\n      \"level_stats\": {"
+                    "\"xp\":%u,"
+                    "\"w\":%u,\"r\":%u,\"d\":%u,\"c\":%u,\"s\":%u"
+                    "}",
+                    (unsigned)ls->xp,
+                    (unsigned)ls->levels[SHIP_ATTR_WEIGHT],
+                    (unsigned)ls->levels[SHIP_ATTR_RESISTANCE],
+                    (unsigned)ls->levels[SHIP_ATTR_DAMAGE],
+                    (unsigned)ls->levels[SHIP_ATTR_CREW],
+                    (unsigned)ls->levels[SHIP_ATTR_STURDINESS]
+                );
+                break;
+            }
+        }
+        fprintf(f, "\n    }");
     }
     fprintf(f, "\n  ],\n");
 
@@ -744,6 +768,31 @@ int world_load(const char *path) {
                                 }
                             }
                         }
+                    /* Restore ship level stats into the sim layer */
+                    if (global_sim) {
+                        const char *ls_obj = strstr(obj, "\"level_stats\":");
+                        if (ls_obj) {
+                            ls_obj += 14; /* skip "level_stats": */
+                            unsigned ls_xp = 0, ls_w = 1, ls_r = 1, ls_d = 1, ls_c = 1, ls_ss = 1;
+                            ws_json_uint(ls_obj, "xp", &ls_xp);
+                            ws_json_uint(ls_obj, "w",  &ls_w);
+                            ws_json_uint(ls_obj, "r",  &ls_r);
+                            ws_json_uint(ls_obj, "d",  &ls_d);
+                            ws_json_uint(ls_obj, "c",  &ls_c);
+                            ws_json_uint(ls_obj, "s",  &ls_ss);
+                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                if ((uint32_t)global_sim->ships[si].id != new_id) continue;
+                                ShipLevelStats *ls = &global_sim->ships[si].level_stats;
+                                ls->xp                          = (uint32_t)ls_xp;
+                                ls->levels[SHIP_ATTR_WEIGHT]     = (uint8_t)(ls_w  > 0 ? ls_w  : 1);
+                                ls->levels[SHIP_ATTR_RESISTANCE] = (uint8_t)(ls_r  > 0 ? ls_r  : 1);
+                                ls->levels[SHIP_ATTR_DAMAGE]     = (uint8_t)(ls_d  > 0 ? ls_d  : 1);
+                                ls->levels[SHIP_ATTR_CREW]       = (uint8_t)(ls_c  > 0 ? ls_c  : 1);
+                                ls->levels[SHIP_ATTR_STURDINESS] = (uint8_t)(ls_ss > 0 ? ls_ss : 1);
+                                break;
+                            }
+                        }
+                    }
                     /* Restore weapon groups — module IDs are remapped from old seq to new seq */
                     if (s) {
                         const char *wgarr = find_array(obj, "weapon_groups");

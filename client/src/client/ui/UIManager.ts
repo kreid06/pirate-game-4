@@ -1102,6 +1102,11 @@ export class UIManager {
     this.shipMenu.onRenameRequest = cb;
   }
 
+  /** Set callback for deck demolish buttons in the ship status menu. */
+  setShipDemolishDeckCallback(cb: (shipId: number, moduleId: number, deckLevel: number) => void): void {
+    this.shipMenu.onDemolishDeck = cb;
+  }
+
   /** Set callback for the Leave Company button in the company menu. */
   setLeaveCompanyCallback(cb: () => void): void {
     this.companyMenu.onLeaveCompany = cb;
