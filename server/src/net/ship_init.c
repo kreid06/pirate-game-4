@@ -276,6 +276,7 @@ void init_brigantine_ship(int idx, float world_x, float world_y, uint8_t ship_se
             s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE;
             s->modules[s->module_count].data.cannon.aim_direction  = Q16_FROM_FLOAT(0.0f);
             s->modules[s->module_count].data.cannon.ammunition     = 10;
+            s->modules[s->module_count].data.cannon.gunport_snap_idx = 0xFF; // not linked to a gunport
             s->modules[s->module_count].data.cannon.reload_time    = CANNON_RELOAD_TIME_MS;
             s->modules[s->module_count].data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS;
             s->module_count++;
@@ -520,8 +521,10 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
         ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
         ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
         ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
         ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
         ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+        ship->modules[ship->module_count].deck_id                           = 1; /* upper deck */
         ship->module_count++;
 
         /* Bow starboard cannon (ID 301) */
@@ -533,8 +536,10 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
         ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
         ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
         ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+        ship->modules[ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
         ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
         ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+        ship->modules[ship->module_count].deck_id                           = 1; /* upper deck */
         ship->module_count++;
     }
 
@@ -558,8 +563,10 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
                 sim_ship->modules[sim_ship->module_count].max_health  = 100;
                 sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
                 sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
                 sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
                 sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+                sim_ship->modules[sim_ship->module_count].deck_id                           = 1; /* upper deck */
                 sim_ship->module_count++;
 
                 /* Bow starboard cannon (ID 301) */
@@ -573,8 +580,10 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
                 sim_ship->modules[sim_ship->module_count].max_health  = 100;
                 sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
                 sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+                sim_ship->modules[sim_ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
                 sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
                 sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+                sim_ship->modules[sim_ship->module_count].deck_id                           = 1; /* upper deck */
                 sim_ship->module_count++;
             }
             break;

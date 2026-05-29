@@ -15,6 +15,7 @@ export type ModuleKind =
   | 'swivel'         // Swivel gun - fast, anti-personnel edge weapon
   | 'ramp'           // Deck ramp - connects lower and upper deck levels
   | 'hatch_cover'    // Hatch cover - seals a snap-point hole, blocks falling through
+  | 'gunport'        // Gunport - openable hull hole for lower-deck cannons
   | 'custom';        // User-defined module types
 
 /**
@@ -33,6 +34,7 @@ export enum ModuleTypeId {
   SWIVEL = 8,
   RAMP = 9,
   HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
+  GUNPORT = 11,      // Gunport — openable hull hole for lower-deck cannons
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -53,6 +55,7 @@ export const MODULE_TYPE_MAP = {
       case 'swivel': return ModuleTypeId.SWIVEL;
       case 'ramp': return ModuleTypeId.RAMP;
       case 'hatch_cover': return ModuleTypeId.HATCH_COVER;
+      case 'gunport': return ModuleTypeId.GUNPORT;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -69,6 +72,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.SWIVEL: return 'swivel';
       case ModuleTypeId.RAMP: return 'ramp';
       case ModuleTypeId.HATCH_COVER: return 'hatch_cover';
+      case ModuleTypeId.GUNPORT: return 'gunport';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }
@@ -116,6 +120,7 @@ export type ModuleData =
   | PlankModuleData
   | DeckModuleData
   | SwivelModuleData
+  | GunportModuleData
   | CustomModuleData;
 
 /**
@@ -150,6 +155,7 @@ export interface CannonModuleData {
   targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
   stateBits: number;            // Server MODULE_STATE_* bitmask (bit 4 = RELOADING)
+  gunportSnapIdx: number;       // 0-11 = linked gunport snap index; 255 = not linked
 }
 
 /**
@@ -254,6 +260,40 @@ export interface CustomModuleData {
   customType: string;          // User-defined type identifier
   properties: Record<string, any>; // Flexible property bag
 }
+
+/**
+ * Gunport module data — openable hole cut into a flat hull plank.
+ * is_open: false = cover flush with hull; true = hole exposed for cannon fire.
+ */
+export interface GunportModuleData {
+  kind: 'gunport';
+  isOpen: boolean;              // Current state: false=closed, true=open
+  snapIndex: number;           // Which of the 12 predefined snap positions this occupies (0-11)
+}
+
+/**
+ * 12 predefined gunport snap positions in ship-local client-px coordinates.
+ * Indices 0-5 = starboard side (y = -90), 6-11 = port side (y = +90).
+ * Each of the 3 straight planks per side has 2 gunports at 1/3 and 2/3 of its length.
+ * Hull runs: bowBottom(190,-90) → sternBottom(-260,-90) for starboard (3 planks of 150px each).
+ */
+export const GUNPORT_SNAP_POINTS: { x: number; y: number; side: 'starboard' | 'port' }[] = [
+  // Starboard (y = -90) — indices 0-5, bow-to-stern order
+  // Evenly spaced: plank centres 115, -35, -185 ± 37.5px = 75px uniform spacing
+  { x: 152.5, y: -90, side: 'starboard' },
+  { x:  77.5, y: -90, side: 'starboard' },
+  { x:   2.5, y: -90, side: 'starboard' },
+  { x: -72.5, y: -90, side: 'starboard' },
+  { x:-147.5, y: -90, side: 'starboard' },
+  { x:-222.5, y: -90, side: 'starboard' },
+  // Port (y = +90) — indices 6-11, bow-to-stern order
+  { x: 152.5, y:  90, side: 'port' },
+  { x:  77.5, y:  90, side: 'port' },
+  { x:   2.5, y:  90, side: 'port' },
+  { x: -72.5, y:  90, side: 'port' },
+  { x:-147.5, y:  90, side: 'port' },
+  { x:-222.5, y:  90, side: 'port' },
+];
 
 /**
  * Module interaction info for UI and input handling

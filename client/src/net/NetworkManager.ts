@@ -98,6 +98,8 @@ export enum MessageType {
   PLACE_DECK = 'place_deck',
   PLACE_RAMP = 'place_ramp',
   PLACE_HATCH_COVER = 'place_hatch_cover',
+  PLACE_GUNPORT = 'place_gunport',
+  TOGGLE_GUNPORT = 'toggle_gunport',
   PLAYER_SET_DECK = 'player_set_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
   CREW_ASSIGN = 'crew_assign',
@@ -450,6 +452,20 @@ interface PlaceHatchCoverMessage extends NetworkMessage {
   snapIndex: number;
 }
 
+interface PlaceGunportMessage extends NetworkMessage {
+  type: MessageType.PLACE_GUNPORT;
+  timestamp: number;
+  shipId: number;
+  snapIndex: number; // 0-11 (0-5 = starboard, 6-11 = port)
+}
+
+interface ToggleGunportMessage extends NetworkMessage {
+  type: MessageType.TOGGLE_GUNPORT;
+  timestamp: number;
+  shipId: number;
+  gunportId: number;
+}
+
 interface PlayerSetDeckMessage extends NetworkMessage {
   type: MessageType.PLAYER_SET_DECK;
   timestamp: number;
@@ -519,7 +535,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlayerSetDeckMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage;
 
 /**
  * Main network manager class
@@ -639,6 +655,10 @@ export class NetworkManager {
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
+  /** Fired when the server confirms a gunport was toggled (open or closed). */
+  public onGunportState: ((shipId: number, gunportId: number, isOpen: boolean) => void) | null = null;
+  /** Fired when the server blocks a cannon fire attempt because its gunport is closed. */
+  public onGunportBlocked: ((cannonId: number, gunportId: number) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
   /** Fired when the server responds to a harvest_resource request. */
@@ -1552,9 +1572,11 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_CANNON from the player's inventory.
    */
-  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number): void {
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+    const msg: any = { type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation };
+    if (snapIndex !== undefined && snapIndex >= 0 && snapIndex <= 11) msg.snapIndex = snapIndex;
+    this.sendMessage(msg);
   }
 
   /**
@@ -1622,6 +1644,25 @@ export class NetworkManager {
   sendPlaceHatchCover(shipId: number, snapIndex: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_HATCH_COVER, timestamp: Date.now(), shipId, snapIndex });
+  }
+
+  /**
+   * Request the server to place a gunport door at the given snap-point index (0-11) on the player's ship.
+   * Consumes 1 ITEM_DOOR from the player's inventory.
+   */
+  sendPlaceGunport(shipId: number, snapIndex: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_GUNPORT, timestamp: Date.now(), shipId, snapIndex });
+  }
+
+  /**
+   * Request the server to toggle a gunport open/closed.
+   * Can be called when player is near a gunport (E-key), mounted at a cannon at that gunport (R-key),
+   * or at the helm with a weapon group selected (R-key toggles all gunports in the group).
+   */
+  sendToggleGunport(shipId: number, gunportId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.TOGGLE_GUNPORT, timestamp: Date.now(), shipId, gunportId });
   }
 
   /**
@@ -2040,6 +2081,7 @@ export class NetworkManager {
                       targetHealth: mod.targetHealth ?? mod.maxHealth ?? 8000,
                       maxHealth: mod.maxHealth ?? 8000,
                       stateBits: mod.state ?? 0,
+                      gunportSnapIdx: mod.gunportSnapIdx ?? 255,
                     };
                   } else if (kind === 'helm' || kind === 'steering-wheel') {
                     moduleData = {
@@ -2093,12 +2135,19 @@ export class NetworkManager {
                       targetHealth: mod.targetHealth ?? mod.maxHealth ?? 4000,
                       maxHealth: mod.maxHealth ?? 4000,
                     };
+                  } else if (kind === 'gunport') {
+                    moduleData = {
+                      kind: 'gunport',
+                      // is_open is encoded in the server's stateBits or a custom field
+                      isOpen: !!(mod.isOpen ?? mod.is_open ?? false),
+                      snapIndex: mod.snapIndex ?? -1,
+                    };
                   }
                   
                   gameplayModules.push({
                     id: mod.id,
                     kind: kind,
-                    deckId: mod.deck_id ?? 0, // 0=lower deck, 1=upper deck (server deck_id)
+                    deckId: mod.deck_id ?? 255, // 255=deck-independent fallback; 0=lower, 1=upper when server sends it
                     localPos: Vec2.from(mod.x || 0, mod.y || 0),
                     localRot: mod.rotation || 0,
                     occupiedBy: null,
@@ -2481,6 +2530,24 @@ export class NetworkManager {
           targetShipId: g.targetShipId ?? 0,
         })) : [];
         this.onCannonGroupState?.(gsShipId, gsGroups);
+        break;
+      }
+
+      case 'gunport_state': {
+        const gpShipId: number = message.shipId || 0;
+        const gpId: number = message.gunportId || 0;
+        const gpOpen: boolean = !!message.isOpen;
+        this.onGunportState?.(gpShipId, gpId, gpOpen);
+        break;
+      }
+
+      case 'gunport_blocked': {
+        // Only process if this message is for the local player
+        if (message.player_id === this.assignedPlayerId) {
+          const gpbCannonId: number = message.cannon_id || 0;
+          const gpbGunportId: number = message.gunport_id || 0;
+          this.onGunportBlocked?.(gpbCannonId, gpbGunportId);
+        }
         break;
       }
 

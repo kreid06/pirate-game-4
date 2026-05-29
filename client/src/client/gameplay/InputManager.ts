@@ -150,6 +150,8 @@ export class InputManager {
   public onRepairSail: (() => void) | null = null;
   /** Called when R is pressed in ramp build mode to cycle the ramp facing by 90°. */
   public onCycleRampFacing: (() => void) | null = null;
+  /** Called when R is pressed while mounted at a cannon that is next to a gunport. */
+  public onToggleGunportAtCannon: (() => void) | null = null;
   /** Set to true by ClientApplication when ramp build mode is active. */
   public inRampBuildMode: boolean = false;
 
@@ -1252,12 +1254,16 @@ export class InputManager {
       case 'KeyR':
         // In explicit build mode, plan mode, or island build mode: rotate the placement ghost.
         // In ramp build mode: cycle the ramp facing by 90°.
+        // Mounted at cannon: toggle gunport at that position.
         // Otherwise: repair sail fibers on the hovered damaged mast.
         if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
           this.onBuildRotate(15);
           event.preventDefault();
         } else if (this.inRampBuildMode && this.onCycleRampFacing) {
           this.onCycleRampFacing();
+          event.preventDefault();
+        } else if (this.mountKind === 'cannon' && this.onToggleGunportAtCannon) {
+          this.onToggleGunportAtCannon();
           event.preventDefault();
         } else if (!this.explicitBuildMode && !this.buildMenuOpen && !this.islandBuildMode && this.onRepairSail) {
           this.onRepairSail();

@@ -240,6 +240,11 @@ typedef struct WorldNpc {
     // When > 0, NPC is dwelling at a roam module; counts down in ms per tick.
     // Cleared to 0 when any module on the ship takes damage.
     uint32_t      roam_wait_ms;
+
+    // ── Deck level ──────────────────────────────────────────────────────
+    // 0 = lower deck, 1 = upper deck.  NPCs default to upper deck (1).
+    // Used for deck-gated collision filtering with players.
+    uint8_t       deck_level;
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 

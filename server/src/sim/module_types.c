@@ -21,6 +21,7 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
         case MODULE_TYPE_CANNON:
             module.data.cannon.aim_direction = 0;
             module.data.cannon.ammunition = 10;
+            module.data.cannon.gunport_snap_idx = 0xFF; // not linked to a gunport by default
             module.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
             module.data.cannon.reload_time = CANNON_RELOAD_TIME_MS;
             module.health        = 8000;

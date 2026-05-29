@@ -858,6 +858,7 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
  * NPCs are treated as solid obstacles; only the player position is adjusted.
  */
 static void resolve_player_npc_collisions(const SimpleShip* ship,
+                                          uint8_t player_deck_level,
                                           float* new_local_x, float* new_local_y)
 {
     const float PLAYER_RADIUS = 8.0f;
@@ -868,6 +869,7 @@ static void resolve_player_npc_collisions(const SimpleShip* ship,
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active) continue;
         if (npc->ship_id != ship->ship_id) continue;
+        if (npc->deck_level != player_deck_level) continue;  /* skip cross-deck collision */
 
         float dx = *new_local_x - npc->local_x;
         float dy = *new_local_y - npc->local_y;
@@ -1531,42 +1533,57 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                         float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                         float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
                             fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
-                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                            (int)module->health, (int)module->target_health, (int)module->max_health,
+                            (unsigned)module->deck_id);
                     } else if (module->type_id == MODULE_TYPE_CANNON) {
                         float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"gunportSnapIdx\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, aim_direction,
                             (unsigned)module->state_bits,
-                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                            (int)module->health, (int)module->target_health, (int)module->max_health,
+                            (unsigned)module->deck_id,
+                            (unsigned)module->data.cannon.gunport_snap_idx);
                     } else if (module->type_id == MODULE_TYPE_SWIVEL) {
                         float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, aim_dir,
                             (unsigned)module->state_bits,
-                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                            (int)module->health, (int)module->target_health, (int)module->max_health,
+                            (unsigned)module->deck_id);
                     } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                         float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, wheel_rot,
                             (module->data.helm.occupied_by != 0) ? "true" : "false",
                             (unsigned)module->state_bits,
-                            (int)module->health, (int)module->target_health, (int)module->max_health);
+                            (int)module->health, (int)module->target_health, (int)module->max_health,
+                            (unsigned)module->deck_id);
+                    } else if (module->type_id == MODULE_TYPE_GUNPORT) {
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"isOpen\":%s,\"state\":%u,\"deck_id\":%u,\"snapIndex\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot,
+                            module->data.gunport.is_open ? "true" : "false",
+                            (unsigned)module->state_bits,
+                            (unsigned)module->deck_id,
+                            (unsigned)module->data.gunport.snap_idx);
                     } else {
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, (unsigned)module->state_bits,
-                            (int)module->health, (int)module->max_health);
+                            (int)module->health, (int)module->max_health,
+                            (unsigned)module->deck_id);
                     }
                 }
             }
@@ -5516,6 +5533,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 nr.state_bits  = MODULE_STATE_ACTIVE;
                                                 nr.health      = 8000;
                                                 nr.max_health  = 8000;
+                                                nr.deck_id     = 0xFF; /* deck-independent */
 
                                                 ramp_sim->modules[ramp_sim->module_count++]     = nr;
                                                 ramp_simple->modules[ramp_simple->module_count++] = nr;
@@ -5632,6 +5650,194 @@ int websocket_server_update(struct Sim* sim) {
                                                     "{\"type\":\"message_ack\",\"status\":\"hatch_placed\",\"hatch_id\":%u}",
                                                     new_id);
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_gunport") == 0) {
+                            // PLACE GUNPORT: cut an openable hole in a flat hull plank for lower-deck cannons.
+                            // Payload: {"type":"place_gunport","shipId":N,"snapIndex":0..11}
+                            // Consumes 1 ITEM_DOOR from the player's inventory.
+                            // 12 predefined positions: indices 0-5 = starboard (y=-9), 6-11 = port (y=+9) in server units.
+                            // Must match client GUNPORT_SNAP_POINTS in modules.ts / RenderSystem.ts.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    int gp_slot = -1;
+                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                        if (player->inventory.slots[s].item == ITEM_DOOR &&
+                                            player->inventory.slots[s].quantity > 0) {
+                                            gp_slot = s; break;
+                                        }
+                                    }
+                                    if (gp_slot < 0) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_door\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        // Gunport snap positions (server units = client-px / 10)
+                                        // Indices 0-5: starboard (y=-9), 6-11: port (y=+9)
+                                        // x values match plank segment 1/3 and 2/3 positions:
+                                        // Evenly-spaced gunport snap positions: 2 per plank, centred at plank_center ± 37.5px.
+                                        // Plank centres (client px): 115, -35, -185  →  server units: 11.5, -3.5, -18.5
+                                        //   Plank0 (cx=115): GP at 115±37.5 = 152.5, 77.5  → server: 15.25, 7.75
+                                        //   Plank1 (cx=-35): GP at -35±37.5 = 2.5, -72.5   → server:  0.25,-7.25
+                                        //   Plank2 (cx=-185):GP at -185±37.5=-147.5,-222.5 → server:-14.75,-22.25
+                                        // Uniform 75px (7.5 su) spacing across all 6 snap points per side.
+                                        static const float GP_X[12] = {
+                                            15.25f, 7.75f, 0.25f, -7.25f, -14.75f, -22.25f,  // starboard 0-5
+                                            15.25f, 7.75f, 0.25f, -7.25f, -14.75f, -22.25f   // port      6-11
+                                        };
+                                        static const float GP_Y[12] = {
+                                            -9.0f, -9.0f, -9.0f, -9.0f, -9.0f, -9.0f,   // starboard
+                                             9.0f,  9.0f,  9.0f,  9.0f,  9.0f,  9.0f    // port
+                                        };
+                                        // Outward rotation for gunport cannons (set when linking a cannon)
+                                        // Starboard: π rad, Port: 0 rad
+                                        static const float GP_ROT[12] = {
+                                            (float)M_PI, (float)M_PI, (float)M_PI, (float)M_PI, (float)M_PI, (float)M_PI,
+                                            0.0f,        0.0f,        0.0f,        0.0f,        0.0f,        0.0f
+                                        };
+                                        (void)GP_ROT; // used later by place_cannon_at for gunport cannons
+
+                                        uint16_t target_ship_id = player->parent_ship_id;
+                                        int snap_index = 0;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        const char* p_si  = strstr(payload, "\"snapIndex\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                        if (p_si)  { sscanf(p_si + 12, "%d", &snap_index); }
+                                        if (snap_index < 0 || snap_index > 11) snap_index = 0;
+
+                                        float local_x = GP_X[snap_index];
+                                        float local_y = GP_Y[snap_index];
+
+                                        struct Ship* gp_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                gp_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        SimpleShip* gp_simple = find_ship(target_ship_id);
+                                        if (!gp_sim || !gp_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (gp_sim->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else {
+                                            // Prevent placing two gunports at the same snap position
+                                            bool occupied = false;
+                                            float tol = Q16_TO_FLOAT(Q16_FROM_FLOAT(2.0f)); // 2 server units = 20 client px
+                                            for (uint8_t m = 0; m < gp_sim->module_count; m++) {
+                                                if (gp_sim->modules[m].type_id != MODULE_TYPE_GUNPORT) continue;
+                                                float rx = Q16_TO_FLOAT(gp_sim->modules[m].local_pos.x);
+                                                float ry = Q16_TO_FLOAT(gp_sim->modules[m].local_pos.y);
+                                                if (fabsf(rx - local_x) < tol && fabsf(ry - local_y) < tol) {
+                                                    occupied = true; break;
+                                                }
+                                            }
+                                            if (occupied) {
+                                                strcpy(response, "{\"type\":\"message_ack\",\"status\":\"gunport_already_present\"}");
+                                            } else {
+                                                uint16_t max_id = 0;
+                                                for (uint8_t m = 0; m < gp_sim->module_count; m++)
+                                                    if (gp_sim->modules[m].id > max_id) max_id = gp_sim->modules[m].id;
+                                                for (uint8_t m = 0; m < gp_simple->module_count; m++)
+                                                    if (gp_simple->modules[m].id > max_id) max_id = gp_simple->modules[m].id;
+                                                uint16_t new_id = max_id + 1;
+
+                                                ShipModule ng;
+                                                memset(&ng, 0, sizeof(ShipModule));
+                                                ng.id          = new_id;
+                                                ng.type_id     = MODULE_TYPE_GUNPORT;
+                                                ng.deck_id     = 1; /* upper-deck hull (gunport row) */
+                                                ng.local_pos.x = Q16_FROM_FLOAT(local_x);
+                                                ng.local_pos.y = Q16_FROM_FLOAT(local_y);
+                                                ng.local_rot   = 0;
+                                                ng.state_bits  = MODULE_STATE_ACTIVE;
+                                                ng.health      = 0; // gunports are indestructible
+                                                ng.max_health  = 0;
+                                                ng.data.gunport.is_open  = 0; // closed by default
+                                                ng.data.gunport.snap_idx = (uint8_t)snap_index;
+
+                                                gp_sim->modules[gp_sim->module_count++]       = ng;
+                                                gp_simple->modules[gp_simple->module_count++] = ng;
+
+                                                player->inventory.slots[gp_slot].quantity--;
+                                                if (player->inventory.slots[gp_slot].quantity == 0)
+                                                    player->inventory.slots[gp_slot].item = ITEM_NONE;
+
+                                                log_info("🔳 Player %u placed gunport %u (snap %d, x=%.1f y=%.1f) on ship %u",
+                                                         player->player_id, new_id, snap_index,
+                                                         local_x * 10.0f, local_y * 10.0f, gp_sim->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"gunport_placed\",\"gunport_id\":%u,\"snap_index\":%d}",
+                                                    new_id, snap_index);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "toggle_gunport") == 0) {
+                            // TOGGLE GUNPORT: open or close a gunport by its module ID.
+                            // Payload: {"type":"toggle_gunport","shipId":N,"gunportId":N}
+                            // Can be sent by a player near the gunport (E-key) or mounted at
+                            // a cannon/helm that is associated with the gunport (R-key).
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    uint16_t target_ship_id = player->parent_ship_id;
+                                    uint32_t gunport_id = 0;
+                                    const char* p_sid = strstr(payload, "\"shipId\":");
+                                    const char* p_gid = strstr(payload, "\"gunportId\":");
+                                    if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                    if (p_gid) { sscanf(p_gid + 12, "%u", &gunport_id); }
+
+                                    struct Ship* tog_sim = NULL;
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id == target_ship_id) {
+                                            tog_sim = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                    SimpleShip* tog_simple = find_ship(target_ship_id);
+                                    if (!tog_sim || !tog_simple) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else {
+                                        // Find the gunport in both layers and flip is_open
+                                        bool found = false;
+                                        for (uint8_t m = 0; m < tog_sim->module_count; m++) {
+                                            if (tog_sim->modules[m].type_id != MODULE_TYPE_GUNPORT) continue;
+                                            if (tog_sim->modules[m].id != (uint16_t)gunport_id) continue;
+                                            tog_sim->modules[m].data.gunport.is_open ^= 1;
+                                            uint8_t new_state = tog_sim->modules[m].data.gunport.is_open;
+                                            // Mirror into SimpleShip
+                                            for (uint8_t ms = 0; ms < tog_simple->module_count; ms++) {
+                                                if (tog_simple->modules[ms].id == (uint16_t)gunport_id) {
+                                                    tog_simple->modules[ms].data.gunport.is_open = new_state;
+                                                    break;
+                                                }
+                                            }
+                                            found = true;
+                                            log_info("🔳 Player %u toggled gunport %u → %s on ship %u",
+                                                     player->player_id, gunport_id,
+                                                     new_state ? "open" : "closed", target_ship_id);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u}",
+                                                gunport_id, new_state ? "true" : "false", target_ship_id);
+                                            break;
+                                        }
+                                        if (!found) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"gunport_not_found\"}");
                                         }
                                     }
                                 }
@@ -6084,9 +6290,12 @@ int websocket_server_update(struct Sim* sim) {
                                             const char* px = strstr(payload, "\"localX\":");
                                             const char* py = strstr(payload, "\"localY\":");
                                             const char* pr = strstr(payload, "\"rotation\":");
+                                            const char* psi = strstr(payload, "\"snapIndex\":");
                                             if (px) sscanf(px + 9,  "%f", &local_x);
                                             if (py) sscanf(py + 9,  "%f", &local_y);
                                             if (pr) sscanf(pr + 11, "%f", &rotation);
+                                            int cannon_snap_idx = -1;
+                                            if (psi) sscanf(psi + 12, "%d", &cannon_snap_idx);
 
                                             // Allocate a unique module ID (scan max existing + 1 across both arrays)
                                             uint16_t max_id = 0;
@@ -6109,6 +6318,8 @@ int websocket_server_update(struct Sim* sim) {
                                             nc.max_health  = 8000;
                                             nc.data.cannon.aim_direction   = Q16_FROM_FLOAT(0.0f);
                                             nc.data.cannon.ammunition      = 10;
+                                            nc.data.cannon.gunport_snap_idx = (cannon_snap_idx >= 0 && cannon_snap_idx <= 11)
+                                                                               ? (uint8_t)cannon_snap_idx : 0xFF;
                                             nc.data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
                                             nc.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
 
@@ -6310,6 +6521,7 @@ int websocket_server_update(struct Sim* sim) {
                                             ns.data.swivel.reload_time           = SWIVEL_RELOAD_TIME_MS;
                                             ns.data.swivel.time_since_fire       = SWIVEL_RELOAD_TIME_MS; /* start ready to fire */
                                             ns.data.swivel.loaded_ammo           = 0; /* default: cannonball */
+                                            ns.deck_id                           = 1; /* upper deck */
 
                                             sw_sim->modules[sw_sim->module_count++]       = ns;
                                             sw_simple->modules[sw_simple->module_count++] = ns;
@@ -6402,6 +6614,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 nc->data.cannon.ammunition      = 10;
                                                 nc->data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
                                                 nc->data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
+                                                nc->deck_id                     = 1; /* upper deck */
                                                 sim_ship->module_count++;
                                                 player->inventory.slots[cannon_slot].quantity--;
                                                 if (player->inventory.slots[cannon_slot].quantity == 0)
@@ -6499,6 +6712,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 nm->data.mast.fiber_health     = Q16_FROM_FLOAT(15000.0f);
                                                 nm->data.mast.fiber_max_health = Q16_FROM_FLOAT(15000.0f);
                                                 nm->data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
+                                                nm->deck_id                   = 0xFF; /* deck-independent */
                                                 sim_ship->module_count++;
                                                 // Mirror into SimpleShip so find_module_on_ship()
                                                 // (used by NPC riggers) can see the new mast.
@@ -6575,6 +6789,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 nh->max_health  = Q16_FROM_FLOAT(10000.0f);
                                                 nh->data.helm.occupied_by    = 0;
                                                 nh->data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
+                                                nh->deck_id                  = 1; /* upper deck */
                                                 sim_ship->module_count++;
                                                 // Mirror into SimpleShip so find_module_on_ship()
                                                 // (used by NPC helmsmen) can see the new helm.
@@ -7962,6 +8177,7 @@ int websocket_server_update(struct Sim* sim) {
                                     npc->npc_level       = 1;
                                     npc->max_health      = 100;
                                     npc->health          = 100;
+                                    npc->deck_level      = 1;  /* NPCs default to upper deck */
                                     strncpy(npc->name,     "Crewmember",         sizeof(npc->name)     - 1);
                                     strncpy(npc->dialogue, "Aye aye, Captain!",  sizeof(npc->dialogue) - 1);
                                     g_npcs_dirty = true;
@@ -9858,6 +10074,62 @@ void websocket_server_tick(float dt) {
                 if (ev->destroyed) {
                     // Plank destroyed: remove from SimpleShip and broadcast PLANK_HIT
                     SimpleShip* simple = find_ship(ev->ship_id);
+
+                    // Cascade: destroy gunports that sit on the broken plank.
+                    // Find the plank's centre position in the sim ship (still present
+                    // with MODULE_STATE_DESTROYED flag), then remove any gunport on
+                    // the same hull side (same sign of y) within ±7.5 server units (75 px).
+                    {
+                        struct Ship* cas_sim = NULL;
+                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                            if (global_sim->ships[si].id == ev->ship_id) {
+                                cas_sim = &global_sim->ships[si]; break;
+                            }
+                        }
+                        if (cas_sim) {
+                            float px = 0.0f, py = 0.0f;
+                            bool found_plank = false;
+                            for (uint8_t m = 0; m < cas_sim->module_count; m++) {
+                                if (cas_sim->modules[m].id == ev->module_id) {
+                                    px = Q16_TO_FLOAT(cas_sim->modules[m].local_pos.x);
+                                    py = Q16_TO_FLOAT(cas_sim->modules[m].local_pos.y);
+                                    found_plank = true; break;
+                                }
+                            }
+                            if (found_plank) {
+                                const float PLANK_HALF = 7.6f; // 75 px + tiny tolerance
+                                // Remove matching gunports from sim ship
+                                for (int m = (int)cas_sim->module_count - 1; m >= 0; m--) {
+                                    ShipModule* gp = &cas_sim->modules[m];
+                                    if (gp->type_id != MODULE_TYPE_GUNPORT) continue;
+                                    float gx = Q16_TO_FLOAT(gp->local_pos.x);
+                                    float gy = Q16_TO_FLOAT(gp->local_pos.y);
+                                    if (fabsf(gx - px) < PLANK_HALF &&
+                                        ((gy < 0.0f) == (py < 0.0f))) {
+                                        memmove(&cas_sim->modules[m], &cas_sim->modules[m+1],
+                                                (cas_sim->module_count - (uint8_t)m - 1) * sizeof(ShipModule));
+                                        cas_sim->module_count--;
+                                    }
+                                }
+                                // Remove matching gunports from SimpleShip
+                                if (simple) {
+                                    for (int m = (int)simple->module_count - 1; m >= 0; m--) {
+                                        ShipModule* gp = &simple->modules[m];
+                                        if (gp->type_id != MODULE_TYPE_GUNPORT) continue;
+                                        float gx = Q16_TO_FLOAT(gp->local_pos.x);
+                                        float gy = Q16_TO_FLOAT(gp->local_pos.y);
+                                        if (fabsf(gx - px) < PLANK_HALF &&
+                                            ((gy < 0.0f) == (py < 0.0f))) {
+                                            memmove(&simple->modules[m], &simple->modules[m+1],
+                                                    (simple->module_count - (uint8_t)m - 1) * sizeof(ShipModule));
+                                            simple->module_count--;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if (simple) {
                         for (int m = 0; m < simple->module_count; m++) {
                             if (simple->modules[m].id == ev->module_id) {
@@ -10638,7 +10910,7 @@ void websocket_server_tick(float dt) {
                                 ws_player->is_mounted ? ws_player->mounted_module_id : 0,
                                 ws_player->deck_level,
                                 &_znlx, &_znly);
-                            resolve_player_npc_collisions(_zship, &_znlx, &_znly);
+                            resolve_player_npc_collisions(_zship, ws_player->deck_level, &_znlx, &_znly);
                             /* Lower-deck: keep player inside the hull polygon */
                             if (ws_player->deck_level == 0) {
                                 resolve_player_hull_containment(_zship, &_znlx, &_znly);
@@ -10663,6 +10935,7 @@ void websocket_server_tick(float dt) {
                                 sim_player->relative_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_znly));
                                 sim_player->velocity.x     = 0;
                                 sim_player->velocity.y     = 0;
+                                sim_player->deck_index     = ws_player->deck_level;
                                 if (_z_in_deck) {
                                     /* On ship deck — flag as on-ship */
                                     if (ws_player->parent_ship_id == 0) {
@@ -10744,7 +11017,7 @@ void websocket_server_tick(float dt) {
                                 ws_player->is_mounted ? ws_player->mounted_module_id : 0,
                                 ws_player->deck_level,
                                 &new_local_x, &new_local_y);
-                            resolve_player_npc_collisions(player_ship, &new_local_x, &new_local_y);
+                            resolve_player_npc_collisions(player_ship, ws_player->deck_level, &new_local_x, &new_local_y);
 
                             // On the lower deck the hull/planks act as a solid wall:
                             // keep the player strictly inside the hull polygon so they
@@ -10818,6 +11091,7 @@ void websocket_server_tick(float dt) {
                                 sim_player->relative_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->local_y));
                                 sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->x));
                                 sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(ws_player->y));
+                                sim_player->deck_index = ws_player->deck_level;
                                 
                                 // log_info("🚶 P%u: Walking on ship %u | local=(%.2f, %.2f) | world=(%.2f, %.2f)",
                                 //          sim_player->id, ws_player->parent_ship_id,

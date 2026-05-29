@@ -28,6 +28,7 @@ typedef enum {
     MODULE_TYPE_SWIVEL = 8,         // Swivel gun — fast, low-damage, anti-personnel
     MODULE_TYPE_RAMP         = 9,   // Deck ramp — connects lower and upper deck levels
     MODULE_TYPE_HATCH_COVER  = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
+    MODULE_TYPE_GUNPORT      = 11,  // Gunport — openable hole in hull plank for lower-deck cannons
     MODULE_TYPE_CUSTOM       = 255  // User-defined
 } ModuleTypeId;
 
@@ -66,6 +67,8 @@ typedef struct {
     q16_t aim_direction;         // Current angle the cannon is rotated to
     q16_t desired_aim_direction; // Target angle — actual rotates toward this each tick
     uint8_t ammunition;         // Remaining ammunition
+    uint8_t gunport_snap_idx;   // Snap index (0-11) of associated gunport; 0xFF = not linked
+    uint8_t _pad[2];            // Explicit alignment padding
     uint32_t time_since_fire;   // Time since last fire (ms)
     uint32_t reload_time;       // Time required to reload (ms)
 } CannonModuleData;
@@ -105,6 +108,17 @@ typedef struct {
 } PlankModuleData;
 
 /**
+ * Gunport — openable hole in a flat hull plank for lower-deck cannons.
+ * is_open: 0 = closed (cover flush with hull), 1 = open (hole exposed).
+ * Gunports cannot be damaged; they are placed and demolished by the player.
+ */
+typedef struct {
+    uint8_t is_open;   // 0 = closed, 1 = open
+    uint8_t snap_idx;  // Which snap point this gunport occupies (0-11); 0xFF = unset
+    uint8_t _pad[2];   // alignment
+} GunportModuleData;
+
+/**
  * Swivel gun — fast, low-damage, anti-personnel weapon mounted at ship edges.
  */
 typedef struct {
@@ -137,6 +151,7 @@ typedef struct {
         SeatModuleData seat;
         PlankModuleData plank;
         SwivelModuleData swivel;
+        GunportModuleData gunport;
     } data;
 
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0

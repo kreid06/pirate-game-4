@@ -343,6 +343,7 @@ uint32_t spawn_ship_crew(uint16_t ship_id) {
     npc->max_health  = (uint16_t)(100 + npc->stat_health * 20);
     npc->health      = npc->max_health;
     npc->xp          = 0;
+    npc->deck_level  = 1; /* crew operate on the upper deck */
 
     /* Stagger idle positions along ship centreline */
     int slot_idx = (int)(npc->id % 9);

@@ -10,7 +10,7 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
@@ -125,6 +125,14 @@ export class RenderSystem {
   private cannonBuildMode: boolean = false;
   /** The cannon slot (index+ship) currently under the cursor in cannon build mode. */
   private hoveredCannonSlot: { ship: Ship; cannonIndex: number } | null = null;
+  /** A gunport on the ship that the cursor is over in cannon build mode (snap cannon to this gunport). */
+  private hoveredGunportCannonSnap: { ship: Ship; module: ShipModule } | null = null;
+  /** Per-gunport animation state: gunportId → { targetOpen, startProgress, startTime }. */
+  private gunportAnimations: Map<number, { targetOpen: boolean; startProgress: number; startTime: number }> = new Map();
+  /** Duration of gunport cannon slide animation in milliseconds. */
+  private static readonly GUNPORT_ANIM_MS = 500;
+  /** How far inboard a gunport cannon is rendered when the gunport is closed (pixels). */
+  static readonly GUNPORT_CANNON_INBOARD = 40;
   /** Whether mast replacement build mode is active (sail item held). */
   private mastBuildMode: boolean = false;
   /** The mast slot (mastIndex+ship) currently under the cursor in mast build mode. */
@@ -144,6 +152,10 @@ export class RenderSystem {
   /** Whether ramp placement build mode is active (ramp item held). */
   private rampBuildMode: boolean = false;
   private hatchBuildMode: boolean = false;
+  /** Whether gunport placement build mode is active (door item held on ship). */
+  private gunportBuildMode: boolean = false;
+  /** The gunport snap index currently hovered in gunport build mode. */
+  private hoveredGunportSnap: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** The ramp snap point slot currently under the cursor in ramp build mode. */
   private hoveredRampSlot: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
@@ -1598,6 +1610,8 @@ export class RenderSystem {
         ctx.rect(-w / 2, -h / 2, w, h);
       } else if (kind === 'ramp' || kind === 'hatch_cover') {
         ctx.rect(-25, -25, 50, 50);
+      } else if (kind === 'gunport') {
+        ctx.rect(-10, -7, 20, 14);
       } else {
         ctx.rect(-10, -10, 20, 20);
       }
@@ -2137,6 +2151,7 @@ export class RenderSystem {
   setCannonBuildMode(active: boolean): void {
     this.cannonBuildMode = active;
     if (!active) this.hoveredCannonSlot = null;
+    if (!active) this.hoveredGunportCannonSnap = null;
   }
 
   /**
@@ -2234,6 +2249,22 @@ export class RenderSystem {
   setHatchBuildMode(active: boolean): void {
     this.hatchBuildMode = active;
     if (!active) this.hoveredRampSlot = null;
+  }
+
+  /** Enable or disable gunport placement build mode */
+  setGunportBuildMode(active: boolean): void {
+    this.gunportBuildMode = active;
+    if (!active) this.hoveredGunportSnap = null;
+  }
+
+  /** Whether gunport build mode is currently active */
+  isInGunportBuildMode(): boolean {
+    return this.gunportBuildMode;
+  }
+
+  /** Get the gunport snap slot currently hovered (only in gunport build mode) */
+  getHoveredGunportSnap(): { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null {
+    return this.hoveredGunportSnap;
   }
 
   /** Whether hatch cover build mode is currently active */
@@ -3271,7 +3302,73 @@ export class RenderSystem {
     return this.hoveredCannonSlot;
   }
 
-  /** Whether build mode is currently active */
+  /**
+   * Get the gunport-snapped cannon position under the cursor (only in cannon build mode).
+   * If the cursor is over a gunport that has no cannon yet, returns that gunport module.
+   */
+  getHoveredGunportCannonSnap(): { ship: Ship; module: ShipModule } | null {
+    return this.hoveredGunportCannonSnap;
+  }
+
+  // ── Gunport cannon animation ──────────────────────────────────────────────
+
+  /** Find the gunport module whose position matches a cannon's position (co-located at hull edge). */
+  private findGunportForCannon(cannon: ShipModule, ship: Ship): ShipModule | null {
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'gunport') continue;
+      if (Math.abs(mod.localPos.x - cannon.localPos.x) < 15 &&
+          Math.abs(mod.localPos.y - cannon.localPos.y) < 6) {
+        return mod;
+      }
+    }
+    return null;
+  }
+
+  /** Compute deploy progress [0-1] for a gunport animation (0=stowed/closed, 1=deployed/open). */
+  private computeGunportProgress(
+    anim: { targetOpen: boolean; startProgress: number; startTime: number },
+    now: number,
+  ): number {
+    const t = Math.min((now - anim.startTime) / RenderSystem.GUNPORT_ANIM_MS, 1.0);
+    const eased = t * t * (3 - 2 * t); // smooth-step
+    return anim.targetOpen
+      ? anim.startProgress + (1 - anim.startProgress) * eased
+      : anim.startProgress * (1 - eased);
+  }
+
+  /** Trigger a cannon slide-out (open) or slide-in (close) animation for a gunport. */
+  triggerGunportAnimation(gunportId: number, isOpen: boolean): void {
+    const existing = this.gunportAnimations.get(gunportId);
+    const now = performance.now();
+    const currentProgress = existing ? this.computeGunportProgress(existing, now) : (isOpen ? 0 : 1);
+    this.gunportAnimations.set(gunportId, { targetOpen: isOpen, startProgress: currentProgress, startTime: now });
+  }
+
+  /** Returns true if a gunport's cannon slide animation is currently in progress. */
+  isGunportAnimating(gunportId: number): boolean {
+    const anim = this.gunportAnimations.get(gunportId);
+    if (!anim) return false;
+    const p = this.computeGunportProgress(anim, performance.now());
+    return p > 0.001 && p < 0.999;
+  }
+
+  /** Returns the set of cannon module IDs whose gunport is currently mid-animation (fire blocked). */
+  getBlockedGunportCannonIds(ship: Ship): Set<number> {
+    const blocked = new Set<number>();
+    for (const cannon of ship.modules) {
+      if (cannon.kind !== 'cannon') continue;
+      const gp = this.findGunportForCannon(cannon, ship);
+      if (gp && this.isGunportAnimating(gp.id)) blocked.add(cannon.id);
+    }
+    return blocked;
+  }
+
+  /** Whether the given cannon has an associated gunport (i.e. it is a gunport cannon). */
+  isGunportCannon(cannon: ShipModule, ship: Ship): boolean {
+    return this.findGunportForCannon(cannon, ship) !== null;
+  }
+
+
   isInBuildMode(): boolean {
     return this.buildMode;
   }
@@ -3470,6 +3567,19 @@ export class RenderSystem {
           return;
         }
       }
+
+      // --- Pass 1b: gunports take priority over hull planks (lower deck only) ---
+      if (this._playerDeckLevel === 0) {
+        for (const module of ship.modules) {
+          if (module.kind !== 'gunport') continue;
+          const mdx = localX - module.localPos.x;
+          const mdy = localY - module.localPos.y;
+          if (Math.abs(mdx) <= 13 && Math.abs(mdy) <= 7) {
+            this.hoveredModule = { ship, module };
+            return;
+          }
+        }
+      }
       
       // --- Pass 2: everything else (planks, cannons, masts, etc.) ---
       for (const module of ship.modules) {
@@ -3516,6 +3626,12 @@ export class RenderSystem {
           // Ramp / hatch cover render as a 50×50 square (matches visual footprint)
           width = 50;
           height = 50;
+        } else if (moduleKind === 'gunport') {
+          // Gunport only interactable from lower deck; skip on upper deck
+          if (this._playerDeckLevel !== 0) continue;
+          // Gunport renders as a 22×10 rectangle on the hull plank
+          width = 24;
+          height = 14;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -3764,8 +3880,10 @@ export class RenderSystem {
     // In cannon build mode, detect which missing cannon slot is under the cursor
     if (this.cannonBuildMode) {
       this.detectHoveredCannonSlot(worldState);
+      this.detectHoveredGunportCannonSnap(worldState);
     } else {
       this.hoveredCannonSlot = null;
+      this.hoveredGunportCannonSnap = null;
     }
 
     // In mast build mode, detect which missing mast slot is under the cursor
@@ -3797,6 +3915,13 @@ export class RenderSystem {
       this.detectHoveredRampSlot(worldState);
     } else {
       this.hoveredRampSlot = null;
+    }
+
+    // In gunport build mode, detect which gunport snap is under the cursor
+    if (this.gunportBuildMode) {
+      this.detectHoveredGunportSnap(worldState);
+    } else {
+      this.hoveredGunportSnap = null;
     }
 
     // Draw background elements
@@ -8184,11 +8309,25 @@ export class RenderSystem {
       }
     }
 
+    // In gunport build mode, overlay ghost outlines at gunport snap points (layer 3)
+    if (this.gunportBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(3, `gunport-ghost-${ship.id}`, () => this.drawGunportSnapGhosts(ship, camera), 0);
+      }
+    }
+
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
-      this.queueRenderItem(4, 'cannons', _da(() => this.drawShipCannons(ship, camera)));
-      this.queueRenderItem(4, 'swivel-guns', _da(() => this.drawShipSwivelGuns(ship, camera)));
+      // Lower-deck modules (deckId=0): hull-clipped at layer 1 so they render below planks.
+      // Dimmed when the player is on the upper deck (can't see them directly).
+      const _ldDim = (fn: () => void): (() => void) => this._lowerDeckShipId !== ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.3; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(1, `cannons-lower-${ship.id}`,  _ldDim(() => this.drawShipCannons(ship, camera, 0)), 3);
+      this.queueRenderItem(1, `swivels-lower-${ship.id}`,  _ldDim(() => this.drawShipSwivelGuns(ship, camera, 0)), 3);
+      // Upper-deck + deck-independent modules at their normal layers.
+      this.queueRenderItem(4, 'cannons', _da(() => this.drawShipCannons(ship, camera, 1)));
+      this.queueRenderItem(4, 'swivel-guns', _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
       this.queueRenderItem(4, 'cannon-aim-guides', _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
       this.queueRenderItem(4, 'swivel-aim-guides', _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
       this.queueRenderItem(4, 'rudder', _da(() => this.drawShipRudder(ship, camera)));
@@ -9139,7 +9278,10 @@ export class RenderSystem {
     const plankBaseColor  = shipHasUpperDeck ? '#8B7355' : '#6B5232';
     const plankStrokeBase = shipHasUpperDeck ? '#4A3020' : '#3A2010';
 
-    // Clip to hull shape minus deck holes so planks don't draw over transparent openings
+    // Clip to hull shape minus deck holes so planks don't draw over transparent openings.
+    // Use a nested save/restore so the clip is released before gunport overlays are drawn
+    // (open door panels extend 14px outside the hull and must not be clipped).
+    this.ctx.save();
     if (shipHasUpperDeck && ship.hull.length >= 3) {
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
@@ -9179,7 +9321,8 @@ export class RenderSystem {
         }
       }
 
-      this.ctx.restore();
+      this.ctx.restore(); // inner - hull clip
+      this.ctx.restore(); // outer - ship transform
       return;
     }
 
@@ -9283,6 +9426,69 @@ export class RenderSystem {
           const hl = plank.moduleData.length / 2;
           const hw = plank.moduleData.width / 2;
           this.ctx.fillRect(-hl, -hw, plank.moduleData.length, plank.moduleData.width);
+        }
+        this.ctx.restore();
+      }
+    }
+    // Release hull clip so gunport door panels can render outside the hull boundary.
+    this.ctx.restore();
+
+    // ── Gunport overlays: draw on top of the hull planks ──────────────────
+    // Draw at the 12 predefined gunport positions along starboard (y=-90) and port (y=+90).
+    // Closed: flush wooden door cover flush with the plank.
+    // Open: dark hole in the plank + the door panel swung outward as a visible rectangle.
+    {
+      const gpHalfW = 11;   // half-width of the hole (22px wide)
+      const gpHalfH = 5;   // half-height (10px = plank thickness)
+      const doorExt = 14;  // how far the swung-open panel extends beyond the hull
+      for (const mod of ship.modules) {
+        if (mod.kind !== 'gunport') continue;
+        if (mod.moduleData?.kind !== 'gunport') continue;
+        const gx = mod.localPos.x;
+        const gy = mod.localPos.y;
+        const isOpen = (mod.moduleData as any).isOpen ?? false;
+        this.ctx.save();
+        this.ctx.translate(gx, gy);
+        if (isOpen) {
+          // ── Dark hole through the plank ──
+          this.ctx.fillStyle = '#0e0808';
+          this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+          this.ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+          this.ctx.lineWidth = 0.8;
+          this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+          // ── Door panel swung outward ──────────────────────────────────────
+          // The panel hinges at the outer hull face and lies flat outside the ship.
+          // Starboard (gy < 0): outer face at y = -gpHalfH, extends further negative.
+          // Port     (gy > 0): outer face at y = +gpHalfH, extends further positive.
+          const outDir = gy < 0 ? -1 : 1;
+          const hingeY = outDir * gpHalfH;          // outer edge of the plank in local coords
+          const panelY = outDir < 0 ? hingeY - doorExt : hingeY;
+          // Wood fill
+          this.ctx.fillStyle = '#7a5c2a';
+          this.ctx.fillRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
+          // Outline
+          this.ctx.strokeStyle = '#4a3010';
+          this.ctx.lineWidth = 0.8;
+          this.ctx.strokeRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
+          // Subtle wood grain line
+          this.ctx.globalAlpha = 0.25;
+          this.ctx.strokeStyle = '#3a2010';
+          this.ctx.lineWidth = 0.6;
+          this.ctx.beginPath();
+          this.ctx.moveTo(0, panelY + 2); this.ctx.lineTo(0, panelY + doorExt - 2);
+          this.ctx.stroke();
+          this.ctx.globalAlpha = 1.0;
+        } else {
+          // ── Closed: flush wooden cover matching the door item's look ──
+          this.ctx.fillStyle = '#6a4828';
+          this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+          this.ctx.strokeStyle = '#3a2010';
+          this.ctx.lineWidth = 0.8;
+          this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+          // Centre hinge line
+          this.ctx.beginPath();
+          this.ctx.moveTo(-gpHalfW, 0); this.ctx.lineTo(gpHalfW, 0);
+          this.ctx.stroke();
         }
         this.ctx.restore();
       }
@@ -10026,6 +10232,44 @@ export class RenderSystem {
   }
 
   /**
+   * In cannon build mode: check whether the cursor is over a gunport that has no cannon yet.
+   * If so, snap to that gunport position so the player can place a cannon there.
+   */
+  private detectHoveredGunportCannonSnap(worldState: WorldState): void {
+    this.hoveredGunportCannonSnap = null;
+    if (!this.mouseWorldPos) return;
+    if (this._playerDeckLevel !== 0) return; // only snap from lower deck
+
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (const mod of ship.modules) {
+        if (mod.kind !== 'gunport') continue;
+        // Skip if a cannon is already linked to this gunport's snap index
+        const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
+        const hasCannon = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 && ship.modules.some(
+          m => m.kind === 'cannon'
+            && (m.moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx === gpData.snapIndex,
+        );
+        if (hasCannon) continue;
+
+        const stowedY = mod.localPos.y + (mod.localPos.y < 0 ? RenderSystem.GUNPORT_CANNON_INBOARD : -RenderSystem.GUNPORT_CANNON_INBOARD);
+        const ddx = localX - mod.localPos.x;
+        const ddy = localY - stowedY;
+        if (Math.abs(ddx) <= 14 && Math.abs(ddy) <= 14) {
+          this.hoveredGunportCannonSnap = { ship, module: mod };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
    * Draw ghost outlines at missing cannon positions (cannon build mode).
    */
   private drawMissingCannonGhosts(ship: Ship, camera: Camera): void {
@@ -10087,6 +10331,67 @@ export class RenderSystem {
         this.ctx.beginPath();
         this.ctx.arc(0, 0, 22, 0, Math.PI * 2);
         this.ctx.stroke();
+      }
+
+      this.ctx.restore();
+    }
+
+    // ── Ghost cannons at gunport positions (no cannon installed yet) ──────
+    const gpHalfWGhost = 11; // match visual gpHalfW
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'gunport') continue;
+      // Skip if a cannon is already here
+      const hasCannon = ship.modules.some(
+        m => m.kind === 'cannon'
+          && Math.abs(m.localPos.x - mod.localPos.x) < 15
+          && Math.abs(m.localPos.y - mod.localPos.y) < 20,
+      );
+      if (hasCannon) continue;
+
+      const isHoveredGp = this.hoveredGunportCannonSnap?.module === mod;
+      // Rotation: starboard (y < 0) rot=0 → barrel points -y (outward); port (y > 0) rot=π → barrel points +y (outward)
+      const rot = mod.localPos.y < 0 ? 0 : Math.PI;
+      // Draw ghost at stowed (inboard) position — same visual origin as the rendered cannon at rest
+      const ghostStowedY = mod.localPos.y + (mod.localPos.y < 0 ? RenderSystem.GUNPORT_CANNON_INBOARD : -RenderSystem.GUNPORT_CANNON_INBOARD);
+
+      this.ctx.save();
+      this.ctx.translate(mod.localPos.x, ghostStowedY);
+      this.ctx.rotate(rot);
+
+      // Base rect
+      this.ctx.strokeStyle = isHoveredGp ? '#66ee99' : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHoveredGp ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
+      this.ctx.lineWidth   = isHoveredGp ? lw * 2 : lw;
+      this.ctx.setLineDash(isHoveredGp ? [] : [4, 3]);
+      this.ctx.beginPath();
+      this.ctx.rect(-gpHalfWGhost, -10, gpHalfWGhost * 2, 20);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      // Barrel stub (pointing outward — negative y = outward when rot=π, positive y when rot=0)
+      this.ctx.strokeStyle = isHoveredGp ? '#99ffbb' : 'rgba(80,200,120,0.45)';
+      this.ctx.fillStyle   = 'transparent';
+      this.ctx.lineWidth   = lw;
+      this.ctx.beginPath();
+      this.ctx.rect(-6, -36, 12, 36);
+      this.ctx.stroke();
+
+      if (isHoveredGp) {
+        this.ctx.strokeStyle = '#88ff99';
+        this.ctx.lineWidth = lw * 1.5;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        this.ctx.stroke();
+        // Label
+        this.ctx.rotate(-rot); // unrotate for text
+        const fontSize = Math.max(5, Math.round(7 / cameraState.zoom));
+        this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+        this.ctx.fillStyle = '#ffffffcc';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = mod.localPos.y < 0 ? 'bottom' : 'top';
+        const labelY = mod.localPos.y < 0 ? -18 : 18;
+        this.ctx.fillText('Place Cannon', 0, labelY);
       }
 
       this.ctx.restore();
@@ -10521,7 +10826,32 @@ export class RenderSystem {
   }
 
   /**
-   * Draw the lower deck (deckId=0) surface visible through the 50×50 hull holes.
+   * Apply a screen-space hull clip and invoke fn() inside it.
+   * Used to render lower-deck modules clipped to the ship hull at layer 1.
+   */
+  private _withShipHullClip(ship: Ship, camera: Camera, fn: () => void): void {
+    if (ship.hull.length < 3) { fn(); return; }
+    const screenPos = camera.worldToScreen(ship.position);
+    const camState  = camera.getState();
+    const angle     = ship.rotation - camState.rotation;
+    const cos       = Math.cos(angle);
+    const sin       = Math.sin(angle);
+    const zoom      = camState.zoom;
+    this.ctx.save();
+    this.ctx.beginPath();
+    for (let i = 0; i < ship.hull.length; i++) {
+      const sx = screenPos.x + (ship.hull[i].x * cos - ship.hull[i].y * sin) * zoom;
+      const sy = screenPos.y + (ship.hull[i].x * sin + ship.hull[i].y * cos) * zoom;
+      if (i === 0) this.ctx.moveTo(sx, sy);
+      else         this.ctx.lineTo(sx, sy);
+    }
+    this.ctx.closePath();
+    this.ctx.clip();
+    fn();
+    this.ctx.restore();
+  }
+
+  /**
    * Runs at layer 1, sub-priority 1 — after hull fill, before planks.
    * If the lower deck is missing, renders a dark void so the gap reads as depth.
    */
@@ -10829,7 +11159,100 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  private drawShipCannons(ship: Ship, camera: Camera): void {
+  private detectHoveredGunportSnap(worldState: WorldState): void {
+    this.hoveredGunportSnap = null;
+    if (!this.mouseWorldPos) return;
+
+    const HALF_W = 14; // horizontal tolerance (~half the gunport spacing)
+    const HALF_H = 12; // vertical tolerance (stays on plank)
+
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < GUNPORT_SNAP_POINTS.length; i++) {
+        const sp = GUNPORT_SNAP_POINTS[i];
+        // Skip occupied snap points
+        const occupied = ship.modules.some(
+          m => m.kind === 'gunport'
+            && Math.abs(m.localPos.x - sp.x) < 15
+            && Math.abs(m.localPos.y - sp.y) < 12
+        );
+        if (occupied) continue;
+
+        if (Math.abs(localX - sp.x) <= HALF_W && Math.abs(localY - sp.y) <= HALF_H) {
+          this.hoveredGunportSnap = { ship, snapIndex: i, localPos: { x: sp.x, y: sp.y } };
+          return;
+        }
+      }
+    }
+  }
+
+  private drawGunportSnapGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    this.ctx.save();
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+    const gpHalfW = 11;
+    const gpHalfH = 5;
+
+    for (let i = 0; i < GUNPORT_SNAP_POINTS.length; i++) {
+      const sp = GUNPORT_SNAP_POINTS[i];
+      const occupied = ship.modules.some(
+        m => m.kind === 'gunport'
+          && Math.abs(m.localPos.x - sp.x) < 15
+          && Math.abs(m.localPos.y - sp.y) < 12
+      );
+      if (occupied) continue;
+
+      const isHovered = this.hoveredGunportSnap?.ship === ship
+                     && this.hoveredGunportSnap?.snapIndex === i;
+
+      this.ctx.save();
+      this.ctx.translate(sp.x, sp.y);
+
+      if (isHovered) {
+        // Bright ghost — show the closed cover preview
+        this.ctx.fillStyle = 'rgba(160,120,60,0.85)';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = '#ffee88';
+        this.ctx.lineWidth = lw * 1.5;
+        this.ctx.strokeRect(-gpHalfW - 2, -gpHalfH - 2, (gpHalfW + 2) * 2, (gpHalfH + 2) * 2);
+        // Label
+        const fontSize = Math.max(5, Math.round(7 / cameraState.zoom));
+        this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+        this.ctx.fillStyle = '#ffffffcc';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = sp.side === 'starboard' ? 'bottom' : 'top';
+        this.ctx.fillText('Gunport', 0, sp.side === 'starboard' ? -gpHalfH - 4 : gpHalfH + 4);
+      } else {
+        // Dim ghost
+        this.ctx.fillStyle = 'rgba(120,80,40,0.35)';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = 'rgba(200,150,60,0.50)';
+        this.ctx.lineWidth = lw;
+        this.ctx.setLineDash([3 / cameraState.zoom, 2 / cameraState.zoom]);
+        this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.setLineDash([]);
+      }
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  private drawShipCannons(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
       return;
@@ -10848,8 +11271,13 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     
-    // Find all cannon modules
-    const cannons = ship.modules.filter(m => m.kind === 'cannon');
+    // Find all cannon modules, filtered by deck if requested.
+    // deckFilter=0 → lower deck only; deckFilter=1 → upper deck + deck-independent (255).
+    const cannons = ship.modules.filter(m => m.kind === 'cannon' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      /* deckFilter === 1 */ m.deckId === 1 || m.deckId === 255
+    ));
     
     const isPhantomBrig = ship.shipType === SHIP_TYPE_GHOST;
 
@@ -10869,8 +11297,27 @@ export class RenderSystem {
       // Save context for this cannon
       this.ctx.save();
       
+      // Deck-based opacity: fade cannons on decks above the player's current deck.
+      // Decks below (or same) render at full opacity — render order handles occlusion.
+      if (cannon.deckId !== 255 && cannon.deckId > this._playerDeckLevel) {
+        this.ctx.globalAlpha = 0.35;
+      }
+
+      // Gunport-associated cannons slide outward when the gunport opens
+      let renderY = y;
+      const assocGunport = this.findGunportForCannon(cannon, ship);
+      if (assocGunport) {
+        const inboard = RenderSystem.GUNPORT_CANNON_INBOARD;
+        // Stowed position is INBOARD px inside the hull edge; deployed = cannon.localPos.y (hull)
+        const stowedY = y + (y < 0 ? inboard : -inboard);
+        const anim = this.gunportAnimations.get(assocGunport.id);
+        const isOpen = (assocGunport.moduleData as any)?.isOpen ?? false;
+        const progress = anim ? this.computeGunportProgress(anim, performance.now()) : (isOpen ? 1 : 0);
+        renderY = stowedY + (y - stowedY) * progress; // lerp: 0=stowed, 1=deployed at hull
+      }
+
       // Move to cannon position and apply module rotation
-      this.ctx.translate(x, y);
+      this.ctx.translate(x, renderY);
       this.ctx.rotate(localRot);
       
       const lineWidth = 1 / cameraState.zoom;
@@ -10961,7 +11408,7 @@ export class RenderSystem {
    * Draw swivel guns — small, fast-reload anti-personnel weapons on ship edges.
    * Visual: circular pivot base + short rotating barrel.
    */
-  private drawShipSwivelGuns(ship: Ship, camera: Camera): void {
+  private drawShipSwivelGuns(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
     const { phase2Alpha } = this.computeSinkState(ship);
@@ -10977,7 +11424,11 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    const swivels = ship.modules.filter(m => m.kind === 'swivel');
+    const swivels = ship.modules.filter(m => m.kind === 'swivel' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      /* deckFilter === 1 */ m.deckId === 1 || m.deckId === 255
+    ));
 
     for (const swivel of swivels) {
       // Use moduleData if present; fall back to safe defaults so newly-placed swivels always render

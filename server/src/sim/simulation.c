@@ -1069,6 +1069,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-305.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
+    ship->modules[ship->module_count - 1].deck_id = 0xFF; /* deck-independent */
 
     /* Bare skeleton — hull polygon only, no gameplay modules.
      * initial_plank_count stays 0 so the drain formula sees missing=0. */
@@ -1085,6 +1086,7 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
+    ship->modules[ship->module_count - 1].deck_id = 1; /* upper deck */
     
     // Port side cannons (3) — offsets 0x03..0x05
     if (modules_placed & MODULE_CANNON_PORT) {
@@ -1093,16 +1095,19 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
+    ship->modules[ship->module_count - 1].deck_id = 1;
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_PORT_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
+    ship->modules[ship->module_count - 1].deck_id = 1;
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_PORT_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
+    ship->modules[ship->module_count - 1].deck_id = 1;
     }
     
     // Starboard side cannons (3) — offsets 0x06..0x08
@@ -1112,16 +1117,19 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
+    ship->modules[ship->module_count - 1].deck_id = 1;
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_STBD_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
+    ship->modules[ship->module_count - 1].deck_id = 1;
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_STBD_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
+    ship->modules[ship->module_count - 1].deck_id = 1;
     }
     
     // Three masts — offsets 0x09..0x0B (bow, mid, stern)
@@ -1131,16 +1139,19 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(165.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
+    ship->modules[ship->module_count - 1].deck_id = 0xFF;
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_MAST_MID), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
+    ship->modules[ship->module_count - 1].deck_id = 0xFF;
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_MAST_STERN), MODULE_TYPE_MAST,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-235.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f))},
         0
     );
+    ship->modules[ship->module_count - 1].deck_id = 0xFF;
     }
     
     // Initialize 10 hull planks with positions matching client hull geometry.
@@ -2868,6 +2879,9 @@ static void handle_player_player_collisions(struct Sim* sim) {
         for (uint16_t j = i + 1; j < sim->player_count; j++) {
             struct Player* p1 = &sim->players[i];
             struct Player* p2 = &sim->players[j];
+
+            /* Skip collision between players on different decks */
+            if (p1->deck_index != p2->deck_index) continue;
 
             float dx = Q16_TO_FLOAT(p2->position.x) - Q16_TO_FLOAT(p1->position.x);
             float dy = Q16_TO_FLOAT(p2->position.y) - Q16_TO_FLOAT(p1->position.y);

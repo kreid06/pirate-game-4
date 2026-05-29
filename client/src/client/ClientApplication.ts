@@ -802,6 +802,35 @@ export class ClientApplication {
         }
       };
 
+      // Gunport state changed (toggled open/closed) — update local ship module data
+      this.networkManager.onGunportState = (shipId, gunportId, isOpen) => {
+        const ws = this.authoritativeWorldState;
+        const ship = ws?.ships.find(s => s.id === shipId);
+        if (!ship) return;
+        const mod = ship.modules.find(m => m.id === gunportId);
+        if (mod?.moduleData?.kind === 'gunport') {
+          (mod.moduleData as any).isOpen = isOpen;
+        }
+        // Also update predicted world state if present
+        const pws = this.predictedWorldState;
+        const pship = pws?.ships.find(s => s.id === shipId);
+        const pmod = pship?.modules.find(m => m.id === gunportId);
+        if (pmod?.moduleData?.kind === 'gunport') {
+          (pmod.moduleData as any).isOpen = isOpen;
+        }
+        // Trigger cannon slide animation (out when opening, in when closing)
+        this.renderSystem.triggerGunportAnimation(gunportId, isOpen);
+      };
+
+      // Gunport blocked notification — show a UI hint
+      this.networkManager.onGunportBlocked = (_cannonId, _gunportId) => {
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const ws = this.predictedWorldState || this.authoritativeWorldState;
+        const player = assignedId !== null ? ws?.players.find(p => p.id === assignedId) : ws?.players[0];
+        const pos = player?.position ?? Vec2.from(0, 0);
+        this.renderSystem.spawnResourcePickup(pos, 'Open gunport first!', '#ffaa44');
+      };
+
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);
       this.shipPredictor = new ShipPredictor();
@@ -1353,6 +1382,13 @@ export class ClientApplication {
         this.networkManager.sendSwivelAim(aimAngle);
       };
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const myPlayer = assignedId !== null ? ws?.players.find(p => p.id === assignedId) : ws?.players[0];
+        const ship = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer.carrierId) ?? null : null;
+        // Cannons whose gunport is mid-animation cannot fire until the animation completes
+        const animBlocked = ship ? this.renderSystem.getBlockedGunportCannonIds(ship) : new Set<number>();
+
         // Multi-group fire: fire all cannons in every selected group
         const groups = weaponGroups && weaponGroups.size > 0 ? weaponGroups : (weaponGroup !== undefined && weaponGroup >= 0 ? new Set([weaponGroup]) : null);
         if (groups) {
@@ -1361,7 +1397,17 @@ export class ClientApplication {
           for (const g of groups) {
             const gs = this.controlGroups.get(g);
             if (!gs || gs.cannonIds.length === 0) continue;
-            for (const id of gs.cannonIds) if (!allIds.includes(id)) allIds.push(id);
+            for (const id of gs.cannonIds) {
+              if (allIds.includes(id)) continue;
+              if (animBlocked.has(id)) continue; // gunport mid-animation — wait
+              // From the helm, gunport cannons require an NPC crew member stationed at them
+              const cannonMod = ship?.modules.find(m => m.id === id) ?? null;
+              if (cannonMod && ship && this.renderSystem.isGunportCannon(cannonMod, ship)) {
+                const hasNpc = ws!.npcs.some(n => n.shipId === ship.id && n.assignedWeaponId === id);
+                if (!hasNpc) continue; // no crew assigned — skip until pathfinding brings them here
+              }
+              allIds.push(id);
+            }
             if (gs.mode === 'freefire' || gs.mode === 'targetfire') skipAimCheck = true;
           }
           if (allIds.length > 0) {
@@ -1369,7 +1415,11 @@ export class ClientApplication {
             return;
           }
         }
-        this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
+        // Direct fire (player physically at the cannon): block only animation, no NPC check
+        const filteredIds = cannonIds?.filter(id => !animBlocked.has(id)) ?? cannonIds;
+        if (!filteredIds || filteredIds.length > 0) {
+          this.networkManager.sendCannonFire(filteredIds, fireAll, ammoType ?? 0);
+        }
       };
       this.inputManager.onForceReload = () => {
         const ammoType = this.inputManager?.selectedAmmoType ?? 0;
@@ -1385,6 +1435,30 @@ export class ClientApplication {
 
       this.inputManager.onCycleRampFacing = () => {
         this.renderSystem.cycleRampFacing();
+      };
+
+      // R key while mounted at a cannon: toggle the gunport at that cannon's position
+      this.inputManager.onToggleGunportAtCannon = () => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+        if (!me || me.carrierId === 0) return;
+        const ship = ws?.ships.find(s => s.id === me.carrierId);
+        if (!ship) return;
+        const cannonId = this.inputManager.mountedCannonModuleId;
+        if (cannonId === null) return;
+        const cannon = ship.modules.find(m => m.id === cannonId);
+        if (!cannon) return;
+        // Find a gunport within ~15 client-px of this cannon
+        const gpTol = 15;
+        const gp = ship.modules.find(m =>
+          m.kind === 'gunport' &&
+          Math.abs(m.localPos.x - cannon.localPos.x) < gpTol &&
+          Math.abs(m.localPos.y - cannon.localPos.y) < gpTol
+        );
+        if (!gp) { console.log('🔳 No gunport at this cannon'); return; }
+        this.networkManager.sendToggleGunport(ship.id, gp.id);
+        console.log(`🔳 [GUNPORT] R-key toggle gunport ${gp.id} at cannon ${cannonId}`);
       };
 
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
@@ -1526,6 +1600,13 @@ export class ClientApplication {
           }
           return;
         }
+        // Gunport placement — snaps to predefined positions on the hull planks
+        const gunportSnap = this.renderSystem.getHoveredGunportSnap();
+        if (gunportSnap) {
+          console.log(`🔳 [BUILD] Placing gunport at snap ${gunportSnap.snapIndex} on ship ${gunportSnap.ship.id}`);
+          this.networkManager.sendPlaceGunport(gunportSnap.ship.id, gunportSnap.snapIndex);
+          return;
+        }
         // Mast placement build mode
         const mastSlot = this.renderSystem.getHoveredMastSlot();
         if (mastSlot) {
@@ -1538,6 +1619,22 @@ export class ClientApplication {
         if (cannonSlot) {
           console.log(`🔧 [BUILD] Placing cannon in slot ${cannonSlot.cannonIndex} on ship ${cannonSlot.ship.id}`);
           this.networkManager.sendPlaceCannon(cannonSlot.ship.id);
+          return;
+        }
+        // Cannon snap to gunport position
+        const gpSnap = this.renderSystem.getHoveredGunportCannonSnap();
+        if (gpSnap) {
+          const gp = gpSnap.module;
+          const rot = gp.localPos.y < 0 ? 0 : Math.PI;
+          // Offset cannon 40px toward ship centre (inward from hull at y=±90 → cannon at y=±50)
+          const CANNON_INWARD_OFFSET = 40;
+          const cannonY = gp.localPos.y < 0
+            ? gp.localPos.y + CANNON_INWARD_OFFSET
+            : gp.localPos.y - CANNON_INWARD_OFFSET;
+          const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
+          const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
+          console.log(`🔳 [BUILD] Placing cannon at gunport ${gp.id} snap=${snapIdx ?? 'none'} pos (${gp.localPos.x.toFixed(0)}, ${cannonY.toFixed(0)}) rot=${(rot * 180 / Math.PI).toFixed(0)}°`);
+          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx);
           return;
         }
         // Plank placement build mode
@@ -3908,6 +4005,8 @@ export class ClientApplication {
     const inRampBuildMode   = activeItem === 'ramp';
     // Hatch cover build mode: on-ship + wood_ceiling equipped
     const inHatchBuildMode  = (player?.carrierId ?? 0) !== 0 && activeItem === 'wood_ceiling';
+    // Gunport build mode: on-ship + door item equipped (door becomes a gunport when placed on ship hull)
+    const inGunportBuildMode = (player?.carrierId ?? 0) !== 0 && activeItem === 'door';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress' || activeItem === 'claim_flag');
@@ -3957,9 +4056,10 @@ export class ClientApplication {
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
     this.renderSystem.setRampBuildMode(!this.explicitBuildMode && inRampBuildMode);
     this.renderSystem.setHatchBuildMode(!this.explicitBuildMode && inHatchBuildMode);
+    this.renderSystem.setGunportBuildMode(!this.explicitBuildMode && inGunportBuildMode);
     if (this.inputManager) this.inputManager.inRampBuildMode = !this.explicitBuildMode && inRampBuildMode;
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || this.islandBuildMode
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || inGunportBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
   }
 
@@ -5085,6 +5185,26 @@ export class ClientApplication {
             break;
           }
 
+          // Gunport: tap E to toggle open/close; hold E for radial with Demolish
+          if (hov.module.kind === 'gunport' && meE.carrierId === hov.ship.id) {
+            this._interactKind = 'module';
+            this._suppressLadderInteract = true;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              const gOpen = hov.module.moduleData?.kind === 'gunport' && (hov.module.moduleData as any).isOpen;
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: gOpen ? 'close_gunport' : 'open_gunport', label: gOpen ? 'Close Port' : 'Open Port' },
+                { id: 'demolish', label: '🪓 Demolish Gunport' },
+              ]);
+            }, 300);
+            break;
+          }
+
           // Generic module: open Demolish radial when on own ship
           if (meE.carrierId === hov.ship.id) {
             const modKindLabel = hov.module.kind.charAt(0).toUpperCase() + hov.module.kind.slice(1);
@@ -5514,16 +5634,41 @@ export class ClientApplication {
 
       // ── GENERIC MODULE (plank / seat / custom / etc.) — Demolish only ───
       if (interactKind === 'module') {
+        // Check if module is a gunport (handled differently — tap = toggle, hold = radial)
+        const wsGp = this.authoritativeWorldState || this.predictedWorldState;
+        const gpShip = wsGp?.ships.find(s => s.id === shipId);
+        const gpMod = gpShip?.modules.find(m => m.id === moduleId);
+        const isGunportModule = gpMod?.kind === 'gunport';
+
         if (this._ladderHoldTimer !== null) {
           clearTimeout(this._ladderHoldTimer);
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
-          // Tap: no default action — require hold to confirm demolish
-          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          if (isGunportModule && moduleId !== null && shipId !== null) {
+            // Tap on gunport: toggle it immediately
+            if (!isInRange()) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.networkManager.sendToggleGunport(shipId, moduleId);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🔳 [GUNPORT] Toggle gunport ${moduleId} on ship ${shipId}`);
+            }
+          } else {
+            // Tap: no default action — require hold to confirm demolish
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          }
         } else if (this._radialMenu.isOpen) {
           const selected = this._radialMenu.getHoveredId();
           this._radialMenu.close();
-          if (selected === 'demolish' && moduleId !== null && shipId !== null) {
+          if ((selected === 'open_gunport' || selected === 'close_gunport') && moduleId !== null && shipId !== null) {
+            if (!isInRange()) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.networkManager.sendToggleGunport(shipId, moduleId);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🔳 [GUNPORT] Toggle gunport ${moduleId} on ship ${shipId}`);
+            }
+          } else if (selected === 'demolish' && moduleId !== null && shipId !== null) {
             if (!isInRange()) {
               console.warn('🪓 module demolish cancelled: moved out of range');
               this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());

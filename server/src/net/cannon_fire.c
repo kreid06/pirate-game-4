@@ -1433,10 +1433,30 @@ void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_typ
         }
         
         if (module->data.cannon.time_since_fire < module->data.cannon.reload_time) {
-            // log_info("  ⚠️  Cannon %u: Reloading (%.1fs remaining)", 
-            //          module->id,
-            //          (module->data.cannon.reload_time - module->data.cannon.time_since_fire) / 1000.0f);
             continue;
+        }
+
+        // ── Gunport blocking: if cannon is linked to a gunport and it's closed, block fire ──
+        {
+            uint8_t gp_snap = module->data.cannon.gunport_snap_idx;
+            if (gp_snap != 0xFF) {
+                // Find the gunport with the matching snap_idx
+                for (uint8_t gm = 0; gm < sim_ship->module_count; gm++) {
+                    ShipModule* gp = &sim_ship->modules[gm];
+                    if (gp->type_id != MODULE_TYPE_GUNPORT) continue;
+                    if (gp->data.gunport.snap_idx != gp_snap) continue;
+                    if (!gp->data.gunport.is_open) {
+                        // Notify the firing player that the gunport is closed
+                        char gpblk[128];
+                        snprintf(gpblk, sizeof(gpblk),
+                            "{\"type\":\"gunport_blocked\",\"player_id\":%u,\"cannon_id\":%u,\"gunport_id\":%u}",
+                            player->player_id, module->id, gp->id);
+                        broadcast_json_all(gpblk);
+                        goto next_cannon; // skip firing this cannon
+                    }
+                    break; // found matching gunport (open) — allow fire
+                }
+            }
         }
 
         // Require a player or NPC to be mounted at this cannon before it can fire.
@@ -1521,6 +1541,7 @@ void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_typ
                 }
             }
         }
+        next_cannon:; // label for gunport-blocked skip
     }
     
     log_info("💥 Player %u fired %d cannon(s) on ship %u (%s%s)", 
