@@ -188,7 +188,8 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
             }
             if (!occupied) free_mast = mid;
         }
-        npc->role = NPC_ROLE_RIGGER;
+        npc->role       = NPC_ROLE_RIGGER;
+        npc->deck_level = 1; /* masts are always on the top deck */
         if (free_mast != 0) {
             ShipModule* mast = find_module_by_id(ship, free_mast);
             if (mast) {

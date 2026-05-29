@@ -1095,19 +1095,19 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
-    ship->modules[ship->module_count - 1].deck_id = 1;
+    ship->modules[ship->module_count - 1].deck_id = 1; /* top deck */
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_PORT_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
-    ship->modules[ship->module_count - 1].deck_id = 1;
+    ship->modules[ship->module_count - 1].deck_id = 1; /* top deck */
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_PORT_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(75.0f))},
         Q16_FROM_FLOAT(3.1415927f)
     );
-    ship->modules[ship->module_count - 1].deck_id = 1;
+    ship->modules[ship->module_count - 1].deck_id = 1; /* top deck */
     }
     
     // Starboard side cannons (3) — offsets 0x06..0x08
@@ -1117,19 +1117,19 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-35.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
-    ship->modules[ship->module_count - 1].deck_id = 1;
+    ship->modules[ship->module_count - 1].deck_id = 1; /* top deck */
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_STBD_1), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(65.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
-    ship->modules[ship->module_count - 1].deck_id = 1;
+    ship->modules[ship->module_count - 1].deck_id = 1; /* top deck */
     ship->modules[ship->module_count++] = module_create(
         MID(ship_seq, MODULE_OFFSET_CANNON_STBD_2), MODULE_TYPE_CANNON,
         (Vec2Q16){Q16_FROM_FLOAT(CLIENT_TO_SERVER(-135.0f)), Q16_FROM_FLOAT(CLIENT_TO_SERVER(-75.0f))},
         Q16_FROM_FLOAT(0.0f)
     );
-    ship->modules[ship->module_count - 1].deck_id = 1;
+    ship->modules[ship->module_count - 1].deck_id = 1; /* top deck */
     }
     
     // Three masts — offsets 0x09..0x0B (bow, mid, stern)

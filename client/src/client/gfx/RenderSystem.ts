@@ -8362,20 +8362,20 @@ export class RenderSystem {
       this.queueRenderItem(1, `cannons-lower-${ship.id}`,  () => this.drawShipCannons(ship, camera, 0), 3);
       this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
-      this.queueRenderItem(4, 'cannons', _da(() => this.drawShipCannons(ship, camera, 1)));
-      this.queueRenderItem(4, 'swivel-guns', _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
-      this.queueRenderItem(4, 'cannon-aim-guides', _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
-      this.queueRenderItem(4, 'swivel-aim-guides', _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
-      this.queueRenderItem(4, 'rudder', _da(() => this.drawShipRudder(ship, camera)));
+      this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
+      this.queueRenderItem(4, `swivel-guns-upper-${ship.id}`, _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
+      this.queueRenderItem(4, `cannon-aim-guides-${ship.id}`, _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, `swivel-aim-guides-${ship.id}`, _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, `rudder-${ship.id}`, _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         // Always render at full opacity so active groups remain visible from the steering wheel.
         this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
       }
       // Reload indicators always drawn above group overlay (layer 6)
       this.queueRenderItem(6, `cannon-reload-${ship.id}`, _da(() => this.drawCannonReloadIndicators(ship, camera)));
-      this.queueRenderItem(5, 'steering-wheels', _da(() => this.drawShipSteeringWheels(ship, camera)));
-      this.queueRenderItem(5, 'ladders', _da(() => this.drawShipLadders(ship, camera)));
-      this.queueRenderItem(5, 'sail-ropes', _da(() => this.drawShipSailRopes(ship, camera)));
+      this.queueRenderItem(5, `steering-wheels-${ship.id}`, _da(() => this.drawShipSteeringWheels(ship, camera)));
+      this.queueRenderItem(5, `ladders-${ship.id}`, _da(() => this.drawShipLadders(ship, camera)));
+      this.queueRenderItem(5, `sail-ropes-${ship.id}`, _da(() => this.drawShipSailRopes(ship, camera)));
     }
 
     // Island cannon trajectory guide (same layer as ship cannon aim guides)
@@ -8555,12 +8555,17 @@ export class RenderSystem {
       const _npcCheckPos = _npcShip?.position ?? npc.position;
       if (!this.fogVisibleAt(_npcCheckPos.x, _npcCheckPos.y)) continue;
       if (npc.shipId && npc.deckLevel === 0) {
-        // Lower-deck NPC: only visible when Alt is held (ghost above planks).
+        // Lower-deck NPC: render at layer 1 (below planks) so they're visible from the lower
+        // deck and naturally hidden from above by the upper-deck cover at layer 2.
+        // Alt-held ghost rendering at layer 4 lets you see them from above in dim form.
+        this.queueRenderItem(1, `npc-lower-${npc.id}`, () => this.drawNpc(npc, worldState, camera), 2);
         if (this.altKeyHeld) {
-          this.queueRenderItem(4, 'npcs', () => this.drawNpc(npc, worldState, camera), 2);
+          this.queueRenderItem(4, `npc-lower-ghost-${npc.id}`, () => {
+            this.ctx.save(); this.ctx.globalAlpha *= 0.35; this.drawNpc(npc, worldState, camera); this.ctx.restore();
+          }, 2);
         }
       } else {
-        this.queueRenderItem(4, 'npcs', () => this.drawNpc(npc, worldState, camera), 2);
+        this.queueRenderItem(4, `npc-upper-${npc.id}`, () => this.drawNpc(npc, worldState, camera), 2);
       }
     }
 
@@ -15665,8 +15670,12 @@ export class RenderSystem {
     const worldRotation = npc.rotation + (ship ? ship.rotation : 0);
 
     this.ctx.save();
-    // Fade out NPCs on a different deck level than the local player
-    const _npcDeckAlpha = (npc.deckLevel !== 255 && npc.deckLevel !== this._playerDeckLevel) ? 0.25 : 1.0;
+    // Fade out upper-deck NPCs when the player is on the lower deck (and vice versa).
+    // Lower-deck NPCs (deckLevel=0) are queued at layer 1 so they render under planks —
+    // no alpha reduction needed there; the planks/cover provide natural occlusion from above.
+    // Upper-deck NPCs (deckLevel=1) queued at layer 4 are dimmed when player is on lower deck.
+    const _diffDeck = npc.deckLevel !== 255 && npc.deckLevel !== this._playerDeckLevel;
+    const _npcDeckAlpha = (_diffDeck && npc.deckLevel === 1) ? 0.25 : 1.0;
     this.ctx.globalAlpha = (isMoving ? 0.7 : 1.0) * _npcDeckAlpha;
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
@@ -16670,7 +16679,8 @@ export class RenderSystem {
 
     const ignoreFlag  = this.npcIgnoreSet.has(npc.id) ? '  🚫' : '';
     const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}${ignoreFlag}`;
-    const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
+    const _deckLabel  = npc.shipId ? (npc.deckLevel === 0 ? 'Deck: Lower' : 'Deck: Upper') : '';
+    const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}${_deckLabel ? `  –  ${_deckLabel}` : ''}`;
     const companyLabel = COMPANY_NAMES[npc.companyId]
       ?? this._cachedCompanies.find(c => c.id === npc.companyId)?.name
       ?? `#${npc.companyId}`;
@@ -16841,6 +16851,14 @@ export class RenderSystem {
       stats.push({ label: 'Sail State',     value: moduleData.sailState.toUpperCase() });
       stats.push({ label: 'Openness',       value: `${moduleData.openness.toFixed(0)}%` });
       stats.push({ label: 'Wind Eff.',      value: `${(moduleData.windEfficiency * 100).toFixed(0)}%` });
+    }
+
+    // Deck assignment — shown for interactive modules (not layout-only planks / decks)
+    if (moduleData.kind !== 'plank' && moduleData.kind !== 'deck') {
+      const _deckVal = module.deckId === 255 ? 'Any'
+                     : module.deckId === 0    ? 'Lower'
+                     :                          'Upper';
+      stats.push({ label: 'Deck', value: `${_deckVal} (${module.deckId === 255 ? '—' : module.deckId})` });
     }
 
     // Weight

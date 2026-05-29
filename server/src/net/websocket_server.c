@@ -824,18 +824,14 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
         if (mod_radius <= 0.0f) continue; // passable (ladder / deck / seat)
 
         // Per-deck filtering: masts span all decks and always collide.
-        // Cannons are deck-aware: only collide when the cannon's deck_id matches
-        // the player's deck level so a lower-deck cannon blocks lower-deck players
-        // (and upper-deck players walk over it) and vice-versa.
+        // Cannons always block player movement regardless of deck_id — broadside
+        // cannons are at deck-edge level and act as physical obstacles on both decks.
         // Other upper-deck modules (helm, swivel) are skipped on the lower deck.
         if (player_deck_level == 0) {
             if (mod->type_id != MODULE_TYPE_MAST &&
-                !(mod->type_id == MODULE_TYPE_CANNON && mod->deck_id == 0)) {
+                mod->type_id != MODULE_TYPE_CANNON) {
                 continue;
             }
-        } else if (mod->type_id == MODULE_TYPE_CANNON && mod->deck_id != (uint8_t)player_deck_level) {
-            // Upper-deck player: skip cannons that belong to a different deck
-            continue;
         }
 
         // Module position in ship-local client pixels
@@ -6478,8 +6474,8 @@ int websocket_server_update(struct Sim* sim) {
                                             int cannon_snap_idx = -1;
                                             if (psi) sscanf(psi + 12, "%d", &cannon_snap_idx);
                                             const char* pdk = strstr(payload, "\"deckId\":");
-                                            uint8_t req_deck_id = 1; /* default: upper deck */
-                                            if (pdk) { unsigned dk = 1; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : 1; }
+                                            uint8_t req_deck_id = player->deck_level; /* default: player's current deck */
+                                            if (pdk) { unsigned dk = 0; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : player->deck_level; }
 
                                             // Allocate a unique module ID (scan max existing + 1 across both arrays)
                                             uint16_t max_id = 0;
@@ -6687,8 +6683,8 @@ int websocket_server_update(struct Sim* sim) {
                                             if (py) sscanf(py + 9,  "%f", &local_y);
                                             if (pr) sscanf(pr + 11, "%f", &rotation);
                                             const char* pdk = strstr(payload, "\"deckId\":");
-                                            uint8_t req_deck_id = 1; /* default: upper deck */
-                                            if (pdk) { unsigned dk = 1; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : 1; }
+                                            uint8_t req_deck_id = player->deck_level; /* default: player's current deck */
+                                            if (pdk) { unsigned dk = 0; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : player->deck_level; }
                                             // edge distance must be within [0, 2.5] server units = [0, 25] client px.
                                             if (is_outside_deck(target_ship_id, local_x, local_y)) {
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"outside_deck\"}");
@@ -7239,7 +7235,7 @@ int websocket_server_update(struct Sim* sim) {
                                     } else if (gm_mod->type_id == MODULE_TYPE_MAST) {
                                         gm_npc->role            = NPC_ROLE_RIGGER;
                                         gm_npc->assigned_weapon_id = gm_mod_id;
-                                        if (gm_mod->deck_id != 0xFF) gm_npc->deck_level = (uint8_t)gm_mod->deck_id;
+                                        gm_npc->deck_level      = 1; /* masts are always on the top deck */
                                         gm_npc->target_local_x  = mx;
                                         gm_npc->target_local_y  = my + 20.0f;
                                         gm_npc->state           = WORLD_NPC_STATE_MOVING;

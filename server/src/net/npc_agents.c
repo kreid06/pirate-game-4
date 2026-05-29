@@ -329,7 +329,9 @@ void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
     /* Swivels are smaller — NPC stands slightly closer to the pivot */
     const float CANNON_MOUNT_DIST = (cannon->type_id == MODULE_TYPE_SWIVEL) ? 18.0f : 25.0f;
     npc->assigned_weapon_id = cannon_id;
-    if (cannon->deck_id != 0xFF) npc->deck_level = (uint8_t)cannon->deck_id;
+    /* Cannons are always on a specific deck (0=lower, 1=upper), never deck-independent.
+     * Use deck_id directly if it's 0 or 1; legacy saves that stored 0xFF default to top deck. */
+    npc->deck_level = (cannon->deck_id <= 1) ? cannon->deck_id : 1;
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;

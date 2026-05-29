@@ -1643,7 +1643,7 @@ export class ClientApplication {
           const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
           const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
           console.log(`🔳 [BUILD] Placing cannon at gunport ${gp.id} snap=${snapIdx ?? 'none'} pos (${gp.localPos.x.toFixed(0)}, ${cannonY.toFixed(0)}) rot=${(rot * 180 / Math.PI).toFixed(0)}°`);
-          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx);
+          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel);
           return;
         }
         // Plank placement build mode
