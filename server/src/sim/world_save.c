@@ -808,6 +808,7 @@ int world_load(const char *path) {
                    && world_npc_count < MAX_WORLD_NPCS) {
                 WorldNpc *n = &world_npcs[world_npc_count];
                 memset(n, 0, sizeof(*n));
+                n->deck_level = 1; /* default upper deck; corrected below if assigned to a module */
 
                 unsigned id = 0, role = 0, company = 0, ship_id = 0;
                 unsigned health = 100, max_health = 100, level = 1;
@@ -877,7 +878,9 @@ int world_load(const char *path) {
                 }
 
                 /* Restore module occupied state so ship logic sees the NPC
-                 * as already at their station on the first tick after load. */
+                 * as already at their station on the first tick after load.
+                 * Also re-derive deck_level from the module's deck_id so NPCs
+                 * assigned to lower-deck weapons don't land on the wrong deck. */
                 if (n->assigned_weapon_id != 0 && n->ship_id != 0
                     && (n->state == WORLD_NPC_STATE_AT_GUN
                         || n->state == WORLD_NPC_STATE_IDLE)) {
@@ -886,8 +889,10 @@ int world_load(const char *path) {
                         ShipModule* mod = find_module_by_id(ss, n->assigned_weapon_id);
                         if (mod) {
                             mod->state_bits |= MODULE_STATE_OCCUPIED;
-                            log_info("🤖 NPC %u restored to module %u on ship %u",
-                                     n->id, n->assigned_weapon_id, n->ship_id);
+                            /* deck_id 0xFF = deck-independent (e.g. mast); treat as upper */
+                            n->deck_level = (mod->deck_id != 0xFF) ? mod->deck_id : 1;
+                            log_info("🤖 NPC %u restored to module %u on ship %u (deck %u)",
+                                     n->id, n->assigned_weapon_id, n->ship_id, (unsigned)n->deck_level);
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1780069949,
+    "timestamp": 1780070469,
     "ship_count": 3,
     "npc_count": 28,
     "structure_count": 38
@@ -159,7 +159,18 @@
         {"id":803,"type":2,"lx":-14.7500,"ly":5.0000,"lr":3.141571,"health":8000,"max_health":8000,"gp_snap":10,"gp_open":0,"deck":0},
         {"id":804,"type":11,"lx":7.7500,"ly":9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":7,"gp_open":0,"deck":1},
         {"id":805,"type":2,"lx":7.7500,"ly":5.0000,"lr":3.141571,"health":8000,"max_health":8000,"gp_snap":7,"gp_open":0,"deck":0},
-        {"id":806,"type":9,"lx":-14.0000,"ly":0.0000,"lr":0.000000,"health":8000,"max_health":8000,"gp_snap":255,"gp_open":0,"deck":255}
+        {"id":806,"type":9,"lx":-14.0000,"ly":0.0000,"lr":0.000000,"health":8000,"max_health":8000,"gp_snap":255,"gp_open":0,"deck":255},
+        {"id":807,"type":2,"lx":-7.2500,"ly":5.0000,"lr":3.141586,"health":8000,"max_health":8000,"gp_snap":9,"gp_open":0,"deck":0},
+        {"id":808,"type":11,"lx":0.2500,"ly":9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":8,"gp_open":0,"deck":1},
+        {"id":809,"type":11,"lx":15.2500,"ly":9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":6,"gp_open":0,"deck":1},
+        {"id":810,"type":11,"lx":15.2500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":0,"gp_open":0,"deck":1},
+        {"id":811,"type":11,"lx":7.7500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":1,"gp_open":0,"deck":1},
+        {"id":812,"type":11,"lx":0.2500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":2,"gp_open":0,"deck":1},
+        {"id":813,"type":11,"lx":-7.2500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":3,"gp_open":0,"deck":1},
+        {"id":814,"type":11,"lx":-14.7500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":4,"gp_open":0,"deck":1},
+        {"id":815,"type":11,"lx":-22.2500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"gp_snap":5,"gp_open":0,"deck":1},
+        {"id":816,"type":2,"lx":0.2500,"ly":5.0000,"lr":3.141586,"health":8000,"max_health":8000,"gp_snap":8,"gp_open":0,"deck":0},
+        {"id":817,"type":2,"lx":15.2500,"ly":5.0000,"lr":3.141586,"health":8000,"max_health":8000,"gp_snap":6,"gp_open":0,"deck":0}
       ],
       "weapon_groups": [
         {"co":0,"idx":1,"mode":2,"target":0,"gpopen":0,"wids":[771,772,773]},
@@ -168,7 +179,6 @@
         {"co":1,"idx":2,"mode":2,"target":0,"gpopen":0,"wids":[774,775,776]},
         {"co":2,"idx":1,"mode":2,"target":0,"gpopen":0,"wids":[771,772,773]},
         {"co":2,"idx":2,"mode":2,"target":0,"gpopen":0,"wids":[774,775,776]},
-        {"co":3,"idx":1,"mode":2,"target":0,"gpopen":0,"wids":[771,772,773]},
         {"co":3,"idx":2,"mode":2,"target":0,"gpopen":0,"wids":[774,776]},
         {"co":3,"idx":3,"mode":2,"target":0,"gpopen":0,"wids":[803,771,772,773]}
       ]
