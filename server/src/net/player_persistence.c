@@ -48,6 +48,7 @@ void save_player_to_file(const WebSocketPlayer *p) {
         "  \"parent_ship_id\": %u,\n"
         "  \"local_x\": %.3f,\n"
         "  \"local_y\": %.3f,\n"
+        "  \"deck_level\": %u,\n"
         "  \"health\": %u,\n"
         "  \"max_health\": %u,\n"
         "  \"player_level\": %u,\n"
@@ -70,6 +71,7 @@ void save_player_to_file(const WebSocketPlayer *p) {
         (double)p->x, (double)p->y,
         (unsigned)p->parent_ship_id,
         (double)p->local_x, (double)p->local_y,
+        (unsigned)p->deck_level,
         (unsigned)p->health, (unsigned)p->max_health,
         (unsigned)p->player_level, (unsigned)p->player_xp,
         (unsigned)p->stat_health, (unsigned)p->stat_damage,
@@ -160,6 +162,7 @@ bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_uint_field(buf, "stat_damage", &tmp))  p->stat_damage   = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "stat_stamina", &tmp)) p->stat_stamina  = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "stat_weight", &tmp))  p->stat_weight   = (uint8_t)tmp;
+    if (json_parse_uint_field(buf, "deck_level",  &tmp))  p->deck_level    = (uint8_t)(tmp <= 1 ? tmp : 0);
     if (json_parse_uint_field(buf, "company_id", &tmp))   p->company_id    = (uint8_t)(tmp < COMPANY_SOLO ? COMPANY_SOLO : tmp); /* players never in company 0 */
     if (json_parse_uint_field(buf, "active_slot", &tmp))  p->inventory.active_slot = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "helm",  &tmp))        p->inventory.equipment.helm   = (ItemKind)tmp;

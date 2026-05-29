@@ -130,7 +130,7 @@ export class RenderSystem {
   /** Per-gunport animation state: gunportId → { targetOpen, startProgress, startTime }. */
   private gunportAnimations: Map<number, { targetOpen: boolean; startProgress: number; startTime: number }> = new Map();
   /** Duration of gunport cannon slide animation in milliseconds. */
-  private static readonly GUNPORT_ANIM_MS = 500;
+  private static readonly GUNPORT_ANIM_MS = 800;
   /** How far inboard a gunport cannon is rendered when the gunport is closed (pixels). */
   static readonly GUNPORT_CANNON_INBOARD = 40;
   /** Whether mast replacement build mode is active (sail item held). */
@@ -3314,12 +3314,16 @@ export class RenderSystem {
 
   /** Find the gunport module whose position matches a cannon's position (co-located at hull edge). */
   private findGunportForCannon(cannon: ShipModule, ship: Ship): ShipModule | null {
+    // Match by snap index — the server links cannon to gunport via gunportSnapIdx / snapIndex.
+    // Proximity matching breaks now that the server authoritatively moves the cannon between
+    // stowed (y=±10) and deployed (y=±80) positions, both far from the gunport hull edge (y=±90).
+    const cannonData = cannon.moduleData as import('../../sim/modules').CannonModuleData | undefined;
+    const snapIdx = cannonData?.gunportSnapIdx;
+    if (snapIdx === undefined || snapIdx === 255) return null;
     for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
-      if (Math.abs(mod.localPos.x - cannon.localPos.x) < 15 &&
-          Math.abs(mod.localPos.y - cannon.localPos.y) < 6) {
-        return mod;
-      }
+      const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData | undefined;
+      if (gpData?.snapIndex === snapIdx) return mod;
     }
     return null;
   }
@@ -6537,7 +6541,7 @@ export class RenderSystem {
       if (s.type === 'cannon') {
         // Draw highlight matching cannon shape: base rect + barrel rect
         // Base inherits rotRad from ctx.rotate(rotRad) above — correct.
-        const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
+        const baseW = 22 * zoom, baseH = 15 * zoom, barW = 16 * zoom, barH = 40 * zoom;
         ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
         // Barrel: must match the actual draw code's barrelRot exactly.
         // Draw code: barrelRot = aimAngle + π/2, applied at translate(ssp) level (no rotRad stacked).
@@ -10258,7 +10262,7 @@ export class RenderSystem {
         );
         if (hasCannon) continue;
 
-        const stowedY = mod.localPos.y + (mod.localPos.y < 0 ? RenderSystem.GUNPORT_CANNON_INBOARD : -RenderSystem.GUNPORT_CANNON_INBOARD);
+        const stowedY = mod.localPos.y + (mod.localPos.y < 0 ? 40 : -40);
         const ddx = localX - mod.localPos.x;
         const ddy = localY - stowedY;
         if (Math.abs(ddx) <= 14 && Math.abs(ddy) <= 14) {
@@ -10340,19 +10344,20 @@ export class RenderSystem {
     const gpHalfWGhost = 11; // match visual gpHalfW
     for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
-      // Skip if a cannon is already here
-      const hasCannon = ship.modules.some(
+      // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
+      // because the cannon is now far from the gunport hull edge when stowed/deployed).
+      const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
+      const hasCannon = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 && ship.modules.some(
         m => m.kind === 'cannon'
-          && Math.abs(m.localPos.x - mod.localPos.x) < 15
-          && Math.abs(m.localPos.y - mod.localPos.y) < 20,
+          && (m.moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx === gpData.snapIndex,
       );
       if (hasCannon) continue;
 
       const isHoveredGp = this.hoveredGunportCannonSnap?.module === mod;
       // Rotation: starboard (y < 0) rot=0 → barrel points -y (outward); port (y > 0) rot=π → barrel points +y (outward)
       const rot = mod.localPos.y < 0 ? 0 : Math.PI;
-      // Draw ghost at stowed (inboard) position — same visual origin as the rendered cannon at rest
-      const ghostStowedY = mod.localPos.y + (mod.localPos.y < 0 ? RenderSystem.GUNPORT_CANNON_INBOARD : -RenderSystem.GUNPORT_CANNON_INBOARD);
+      // Stowed position: 40px inboard of hull edge (gpY=-90 → ghostY=-50, gpY=+90 → ghostY=+50)
+      const ghostStowedY = mod.localPos.y + (mod.localPos.y < 0 ? 40 : -40);
 
       this.ctx.save();
       this.ctx.translate(mod.localPos.x, ghostStowedY);
@@ -10364,7 +10369,7 @@ export class RenderSystem {
       this.ctx.lineWidth   = isHoveredGp ? lw * 2 : lw;
       this.ctx.setLineDash(isHoveredGp ? [] : [4, 3]);
       this.ctx.beginPath();
-      this.ctx.rect(-gpHalfWGhost, -10, gpHalfWGhost * 2, 20);
+      this.ctx.rect(-gpHalfWGhost, -7.5, gpHalfWGhost * 2, 15);
       this.ctx.fill();
       this.ctx.stroke();
       this.ctx.setLineDash([]);
@@ -11307,13 +11312,17 @@ export class RenderSystem {
       let renderY = y;
       const assocGunport = this.findGunportForCannon(cannon, ship);
       if (assocGunport) {
-        const inboard = RenderSystem.GUNPORT_CANNON_INBOARD;
-        // Stowed position is INBOARD px inside the hull edge; deployed = cannon.localPos.y (hull)
-        const stowedY = y + (y < 0 ? inboard : -inboard);
+        // Use gunport position as the reference so the animation is independent of
+        // whatever local_pos the server assigns the cannon (deployed vs stowed).
+        const gpY = assocGunport.localPos.y;  // ±90 (hull edge)
+        // Stowed:   cannon 40 px inboard of hull edge → centre at ∓50
+        // Deployed: cannon base (outboard face) flush with hull inner surface → centre at ∓80
+        const stowedY   = gpY + (gpY < 0 ?  40 : -40);  // -90+40=-50 stbd, +90-40=+50 port
+        const deployedY = gpY + (gpY < 0 ?  10 : -10);  // -90+10=-80 stbd, +90-10=+80 port
         const anim = this.gunportAnimations.get(assocGunport.id);
         const isOpen = (assocGunport.moduleData as any)?.isOpen ?? false;
         const progress = anim ? this.computeGunportProgress(anim, performance.now()) : (isOpen ? 1 : 0);
-        renderY = stowedY + (y - stowedY) * progress; // lerp: 0=stowed, 1=deployed at hull
+        renderY = stowedY + (deployedY - stowedY) * progress;
       }
 
       // Move to cannon position and apply module rotation
@@ -11334,8 +11343,8 @@ export class RenderSystem {
         this.ctx.fillStyle = '#060f0d';
         this.ctx.strokeStyle = `rgba(0,200,180,${glowAlpha})`;
         this.ctx.lineWidth = lineWidth * 1.5;
-        this.ctx.fillRect(-15, -10, 30, 20);
-        this.ctx.strokeRect(-15, -10, 30, 20);
+        this.ctx.fillRect(-11, -7.5, 22, 15);
+        this.ctx.strokeRect(-11, -7.5, 22, 15);
 
         // Spectral barrel
         this.ctx.save();
@@ -11368,8 +11377,8 @@ export class RenderSystem {
       this.ctx.fillStyle = this.darkenByDamage('#8B4513', cannonHealthRatio);
       this.ctx.strokeStyle = '#000000';
       this.ctx.lineWidth = lineWidth;
-      this.ctx.fillRect(-15, -10, 30, 20);
-      this.ctx.strokeRect(-15, -10, 30, 20);
+      this.ctx.fillRect(-11, -7.5, 22, 15);
+      this.ctx.strokeRect(-11, -7.5, 22, 15);
 
       // Save context to apply turret rotation
       this.ctx.save();

@@ -187,6 +187,12 @@ int world_save(const char *path) {
         for (uint8_t m = 0; m < s->module_count; m++) {
             const ShipModule *mod = &s->modules[m];
             if (m > 0) fprintf(f, ",");
+            /* gp_snap: gunport.snap_idx or cannon.gunport_snap_idx; 0xFF = not linked */
+            unsigned save_gp_snap =
+                (mod->type_id == MODULE_TYPE_CANNON) ? (unsigned)mod->data.cannon.gunport_snap_idx :
+                (mod->type_id == MODULE_TYPE_GUNPORT) ? (unsigned)mod->data.gunport.snap_idx : 0xFFu;
+            unsigned save_gp_open =
+                (mod->type_id == MODULE_TYPE_GUNPORT) ? (unsigned)mod->data.gunport.is_open : 0u;
             fprintf(f,
                 "\n        {"
                 "\"id\":%u,"
@@ -195,7 +201,9 @@ int world_save(const char *path) {
                 "\"ly\":%.4f,"
                 "\"lr\":%.6f,"
                 "\"health\":%u,"
-                "\"max_health\":%u"
+                "\"max_health\":%u,"
+                "\"gp_snap\":%u,"
+                "\"gp_open\":%u"
                 "}",
                 (unsigned)mod->id,
                 (unsigned)mod->type_id,
@@ -203,7 +211,9 @@ int world_save(const char *path) {
                 (double)((float)mod->local_pos.y / 65536.0f),
                 (double)((float)mod->local_rot    / 65536.0f),
                 (unsigned)(mod->health    < 0 ? 0 : (uint32_t)mod->health),
-                (unsigned)(mod->max_health < 0 ? 0 : (uint32_t)mod->max_health)
+                (unsigned)(mod->max_health < 0 ? 0 : (uint32_t)mod->max_health),
+                save_gp_snap,
+                save_gp_open
             );
         }
 
@@ -577,6 +587,7 @@ int world_load(const char *path) {
                                 }
                                 while ((mobj = next_json_object(&marr)) != NULL) {
                                     unsigned saved_id = 0, mtype = 0, mhealth = 0, mmax = 0;
+                                    unsigned mgp_snap = 0xFF, mgp_open = 0;
                                     float mlx = 0, mly = 0, mlr = 0;
                                     ws_json_uint(mobj,  "id",         &saved_id);
                                     ws_json_uint(mobj,  "type",       &mtype);
@@ -585,6 +596,8 @@ int world_load(const char *path) {
                                     ws_json_float(mobj, "lr",         &mlr);
                                     ws_json_uint(mobj,  "health",     &mhealth);
                                     ws_json_uint(mobj,  "max_health", &mmax);
+                                    ws_json_uint(mobj,  "gp_snap",    &mgp_snap);
+                                    ws_json_uint(mobj,  "gp_open",    &mgp_open);
                                     /* Rebuild MID with new ship_seq, preserving the offset */
                                     uint8_t offset = (uint8_t)(saved_id & 0xFF);
                                     uint16_t new_mid = (uint16_t)((s->ship_seq << 8) | offset);
@@ -596,6 +609,13 @@ int world_load(const char *path) {
                                     ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
                                     new_mod.health     = (int32_t)mhealth;
                                     new_mod.max_health = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                    /* Restore gunport / cannon link data */
+                                    if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
+                                        new_mod.data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
+                                    else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
+                                        new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
+                                        new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
+                                    }
                                     /* Add to SimpleShip layer */
                                     if (s->module_count < MAX_MODULES_PER_SHIP)
                                         s->modules[s->module_count++] = new_mod;
@@ -611,6 +631,7 @@ int world_load(const char *path) {
                                  * Dynamically-placed modules (ramps) have no default slot — add them. */
                                 while ((mobj = next_json_object(&marr)) != NULL) {
                                     unsigned mtype = 0, mhealth = 0, mmax = 0, msaved_id = 0;
+                                    unsigned mgp_snap = 0xFF, mgp_open = 0;
                                     float mlx = 0, mly = 0, mlr = 0;
                                     ws_json_uint(mobj,  "id",         &msaved_id);
                                     ws_json_uint(mobj,  "type",       &mtype);
@@ -619,6 +640,8 @@ int world_load(const char *path) {
                                     ws_json_float(mobj, "lr",         &mlr);
                                     ws_json_uint(mobj,  "health",     &mhealth);
                                     ws_json_uint(mobj,  "max_health", &mmax);
+                                    ws_json_uint(mobj,  "gp_snap",    &mgp_snap);
+                                    ws_json_uint(mobj,  "gp_open",    &mgp_open);
 
                                     bool matched = false;
                                     /* Match module by type + approximate position */
@@ -631,13 +654,22 @@ int world_load(const char *path) {
                                         m->health    = (int32_t)mhealth;
                                         m->local_rot = (q16_t)(int32_t)(mlr * 65536.0f);
                                         if (mmax > 0) m->max_health = (int32_t)mmax;
+                                        /* Restore gunport / cannon link data */
+                                        if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
+                                            m->data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
+                                        else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
+                                            m->data.gunport.snap_idx = (uint8_t)mgp_snap;
+                                            m->data.gunport.is_open  = (uint8_t)(mgp_open & 1);
+                                        }
                                         matched = true;
                                         break;
                                     }
 
-                                    /* Dynamically-placed modules (e.g. ramps) have no default
-                                     * slot — add them to both SimpleShip and sim layers. */
-                                    if (!matched && mhealth > 0) {
+                                    /* Dynamically-placed modules (e.g. ramps, gunports) have no
+                                     * default slot — add them to both SimpleShip and sim layers.
+                                     * mmax == 0 catches indestructible modules (gunports) which
+                                     * are intentionally stored with health=0 / max_health=0. */
+                                    if (!matched && (mhealth > 0 || mmax == 0)) {
                                         Vec2Q16 pos = {
                                             (q16_t)(int32_t)(mlx * 65536.0f),
                                             (q16_t)(int32_t)(mly * 65536.0f)
@@ -660,6 +692,13 @@ int world_load(const char *path) {
                                         ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
                                         new_mod.health     = (int32_t)mhealth;
                                         new_mod.max_health = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                        /* Restore gunport / cannon link data for dynamically-placed modules */
+                                        if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
+                                            new_mod.data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
+                                        else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
+                                            new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
+                                            new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
+                                        }
                                         if (s->module_count < MAX_MODULES_PER_SHIP)
                                             s->modules[s->module_count++] = new_mod;
                                         /* Mirror into sim layer */

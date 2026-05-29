@@ -550,7 +550,7 @@ static float module_collision_radius(ModuleTypeId type) {
         case MODULE_TYPE_HELM:
         case MODULE_TYPE_STEERING_WHEEL: return 18.0f;
         case MODULE_TYPE_MAST:           return 14.0f;
-        case MODULE_TYPE_CANNON:         return 20.0f;
+        case MODULE_TYPE_CANNON:         return 13.0f;
         case MODULE_TYPE_SWIVEL:         return 10.0f;
         default:                         return 0.0f; // ladder/plank/deck/seat — passable
     }
@@ -823,9 +823,18 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
         float mod_radius = module_collision_radius(mod->type_id);
         if (mod_radius <= 0.0f) continue; // passable (ladder / deck / seat)
 
-        // Per-deck filtering: on lower deck only masts collide
-        // (cannons / helms / swivels live on the upper deck).
-        if (player_deck_level == 0 && mod->type_id != MODULE_TYPE_MAST) {
+        // Per-deck filtering: masts span all decks and always collide.
+        // Cannons are deck-aware: only collide when the cannon's deck_id matches
+        // the player's deck level so a lower-deck cannon blocks lower-deck players
+        // (and upper-deck players walk over it) and vice-versa.
+        // Other upper-deck modules (helm, swivel) are skipped on the lower deck.
+        if (player_deck_level == 0) {
+            if (mod->type_id != MODULE_TYPE_MAST &&
+                !(mod->type_id == MODULE_TYPE_CANNON && mod->deck_id == 0)) {
+                continue;
+            }
+        } else if (mod->type_id == MODULE_TYPE_CANNON && mod->deck_id != (uint8_t)player_deck_level) {
+            // Upper-deck player: skip cannons that belong to a different deck
             continue;
         }
 
@@ -965,7 +974,26 @@ void recalc_ship_mass(SimpleShip* ship) {
         cargo_kg += PLAYER_BODY_MASS_KG + player_inventory_weight(&players[i]);
     }
 
-    float new_mass = ship->base_mass + cargo_kg;
+    /* Cannon weights: 100 kg when deployed (gunport open / no gunport), 40 kg when stowed. */
+    float cannon_kg = 0.0f;
+    for (uint8_t cm = 0; cm < ship->module_count; cm++) {
+        if (ship->modules[cm].type_id != MODULE_TYPE_CANNON) continue;
+        uint8_t snap = ship->modules[cm].data.cannon.gunport_snap_idx;
+        if (snap == 0xFF) {
+            cannon_kg += 100.0f; /* upper-deck / free cannon: always full weight */
+        } else {
+            bool gp_open = false;
+            for (uint8_t gm = 0; gm < ship->module_count; gm++) {
+                if (ship->modules[gm].type_id != MODULE_TYPE_GUNPORT) continue;
+                if (ship->modules[gm].data.gunport.snap_idx != snap) continue;
+                gp_open = (ship->modules[gm].data.gunport.is_open != 0);
+                break;
+            }
+            cannon_kg += gp_open ? 100.0f : 40.0f;
+        }
+    }
+
+    float new_mass = ship->base_mass + cargo_kg + cannon_kg;
     ship->mass     = new_mass;
 
     /* Sync into authoritative sim ship */
@@ -5827,6 +5855,29 @@ int websocket_server_update(struct Sim* sim) {
                                                     break;
                                                 }
                                             }
+                                            // Move the linked cannon to deployed / stowed position.
+                                            // Deployed (open):  cannon centre 1.0 su inboard of hull edge.
+                                            // Stowed  (closed): cannon centre 8.0 su inboard of hull edge.
+                                            {
+                                                q16_t gp_y = tog_sim->modules[m].local_pos.y;
+                                                uint8_t gp_snap = tog_sim->modules[m].data.gunport.snap_idx;
+                                                q16_t cannon_new_y = new_state
+                                                    ? ((gp_y < 0) ? gp_y + Q16_FROM_FLOAT(1.0f) : gp_y - Q16_FROM_FLOAT(1.0f))
+                                                    : ((gp_y < 0) ? gp_y + Q16_FROM_FLOAT(4.0f) : gp_y - Q16_FROM_FLOAT(4.0f));
+                                                for (uint8_t cm = 0; cm < tog_sim->module_count; cm++) {
+                                                    if (tog_sim->modules[cm].type_id != MODULE_TYPE_CANNON) continue;
+                                                    if (tog_sim->modules[cm].data.cannon.gunport_snap_idx != gp_snap) continue;
+                                                    tog_sim->modules[cm].local_pos.y = cannon_new_y;
+                                                    for (uint8_t cms = 0; cms < tog_simple->module_count; cms++) {
+                                                        if (tog_simple->modules[cms].id == tog_sim->modules[cm].id) {
+                                                            tog_simple->modules[cms].local_pos.y = cannon_new_y;
+                                                            break;
+                                                        }
+                                                    }
+                                                    break;
+                                                }
+                                                recalc_ship_mass(tog_simple);
+                                            }
                                             found = true;
                                             log_info("🔳 Player %u toggled gunport %u → %s on ship %u",
                                                      player->player_id, gunport_id,
@@ -6323,10 +6374,27 @@ int websocket_server_update(struct Sim* sim) {
                                             nc.data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
                                             nc.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
 
+                                            // If bound to a gunport, snap initial y-position to
+                                            // deployed or stowed based on current gunport state.
+                                            if (nc.data.cannon.gunport_snap_idx != 0xFF) {
+                                                for (uint8_t gm = 0; gm < simple->module_count; gm++) {
+                                                    if (simple->modules[gm].type_id != MODULE_TYPE_GUNPORT) continue;
+                                                    if (simple->modules[gm].data.gunport.snap_idx != nc.data.cannon.gunport_snap_idx) continue;
+                                                    q16_t gp_y = simple->modules[gm].local_pos.y;
+                                                    if (simple->modules[gm].data.gunport.is_open) {
+                                                        nc.local_pos.y = (gp_y < 0) ? gp_y + Q16_FROM_FLOAT(1.0f) : gp_y - Q16_FROM_FLOAT(1.0f);
+                                                    } else {
+                                                        nc.local_pos.y = (gp_y < 0) ? gp_y + Q16_FROM_FLOAT(4.0f) : gp_y - Q16_FROM_FLOAT(4.0f);
+                                                    }
+                                                    break;
+                                                }
+                                            }
+
                                             // Add to physics simulation
                                             sim_ship->modules[sim_ship->module_count++] = nc;
                                             // Add to SimpleShip (network broadcast + NPC visibility)
                                             simple->modules[simple->module_count++] = nc;
+                                            recalc_ship_mass(simple);
 
                                             // Consume 1 cannon from inventory
                                             player->inventory.slots[cannon_slot].quantity--;
