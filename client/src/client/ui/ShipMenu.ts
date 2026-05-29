@@ -581,7 +581,7 @@ export class ShipMenu {
     rows.push({ label: 'Water Ingress', pct: water / 100, color: wColor, valueStr: `${water.toFixed(0)}%`, stripe: true });
 
     // Ship Weight — modules + bodies (75 kg each) + inventory
-    const SHIP_WEIGHT_CAP = 6000; // default brigantine max
+    const SHIP_WEIGHT_CAP = 6000 + ((ship.levelStats?.levels?.[0] ?? 1) - 1) * 400;
 
     const MODULE_KG: Record<string, number> = {
       'cannon':         100,
@@ -595,7 +595,17 @@ export class ShipMenu {
       'seat':            25,
       'custom':          50,
     };
-    const moduleKg  = ship.modules.reduce((s, m) => s + (MODULE_KG[m.kind] ?? 50), 0);
+    const moduleKg = ship.modules.reduce((s, m) => {
+      if (m.kind === 'cannon') {
+        const snapIdx = (m.moduleData as any)?.gunportSnapIdx;
+        if (snapIdx !== undefined && snapIdx !== 255) {
+          const gp = ship.modules.find(gm => gm.kind === 'gunport' && (gm.moduleData as any)?.snapIndex === snapIdx);
+          return s + (gp ? ((gp.moduleData as any)?.isOpen ? 100 : 40) : 100);
+        }
+        return s + 100;
+      }
+      return s + (MODULE_KG[m.kind] ?? 50);
+    }, 0);
 
     const aboadPlayers = worldState.players.filter(p => p.carrierId === ship.id);
     const aboardNpcs   = worldState.npcs.filter(n => n.shipId === ship.id);
@@ -871,7 +881,7 @@ export class ShipMenu {
       const attrCap = ls.attrCaps[attr] ?? SHIP_ATTR_CAPS[attr] ?? 50;
       const attrMaxed = pts >= attrCap;
       const isMaxed   = attrMaxed || shipCapped;
-      const wip       = attr === SHIP_ATTR_WEIGHT || attr === SHIP_ATTR_CREW;
+      const wip       = attr === SHIP_ATTR_CREW;
 
       // Alternate stripe
       if (ii % 2 === 1) {
@@ -912,7 +922,9 @@ export class ShipMenu {
       ctx.fillStyle = wip ? TEXT_DIM : TEXT_MONO;
       let effectStr = '';
       if (!wip) {
-        if (attr === SHIP_ATTR_DAMAGE) {
+        if (attr === SHIP_ATTR_WEIGHT) {
+          effectStr = `${6000 + pts * 400} kg cap`;
+        } else if (attr === SHIP_ATTR_DAMAGE) {
           const mult = 1.0 + 0.04 * pts;
           effectStr = `×${mult.toFixed(2)} dmg`;
         } else if (attr === SHIP_ATTR_RESISTANCE) {

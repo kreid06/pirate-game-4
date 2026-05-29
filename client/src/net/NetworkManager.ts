@@ -655,8 +655,8 @@ export class NetworkManager {
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
   public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number, gunportsOpen: boolean}[]) => void) | null = null;
-  /** Fired when the server confirms a gunport was toggled (open or closed). */
-  public onGunportState: ((shipId: number, gunportId: number, isOpen: boolean) => void) | null = null;
+  /** Fired when the server confirms a gunport was toggled (open or closed). mass is the updated ship mass in kg (if provided). */
+  public onGunportState: ((shipId: number, gunportId: number, isOpen: boolean, mass?: number) => void) | null = null;
   /** Fired when the server blocks a cannon fire attempt because its gunport is closed. */
   public onGunportBlocked: ((cannonId: number, gunportId: number) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
@@ -2549,7 +2549,8 @@ export class NetworkManager {
         const gpShipId: number = message.shipId || 0;
         const gpId: number = message.gunportId || 0;
         const gpOpen: boolean = !!message.isOpen;
-        this.onGunportState?.(gpShipId, gpId, gpOpen);
+        const gpMass: number | undefined = typeof message.mass === 'number' ? message.mass : undefined;
+        this.onGunportState?.(gpShipId, gpId, gpOpen, gpMass);
         break;
       }
 

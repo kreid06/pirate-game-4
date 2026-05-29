@@ -5957,10 +5957,10 @@ int websocket_server_update(struct Sim* sim) {
                                             /* Broadcast to ALL clients so every player on the ship
                                              * receives the state change and triggers the animation. */
                                             {
-                                                char gp_bcast[128];
+                                                char gp_bcast[160];
                                                 snprintf(gp_bcast, sizeof(gp_bcast),
-                                                    "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u}",
-                                                    gunport_id, new_state ? "true" : "false", target_ship_id);
+                                                    "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u,\"mass\":%.0f}",
+                                                    gunport_id, new_state ? "true" : "false", target_ship_id, tog_simple->mass);
                                                 broadcast_json_all(gp_bcast);
                                             }
                                             strcpy(response, "{\"type\":\"ok\"}");
@@ -6017,12 +6017,12 @@ int websocket_server_update(struct Sim* sim) {
                                                 for (uint8_t m2 = 0; m2 < ship->module_count; m2++) {
                                                     if (ship->modules[m2].type_id != MODULE_TYPE_GUNPORT) continue;
                                                     if (ship->modules[m2].data.gunport.snap_idx != gp_snap) continue;
-                                                    char gp_msg[128];
+                                                    char gp_msg[160];
                                                     snprintf(gp_msg, sizeof(gp_msg),
-                                                        "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u}",
+                                                        "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u,\"mass\":%.0f}",
                                                         ship->modules[m2].id,
                                                         grp->gunports_open ? "true" : "false",
-                                                        ship->ship_id);
+                                                        ship->ship_id, ship->mass);
                                                     broadcast_json_all(gp_msg);
                                                     break;
                                                 }
@@ -12381,8 +12381,15 @@ void websocket_server_tick(float dt) {
              * top speed.  Sail force F is constant; equilibrium speed v_eq ∝ F/m, so
              * target_speed = BASE_WIND_SPEED × wind_factor × (base_mass / current_mass). */
             SimpleShip* ws_ship = find_ship(ship->id);
-            float mass_ratio = (ws_ship && ws_ship->mass > 0.0f)
-                               ? (BRIGANTINE_MASS / ws_ship->mass) : 1.0f;
+            /* Normalize by weight cap: same load% = same speed regardless of Weight level.
+             * effective_mass = raw_mass * (base_cap / weight_cap)
+             * base_cap = 6000 kg (level-1 cap); weight_cap grows +400 kg/level.
+             * ship->level_stats lives on the sim Ship (struct Ship), not SimpleShip. */
+            float weight_cap = 6000.0f + (float)(ship->level_stats.levels[SHIP_ATTR_WEIGHT] - 1) * 400.0f;
+            float effective_mass = (ws_ship && ws_ship->mass > 0.0f)
+                ? ws_ship->mass * (6000.0f / weight_cap)
+                : BRIGANTINE_MASS;
+            float mass_ratio = BRIGANTINE_MASS / effective_mass;
 
             float wind_force_factor = (global_sim->wind_power * avg_sail_openness / 100.0f)
                                       * avg_wind_efficiency

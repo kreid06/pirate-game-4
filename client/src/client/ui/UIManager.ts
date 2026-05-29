@@ -2301,12 +2301,22 @@ class HUDElement implements UIElement {
                                        (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
 
       // Compute total ship weight: modules + bodies (75 kg ea) + inventory
-      const SHIP_WEIGHT_CAP = 6000;
+      const SHIP_WEIGHT_CAP = 6000 + ((playerShip.levelStats?.levels?.[0] ?? 1) - 1) * 400;
       const MODULE_KG_W: Record<string, number> = {
         cannon: 100, swivel: 180, mast: 150, helm: 20, 'steering-wheel': 20,
         plank: 30, deck: 200, ladder: 5, seat: 25, custom: 50,
       };
-      const _modKg      = playerShip.modules.reduce((s, m) => s + (MODULE_KG_W[m.kind] ?? 50), 0);
+      const _modKg = playerShip.modules.reduce((s, m) => {
+        if (m.kind === 'cannon') {
+          const snapIdx = (m.moduleData as any)?.gunportSnapIdx;
+          if (snapIdx !== undefined && snapIdx !== 255) {
+            const gp = playerShip.modules.find(gm => gm.kind === 'gunport' && (gm.moduleData as any)?.snapIndex === snapIdx);
+            return s + (gp ? ((gp.moduleData as any)?.isOpen ? 100 : 40) : 100);
+          }
+          return s + 100;
+        }
+        return s + (MODULE_KG_W[m.kind] ?? 50);
+      }, 0);
       const _aboard     = context.worldState.players.filter(p => p.onDeck && p.carrierId === playerShip.id);
       const _npcsAboard = context.worldState.npcs.filter(n => n.shipId === playerShip.id);
       const _bodyKg     = (_aboard.length + _npcsAboard.length) * 75;

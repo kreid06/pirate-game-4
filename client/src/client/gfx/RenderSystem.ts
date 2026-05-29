@@ -168,6 +168,11 @@ export class RenderSystem {
   private _lowerDeckShipId: number | null = null;
   /** Which deck the local player is on: 1 = upper deck (default), 0 = lower deck. */
   private _playerDeckLevel: number = 1;
+  /**
+   * Smoothed opacity multiplier for upper-deck modules/NPCs when the local player is on the lower deck.
+   * Lerps between 1.0 (on upper deck) and 0.3 (on lower deck) over ~300 ms.
+   */
+  private _upperDeckFade: number = 1.0;
   /** Optional callback fired whenever _playerDeckLevel changes (so ClientApplication can notify the server). */
   public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
   /** Read-only access to the current player deck level for placement decisions. */
@@ -3872,6 +3877,13 @@ export class RenderSystem {
           const newAlpha    = prevAlpha + (targetAlpha - prevAlpha) * Math.min(1, FADE_SPEED * frameDt);
           this._sailAlphaByShip.set(ship.id, newAlpha);
         }
+      }
+
+      // Upper-deck fade: smoothly dim upper-deck modules and NPCs while on the lower deck.
+      {
+        const _udTarget = this._playerDeckLevel === 0 ? 0.3 : 1.0;
+        const _udSpeed  = 4.0; // transition completes in ~300 ms
+        this._upperDeckFade = this._upperDeckFade + (_udTarget - this._upperDeckFade) * Math.min(1, _udSpeed * frameDt);
       }
     }
 
@@ -8294,14 +8306,14 @@ export class RenderSystem {
     // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
-        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       this.queueRenderItem(3, 'plank-status', _da(() => this.drawPlankStatusIcons(ship, camera)), 2);
     }
 
     // Burning module fire overlays — drawn above module graphics
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
-        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       this.queueRenderItem(4, `fire-modules-${ship.id}`, _da(() => this.drawBurningModules(ship, camera)), 5);
     }
 
@@ -8360,7 +8372,7 @@ export class RenderSystem {
 
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
-        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       // Lower-deck modules (deckId=0): hull-clipped at layer 1 so they render below planks.
       // Full opacity — the planks at layer 3 cover them naturally when the player is on the upper deck.
       this.queueRenderItem(1, `cannons-lower-${ship.id}`,  () => this.drawShipCannons(ship, camera, 0), 3);
@@ -8390,7 +8402,7 @@ export class RenderSystem {
     // Queue sail fibers (layer 6)
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
-        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       this.queueRenderItem(6, 'sail-fibers', _da(() => this.drawShipSailFibers(ship, camera)));
     }
 
@@ -8402,7 +8414,7 @@ export class RenderSystem {
     // Queue sail masts (layer 7)
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
-        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       this.queueRenderItem(7, 'sail-masts', _da(() => this.drawShipSailMasts(ship, camera)));
     }
     
@@ -9061,7 +9073,7 @@ export class RenderSystem {
     if (phase1Alpha <= 0) return; // fully faded — nothing to draw
     
     this.ctx.save();
-    const _deckAlpha = this._lowerDeckShipId === ship.id ? 0.4 : 1.0;
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? this._upperDeckFade : 1.0;
     if (phase1Alpha * _deckAlpha < 1) this.ctx.globalAlpha = phase1Alpha * _deckAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
@@ -9314,7 +9326,7 @@ export class RenderSystem {
     // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
     const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
     const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) * ghostHealthFade : phase1Alpha;
-    const _deckAlpha = this._lowerDeckShipId === ship.id ? 0.4 : 1.0;
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? this._upperDeckFade : 1.0;
     if (baseAlpha * _deckAlpha < 1) this.ctx.globalAlpha = baseAlpha * _deckAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
@@ -15679,7 +15691,7 @@ export class RenderSystem {
     // no alpha reduction needed there; the planks/cover provide natural occlusion from above.
     // Upper-deck NPCs (deckLevel=1) queued at layer 4 are dimmed when player is on lower deck.
     const _diffDeck = npc.deckLevel !== 255 && npc.deckLevel !== this._playerDeckLevel;
-    const _npcDeckAlpha = (_diffDeck && npc.deckLevel === 1) ? 0.25 : 1.0;
+    const _npcDeckAlpha = (_diffDeck && npc.deckLevel === 1) ? this._upperDeckFade : 1.0;
     this.ctx.globalAlpha = (isMoving ? 0.7 : 1.0) * _npcDeckAlpha;
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
@@ -16870,7 +16882,17 @@ export class RenderSystem {
       'cannon': 100, 'swivel': 180, 'mast': 150, 'helm': 20, 'steering-wheel': 20,
       'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50,
     };
-    const weightKg = MODULE_KG[moduleData.kind] ?? 50;
+    let weightKg = MODULE_KG[moduleData.kind] ?? 50;
+    // Cannon weight is dynamic: 40 kg when stowed (gunport closed), 100 kg when deployed (gunport open / no gunport)
+    if (moduleData.kind === 'cannon') {
+      const snapIdx = (moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx;
+      if (snapIdx !== undefined && snapIdx !== 255) {
+        const gp = ship.modules.find(m => m.moduleData?.kind === 'gunport'
+          && (m.moduleData as import('../../sim/modules').GunportModuleData).snapIndex === snapIdx);
+        const gpOpen = gp ? !!(gp.moduleData as import('../../sim/modules').GunportModuleData).isOpen : true;
+        weightKg = gpOpen ? 100 : 40;
+      }
+    }
 
     // Interact range
     const MAX_INTERACT_DIST = 50;

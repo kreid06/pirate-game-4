@@ -808,7 +808,7 @@ export class ClientApplication {
       };
 
       // Gunport state changed (toggled open/closed) — update local ship module data
-      this.networkManager.onGunportState = (shipId, gunportId, isOpen) => {
+      this.networkManager.onGunportState = (shipId, gunportId, isOpen, mass) => {
         const ws = this.authoritativeWorldState;
         const ship = ws?.ships.find(s => s.id === shipId);
         if (!ship) return;
@@ -816,6 +816,7 @@ export class ClientApplication {
         if (mod?.moduleData?.kind === 'gunport') {
           (mod.moduleData as any).isOpen = isOpen;
         }
+        if (mass !== undefined) ship.mass = mass;
         // Also update predicted world state if present
         const pws = this.predictedWorldState;
         const pship = pws?.ships.find(s => s.id === shipId);
@@ -823,6 +824,7 @@ export class ClientApplication {
         if (pmod?.moduleData?.kind === 'gunport') {
           (pmod.moduleData as any).isOpen = isOpen;
         }
+        if (mass !== undefined && pship) pship.mass = mass;
         // Trigger cannon slide animation (out when opening, in when closing)
         this.renderSystem.triggerGunportAnimation(gunportId, isOpen);
       };

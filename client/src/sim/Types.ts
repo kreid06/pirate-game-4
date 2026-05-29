@@ -278,7 +278,7 @@ export const SHIP_ATTR_NAMES: Record<number, string> = {
 };
 
 export const SHIP_ATTR_DESC: Record<number, string> = {
-  [SHIP_ATTR_WEIGHT]:     '+5% hull mass/lvl (WIP)',
+  [SHIP_ATTR_WEIGHT]:     '+400 kg max weight/lvl',
   [SHIP_ATTR_RESISTANCE]: '−2% dmg taken/lvl  →  floor 30%',
   [SHIP_ATTR_DAMAGE]:     '+4% cannon dmg/lvl  →  ceil 240%',
   [SHIP_ATTR_CREW]:       '+2 max crew/lvl (WIP)',

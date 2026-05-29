@@ -210,8 +210,11 @@ export class ShipPredictor {
     const windForceFactor = (ctrl.windPower * ctrl.sailOpenness / 100.0)
                             * ctrl.windEfficiency * avgSailAlign;
 
-    // Mass scaling — mirrors server: heavier ships have lower top speed (v_eq ∝ F/m).
-    const massRatio   = ship.mass > 0 ? BRIGANTINE_MASS / ship.mass : 1.0;
+    // Mass scaling — mirrors server: same load% = same speed regardless of Weight level.
+    // effective_mass = raw_mass * (base_cap / weight_cap); base_cap = 6000 kg.
+    const weightCap     = 6000 + ((ship.levelStats?.levels?.[0] ?? 1) - 1) * 400;
+    const effectiveMass = ship.mass > 0 ? ship.mass * (6000 / weightCap) : BRIGANTINE_MASS;
+    const massRatio     = effectiveMass > 0 ? BRIGANTINE_MASS / effectiveMass : 1.0;
     const targetSpeed = BASE_WIND_SPEED * windForceFactor * massRatio;
     const blendFactor = 1.0 - Math.exp(-dt / WIND_ACCEL_RATE);
 
