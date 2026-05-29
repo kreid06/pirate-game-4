@@ -12428,8 +12428,9 @@ void websocket_server_tick(float dt) {
              * When the helmsman holds S, override the wind target with a slow
              * backward velocity — 15% of BASE_WIND_SPEED in the stern direction.
              * Also scaled by mass_ratio so a loaded ship reverses more slowly.
-             * Uses a faster blend (0.8s) so the ship brakes and reverses quickly. */
-            if (ws_ship && ws_ship->reverse_thrust) {
+             * Uses a faster blend (0.8s) so the ship brakes and reverses quickly.
+             * Requires sails to be fully closed (avg_sail_openness == 0). */
+            if (ws_ship && ws_ship->reverse_thrust && avg_sail_openness == 0.0f) {
                 const float REVERSE_SPEED = BASE_WIND_SPEED * 0.0375f * mass_ratio;
                 const float REVERSE_ACCEL = 0.8f; /* time-constant in seconds */
                 float rev_blen = 1.0f - expf(-dt / REVERSE_ACCEL);

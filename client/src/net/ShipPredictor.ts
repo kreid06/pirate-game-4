@@ -224,8 +224,8 @@ export class ShipPredictor {
     let vx = ship.velocity.x + (cos * targetSpeed - ship.velocity.x) * blendFactor;
     let vy = ship.velocity.y + (sin * targetSpeed - ship.velocity.y) * blendFactor;
 
-    // ── 3. Reverse thrust override ────────────────────────────────────────
-    if (ctrl.reverseThrust) {
+    // ── 3. Reverse thrust override — only when sails are fully closed ────────
+    if (ctrl.reverseThrust && ctrl.sailOpenness === 0) {
       const revSpeed = REVERSE_SPEED * massRatio;
       const revBlend = 1.0 - Math.exp(-dt / REVERSE_ACCEL);
       vx += (-cos * revSpeed - vx) * revBlend;
