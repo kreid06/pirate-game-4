@@ -279,6 +279,7 @@ void init_brigantine_ship(int idx, float world_x, float world_y, uint8_t ship_se
             s->modules[s->module_count].data.cannon.gunport_snap_idx = 0xFF; // not linked to a gunport
             s->modules[s->module_count].data.cannon.reload_time    = CANNON_RELOAD_TIME_MS;
             s->modules[s->module_count].data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS;
+            s->modules[s->module_count].deck_id = 1; /* upper deck — matches simulation.c and collision filter */
             s->module_count++;
         }
     }

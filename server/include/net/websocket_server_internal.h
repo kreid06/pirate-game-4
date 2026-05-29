@@ -129,3 +129,6 @@ bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
 void broadcast_json_all(const char* json);
 void update_flame_waves(uint32_t time_elapsed);
 void player_die(WebSocketPlayer* player);
+/** Apply a group's current gunports_open state to all cannons in the group.
+ *  Opens/closes each cannon's associated gunport and moves the cannon barrel. */
+void apply_group_gunport_state(SimpleShip* ship, WeaponGroup* group);

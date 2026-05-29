@@ -350,6 +350,7 @@ export interface Npc {
   statWeight: number;     // upgrade levels (+10% carry capacity each)
   statPoints: number;     // unspent stat points = (npcLevel - 1) - total spent
   locked: boolean;        // when true: pinned to current module; crew panel cannot reassign
+  deckLevel: number;      // 0 = lower deck, 1 = upper deck (255 = deck-independent)
 }
 
 /**
@@ -523,4 +524,6 @@ export interface WeaponGroupState {
   mode: WeaponGroupMode;
   /** For targetfire mode: the ship ID the group is locked onto. -1 = none. */
   targetId: number;
+  /** Whether this group's gunports are in the open state (toggled with R at helm). */
+  gunportsOpen: boolean;
 }

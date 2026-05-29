@@ -170,6 +170,8 @@ export class RenderSystem {
   private _playerDeckLevel: number = 1;
   /** Optional callback fired whenever _playerDeckLevel changes (so ClientApplication can notify the server). */
   public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
+  /** Read-only access to the current player deck level for placement decisions. */
+  public get playerDeckLevel(): number { return this._playerDeckLevel; }
   /** Current ramp facing index in build mode: 0=+x, 1=+y, 2=-x, 3=-y (top/light end direction). */
   private rampFacing: number = 0;
   /** Player position info used by the hover tooltip to determine interact range. */
@@ -182,6 +184,8 @@ export class RenderSystem {
   public activeWeaponGroups: Set<number> = new Set();
   /** NPC IDs whose command-ignore flag is set (client-side only).  Used to draw badge + block Move To. */
   public npcIgnoreSet: Set<number> = new Set();
+  /** Tracks whether the Alt key is currently held — reveals lower-deck NPCs when above deck. */
+  public altKeyHeld: boolean = false;
   /** NPC IDs selected via Ctrl+drag box — rendered with highlight ring. */
   public selectedNpcIds: Set<number> = new Set();
   /** Screen-space rect being dragged for box selection (null when inactive). */
@@ -3590,6 +3594,13 @@ export class RenderSystem {
         // Ladders already checked in pass 1; decks are never interactively highlighted
         const _pass2Kind = module.moduleData?.kind ?? module.kind;
         if (_pass2Kind === 'ladder' || _pass2Kind === 'deck') continue;
+
+        // Gunports are only interactable from the lower deck (deck 0)
+        if (_pass2Kind === 'gunport' && this._playerDeckLevel !== 0) continue;
+        // Planks are interactable from any deck level (build/repair from either deck)
+        // All other modules: block cross-deck interaction (deck-independent modules allowed everywhere)
+        if (_pass2Kind !== 'plank' && _pass2Kind !== 'gunport'
+            && module.deckId !== 255 && module.deckId !== this._playerDeckLevel) continue;
 
         const moduleKind = _pass2Kind;
 
@@ -8209,6 +8220,19 @@ export class RenderSystem {
       if (scaffold) {
         this.queueRenderItem(1, `scaffold-vis-${ship.id}`, () => this.drawScaffoldingVisuals(ship, scaffold, camera), 1);
       }
+      // Gunport doors: layer 1 priority 4 (above lower-deck cannons at prio 3).
+      // Only queued when the player is on this ship's lower deck — the upper-deck
+      // cover at layer 2 hides them from any other viewpoint.
+      if (this._lowerDeckShipId === ship.id) {
+        this.queueRenderItem(1, `gunports-${ship.id}`, () => this.drawGunportOverlays(ship, camera), 4);
+      }
+      // Upper-deck cover: solid hull fill at layer 2 — paints over lower-deck cannons,
+      // gunports, and any other layer-1 content so nothing bleeds through plank gaps.
+      if (ship.shipType !== SHIP_TYPE_GHOST
+          && ship.modules.some(m => m.kind === 'deck' && m.deckId === 1)
+          && this._lowerDeckShipId !== ship.id) {
+        this.queueRenderItem(2, `upper-deck-cover-${ship.id}`, () => this.drawUpperDeckCover(ship, camera));
+      }
     }
     
     // Queue players (layer 2 normally; layer 3 priority 5 when in shipyard build mode
@@ -8231,7 +8255,17 @@ export class RenderSystem {
           this.queueRenderItem(1, 'players', () => this.drawPlayer(player, worldState, camera), 2);
         }
       } else {
-        this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+        // Deck-aware layering: lower deck → layer 1 (under planks); upper deck → layer 4 (above planks)
+        // For local player use _playerDeckLevel; for others use deckId. Off-ship (swimming) use layer 2.
+        const _onShip = player.carrierId !== 0;
+        const _deckLevel = isLocal ? this._playerDeckLevel : (player.deckId ?? 1);
+        if (_onShip && _deckLevel === 0) {
+          this.queueRenderItem(1, 'players', () => this.drawPlayer(player, worldState, camera), 2);
+        } else if (_onShip) {
+          this.queueRenderItem(4, 'players', () => this.drawPlayer(player, worldState, camera), 2);
+        } else {
+          this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+        }
       }
     }
     
@@ -8324,11 +8358,9 @@ export class RenderSystem {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.4; fn(); this.ctx.restore(); } : fn;
       // Lower-deck modules (deckId=0): hull-clipped at layer 1 so they render below planks.
-      // Dimmed when the player is on the upper deck (can't see them directly).
-      const _ldDim = (fn: () => void): (() => void) => this._lowerDeckShipId !== ship.id
-        ? () => { this.ctx.save(); this.ctx.globalAlpha *= 0.3; fn(); this.ctx.restore(); } : fn;
-      this.queueRenderItem(1, `cannons-lower-${ship.id}`,  _ldDim(() => this.drawShipCannons(ship, camera, 0)), 3);
-      this.queueRenderItem(1, `swivels-lower-${ship.id}`,  _ldDim(() => this.drawShipSwivelGuns(ship, camera, 0)), 3);
+      // Full opacity — the planks at layer 3 cover them naturally when the player is on the upper deck.
+      this.queueRenderItem(1, `cannons-lower-${ship.id}`,  () => this.drawShipCannons(ship, camera, 0), 3);
+      this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
       this.queueRenderItem(4, 'cannons', _da(() => this.drawShipCannons(ship, camera, 1)));
       this.queueRenderItem(4, 'swivel-guns', _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
@@ -8336,7 +8368,8 @@ export class RenderSystem {
       this.queueRenderItem(4, 'swivel-aim-guides', _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
       this.queueRenderItem(4, 'rudder', _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
-        this.queueRenderItem(5, `cannon-groups-${ship.id}`, _da(() => this.drawCannonGroupOverlay(ship, camera)));
+        // Always render at full opacity so active groups remain visible from the steering wheel.
+        this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
       }
       // Reload indicators always drawn above group overlay (layer 6)
       this.queueRenderItem(6, `cannon-reload-${ship.id}`, _da(() => this.drawCannonReloadIndicators(ship, camera)));
@@ -8516,12 +8549,19 @@ export class RenderSystem {
       }
     }
 
-    // Queue NPCs (layer 2 - same as players)
+    // Queue NPCs — deck-aware layering: lower deck (0) → layer 1 (under planks), upper deck → layer 4 (above planks)
     for (const npc of (worldState.npcs || [])) {
       const _npcShip = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
       const _npcCheckPos = _npcShip?.position ?? npc.position;
       if (!this.fogVisibleAt(_npcCheckPos.x, _npcCheckPos.y)) continue;
-      this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, worldState, camera));
+      if (npc.shipId && npc.deckLevel === 0) {
+        // Lower-deck NPC: only visible when Alt is held (ghost above planks).
+        if (this.altKeyHeld) {
+          this.queueRenderItem(4, 'npcs', () => this.drawNpc(npc, worldState, camera), 2);
+        }
+      } else {
+        this.queueRenderItem(4, 'npcs', () => this.drawNpc(npc, worldState, camera), 2);
+      }
     }
 
     // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
@@ -9434,70 +9474,9 @@ export class RenderSystem {
         this.ctx.restore();
       }
     }
-    // Release hull clip so gunport door panels can render outside the hull boundary.
+    // Release hull clip.
     this.ctx.restore();
 
-    // ── Gunport overlays: draw on top of the hull planks ──────────────────
-    // Draw at the 12 predefined gunport positions along starboard (y=-90) and port (y=+90).
-    // Closed: flush wooden door cover flush with the plank.
-    // Open: dark hole in the plank + the door panel swung outward as a visible rectangle.
-    {
-      const gpHalfW = 11;   // half-width of the hole (22px wide)
-      const gpHalfH = 5;   // half-height (10px = plank thickness)
-      const doorExt = 14;  // how far the swung-open panel extends beyond the hull
-      for (const mod of ship.modules) {
-        if (mod.kind !== 'gunport') continue;
-        if (mod.moduleData?.kind !== 'gunport') continue;
-        const gx = mod.localPos.x;
-        const gy = mod.localPos.y;
-        const isOpen = (mod.moduleData as any).isOpen ?? false;
-        this.ctx.save();
-        this.ctx.translate(gx, gy);
-        if (isOpen) {
-          // ── Dark hole through the plank ──
-          this.ctx.fillStyle = '#0e0808';
-          this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
-          this.ctx.strokeStyle = 'rgba(0,0,0,0.7)';
-          this.ctx.lineWidth = 0.8;
-          this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
-          // ── Door panel swung outward ──────────────────────────────────────
-          // The panel hinges at the outer hull face and lies flat outside the ship.
-          // Starboard (gy < 0): outer face at y = -gpHalfH, extends further negative.
-          // Port     (gy > 0): outer face at y = +gpHalfH, extends further positive.
-          const outDir = gy < 0 ? -1 : 1;
-          const hingeY = outDir * gpHalfH;          // outer edge of the plank in local coords
-          const panelY = outDir < 0 ? hingeY - doorExt : hingeY;
-          // Wood fill
-          this.ctx.fillStyle = '#7a5c2a';
-          this.ctx.fillRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
-          // Outline
-          this.ctx.strokeStyle = '#4a3010';
-          this.ctx.lineWidth = 0.8;
-          this.ctx.strokeRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
-          // Subtle wood grain line
-          this.ctx.globalAlpha = 0.25;
-          this.ctx.strokeStyle = '#3a2010';
-          this.ctx.lineWidth = 0.6;
-          this.ctx.beginPath();
-          this.ctx.moveTo(0, panelY + 2); this.ctx.lineTo(0, panelY + doorExt - 2);
-          this.ctx.stroke();
-          this.ctx.globalAlpha = 1.0;
-        } else {
-          // ── Closed: flush wooden cover matching the door item's look ──
-          this.ctx.fillStyle = '#6a4828';
-          this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
-          this.ctx.strokeStyle = '#3a2010';
-          this.ctx.lineWidth = 0.8;
-          this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
-          // Centre hinge line
-          this.ctx.beginPath();
-          this.ctx.moveTo(-gpHalfW, 0); this.ctx.lineTo(gpHalfW, 0);
-          this.ctx.stroke();
-        }
-        this.ctx.restore();
-      }
-    }
-    
     this.ctx.restore();
   }
 
@@ -10962,6 +10941,134 @@ export class RenderSystem {
           this.ctx.strokeRect(rx, ry, 50, 50);
         }
       }
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Solid upper-deck cover drawn at layer 2.
+   * Fills the hull polygon (with ramp/hatch holes) with the deck surface colour so that
+   * lower-deck cannons, gunports, and other layer-1 content are fully hidden when the
+   * player is not below deck — even through gaps between individual plank boards.
+   */
+  private drawUpperDeckCover(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (ship.hull.length < 3) return;
+
+    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.save();
+    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Match the deck-damage-darkened hull colour used in drawShipHull
+    let fillColor = '#DEB887'; // BurlyWood — upper deck
+    const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                 ?? ship.modules.find(m => m.kind === 'deck');
+    const dmd = topDeck?.moduleData as any;
+    if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+      fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
+    }
+    this.ctx.fillStyle = fillColor;
+
+    // Fill hull polygon, punching transparent holes at ramp/hatch snap points
+    this.ctx.beginPath();
+    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    this.ctx.closePath();
+    for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+      this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+    }
+    this.ctx.fill('evenodd');
+
+    // Flood tint overlay (mirrors drawShipHull)
+    if (floodTint > 0) {
+      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+      this.ctx.fillStyle = '#1a6eb5';
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      this.ctx.fill();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw gunport door overlays for a ship.
+   * Queued at layer 1 priority 4 — only when the local player is on this ship's lower deck.
+   * The upper-deck cover at layer 2 hides them from any other viewpoint (option B).
+   */
+  private drawGunportOverlays(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.save();
+    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const gpHalfW = 11;
+    const gpHalfH = 5;
+    const doorExt = 14;
+
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'gunport') continue;
+      if (mod.moduleData?.kind !== 'gunport') continue;
+      const gx = mod.localPos.x;
+      const gy = mod.localPos.y;
+      const isOpen = (mod.moduleData as any).isOpen ?? false;
+      this.ctx.save();
+      this.ctx.translate(gx, gy);
+      if (isOpen) {
+        // Dark hole
+        this.ctx.fillStyle = '#0e0808';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        this.ctx.lineWidth = 0.8;
+        this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        // Door panel swung outward (outside hull, so not covered by layer-2 fill)
+        const outDir = gy < 0 ? -1 : 1;
+        const hingeY = outDir * gpHalfH;
+        const panelY = outDir < 0 ? hingeY - doorExt : hingeY;
+        this.ctx.fillStyle = '#7a5c2a';
+        this.ctx.fillRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
+        this.ctx.strokeStyle = '#4a3010';
+        this.ctx.lineWidth = 0.8;
+        this.ctx.strokeRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
+        this.ctx.globalAlpha = 0.25;
+        this.ctx.strokeStyle = '#3a2010';
+        this.ctx.lineWidth = 0.6;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, panelY + 2); this.ctx.lineTo(0, panelY + doorExt - 2);
+        this.ctx.stroke();
+        this.ctx.globalAlpha = 1.0;
+      } else {
+        // Closed door cover
+        this.ctx.fillStyle = '#6a4828';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = '#3a2010';
+        this.ctx.lineWidth = 0.8;
+        this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.beginPath();
+        this.ctx.moveTo(-gpHalfW, 0); this.ctx.lineTo(gpHalfW, 0);
+        this.ctx.stroke();
+      }
+      this.ctx.restore();
     }
 
     this.ctx.restore();
@@ -15112,7 +15219,13 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(player.position);
     const cameraState = camera.getState();
     const scaledRadius = player.radius * cameraState.zoom;
-    
+
+    // Fade out other players on a different deck level than the local player
+    const _isOtherPlayer = player.id !== this.localPlayerId;
+    const _playerDeckAlpha = (_isOtherPlayer && player.deckId !== this._playerDeckLevel) ? 0.25 : 1.0;
+    this.ctx.save();
+    this.ctx.globalAlpha = _playerDeckAlpha;
+
     // Draw player circle
     // Color: Green if on deck, Blue if mounted, Red if swimming
     // Enemy-company players are always tinted red regardless of mount state.
@@ -15232,6 +15345,8 @@ export class RenderSystem {
       this.ctx.fillStyle = '#ffffff';
       this.ctx.fillText(player.name, screenPos.x, nameY);
     }
+
+    this.ctx.restore();
   }
   
   private drawCannonball(cannonball: Cannonball, camera: Camera, worldState?: WorldState): void {
@@ -15550,7 +15665,9 @@ export class RenderSystem {
     const worldRotation = npc.rotation + (ship ? ship.rotation : 0);
 
     this.ctx.save();
-    this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
+    // Fade out NPCs on a different deck level than the local player
+    const _npcDeckAlpha = (npc.deckLevel !== 255 && npc.deckLevel !== this._playerDeckLevel) ? 0.25 : 1.0;
+    this.ctx.globalAlpha = (isMoving ? 0.7 : 1.0) * _npcDeckAlpha;
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
@@ -17280,6 +17397,7 @@ export class RenderSystem {
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+        if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue; // different deck — no collision
         const existingFp = getModuleFootprint(mod.kind);
         if (footprintsOverlap(newFp, localX, localY, rotRad,
                               existingFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
@@ -17350,14 +17468,14 @@ export class RenderSystem {
       this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';
       this.ctx.strokeStyle = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
       this.ctx.lineWidth   = 1 / zoom;
-      this.ctx.fillRect(-15, -10, 30, 20);
-      this.ctx.strokeRect(-15, -10, 30, 20);
+      this.ctx.fillRect(-11, -7.5, 22, 15);
+      this.ctx.strokeRect(-11, -7.5, 22, 15);
 
       // -- Barrel (pointing up / forward) --
       this.ctx.fillStyle   = valid ? '#225522' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#553311' : '#552222';
       this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
-      this.ctx.fillRect(-8, -38, 16, 30);
-      this.ctx.strokeRect(-8, -38, 16, 30);
+      this.ctx.fillRect(-8, -40, 16, 40);
+      this.ctx.strokeRect(-8, -40, 16, 40);
     } else if (item === 'swivel') {
       // -- Swivel base (smaller than cannon) --
       this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';

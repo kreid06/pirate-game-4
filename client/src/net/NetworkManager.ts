@@ -654,7 +654,7 @@ export class NetworkManager {
   public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
-  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
+  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number, gunportsOpen: boolean}[]) => void) | null = null;
   /** Fired when the server confirms a gunport was toggled (open or closed). */
   public onGunportState: ((shipId: number, gunportId: number, isOpen: boolean) => void) | null = null;
   /** Fired when the server blocks a cannon fire attempt because its gunport is closed. */
@@ -1314,6 +1314,13 @@ export class NetworkManager {
     this.sendMessage(message);
   }
 
+  /** Toggle gunports open/closed for all cannons in the given weapon group indices (R key at helm). */
+  sendGroupGunportToggle(groupIndices: number[]): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'gunport_group_toggle', groups: groupIndices, timestamp: Date.now() }));
+    console.log(`🔳 Group gunport toggle → groups=[${groupIndices.join(',')}]`);
+  }
+
   /**
    * Force-reload the player's manned cannon, discarding the current round.
    * Tells the server to reset the reload timer so the cannon reloads immediately
@@ -1572,10 +1579,11 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_CANNON from the player's inventory.
    */
-  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number): void {
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation };
     if (snapIndex !== undefined && snapIndex >= 0 && snapIndex <= 11) msg.snapIndex = snapIndex;
+    if (deckId !== undefined) msg.deckId = deckId;
     this.sendMessage(msg);
   }
 
@@ -1604,9 +1612,11 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_SWIVEL from the player's inventory.
    */
-  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number): void {
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+    const msg: any = { type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation };
+    if (deckId !== undefined) msg.deckId = deckId;
+    this.sendMessage(msg);
   }
 
   /**
@@ -2264,7 +2274,7 @@ export class NetworkManager {
             rotation: player.rotation || 0, // Server sends rotation (facing direction)
             radius: player.radius || 8,
             carrierId: player.parent_ship || 0, // Server sends parent_ship
-            deckId: player.deck_index ?? player.deckId ?? 0, // Server sends deck_index (0=lower, 1=upper)
+            deckId: player.deck_index ?? player.deck_level ?? player.deckId ?? 1, // deck_level: 0=lower, 1=upper (default upper)
             onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
             
             // Local (ship-relative) position when on a ship
@@ -2351,6 +2361,7 @@ export class NetworkManager {
             statWeight:  n.stat_weight  ?? 0,
             statPoints:  n.stat_points  ?? 0,
             locked:      !!(n.locked),
+            deckLevel:   n.deck_level   ?? 1,
           })),
           carrierDetection: new Map(), // Will be populated as needed
           tombstones: (message.tombstones ?? []).map((t: any) => ({
@@ -2528,6 +2539,7 @@ export class NetworkManager {
           mode: g.mode ?? 'haltfire',
           cannonIds: Array.isArray(g.cannonIds) ? g.cannonIds.map((id: any) => Number(id)) : [],
           targetShipId: g.targetShipId ?? 0,
+          gunportsOpen: !!g.gunportsOpen,
         })) : [];
         this.onCannonGroupState?.(gsShipId, gsGroups);
         break;

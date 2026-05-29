@@ -157,7 +157,7 @@ export class ClientApplication {
 
   // Weapon control groups — 10 user-defined groups (0–9), persistent per session
   private controlGroups: Map<number, WeaponGroupState> = new Map(
-    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1 }])
+    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1, gunportsOpen: false }])
   );
   /**
    * Ship ID received from the server's player_boarded or module_interact_success message.
@@ -780,6 +780,7 @@ export class ClientApplication {
             mode: g.mode as WeaponGroupMode,
             cannonIds: g.cannonIds,
             targetId: g.targetShipId,
+            gunportsOpen: g.gunportsOpen ?? false,
           });
         }
 
@@ -1449,16 +1450,24 @@ export class ClientApplication {
         if (cannonId === null) return;
         const cannon = ship.modules.find(m => m.id === cannonId);
         if (!cannon) return;
-        // Find a gunport within ~15 client-px of this cannon
-        const gpTol = 15;
-        const gp = ship.modules.find(m =>
-          m.kind === 'gunport' &&
-          Math.abs(m.localPos.x - cannon.localPos.x) < gpTol &&
-          Math.abs(m.localPos.y - cannon.localPos.y) < gpTol
-        );
+        // Find the associated gunport via snap_idx (proximity check is unreliable
+        // because the cannon moves 40px inboard when stowed)
+        const cannonData = cannon.moduleData as { gunportSnapIdx?: number } | undefined;
+        const snapIdx = cannonData?.gunportSnapIdx;
+        if (snapIdx === undefined || snapIdx === 255) { console.log('🔳 No gunport linked to this cannon'); return; }
+        const gp = ship.modules.find(m => {
+          if (m.kind !== 'gunport') return false;
+          const gpData = m.moduleData as { snapIndex?: number } | undefined;
+          return gpData?.snapIndex === snapIdx;
+        });
         if (!gp) { console.log('🔳 No gunport at this cannon'); return; }
         this.networkManager.sendToggleGunport(ship.id, gp.id);
         console.log(`🔳 [GUNPORT] R-key toggle gunport ${gp.id} at cannon ${cannonId}`);
+      };
+
+      // R key at helm: toggle gunports for all cannons in the active weapon group(s)
+      this.inputManager.onGroupGunportToggle = (groupIndices) => {
+        this.networkManager.sendGroupGunportToggle(groupIndices);
       };
 
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
@@ -3273,6 +3282,7 @@ export class ClientApplication {
         const camState = this.camera.getState();
         this.renderSystem.beginGLFrame(camState.position.x, camState.position.y, camState.zoom, this._lastDeltaMs, camState.rotation);
       }
+      this.renderSystem.altKeyHeld = this.inputManager?.altKeyHeld ?? false;
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       if (this._glRenderer) {
         this.renderSystem.endGLFrame();
@@ -4287,8 +4297,10 @@ export class ClientApplication {
 
     // Overlap check against real modules (exclude the ghost's own footprint since we're consuming it)
     const newFp = getModuleFootprint(matchKind as any);
+    const _ghostDeck = this.renderSystem.playerDeckLevel;
     for (const mod of ship.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      if (mod.deckId !== 255 && mod.deckId !== _ghostDeck) continue; // different deck — no collision
       const existFp = getModuleFootprint(mod.kind);
       if (footprintsOverlap(newFp, localX, localY, localRot, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
         console.log(`❌ [GHOST SNAP] Placement blocked by existing ${mod.kind}`);
@@ -4310,6 +4322,7 @@ export class ClientApplication {
       console.log(`🔨 [GHOST SNAP] Placing cannon at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
       const newCannon = ModuleUtils.createDefaultModule(tempId, 'cannon', Vec2.from(localX, localY));
       newCannon.localRot = localRot;
+      newCannon.deckId = this.renderSystem.playerDeckLevel;
       for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
         const s = state?.ships.find(sh => sh.id === ship.id);
         if (s) s.modules.push(newCannon);
@@ -4317,11 +4330,12 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(ship.id) ?? [];
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(ship.id, pending);
-      this.networkManager.sendPlaceCannonAt(ship.id, localX, localY, localRot);
+      this.networkManager.sendPlaceCannonAt(ship.id, localX, localY, localRot, undefined, this.renderSystem.playerDeckLevel);
     } else if (matchKind === 'swivel') {
       console.log(`🔫 [GHOST SNAP] Placing swivel at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
       const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
       newSwivel.localRot = localRot;
+      newSwivel.deckId = this.renderSystem.playerDeckLevel;
       for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
         const s = state?.ships.find(sh => sh.id === ship.id);
         if (s) s.modules.push(newSwivel);
@@ -4329,7 +4343,7 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(ship.id) ?? [];
       pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
       this.localPendingModules.set(ship.id, pending);
-      this.networkManager.sendPlaceSwivelAt(ship.id, localX, localY, localRot);
+      this.networkManager.sendPlaceSwivelAt(ship.id, localX, localY, localRot, this.renderSystem.playerDeckLevel);
     } else {
       // mast
       const mastCount = ship.modules.filter(m => m.kind === 'mast').length;
@@ -4413,8 +4427,10 @@ export class ClientApplication {
     }
 
     const newFp = getModuleFootprint(newKind);
+    const _placeDeck = this.renderSystem.playerDeckLevel;
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      if (mod.deckId !== 255 && mod.deckId !== _placeDeck) continue; // different deck — no collision
       const existingFp = getModuleFootprint(mod.kind);
       if (footprintsOverlap(newFp, localX, localY, rotationRad,
                             existingFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
@@ -4457,6 +4473,7 @@ export class ClientApplication {
       console.log(`🔨 [BUILD] Placing cannon at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
       const newCannon = ModuleUtils.createDefaultModule(tempId, 'cannon', Vec2.from(localX, localY));
       newCannon.localRot = rotationRad;
+      newCannon.deckId = this.renderSystem.playerDeckLevel;
       for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
         const s = state?.ships.find(sh => sh.id === shipRef.id);
         if (s) s.modules.push(newCannon);
@@ -4465,11 +4482,12 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
+      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad, undefined, this.renderSystem.playerDeckLevel);
     } else if (this.buildSelectedItem === 'swivel') {
       console.log(`🔫 [BUILD] Placing swivel at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
       const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
       newSwivel.localRot = rotationRad;
+      newSwivel.deckId = this.renderSystem.playerDeckLevel;
       for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
         const s = state?.ships.find(sh => sh.id === shipRef.id);
         if (s) s.modules.push(newSwivel);
@@ -4477,7 +4495,7 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad);
+      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad, this.renderSystem.playerDeckLevel);
     } else {
       // Sail — constrain to rectangular body of ship (away from bow/stern curves)
       const MAST_X_MIN = -240, MAST_X_MAX = 200;

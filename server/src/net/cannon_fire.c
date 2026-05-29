@@ -107,6 +107,11 @@ void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
 
+    /* Apply current group gunport state to newly assigned cannons.
+     * If the group was already in the "open" state (gunports_open=1), opening
+     * a new cannon's gunport ensures it follows suit immediately. */
+    apply_group_gunport_state(ship, group);
+
     /* For all modes, NPCs remain stationed at their assigned cannon.
      * Mode only controls what the NPC does while there (aim/fire guards
      * in tick_npc_agents enforce HALTFIRE / AIMING / etc. per tick).
@@ -895,7 +900,7 @@ void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id) {
                 "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
-            "],\"targetShipId\":%u}", grp->target_ship_id);
+            "],\"targetShipId\":%u,\"gunportsOpen\":%u}", grp->target_ship_id, grp->gunports_open);
     }
     if (pos < (int)sizeof(message) - 2)
         pos += snprintf(message + pos, sizeof(message) - pos, "]}");
@@ -942,7 +947,7 @@ void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShi
                 "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
-            "],\"targetShipId\":%u}", grp->target_ship_id);
+            "],\"targetShipId\":%u,\"gunportsOpen\":%u}", grp->target_ship_id, grp->gunports_open);
     }
     if (pos < (int)sizeof(message) - 2)
         pos += snprintf(message + pos, sizeof(message) - pos, "]}");
@@ -1446,12 +1451,14 @@ void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_typ
                     if (gp->type_id != MODULE_TYPE_GUNPORT) continue;
                     if (gp->data.gunport.snap_idx != gp_snap) continue;
                     if (!gp->data.gunport.is_open) {
-                        // Notify the firing player that the gunport is closed
-                        char gpblk[128];
-                        snprintf(gpblk, sizeof(gpblk),
-                            "{\"type\":\"gunport_blocked\",\"player_id\":%u,\"cannon_id\":%u,\"gunport_id\":%u}",
-                            player->player_id, module->id, gp->id);
-                        broadcast_json_all(gpblk);
+                        // Notify the firing player that the gunport is closed (player may be NULL for NPC fire)
+                        if (player) {
+                            char gpblk[128];
+                            snprintf(gpblk, sizeof(gpblk),
+                                "{\"type\":\"gunport_blocked\",\"player_id\":%u,\"cannon_id\":%u,\"gunport_id\":%u}",
+                                player->player_id, module->id, gp->id);
+                            broadcast_json_all(gpblk);
+                        }
                         goto next_cannon; // skip firing this cannon
                     }
                     break; // found matching gunport (open) — allow fire

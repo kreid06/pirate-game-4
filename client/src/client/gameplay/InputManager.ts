@@ -88,6 +88,7 @@ export class InputManager {
   private readonly MOVEMENT_HEARTBEAT_INTERVAL = 150;
   
   // Event callbacks
+  public altKeyHeld: boolean = false;
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
   
   // HYBRID PROTOCOL: Callbacks for state changes
@@ -115,6 +116,8 @@ export class InputManager {
   public onGroupAssign: (() => void) | null = null;
   /** Ctrl+Digit while hovering a cannon — assign it directly to the given group index. */
   public onGroupAssignTo: ((group: number) => void) | null = null;
+  /** R key at helm — toggle gunports open/closed for the active weapon group(s). */
+  public onGroupGunportToggle: ((groupIndices: number[]) => void) | null = null;
   /** Ctrl+right-click while an NPC is hovered — cycle that NPC's command state. */
   public onNpcStateCycle: (() => void) | null = null;
   /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
@@ -1208,6 +1211,7 @@ export class InputManager {
   // Event handlers
   
   private onKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Alt') { this.altKeyHeld = true; event.preventDefault(); }
     this.inputState.pressedKeys.add(event.code);
     
     // Update action mappings
@@ -1264,6 +1268,9 @@ export class InputManager {
           event.preventDefault();
         } else if (this.mountKind === 'cannon' && this.onToggleGunportAtCannon) {
           this.onToggleGunportAtCannon();
+          event.preventDefault();
+        } else if (this.mountKind === 'helm' && this.activeWeaponGroups.size > 0 && this.onGroupGunportToggle) {
+          this.onGroupGunportToggle([...this.activeWeaponGroups]);
           event.preventDefault();
         } else if (!this.explicitBuildMode && !this.buildMenuOpen && !this.islandBuildMode && this.onRepairSail) {
           this.onRepairSail();
@@ -1416,6 +1423,7 @@ export class InputManager {
   }
   
   private onKeyUp(event: KeyboardEvent): void {
+    if (event.key === 'Alt') this.altKeyHeld = false;
     this.inputState.pressedKeys.delete(event.code);
     
     // Update action mappings

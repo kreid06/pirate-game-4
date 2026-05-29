@@ -329,6 +329,7 @@ void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
     /* Swivels are smaller — NPC stands slightly closer to the pivot */
     const float CANNON_MOUNT_DIST = (cannon->type_id == MODULE_TYPE_SWIVEL) ? 18.0f : 25.0f;
     npc->assigned_weapon_id = cannon_id;
+    if (cannon->deck_id != 0xFF) npc->deck_level = (uint8_t)cannon->deck_id;
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;

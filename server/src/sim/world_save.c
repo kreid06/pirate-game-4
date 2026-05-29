@@ -203,7 +203,8 @@ int world_save(const char *path) {
                 "\"health\":%u,"
                 "\"max_health\":%u,"
                 "\"gp_snap\":%u,"
-                "\"gp_open\":%u"
+                "\"gp_open\":%u,"
+                "\"deck\":%u"
                 "}",
                 (unsigned)mod->id,
                 (unsigned)mod->type_id,
@@ -213,10 +214,31 @@ int world_save(const char *path) {
                 (unsigned)(mod->health    < 0 ? 0 : (uint32_t)mod->health),
                 (unsigned)(mod->max_health < 0 ? 0 : (uint32_t)mod->max_health),
                 save_gp_snap,
-                save_gp_open
+                save_gp_open,
+                (unsigned)mod->deck_id
             );
         }
 
+        fprintf(f, "\n      ]");
+        /* Weapon groups — serialise all groups that have at least one weapon */
+        fprintf(f, ",\n      \"weapon_groups\": [");
+        bool first_wg = true;
+        for (uint8_t co = 0; co < MAX_COMPANIES; co++) {
+            for (uint8_t g = 0; g < MAX_WEAPON_GROUPS; g++) {
+                const WeaponGroup *wg = &s->weapon_groups[co][g];
+                if (wg->weapon_count == 0) continue;
+                if (!first_wg) fprintf(f, ",");
+                first_wg = false;
+                fprintf(f, "\n        {\"co\":%u,\"idx\":%u,\"mode\":%u,\"target\":%u,\"gpopen\":%u,\"wids\":[",
+                        (unsigned)co, (unsigned)g, (unsigned)wg->mode,
+                        (unsigned)wg->target_ship_id, (unsigned)wg->gunports_open);
+                for (uint8_t wi = 0; wi < wg->weapon_count && wi < MAX_WEAPONS_PER_GROUP; wi++) {
+                    if (wi > 0) fprintf(f, ",");
+                    fprintf(f, "%u", (unsigned)wg->weapon_ids[wi]);
+                }
+                fprintf(f, "]}");
+            }
+        }
         fprintf(f, "\n      ]\n    }");
     }
     fprintf(f, "\n  ],\n");
@@ -587,7 +609,7 @@ int world_load(const char *path) {
                                 }
                                 while ((mobj = next_json_object(&marr)) != NULL) {
                                     unsigned saved_id = 0, mtype = 0, mhealth = 0, mmax = 0;
-                                    unsigned mgp_snap = 0xFF, mgp_open = 0;
+                                    unsigned mgp_snap = 0xFF, mgp_open = 0, mdeck = 0xFF;
                                     float mlx = 0, mly = 0, mlr = 0;
                                     ws_json_uint(mobj,  "id",         &saved_id);
                                     ws_json_uint(mobj,  "type",       &mtype);
@@ -598,6 +620,7 @@ int world_load(const char *path) {
                                     ws_json_uint(mobj,  "max_health", &mmax);
                                     ws_json_uint(mobj,  "gp_snap",    &mgp_snap);
                                     ws_json_uint(mobj,  "gp_open",    &mgp_open);
+                                    ws_json_uint(mobj,  "deck",       &mdeck);
                                     /* Rebuild MID with new ship_seq, preserving the offset */
                                     uint8_t offset = (uint8_t)(saved_id & 0xFF);
                                     uint16_t new_mid = (uint16_t)((s->ship_seq << 8) | offset);
@@ -616,6 +639,7 @@ int world_load(const char *path) {
                                         new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
                                         new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                     }
+                                    new_mod.deck_id = (uint8_t)mdeck;
                                     /* Add to SimpleShip layer */
                                     if (s->module_count < MAX_MODULES_PER_SHIP)
                                         s->modules[s->module_count++] = new_mod;
@@ -631,7 +655,7 @@ int world_load(const char *path) {
                                  * Dynamically-placed modules (ramps) have no default slot — add them. */
                                 while ((mobj = next_json_object(&marr)) != NULL) {
                                     unsigned mtype = 0, mhealth = 0, mmax = 0, msaved_id = 0;
-                                    unsigned mgp_snap = 0xFF, mgp_open = 0;
+                                    unsigned mgp_snap = 0xFF, mgp_open = 0, mdeck = 0xFF;
                                     float mlx = 0, mly = 0, mlr = 0;
                                     ws_json_uint(mobj,  "id",         &msaved_id);
                                     ws_json_uint(mobj,  "type",       &mtype);
@@ -642,6 +666,7 @@ int world_load(const char *path) {
                                     ws_json_uint(mobj,  "max_health", &mmax);
                                     ws_json_uint(mobj,  "gp_snap",    &mgp_snap);
                                     ws_json_uint(mobj,  "gp_open",    &mgp_open);
+                                    ws_json_uint(mobj,  "deck",       &mdeck);
 
                                     bool matched = false;
                                     /* Match module by type + approximate position */
@@ -661,6 +686,7 @@ int world_load(const char *path) {
                                             m->data.gunport.snap_idx = (uint8_t)mgp_snap;
                                             m->data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                         }
+                                        m->deck_id = (uint8_t)mdeck;
                                         matched = true;
                                         break;
                                     }
@@ -699,6 +725,7 @@ int world_load(const char *path) {
                                             new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
                                             new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                         }
+                                        new_mod.deck_id = (uint8_t)mdeck;
                                         if (s->module_count < MAX_MODULES_PER_SHIP)
                                             s->modules[s->module_count++] = new_mod;
                                         /* Mirror into sim layer */
@@ -717,6 +744,48 @@ int world_load(const char *path) {
                                 }
                             }
                         }
+                    /* Restore weapon groups — module IDs are remapped from old seq to new seq */
+                    if (s) {
+                        const char *wgarr = find_array(obj, "weapon_groups");
+                        if (wgarr) {
+                            char *wgobj;
+                            while ((wgobj = next_json_object(&wgarr)) != NULL) {
+                                unsigned co = 0, gidx = 0, gmode = 0, gtarget = 0, ggpopen = 0;
+                                ws_json_uint(wgobj, "co",     &co);
+                                ws_json_uint(wgobj, "idx",    &gidx);
+                                ws_json_uint(wgobj, "mode",   &gmode);
+                                ws_json_uint(wgobj, "target", &gtarget);
+                                ws_json_uint(wgobj, "gpopen", &ggpopen);
+                                if (co < MAX_COMPANIES && gidx < MAX_WEAPON_GROUPS) {
+                                    WeaponGroup *wg = &s->weapon_groups[co][gidx];
+                                    wg->mode           = (uint8_t)gmode;
+                                    wg->target_ship_id = (uint16_t)gtarget;
+                                    wg->gunports_open  = (uint8_t)(ggpopen & 1);
+                                    wg->weapon_count   = 0;
+                                    /* Parse wids array and remap: upper byte was old ship_seq */
+                                    const char *wids = strstr(wgobj, "\"wids\":[");
+                                    if (wids) {
+                                        wids += 8;
+                                        while (*wids && *wids != ']' &&
+                                               wg->weapon_count < MAX_WEAPONS_PER_GROUP) {
+                                            while (*wids == ' ' || *wids == ',') wids++;
+                                            if (*wids == ']' || *wids == '\0') break;
+                                            unsigned saved_wid = 0;
+                                            if (sscanf(wids, "%u", &saved_wid) != 1) break;
+                                            unsigned wid_seq = (saved_wid >> 8) & 0xFF;
+                                            unsigned wid_off =  saved_wid       & 0xFF;
+                                            module_id_t new_wid = (wid_seq == seq)
+                                                ? (module_id_t)((s->ship_seq << 8) | wid_off)
+                                                : (module_id_t)saved_wid;
+                                            wg->weapon_ids[wg->weapon_count++] = new_wid;
+                                            while (*wids && *wids != ',' && *wids != ']') wids++;
+                                        }
+                                    }
+                                }
+                                free(wgobj);
+                            }
+                        }
+                    }
                     }
                 }
                 free(obj);

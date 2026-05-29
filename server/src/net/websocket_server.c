@@ -1009,6 +1009,61 @@ void recalc_ship_mass(SimpleShip* ship) {
     }
 }
 
+/**
+ * Apply a weapon group's current gunports_open state to all cannons in the group.
+ * Opens or closes each cannon's associated gunport and repositions the cannon barrel.
+ * Mirrors all changes to both the SimpleShip layer and the authoritative sim layer.
+ */
+void apply_group_gunport_state(SimpleShip* ship, WeaponGroup* group) {
+    if (!ship || !group) return;
+    uint8_t desired = group->gunports_open;
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+
+    for (int c = 0; c < group->weapon_count; c++) {
+        /* Find the cannon in SimpleShip */
+        ShipModule* cannon_s = NULL;
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            if (ship->modules[m].id == group->weapon_ids[c]) {
+                cannon_s = &ship->modules[m];
+                break;
+            }
+        }
+        if (!cannon_s || cannon_s->type_id != MODULE_TYPE_CANNON) continue;
+        uint8_t snap = cannon_s->data.cannon.gunport_snap_idx;
+        if (snap == 0xFF) continue; /* cannon has no associated gunport */
+
+        /* Find the gunport by snap_idx and apply desired state */
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            if (ship->modules[m].type_id != MODULE_TYPE_GUNPORT) continue;
+            if (ship->modules[m].data.gunport.snap_idx != snap) continue;
+            if (ship->modules[m].data.gunport.is_open == desired) break; /* already correct */
+            ship->modules[m].data.gunport.is_open = desired;
+            q16_t gp_y = ship->modules[m].local_pos.y;
+            q16_t new_cannon_y = desired
+                ? ((gp_y < 0) ? gp_y + Q16_FROM_FLOAT(1.0f) : gp_y - Q16_FROM_FLOAT(1.0f))
+                : ((gp_y < 0) ? gp_y + Q16_FROM_FLOAT(4.0f) : gp_y - Q16_FROM_FLOAT(4.0f));
+            cannon_s->local_pos.y = new_cannon_y;
+            /* Mirror gunport and cannon position to sim layer */
+            if (sim_ship) {
+                for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
+                    if (sim_ship->modules[sm].id == ship->modules[m].id) {
+                        sim_ship->modules[sm].data.gunport.is_open = desired;
+                        break;
+                    }
+                }
+                for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
+                    if (sim_ship->modules[sm].id == cannon_s->id) {
+                        sim_ship->modules[sm].local_pos.y = new_cannon_y;
+                        break;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    recalc_ship_mass(ship);
+}
+
 void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
     player->parent_ship_id = ship->ship_id;
     // company_id is NOT inherited from ship — assigned by admin or player choice
@@ -1334,7 +1389,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                 "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                 "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
-                "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"state\":\"%s\","
+                "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"deck_level\":%u,\"state\":\"%s\","
                 "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
                 "\"company\":%u,\"health\":%u,\"max_health\":%u,"
                 "\"stamina\":%u,\"max_stamina\":%u,"
@@ -1348,6 +1403,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 snap->players[p].is_moving ? "true" : "false",
                 snap->players[p].movement_direction_x, snap->players[p].movement_direction_y,
                 snap->players[p].parent_ship_id, snap->players[p].local_x, snap->players[p].local_y,
+                (unsigned)snap->players[p].deck_level,
                 get_state_string(snap->players[p].movement_state),
                 snap->players[p].is_mounted ? "true" : "false",
                 snap->players[p].mounted_module_id,
@@ -1440,6 +1496,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
             "\"owner_id\":%u,"
             "\"assigned_weapon_id\":%u,"
+            "\"deck_level\":%u,"
             "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
             "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
             "\"stat_points\":%u,\"locked\":%d}",
@@ -1449,6 +1506,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
             npc->owner_player_id,
             npc->assigned_weapon_id,
+            (unsigned)npc->deck_level,
             (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
             (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
             (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
@@ -5882,14 +5940,86 @@ int websocket_server_update(struct Sim* sim) {
                                             log_info("🔳 Player %u toggled gunport %u → %s on ship %u",
                                                      player->player_id, gunport_id,
                                                      new_state ? "open" : "closed", target_ship_id);
-                                            snprintf(response, sizeof(response),
-                                                "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u}",
-                                                gunport_id, new_state ? "true" : "false", target_ship_id);
+                                            /* Broadcast to ALL clients so every player on the ship
+                                             * receives the state change and triggers the animation. */
+                                            {
+                                                char gp_bcast[128];
+                                                snprintf(gp_bcast, sizeof(gp_bcast),
+                                                    "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u}",
+                                                    gunport_id, new_state ? "true" : "false", target_ship_id);
+                                                broadcast_json_all(gp_bcast);
+                                            }
+                                            strcpy(response, "{\"type\":\"ok\"}");
                                             break;
                                         }
                                         if (!found) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"gunport_not_found\"}");
                                         }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "gunport_group_toggle") == 0) {
+                            /* GUNPORT GROUP TOGGLE: open/close gunports for all cannons in the
+                             * active weapon group(s).  Payload:
+                             *   {"type":"gunport_group_toggle","groups":[1,2]}
+                             * For each listed group, the group's gunports_open flag is flipped and
+                             * every cannon in that group has its associated gunport opened/closed. */
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    SimpleShip* ship = find_ship(player->parent_ship_id);
+                                    if (!ship) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else {
+                                        uint8_t cid = (player->company_id < MAX_COMPANIES)
+                                                      ? player->company_id : 0;
+                                        uint32_t gidxs[MAX_WEAPON_GROUPS];
+                                        int gcnt = parse_json_uint32_array(payload, "groups", gidxs, MAX_WEAPON_GROUPS);
+                                        for (int gi = 0; gi < gcnt; gi++) {
+                                            uint32_t gidx = gidxs[gi];
+                                            if (gidx >= MAX_WEAPON_GROUPS) continue;
+                                            WeaponGroup* grp = &ship->weapon_groups[cid][gidx];
+                                            if (grp->weapon_count == 0) continue;
+                                            grp->gunports_open ^= 1;
+                                            apply_group_gunport_state(ship, grp);
+                                            /* Broadcast individual gunport_state for each cannon in the
+                                             * group so all clients trigger the slide animation. */
+                                            for (int ci = 0; ci < grp->weapon_count; ci++) {
+                                                ShipModule* cs = NULL;
+                                                for (uint8_t m2 = 0; m2 < ship->module_count; m2++) {
+                                                    if (ship->modules[m2].id == grp->weapon_ids[ci]) {
+                                                        cs = &ship->modules[m2]; break;
+                                                    }
+                                                }
+                                                if (!cs || cs->type_id != MODULE_TYPE_CANNON) continue;
+                                                uint8_t gp_snap = cs->data.cannon.gunport_snap_idx;
+                                                if (gp_snap == 0xFF) continue;
+                                                for (uint8_t m2 = 0; m2 < ship->module_count; m2++) {
+                                                    if (ship->modules[m2].type_id != MODULE_TYPE_GUNPORT) continue;
+                                                    if (ship->modules[m2].data.gunport.snap_idx != gp_snap) continue;
+                                                    char gp_msg[128];
+                                                    snprintf(gp_msg, sizeof(gp_msg),
+                                                        "{\"type\":\"gunport_state\",\"gunportId\":%u,\"isOpen\":%s,\"shipId\":%u}",
+                                                        ship->modules[m2].id,
+                                                        grp->gunports_open ? "true" : "false",
+                                                        ship->ship_id);
+                                                    broadcast_json_all(gp_msg);
+                                                    break;
+                                                }
+                                            }
+                                            log_info("🔳 Player %u toggled group %u gunports → %s (ship %u)",
+                                                     player->player_id, gidx,
+                                                     grp->gunports_open ? "open" : "closed",
+                                                     ship->ship_id);
+                                        }
+                                        broadcast_cannon_group_state(ship, cid);
+                                        strcpy(response, "{\"type\":\"ok\"}");
                                     }
                                 }
                             }
@@ -6347,6 +6477,9 @@ int websocket_server_update(struct Sim* sim) {
                                             if (pr) sscanf(pr + 11, "%f", &rotation);
                                             int cannon_snap_idx = -1;
                                             if (psi) sscanf(psi + 12, "%d", &cannon_snap_idx);
+                                            const char* pdk = strstr(payload, "\"deckId\":");
+                                            uint8_t req_deck_id = 1; /* default: upper deck */
+                                            if (pdk) { unsigned dk = 1; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : 1; }
 
                                             // Allocate a unique module ID (scan max existing + 1 across both arrays)
                                             uint16_t max_id = 0;
@@ -6373,6 +6506,7 @@ int websocket_server_update(struct Sim* sim) {
                                                                                ? (uint8_t)cannon_snap_idx : 0xFF;
                                             nc.data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
                                             nc.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
+                                            nc.deck_id = req_deck_id;
 
                                             // If bound to a gunport, snap initial y-position to
                                             // deployed or stowed based on current gunport state.
@@ -6552,8 +6686,9 @@ int websocket_server_update(struct Sim* sim) {
                                             if (px) sscanf(px + 9,  "%f", &local_x);
                                             if (py) sscanf(py + 9,  "%f", &local_y);
                                             if (pr) sscanf(pr + 11, "%f", &rotation);
-
-                                            // Swivels must be placed on the hull rail (plank band):
+                                            const char* pdk = strstr(payload, "\"deckId\":");
+                                            uint8_t req_deck_id = 1; /* default: upper deck */
+                                            if (pdk) { unsigned dk = 1; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : 1; }
                                             // edge distance must be within [0, 2.5] server units = [0, 25] client px.
                                             if (is_outside_deck(target_ship_id, local_x, local_y)) {
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"outside_deck\"}");
@@ -6589,7 +6724,7 @@ int websocket_server_update(struct Sim* sim) {
                                             ns.data.swivel.reload_time           = SWIVEL_RELOAD_TIME_MS;
                                             ns.data.swivel.time_since_fire       = SWIVEL_RELOAD_TIME_MS; /* start ready to fire */
                                             ns.data.swivel.loaded_ammo           = 0; /* default: cannonball */
-                                            ns.deck_id                           = 1; /* upper deck */
+                                            ns.deck_id                           = req_deck_id;
 
                                             sw_sim->modules[sw_sim->module_count++]       = ns;
                                             sw_simple->modules[sw_simple->module_count++] = ns;
@@ -7104,6 +7239,7 @@ int websocket_server_update(struct Sim* sim) {
                                     } else if (gm_mod->type_id == MODULE_TYPE_MAST) {
                                         gm_npc->role            = NPC_ROLE_RIGGER;
                                         gm_npc->assigned_weapon_id = gm_mod_id;
+                                        if (gm_mod->deck_id != 0xFF) gm_npc->deck_level = (uint8_t)gm_mod->deck_id;
                                         gm_npc->target_local_x  = mx;
                                         gm_npc->target_local_y  = my + 20.0f;
                                         gm_npc->state           = WORLD_NPC_STATE_MOVING;
@@ -7111,6 +7247,7 @@ int websocket_server_update(struct Sim* sim) {
                                         /* Generic walk-to (helm, deck position, etc.) */
                                         gm_npc->role            = NPC_ROLE_NONE;
                                         gm_npc->assigned_weapon_id = gm_mod_id;
+                                        if (gm_mod->deck_id != 0xFF) gm_npc->deck_level = (uint8_t)gm_mod->deck_id;
                                         gm_npc->target_local_x  = mx;
                                         gm_npc->target_local_y  = my + 20.0f;
                                         gm_npc->state           = WORLD_NPC_STATE_MOVING;
