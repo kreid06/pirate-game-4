@@ -103,6 +103,65 @@ static void get_module_interact_pos(const ShipModule* mod, float* out_x, float* 
 }
 
 /**
+ * Stand position used exclusively by repair NPCs.
+ * Hull-edge modules (cannon, swivel, gunport, plank) are pulled inward toward
+ * the ship centre so the repairer stays protected inside the hull rather than
+ * standing on the exposed edge.  All other module types fall through to the
+ * normal interact-pos logic.
+ */
+#define REPAIR_CANNON_INSET  45.0f   /* units toward centre for cannon/swivel */
+#define REPAIR_GUNPORT_INSET 50.0f   /* gunports sit right on the hull wall   */
+#define REPAIR_PLANK_INSET   40.0f   /* extra inset vs the gunner's 28 units  */
+
+static void get_module_repair_pos(const ShipModule* mod, float* out_x, float* out_y) {
+    float cx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+    float cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+    float mag = sqrtf(cx * cx + cy * cy);
+
+    switch (mod->type_id) {
+        case MODULE_TYPE_CANNON:
+        case MODULE_TYPE_SWIVEL: {
+            /* Pull inward from the module position toward ship centre.
+             * This avoids the "behind barrel" vector which ends up at the
+             * hull edge for broadside cannons. */
+            if (mag > 0.0f) {
+                *out_x = cx - (cx / mag) * REPAIR_CANNON_INSET;
+                *out_y = cy - (cy / mag) * REPAIR_CANNON_INSET;
+            } else {
+                *out_x = cx;
+                *out_y = cy;
+            }
+            break;
+        }
+        case MODULE_TYPE_GUNPORT: {
+            if (mag > 0.0f) {
+                *out_x = cx - (cx / mag) * REPAIR_GUNPORT_INSET;
+                *out_y = cy - (cy / mag) * REPAIR_GUNPORT_INSET;
+            } else {
+                *out_x = cx;
+                *out_y = cy;
+            }
+            break;
+        }
+        case MODULE_TYPE_PLANK: {
+            /* Use a larger inset than the gunner's 28-unit offset */
+            if (mag > 0.0f) {
+                *out_x = cx - (cx / mag) * REPAIR_PLANK_INSET;
+                *out_y = cy - (cy / mag) * REPAIR_PLANK_INSET;
+            } else {
+                *out_x = cx;
+                *out_y = cy;
+            }
+            break;
+        }
+        default:
+            /* Helms, masts, seats, decks — existing interact-pos is fine */
+            get_module_interact_pos(mod, out_x, out_y);
+            break;
+    }
+}
+
+/**
  * Find a module on a SimpleShip by module ID.
  * Returns a pointer into ship->modules[], or NULL if not found.
  */
@@ -822,10 +881,10 @@ void tick_world_npcs(float dt) {
             }
 
             if (missing_idx >= 0) {
-                // Stop 28 client units inward from the hull edge
+                // Pull inward toward ship centre by REPAIR_PLANK_INSET units
                 float pcx = s_plank_cx[missing_idx], pcy = s_plank_cy[missing_idx];
                 float pmag = sqrtf(pcx * pcx + pcy * pcy);
-                if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
+                if (pmag > 0.0f) { pcx -= (pcx / pmag) * REPAIR_PLANK_INSET; pcy -= (pcy / pmag) * REPAIR_PLANK_INSET; }
                 npc->target_local_x     = pcx;
                 npc->target_local_y     = pcy;
                 npc->assigned_weapon_id = MID(_idle_seq, MODULE_OFFSET_PLANK(missing_idx));
@@ -867,7 +926,7 @@ void tick_world_npcs(float dt) {
 
             if (target_mod) {
                 float mx, my;
-                get_module_interact_pos(target_mod, &mx, &my);
+                get_module_repair_pos(target_mod, &mx, &my);
                 npc->target_local_x     = mx;
                 npc->target_local_y     = my;
                 npc->assigned_weapon_id = (uint32_t)target_mod->id;
@@ -898,7 +957,7 @@ void tick_world_npcs(float dt) {
                             ShipModule* mod = &sim_ship->modules[m];
                             if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
                             float mx, my;
-                            get_module_interact_pos(mod, &mx, &my);
+                            get_module_repair_pos(mod, &mx, &my);
                             float ddx = mx - npc->local_x, ddy = my - npc->local_y;
                             if (sqrtf(ddx * ddx + ddy * ddy) < 10.0f) continue;
                             mx_list[mod_choices] = mx;
