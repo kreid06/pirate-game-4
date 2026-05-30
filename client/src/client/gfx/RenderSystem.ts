@@ -9185,6 +9185,36 @@ export class RenderSystem {
       }
       this.ctx.stroke();
 
+      // Plank-line grain on the upper deck — mirrors the lower-deck design, retains BurlyWood colour
+      if (!isGhost && hasDeck) {
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+        if (hasUpperDeck) {
+          for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+            this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+          }
+          this.ctx.clip('evenodd');
+        } else {
+          this.ctx.clip();
+        }
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const v of ship.hull) {
+          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        }
+        this.ctx.strokeStyle = hasUpperDeck ? '#b8824a' : '#7a4f28';
+        this.ctx.lineWidth = 1 / cameraState.zoom;
+        for (let y = minY + 12; y < maxY; y += 12) {
+          this.ctx.beginPath();
+          this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
+          this.ctx.stroke();
+        }
+        this.ctx.restore();
+      }
+
       // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
       if (isGhost) {
         const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
@@ -11025,6 +11055,32 @@ export class RenderSystem {
     }
     this.ctx.fill('evenodd');
 
+    // Plank-line grain — mirrors drawShipHull, retains BurlyWood colour
+    {
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+      this.ctx.clip('evenodd');
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const v of ship.hull) {
+        if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+        if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+      }
+      this.ctx.strokeStyle = '#b8824a';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      for (let y = minY + 12; y < maxY; y += 12) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
+        this.ctx.stroke();
+      }
+      this.ctx.restore();
+    }
+
     // Flood tint overlay (mirrors drawShipHull)
     if (floodTint > 0) {
       this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
@@ -11153,8 +11209,8 @@ export class RenderSystem {
     this.ctx.strokeStyle = 'rgba(220,160,80,0.65)';
     this.ctx.lineWidth   = lw * 2.5;
     this.ctx.beginPath();
-    this.ctx.moveTo(25, -25);
-    this.ctx.lineTo(25, 25);
+    this.ctx.moveTo(-25, -25);
+    this.ctx.lineTo(-25, 25);
     this.ctx.stroke();
 
     this.ctx.restore();
