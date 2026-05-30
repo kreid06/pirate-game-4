@@ -1096,9 +1096,21 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].x          = px;
     placed_structures[placed_structure_count].y          = py;
     placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
-    placed_structures[placed_structure_count].max_hp     = 100;
-    placed_structures[placed_structure_count].hp         = 100;
-    placed_structures[placed_structure_count].target_hp  = 100;
+    /* Per-type initial HP */
+    uint32_t init_hp;
+    switch (stype_enum) {
+        case STRUCT_WOODEN_FLOOR: init_hp = 15000;  break;
+        case STRUCT_WALL:         init_hp = 10000;  break;
+        case STRUCT_CEILING:      init_hp = 10000;  break;
+        case STRUCT_DOOR_FRAME:   init_hp = 10000;  break;
+        case STRUCT_DOOR:         init_hp =  8000;  break;
+        case STRUCT_WORKBENCH:    init_hp =  6000;  break;
+        case STRUCT_SHIPYARD:     init_hp = 150000; break;
+        default:                  init_hp =    100; break;
+    }
+    placed_structures[placed_structure_count].max_hp     = init_hp;
+    placed_structures[placed_structure_count].hp         = init_hp;
+    placed_structures[placed_structure_count].target_hp  = init_hp;
     placed_structures[placed_structure_count].placer_id  = player->player_id;
     strncpy(placed_structures[placed_structure_count].placer_name, player->name,
             sizeof(placed_structures[placed_structure_count].placer_name) - 1);
@@ -1144,8 +1156,8 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
          * a claim flag); the client also renders it as its own non-merging
          * blob in the overlay. */
         PlacedStructure *ff = &placed_structures[placed_structure_count - 1];
-        ff->max_hp            = 500;
-        ff->hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
+        ff->max_hp            = 100000;
+        ff->hp                = (uint32_t)(100000 * FLAG_FORT_INITIAL_HP_PCT);
         ff->target_hp         = ff->max_hp; /* heal ceiling; permanently reduced by combat damage */
         ff->fortress_complete = false;
         ff->claim_contested   = false;
@@ -1227,9 +1239,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                  ",\"cannon_aim_angle\":%.4f",
                  placed_structures[placed_structure_count - 1].cannon_aim_angle);
     }
-    uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
-    uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
-    uint16_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
+    uint32_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
+    uint32_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
+    uint32_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
     /* Door: initial locked state (always true for new doors) */
     char door_lock_extra[32] = "";
     if (new_is_door) {
@@ -1856,7 +1868,7 @@ void destroy_placed_structure(uint32_t structure_id) {
  * and delegates to destroy_placed_structure on death.
  * Returns true if the structure was destroyed (s is then stale).
  */
-bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
+bool apply_structure_damage(PlacedStructure *s, uint32_t dmg) {
     /* Claim flags are immune to damage — they only "die" by completing/reversing
      * their territory-claim timer (handled in claim.c). */
     if (s->type == STRUCT_CLAIM_FLAG) return false;
@@ -1864,11 +1876,11 @@ bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
      * become vulnerable once the 1-min ground claim succeeds and they enter
      * BUILDING. */
     if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) return false;
-    s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+    s->hp = (s->hp > dmg) ? (s->hp - dmg) : 0u;
     /* All structures track a heal ceiling that combat damage permanently
      * lowers. For most types there is no auto-repair (so target_hp just
      * mirrors hp), but flag forts use it to cap their heal-back. */
-    s->target_hp = (s->target_hp > dmg) ? (uint16_t)(s->target_hp - dmg) : 0u;
+    s->target_hp = (s->target_hp > dmg) ? (s->target_hp - dmg) : 0u;
     /* Stamp the damage time so player-funded repairs can enforce a cooldown
      * (no repairing structures that took combat damage in the last 30s). */
     s->last_damaged_ms = get_time_ms();
@@ -2281,7 +2293,7 @@ static int repair_recipe_for_struct(PlacedStructureType type,
 /* Compute prorated repair cost: ceil(recipe_qty * missing_hp / max_hp), min 1
  * per ingredient. Returns the ingredient count. */
 static int compute_repair_cost(PlacedStructureType type,
-                               uint16_t missing_hp, uint16_t max_hp,
+                               uint32_t missing_hp, uint32_t max_hp,
                                RepairIng out[4]) {
     RepairIng base[4];
     int n = repair_recipe_for_struct(type, base);
@@ -2372,7 +2384,7 @@ void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* cl
         }
 
         /* Compute cost */
-        uint16_t missing = (uint16_t)(s->max_hp - s->target_hp);
+        uint32_t missing = s->max_hp - s->target_hp;
         RepairIng cost[4];
         int nc = compute_repair_cost(s->type, missing, s->max_hp, cost);
         if (nc <= 0) {
@@ -2449,20 +2461,20 @@ void structure_repair_tick(uint32_t delta_ms) {
         s->repair_broadcast_acc_ms += delta_ms;
         /* HP gained = max_hp * delta / STRUCTURE_REPAIR_FULL_MS, accumulated */
         float hp_gained_f = (float)s->max_hp * s->repair_progress_ms / (float)STRUCTURE_REPAIR_FULL_MS;
-        uint16_t hp_gain_int = (uint16_t)hp_gained_f;
+        uint32_t hp_gain_int = (uint32_t)hp_gained_f;
         if (hp_gain_int > 0) {
             /* Reset accumulator carry for next tick */
             float consumed_ms = (float)hp_gain_int * (float)STRUCTURE_REPAIR_FULL_MS / (float)s->max_hp;
             s->repair_progress_ms -= consumed_ms;
             if (s->repair_progress_ms < 0.0f) s->repair_progress_ms = 0.0f;
 
-            uint16_t cap = s->max_hp;
-            uint32_t new_hp        = (uint32_t)s->hp + (uint32_t)hp_gain_int;
-            uint32_t new_target_hp = (uint32_t)s->target_hp + (uint32_t)hp_gain_int;
+            uint32_t cap = s->max_hp;
+            uint32_t new_hp        = s->hp + hp_gain_int;
+            uint32_t new_target_hp = s->target_hp + hp_gain_int;
             if (new_hp        > cap) new_hp        = cap;
             if (new_target_hp > cap) new_target_hp = cap;
-            s->hp        = (uint16_t)new_hp;
-            s->target_hp = (uint16_t)new_target_hp;
+            s->hp        = new_hp;
+            s->target_hp = new_target_hp;
         }
 
         /* Throttle hp_changed broadcasts to ~1Hz so clients see steady

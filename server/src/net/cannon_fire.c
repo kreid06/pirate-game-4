@@ -1788,7 +1788,11 @@ void update_flame_waves(uint32_t time_elapsed) {
  * Damage per cannonball hit on a structure: 25 HP (4 shots to destroy).
  * Trees are indestructible — they simply stop the cannonball.
  * ────────────────────────────────────────────────────────────────────────────*/
-#define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
+/* Base cannonball damage for building structures (matches ship module damage scale).
+ * Fortifications (flag forts, company fortresses) use PROJ_HIT_FORT_DAMAGE to
+ * preserve their independent balance. */
+#define PROJ_HIT_STRUCT_DAMAGE      3000u   /* HP deducted per cannonball hit (buildings) */
+#define PROJ_HIT_FORT_DAMAGE          25u   /* HP deducted per cannonball hit (forts)     */
 #define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
 /* TREE_TRUNK_R_PX now defined in cannon_fire.h */
 #define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
@@ -1833,7 +1837,29 @@ void check_projectile_static_collisions(struct Sim* sim) {
             float ly = dx * wsn + dy * wc;
             if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
             /* Hit wall */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 0b: door frames and doors — same OBB shape as walls.
+         * Door frames are two thin posts (treated as one slab for hit purposes).
+         * Closed doors block cannonballs; open doors do not. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active) continue;
+            if (s->type != STRUCT_DOOR_FRAME && s->type != STRUCT_DOOR) continue;
+            if (s->type == STRUCT_DOOR && s->open) continue; /* open door: passable */
+            float wrad = wall_get_rad(s->x, s->y);
+            float wc = cosf(-wrad), wsn = sinf(-wrad);
+            float dx = px - s->x, dy = py - s->y;
+            float lx = dx * wc - dy * wsn;
+            float ly = dx * wsn + dy * wc;
+            if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
+            apply_structure_damage(s, (uint32_t)proj->damage);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1853,7 +1879,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
                   dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H)) continue;
             /* Hit workbench */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1871,7 +1897,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
                   dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT)) continue;
             /* Hit floor */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1889,7 +1915,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             /* Circular hit-box ~15px radius covering the cannon mount */
             if (dx * dx + dy * dy > 15.0f * 15.0f) continue;
             /* Hit island cannon */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1925,7 +1951,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
                          && (ly >= -SY_HH && ly <= -SY_HH + SY_BACK_T);
             if (!in_left && !in_right && !in_back) continue;
             /* Hit shipyard */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1951,8 +1977,8 @@ void check_projectile_static_collisions(struct Sim* sim) {
             float dx = px - s->x;
             float dy = py - s->y;
             if (dx * dx + dy * dy > hit_r * hit_r) continue;
-            /* Hit fort */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            /* Hit fort — use fort-specific damage to keep fort balance independent */
+            apply_structure_damage(s, PROJ_HIT_FORT_DAMAGE);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));

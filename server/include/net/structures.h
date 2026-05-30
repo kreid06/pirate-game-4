@@ -22,7 +22,7 @@ void destroy_placed_structure(uint32_t structure_id);
  * destroy_placed_structure on death. Returns true if the structure was destroyed.
  * The pointer s may be invalidated after this call returns true.
  */
-bool apply_structure_damage(PlacedStructure *s, uint16_t dmg);
+bool apply_structure_damage(PlacedStructure *s, uint32_t dmg);
 
 /**
  * handle_repair_structure: player initiates a constant-rate repair on a

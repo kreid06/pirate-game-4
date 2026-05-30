@@ -4096,6 +4096,8 @@ export class RenderSystem {
       ? `npc-${this.hoveredNpc.id}`
       : this.hoveredShip
       ? `ship-${this.hoveredShip.id}`
+      : this._hoveredStructure
+      ? `struct-${this._hoveredStructure.id}`
       : '';
     const _nowTt = performance.now();
     if (_curTtKey !== this._tooltipHoverKey) {
@@ -4106,6 +4108,7 @@ export class RenderSystem {
     this.drawHoverTooltip(camera);
     this.drawNpcTooltip(camera);
     this.drawShipHullTooltip(camera);
+    this.drawStructureTooltip(camera);
   }
   
   /**
@@ -8484,12 +8487,8 @@ export class RenderSystem {
         if (hitStructure || hitTree) {
           const intensity = hitStructure ? 0.6 : 0.5;
           this.particleSystem.createExplosion(Vec2.from(last.x, last.y), intensity);
-          if (hitStructure) {
-            const _csComp = (hitStructure as any).companyId as number ?? -1;
-            const _csTeam: DamageTeam =
-              this._localCompanyId > 0 && _csComp === this._localCompanyId ? 'enemy' : 'friendly';
-            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false, _csTeam);
-          }
+          // Damage number omitted — the authoritative value arrives via onStructureHpChanged
+          // and will be shown immediately with the real hp-delta.
         } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
           // Check if over island land → dirt splash; otherwise water splash
           let overLand = false;
@@ -16795,6 +16794,225 @@ export class RenderSystem {
       this.ctx.lineWidth = 0.8;
       this.ctx.strokeRect(bx, cy, bw, barH);
     }
+  }
+
+  /**
+   * Draw card-style hover tooltip for a hovered island structure.
+   * Mirrors the module tooltip design: left accent bar, HP bar, stats.
+   */
+  private drawStructureTooltip(camera: Camera): void {
+    if (!this._hoveredStructure || !this.mouseWorldPos) return;
+    // Module / NPC tooltips take higher priority
+    if (this.hoveredModule || this.hoveredNpc) return;
+    if (!this._tooltipReady) return;
+
+    const s = this._hoveredStructure;
+    const ctx = this.ctx;
+    const cw  = this.canvas.width;
+    const ch  = this.canvas.height;
+
+    // ── Per-type visual identity ─────────────────────────────────────────
+    type StructMeta = { name: string; color: string; border: string; desc: string };
+    const TYPE_META: Record<string, StructMeta> = {
+      wooden_floor:     { name: 'Wooden Floor',      color: '#7a4f28', border: '#bb8855', desc: 'Foundation tile. Provides a stable surface for structures.' },
+      workbench:        { name: 'Workbench',          color: '#9a6a28', border: '#dda850', desc: 'Crafting station. Used to create items and equipment.' },
+      wall:             { name: 'Wooden Wall',        color: '#7a4f28', border: '#bb8855', desc: 'Structural wall. Protects against cannon fire and intruders.' },
+      door_frame:       { name: 'Door Frame',         color: '#9a6a28', border: '#ccaa55', desc: 'Frame for mounting a door. Can be reinforced.' },
+      door:             { name: 'Door',               color: '#9a6a28', border: '#ccaa55', desc: 'Lockable entry point. Open or close to control access.' },
+      wood_ceiling:     { name: 'Ceiling',            color: '#6b4520', border: '#a07040', desc: 'Overhead covering. Provides shelter and structural integrity.' },
+      shipyard:         { name: 'Shipyard',           color: '#2a5a88', border: '#5599cc', desc: 'Dock for constructing and repairing ships.' },
+      cannon:           { name: 'Island Cannon',      color: '#882222', border: '#cc4433', desc: 'Stationary cannon emplacement. Fires at enemy ships.' },
+      flag_fort:        { name: 'Flag Fort',          color: '#886622', border: '#ddaa33', desc: 'Territory anchor. Claims surrounding land for your company.' },
+      company_fortress: { name: 'Company Fortress',   color: '#553388', border: '#9966cc', desc: 'Whole-island territorial stronghold.' },
+      claim_flag:       { name: 'Claim Flag',         color: '#228866', border: '#44bb88', desc: 'Active territory dispute flag.' },
+      wreck:            { name: 'Wreck',              color: '#555566', border: '#888899', desc: 'Salvageable ship wreckage.' },
+    };
+    const meta: StructMeta = TYPE_META[s.type] ?? { name: s.type, color: '#555566', border: '#8888aa', desc: '' };
+
+    // ── Company name helper ───────────────────────────────────────────────
+    const COMPANY_NAMES_MAP: Record<number, string> = {
+      [COMPANY_UNCLAIMED]: 'Unclaimed',
+      [COMPANY_SOLO]:      'Solo',
+      [COMPANY_PIRATES]:   'Pirates',
+      [COMPANY_NAVY]:      'Navy',
+      [COMPANY_GHOST]:     'Ghost Ships',
+    };
+    const companyName = COMPANY_NAMES_MAP[s.companyId]
+      ?? this._cachedCompanies.find(c => c.id === s.companyId)?.name
+      ?? (s.companyId > 0 ? `Company #${s.companyId}` : 'Unclaimed');
+    const isFriendly = this._localCompanyId > 0 && s.companyId === this._localCompanyId;
+    const companyColor = isFriendly ? '#44ff88' : s.companyId === 0 ? '#aaaaaa' : '#ff8866';
+
+    // ── HP values ────────────────────────────────────────────────────────
+    const hp       = s.hp;
+    const maxHp    = s.maxHp;
+    const targetHp = s.targetHp ?? maxHp;
+    const hpPct       = maxHp    > 0 ? hp / maxHp    : 1;
+    const targetPct   = maxHp    > 0 ? targetHp / maxHp : 1;
+    const hpColor = (p: number) => p > 0.6 ? '#44cc66' : p > 0.3 ? '#ffaa22' : '#ff4444';
+
+    // ── Stat lines ───────────────────────────────────────────────────────
+    type StatLine = { label: string; value: string; color?: string };
+    const stats: StatLine[] = [];
+
+    stats.push({ label: 'Company', value: companyName, color: companyColor });
+    if (s.placerName) stats.push({ label: 'Built by', value: s.placerName, color: '#cccccc' });
+
+    const hpLabel = targetHp < maxHp
+      ? `${hp.toLocaleString()} / ${targetHp.toLocaleString()} / ${maxHp.toLocaleString()}`
+      : `${hp.toLocaleString()} / ${maxHp.toLocaleString()}`;
+    stats.push({ label: 'HP', value: hpLabel, color: hpColor(hpPct) });
+
+    if (s.type === 'door') {
+      stats.push({ label: 'State',  value: s.doorOpen ? 'Open' : 'Closed',      color: s.doorOpen ? '#88ee88' : '#ee8844' });
+      if (s.doorLocked !== undefined)
+        stats.push({ label: 'Lock',   value: s.doorLocked ? 'Locked' : 'Unlocked', color: s.doorLocked ? '#ff6644' : '#44dd88' });
+    }
+    if (s.type === 'cannon') {
+      const reloadReady = !s.cannonReloadMs || s.cannonReloadMs <= 0;
+      stats.push({ label: 'Reload', value: reloadReady ? 'Ready' : `${((s.cannonReloadMs ?? 0) / 1000).toFixed(1)}s`, color: reloadReady ? '#44cc66' : '#ffaa44' });
+    }
+    if (s.type === 'shipyard' && s.construction) {
+      const c = s.construction;
+      const placed = c.modulesPlaced.length;
+      stats.push({ label: 'Constructing', value: `${placed} modules placed`, color: '#44aaff' });
+    }
+    if ((s.type === 'flag_fort' || s.type === 'company_fortress') && s.claimPhase !== undefined) {
+      const PHASES: Record<number, string> = { 0: 'Claiming', 1: 'Building', 2: 'Active', 3: 'Demolishing' };
+      stats.push({ label: 'Phase', value: PHASES[s.claimPhase] ?? String(s.claimPhase), color: '#aaddff' });
+    }
+    if (s.fortressContested || (s.claimPhase !== undefined && s.type === 'flag_fort' && s.dominators && s.dominators.length > 0)) {
+      stats.push({ label: 'Status', value: 'CONTESTED', color: '#ff4444' });
+    }
+    if (hp < targetHp && targetHp > 0) {
+      stats.push({ label: 'Repairing', value: `→ ${targetHp.toLocaleString()}`, color: '#88ccff' });
+    }
+
+    // ── Layout ───────────────────────────────────────────────────────────
+    const PAD    = 10;
+    const W      = 240;
+    const LINE   = 16;
+    const NAME_H = 18;
+
+    ctx.font = '12px Georgia, serif';
+    const wrapText = (text: string, maxW: number): string[] => {
+      const words = text.split(' ');
+      const ls: string[] = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? `${cur} ${w}` : w;
+        if (ctx.measureText(test).width > maxW && cur) { ls.push(cur); cur = w; }
+        else cur = test;
+      }
+      if (cur) ls.push(cur);
+      return ls;
+    };
+    const descLines = meta.desc ? wrapText(meta.desc, W - PAD * 2 - 4) : [];
+
+    const totalH = PAD + NAME_H + 4
+      + (descLines.length > 0 ? descLines.length * LINE + 6 : 0)
+      + stats.length * LINE + (stats.length > 0 ? 6 : 0)
+      + LINE * 2 + 4   // HP bar row
+      + PAD;
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + W      > cw) tx = screenPos.x - W      - 15;
+    if (ty + totalH > ch) ty = screenPos.y - totalH - 15;
+    tx = Math.max(4, tx);
+    ty = Math.max(4, ty);
+
+    // ── Draw card ────────────────────────────────────────────────────────
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = meta.border;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left accent bar
+    ctx.fillStyle = meta.color;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, 4, totalH, [6, 0, 0, 6]);
+    ctx.fill();
+
+    let cy = ty + PAD;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    // Name
+    ctx.font      = 'bold 14px Georgia, serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(meta.name, tx + PAD + 4, cy);
+    cy += NAME_H + 4;
+
+    // Description
+    if (descLines.length > 0) {
+      ctx.font      = '12px Georgia, serif';
+      ctx.fillStyle = '#aaaaaa';
+      for (const line of descLines) { ctx.fillText(line, tx + PAD + 4, cy); cy += LINE; }
+      cy += 6;
+    }
+
+    // Stats (label left, value right)
+    ctx.font = '12px Georgia, serif';
+    for (const st of stats) {
+      if (st.label === 'HP') continue; // HP drawn as bar below
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#888888';
+      ctx.fillText(st.label, tx + PAD + 4, cy);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = st.color ?? '#cccccc';
+      ctx.fillText(st.value, tx + W - PAD - 4, cy);
+      cy += LINE;
+    }
+    if (stats.length > 0) cy += 6;
+
+    // HP bar
+    const barH = 8;
+    const bx   = tx + PAD + 4;
+    const bw   = W - PAD * 2 - 4;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#888888';
+    ctx.fillText('HP', bx, cy);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = hpColor(hpPct);
+    const hpStat = stats.find(r => r.label === 'HP');
+    if (hpStat) ctx.fillText(hpStat.value, tx + W - PAD - 4, cy);
+    cy += LINE;
+
+    // Bar background
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(bx, cy, bw, barH);
+    // Target HP dimmer band (repair ceiling)
+    if (targetPct < 1) {
+      ctx.fillStyle = 'rgba(200,160,60,0.3)';
+      ctx.fillRect(bx, cy, Math.round(bw * targetPct), barH);
+    }
+    // Current HP fill
+    ctx.fillStyle = hpColor(hpPct);
+    ctx.fillRect(bx, cy, Math.round(bw * hpPct), barH);
+    // Target HP tick mark
+    if (targetPct < 1 && targetPct > 0) {
+      const tx2 = bx + Math.round(bw * targetPct);
+      ctx.strokeStyle = '#c8a03c';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(tx2, cy - 1);
+      ctx.lineTo(tx2, cy + barH + 1);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#444455';
+    ctx.lineWidth   = 0.8;
+    ctx.strokeRect(bx, cy, bw, barH);
+
+    ctx.restore();
   }
 
   /**

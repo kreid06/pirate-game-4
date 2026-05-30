@@ -450,9 +450,9 @@ typedef struct {
     ShipConstructionPhase construction_phase; /* Shipyard-only; zero for all other types */
     /* 2-byte fields */
     uint16_t id;                  /* unique structure ID (max MAX_PLACED_STRUCTURES=512) */
-    uint16_t hp;                  /* current hit points */
-    uint16_t max_hp;              /* maximum hit points */
-    uint16_t target_hp;           /* permanent heal ceiling. Initialised to max_hp at placement; combat damage subtracts from both hp and target_hp so a structure can never auto-repair back to its undamaged ceiling. STRUCT_FLAG_FORT uses this as the heal cap; other types currently track it informationally (target_hp == hp in steady state). */
+    uint32_t hp;                  /* current hit points */
+    uint32_t max_hp;              /* maximum hit points */
+    uint32_t target_hp;           /* permanent heal ceiling. Initialised to max_hp at placement; combat damage subtracts from both hp and target_hp so a structure can never auto-repair back to its undamaged ceiling. STRUCT_FLAG_FORT uses this as the heal cap; other types currently track it informationally (target_hp == hp in steady state). */
     uint16_t scaffolded_ship_id;  /* ship_id attached to this shipyard (0 = none) */
     /* 1-byte fields */
     uint8_t  island_id;           /* which island this structure is on (ISLAND_COUNT=2) */
@@ -494,7 +494,7 @@ typedef struct {
      * structure is destroyed mid-repair or the player re-interacts. */
     uint32_t repair_player_id;    /* player_id currently repairing this structure (0 = none) */
     float    repair_progress_ms;  /* ms elapsed since repair started; total = STRUCTURE_REPAIR_FULL_MS */
-    uint16_t repair_start_hp;     /* hp at repair start (for rate computation) */
+    uint32_t repair_start_hp;     /* hp at repair start (for rate computation) */
     uint32_t repair_broadcast_acc_ms; /* ms accumulated since last hp broadcast (throttle to ~1Hz) */
     uint32_t last_damaged_ms;     /* get_time_ms() of most recent combat damage; 0 = never */
     /* ── Per-structure dominance list ──────────────────────────────────────

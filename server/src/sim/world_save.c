@@ -1023,10 +1023,10 @@ int world_load(const char *path) {
                 ps->rotation   = rot;
                 ps->island_id  = (uint8_t)island_id;
                 ps->company_id = (uint8_t)company;
-                ps->hp         = (uint16_t)hp;
-                ps->max_hp     = (uint16_t)max_hp;
+                ps->hp         = (uint32_t)hp;
+                ps->max_hp     = (uint32_t)max_hp;
                 /* Saves prior to target_hp default it to max_hp (no past damage). */
-                ps->target_hp  = target_hp ? (uint16_t)target_hp : (uint16_t)max_hp;
+                ps->target_hp  = target_hp ? (uint32_t)target_hp : (uint32_t)max_hp;
                 ps->placer_id  = placer_id;
                 ps->open       = open;
                 ps->door_locked = door_locked;

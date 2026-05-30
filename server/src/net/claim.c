@@ -945,7 +945,7 @@ static void flag_fort_tick(uint32_t delta_ms) {
          * repair) will set hp to a value that is NOT equal to truncate(float)
          * — detect that and resync the float to hp so healing resumes from
          * the new integer value. */
-        if ((uint16_t)s->claim_progress_ms != s->hp) {
+        if ((uint32_t)s->claim_progress_ms != s->hp) {
             s->claim_progress_ms = (float)s->hp;
         }
 

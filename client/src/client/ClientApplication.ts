@@ -2523,6 +2523,7 @@ export class ClientApplication {
       };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
+        const _sdLastHp = this.renderSystem.getPlacedStructureById(id)?.hp ?? 3000;
         this._structureCompanyMap.delete(id);
         this._structureLastDamagedAt.delete(id);
         this.renderSystem.removePlacedStructure(id);
@@ -2534,7 +2535,7 @@ export class ClientApplication {
           const _sdMyComp = _sdMyId !== null ? (_sdWs?.players.find(p => p.id === _sdMyId)?.companyId ?? -1) : -1;
           const _sdTeam: DamageTeam =
             _sdMyComp > 0 && _sdComp === _sdMyComp ? 'enemy' : 'friendly';
-          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true, _sdTeam);
+          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), _sdLastHp, true, _sdTeam);
         }
       };
       this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
@@ -2557,7 +2558,8 @@ export class ClientApplication {
         const _shMyComp = _shMyId !== null ? (_shWs?.players.find(p => p.id === _shMyId)?.companyId ?? -1) : -1;
         const _shTeam: DamageTeam =
           _shMyComp > 0 && _shComp === _shMyComp ? 'enemy' : 'friendly';
-        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false, _shTeam);
+        const _shDmg = prev !== null ? Math.max(0, prev.prevHp - hp) : 3000;
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), _shDmg || 3000, false, _shTeam);
       };
       this.networkManager.onTreeHit = (x, y) => {
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.5);
