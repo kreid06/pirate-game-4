@@ -89,6 +89,7 @@ export const MENU_ID = {
   RESPAWN:   'respawn',
   MAP:       'map',
   SALVAGE:   'salvage',
+  CHEST:     'chest',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -199,18 +200,24 @@ export class UIManager {
   public onBuildPanelSelect: ((kind: GhostModuleKind) => void) | null = null;
 
   // Entries shown in the left build panel
-  private static readonly BUILD_PANEL_ENTRIES: Array<{
+  static readonly BUILD_PANEL_ENTRIES: Array<{
     kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
+    cost: { wood: number; fiber: number; metal: number; stone: number };
   }> = [
-    { kind: 'cannon', label: 'Cannon',     symbol: '⚫', color: '#444',    borderColor: '#888'    },
-    { kind: 'swivel', label: 'Swivel Gun', symbol: '›', color: '#7a4a2a', borderColor: '#4a2810' },
-    { kind: 'mast',   label: 'Sail',       symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
-    { kind: 'helm',   label: 'Helm',       symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
-    { kind: 'deck',   label: 'Deck',       symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
+    { kind: 'plank',       label: 'Plank',          symbol: 'P',  color: '#b8832b', borderColor: '#7a5520', cost: { wood: 10, fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'cannon',      label: 'Cannon',          symbol: '⚫', color: '#444',    borderColor: '#888',    cost: { wood: 2,  fiber: 0,  metal: 5, stone: 0 } },
+    { kind: 'swivel',      label: 'Swivel Gun',      symbol: '›', color: '#7a4a2a', borderColor: '#4a2810', cost: { wood: 1,  fiber: 0,  metal: 3, stone: 0 } },
+    { kind: 'mast',        label: 'Sail / Mast',     symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48', cost: { wood: 20, fiber: 10, metal: 0, stone: 0 } },
+    { kind: 'helm',        label: 'Helm',            symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060', cost: { wood: 5,  fiber: 0,  metal: 3, stone: 0 } },
+    { kind: 'deck',        label: 'Deck',            symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c', cost: { wood: 15, fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'ramp',        label: 'Ramp',            symbol: '/', color: '#7a5c2a', borderColor: '#4a3410', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'gunport',     label: 'Gunport',         symbol: '▪', color: '#4a3828', borderColor: '#2a1808', cost: { wood: 6,  fiber: 0,  metal: 2, stone: 0 } },
+    { kind: 'hatch_cover', label: 'Hatch Cover',     symbol: '⊞', color: '#8b832b', borderColor: '#5a5520', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
   ];
 
-  private static readonly BUILD_PANEL_W = 164;
-  private static readonly BUILD_PANEL_ENTRY_H = 46;
+  private static readonly BUILD_PANEL_W = 192;
+  private static readonly BUILD_PANEL_ENTRY_H = 54;
   private static readonly BUILD_PANEL_HEADER_H = 32;
 
   // ── Hammer minigame state ──────────────────────────────────────────────────
@@ -228,6 +235,34 @@ export class UIManager {
     sweetspotStart: 0, sweetspotWidth: 0,
     callback: null, resultTime: -1, won: null,
   };
+
+  // ── Build hotbar (replaces regular hotbar visually in ship build mode) ─────
+  /** 8 schematic slots; each entry is the GhostModuleKind (or null = empty). */
+  public get buildHotbarSlots(): (GhostModuleKind | null)[] {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.buildHotbarSlots ?? [];
+  }
+  public set buildHotbarSlots(v: (GhostModuleKind | null)[]) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.buildHotbarSlots = v;
+  }
+  /** Currently selected build hotbar slot (0–7). */
+  public get buildHotbarActiveSlot(): number {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.buildHotbarActiveSlot ?? 0;
+  }
+  public set buildHotbarActiveSlot(v: number) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.buildHotbarActiveSlot = v;
+  }
+  /** Set to true by ClientApplication when ship build mode is active. */
+  public get inShipBuildMode(): boolean {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.inShipBuildMode ?? false;
+  }
+  public set inShipBuildMode(v: boolean) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.inShipBuildMode = v;
+  }
+  /** Callback fired when the player selects a new build hotbar slot. */
+  public onBuildHotbarSlotChange: ((slot: number, kind: GhostModuleKind | null) => void) | null = null;
 
   // ── Drop item picker (hold-E near pile) ───────────────────────────────────
   private _dropPicker: {
@@ -1273,6 +1308,28 @@ export class UIManager {
       return true;
     }
     // Hotbar left-click slot selection (only when no menu/build mode is consuming)
+    // Build hotbar click — when in ship build mode, clicks on hotbar area select schematic slots
+    if (this.inShipBuildMode) {
+      const BUILD_SLOTS = 8;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < BUILD_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            this.buildHotbarActiveSlot = i;
+            if (this.onBuildHotbarSlotChange) {
+              this.onBuildHotbarSlotChange(i, this.buildHotbarSlots[i] ?? null);
+            }
+            return true;
+          }
+        }
+      }
+    }
+
     if (this.onHotbarSlotClick && !this._cachedControlGroups) {
       const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
       const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
@@ -1697,7 +1754,20 @@ export class UIManager {
       ctx.font = isPending ? 'bold 13px Georgia, serif' : '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(e.label, swatchX + swatchR + 8, swatchY);
+      const labelY = ey + EH / 2 - 7;
+      ctx.fillText(e.label, swatchX + swatchR + 8, labelY);
+
+      // Resource cost row
+      const parts: string[] = [];
+      if (e.cost.wood  > 0) parts.push(`\uD83E\uDEB5${e.cost.wood}`);
+      if (e.cost.fiber > 0) parts.push(`\uD83C\uDF3F${e.cost.fiber}`);
+      if (e.cost.metal > 0) parts.push(`\u2699\uFE0F${e.cost.metal}`);
+      if (e.cost.stone > 0) parts.push(`\uD83E\uDEA8${e.cost.stone}`);
+      ctx.font = '10px Georgia, serif';
+      ctx.fillStyle = 'rgba(180,200,220,0.55)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(parts.join(' '), swatchX + swatchR + 8, ey + EH / 2 + 9);
 
       // Ghost count badge
       const count = ghostCounts.get(e.kind) ?? 0;
@@ -1706,7 +1776,7 @@ export class UIManager {
         ctx.fillStyle = 'rgba(255,200,50,0.85)';
         ctx.font = 'bold 11px Georgia, serif';
         ctx.textAlign = 'right';
-        ctx.fillText(badge, px + W - 10, swatchY);
+        ctx.fillText(badge, px + W - 10, labelY);
       }
 
       // Pending indicator arrow on the right edge
@@ -1715,7 +1785,7 @@ export class UIManager {
         ctx.font = '13px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText('▶', px + W - 8, swatchY);
+        ctx.fillText('▶', px + W - 8, labelY);
       }
 
       // Separator
@@ -2149,6 +2219,16 @@ class HUDElement implements UIElement {
   private _cachedPlayerLevel = 1;
   private _cachedPlayerXp    = 0;
 
+  // ── Build hotbar state (owned by HUDElement since it renders it) ───────
+  /** 8 schematic slots; each entry is the GhostModuleKind (or null = empty). */
+  public buildHotbarSlots: (GhostModuleKind | null)[] = [
+    'plank', 'deck', 'mast', 'cannon', 'swivel', 'helm', 'ramp', 'chest',
+  ];
+  /** Currently selected build hotbar slot (0–7). */
+  public buildHotbarActiveSlot = 0;
+  /** Set to true when ship build mode is active. */
+  public inShipBuildMode = false;
+
   // ── Tooltip hover-delay tracking (500 ms) ─────────────────────────────
   private _ttHoverKey   = '';
   private _ttHoverStart = 0;
@@ -2342,10 +2422,15 @@ class HUDElement implements UIElement {
     this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
+    // In ship build mode, show the build schematic hotbar instead
     const helmMode = context.mountKind === 'helm'
       ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
       : undefined;
-    this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
+    if (this.inShipBuildMode) {
+      this.renderBuildHotbar(ctx, ctx.canvas);
+    } else {
+      this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
+    }
 
     // Vital bars (weight / food / water) — right of hotbar
     const BASE_CARRY = 300;
@@ -2586,6 +2671,94 @@ class HUDElement implements UIElement {
           );
         }
       }
+    }
+
+    ctx.restore();
+  }
+
+  /** Renders the 8-slot build schematic hotbar (replaces regular hotbar in ship build mode). */
+  private renderBuildHotbar(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const BUILD_SLOTS = 8;
+    const SLOT_SIZE = 48;
+    const SLOT_GAP = 4;
+    const PADDING = 6;
+    const LABEL_H = 16;
+    const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const startY = canvas.height - totalH - 8;
+
+    ctx.save();
+
+    // Background
+    ctx.fillStyle = 'rgba(20,14,0,0.85)';
+    ctx.fillRect(startX, startY, totalW, totalH);
+    ctx.strokeStyle = '#c87800';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(startX, startY, totalW, totalH);
+
+    // "BUILD" label bottom-left of panel
+    ctx.font = 'bold 9px Georgia, serif';
+    ctx.fillStyle = '#ffcc44';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('BUILD', startX + 4, startY + totalH - LABEL_H + 2);
+
+    for (let i = 0; i < BUILD_SLOTS; i++) {
+      const kind = this.buildHotbarSlots[i];
+      const entry = kind ? UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind) : null;
+      const isActive = i === this.buildHotbarActiveSlot;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;  // same line
+
+      // Slot background
+      ctx.fillStyle = isActive ? 'rgba(200,120,0,0.45)' : 'rgba(30,20,5,0.7)';
+      ctx.strokeStyle = isActive ? '#ffcc44' : '#7a5500';
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, SLOT_SIZE, SLOT_SIZE, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      if (entry) {
+        // Module color swatch
+        const swatchSize = 28;
+        const swatchX = sx + (SLOT_SIZE - swatchSize) / 2;
+        const swatchY = sy + 6;
+        ctx.fillStyle = entry.color;
+        ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
+        ctx.strokeStyle = entry.borderColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(swatchX, swatchY, swatchSize, swatchSize);
+
+        // Symbol
+        ctx.font = 'bold 13px Georgia, serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(entry.symbol, sx + SLOT_SIZE / 2, swatchY + swatchSize / 2);
+
+        // Short label at bottom of slot
+        ctx.font = '8px Georgia, serif';
+        ctx.fillStyle = isActive ? '#ffee88' : '#b8a080';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(entry.label.substring(0, 8), sx + SLOT_SIZE / 2, sy + SLOT_SIZE - 2);
+      } else {
+        // Empty slot
+        ctx.font = '10px Georgia, serif';
+        ctx.fillStyle = '#554433';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('—', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+      }
+
+      // Slot key number
+      ctx.font = '9px monospace';
+      ctx.fillStyle = isActive ? '#ffcc44' : '#776655';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i + 1), sx + 3, sy + 3);
     }
 
     ctx.restore();

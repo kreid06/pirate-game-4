@@ -29,6 +29,8 @@ typedef enum {
     MODULE_TYPE_RAMP         = 9,   // Deck ramp — connects lower and upper deck levels
     MODULE_TYPE_HATCH_COVER  = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
     MODULE_TYPE_GUNPORT      = 11,  // Gunport — openable hole in hull plank for lower-deck cannons
+    MODULE_TYPE_WORKBENCH    = 12,  // Workbench — required on ship to build any ship module
+    MODULE_TYPE_CHEST        = 13,  // Storage chest — on-ship loot/storage container
     MODULE_TYPE_CUSTOM       = 255  // User-defined
 } ModuleTypeId;
 

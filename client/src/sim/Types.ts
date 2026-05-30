@@ -489,7 +489,7 @@ export const PhysicsConfig = {
  * Module kinds that can be ghost-placed as planning markers.
  * Subset of ModuleKind — only buildable module types.
  */
-export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel';
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'chest';
 
 /**
  * A client-local "ghost" placement — a translucent planning marker showing
@@ -509,6 +509,10 @@ export interface GhostPlacement {
   localPos: { x: number; y: number };
   /** Ship-local rotation in radians. */
   localRot: number;
+  /** Raw resources required to complete this plan. */
+  resourceCost: { wood: number; fiber: number; metal: number; stone: number };
+  /** Closure executed when the plan is completed (sends the appropriate network message). */
+  buildAction: () => void;
 }
 
 // ── Weapon control groups ──────────────────────────────────────────────────

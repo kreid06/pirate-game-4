@@ -65,6 +65,10 @@ void save_player_to_file(const WebSocketPlayer *p) {
         "  \"feet\": %u,\n"
         "  \"hands\": %u,\n"
         "  \"shield\": %u,\n"
+        "  \"res_wood\": %u,\n"
+        "  \"res_fiber\": %u,\n"
+        "  \"res_metal\": %u,\n"
+        "  \"res_stone\": %u,\n"
         "  \"slots\": [",
         p->name,
         (unsigned)p->player_id,
@@ -83,7 +87,11 @@ void save_player_to_file(const WebSocketPlayer *p) {
         (unsigned)p->inventory.equipment.legs,
         (unsigned)p->inventory.equipment.feet,
         (unsigned)p->inventory.equipment.hands,
-        (unsigned)p->inventory.equipment.shield
+        (unsigned)p->inventory.equipment.shield,
+        (unsigned)p->res_wood,
+        (unsigned)p->res_fiber,
+        (unsigned)p->res_metal,
+        (unsigned)p->res_stone
     );
 
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
@@ -217,6 +225,12 @@ bool load_player_from_file(WebSocketPlayer *p) {
             }
         }
     }
+
+    /* Load resource pool (new fields — default to 0 if absent in old saves) */
+    if (json_parse_uint_field(buf, "res_wood",  &tmp)) p->res_wood  = (uint16_t)(tmp > 9999u ? 9999u : tmp);
+    if (json_parse_uint_field(buf, "res_fiber", &tmp)) p->res_fiber = (uint16_t)(tmp > 9999u ? 9999u : tmp);
+    if (json_parse_uint_field(buf, "res_metal", &tmp)) p->res_metal = (uint16_t)(tmp > 9999u ? 9999u : tmp);
+    if (json_parse_uint_field(buf, "res_stone", &tmp)) p->res_stone = (uint16_t)(tmp > 9999u ? 9999u : tmp);
 
     free(buf);
     log_info("💾 Loaded player '%s' (id %u, lvl %u, xp %u) from %s",

@@ -102,6 +102,8 @@ export enum MessageType {
   TOGGLE_GUNPORT = 'toggle_gunport',
   PLAYER_SET_DECK = 'player_set_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
+  PLACE_CHEST_AT = 'place_chest_at',
+  CHEST_TRANSFER = 'chest_transfer',
   CREW_ASSIGN = 'crew_assign',
   NPC_RECRUIT = 'npc_recruit',
   NPC_MOVE_ABOARD = 'npc_move_aboard',
@@ -472,6 +474,26 @@ interface PlayerSetDeckMessage extends NetworkMessage {
   deckLevel: number; // 0 = lower deck, 1 = upper deck
 }
 
+interface PlaceChestAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_CHEST_AT;
+  timestamp: number;
+  shipId?: number;   // null/absent for land placement
+  localX: number;
+  localY: number;
+  rotation: number;
+  deckId?: number;
+}
+
+interface ChestTransferMessage extends NetworkMessage {
+  type: MessageType.CHEST_TRANSFER;
+  timestamp: number;
+  shipId: number;
+  moduleId: number;
+  item: string;
+  quantity: number;
+  direction: 'deposit' | 'withdraw';
+}
+
 interface PlaceSwivelAtMessage extends NetworkMessage {
   type: MessageType.PLACE_SWIVEL_AT;
   timestamp: number;
@@ -535,7 +557,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage;
 
 /**
  * Main network manager class
@@ -1620,6 +1642,27 @@ export class NetworkManager {
   }
 
   /**
+   * Request the server to place a resource chest at a free position on the player's ship or on land.
+   * Consumes 1 ITEM_RESOURCE_CHEST from the player's inventory.
+   */
+  sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: any = { type: MessageType.PLACE_CHEST_AT, timestamp: Date.now(), localX, localY, rotation };
+    if (shipId !== null) msg.shipId = shipId;
+    if (deckId !== undefined) msg.deckId = deckId;
+    this.sendMessage(msg);
+  }
+
+  /**
+   * Transfer resources between a chest module and the player's own inventory.
+   * direction: 'deposit' = player inventory → chest; 'withdraw' = chest → player inventory.
+   */
+  sendChestTransfer(shipId: number, moduleId: number, item: string, quantity: number, direction: 'deposit' | 'withdraw'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.CHEST_TRANSFER, timestamp: Date.now(), shipId, moduleId, item, quantity, direction });
+  }
+
+  /**
    * Request the server to replace the helm if it was destroyed.
    * Consumes 1 ITEM_HELM from the player's inventory.
    */
@@ -2306,6 +2349,10 @@ export class NetworkManager {
                   player.inventory.equip?.feet   ?? 0,
                   player.inventory.equip?.hands  ?? 0,
                   player.inventory.equip?.shield ?? 0,
+                  player.inventory.res_wood  ?? 0,
+                  player.inventory.res_fiber ?? 0,
+                  player.inventory.res_metal ?? 0,
+                  player.inventory.res_stone ?? 0,
                 )
               : createEmptyInventory(),
 

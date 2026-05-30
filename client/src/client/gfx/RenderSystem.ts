@@ -156,6 +156,8 @@ export class RenderSystem {
   private hatchBuildMode: boolean = false;
   /** Whether gunport placement build mode is active (door item held on ship). */
   private gunportBuildMode: boolean = false;
+  /** Whether resource chest placement build mode is active (resource_chest item held). */
+  private chestBuildMode: boolean = false;
   /** The gunport snap index currently hovered in gunport build mode. */
   private hoveredGunportSnap: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** The ramp snap point slot currently under the cursor in ramp build mode. */
@@ -2291,6 +2293,16 @@ export class RenderSystem {
     return this.hatchBuildMode;
   }
 
+  /** Activate or deactivate resource chest placement build mode. */
+  setChestBuildMode(active: boolean): void {
+    this.chestBuildMode = active;
+  }
+
+  /** Whether resource chest build mode is currently active */
+  isInChestBuildMode(): boolean {
+    return this.chestBuildMode;
+  }
+
   /** Whether ramp build mode is currently active */
   isInRampBuildMode(): boolean {
     return this.rampBuildMode;
@@ -3665,6 +3677,10 @@ export class RenderSystem {
           // Gunport renders as a 22×10 rectangle on the hull plank
           width = 24;
           height = 14;
+        } else if (moduleKind === 'chest') {
+          // Chest is a 40×28 world-unit box
+          width = 44;
+          height = 32;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -8383,6 +8399,13 @@ export class RenderSystem {
       }
     }
 
+    // In chest build mode, overlay a ghost chest at the cursor position on each ship (layer 4)
+    if (this.chestBuildMode && this.mouseWorldPos) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `chest-ghost-${ship.id}`, () => this.drawChestGhostOnShip(ship, camera), 0);
+      }
+    }
+
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
@@ -8395,6 +8418,7 @@ export class RenderSystem {
       this.queueRenderItem(4, `swivel-guns-upper-${ship.id}`, _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
       this.queueRenderItem(4, `cannon-aim-guides-${ship.id}`, _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
       this.queueRenderItem(4, `swivel-aim-guides-${ship.id}`, _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, `chests-${ship.id}`, _da(() => this.drawShipChests(ship, camera)));
       this.queueRenderItem(4, `rudder-${ship.id}`, _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         // Always render at full opacity so active groups remain visible from the steering wheel.
@@ -14202,6 +14226,162 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  // ── Resource chest rendering ────────────────────────────────────────────────
+
+  /**
+   * Draw all resource chest modules on a ship.
+   * Chests are classic wooden box shapes (40×28 world units) with a golden latch.
+   */
+  private drawShipChests(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const chests = ship.modules.filter(m => m.kind === 'chest');
+    if (chests.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const chest of chests) {
+      this.ctx.save();
+      this.ctx.translate(chest.localPos.x, chest.localPos.y);
+      this.ctx.rotate(chest.localRot);
+      this._drawChestShape(lw, 1.0);
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw a ghost chest following the player's cursor when in chest build mode.
+   * The ghost is placed in the ship-local coordinate frame of the nearest ship.
+   */
+  private drawChestGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+
+    // Only show ghost when cursor is within ship bounds (~150 units radius)
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this.ctx.globalAlpha *= alpha;
+
+    // Ghost tint
+    this.ctx.save();
+    this._drawChestShape(lw, alpha);
+    // Blue-green ghost tint overlay
+    this.ctx.fillStyle = 'rgba(40, 160, 120, 0.30)';
+    this.ctx.strokeStyle = '#55ddbb';
+    this.ctx.lineWidth = lw * 1.5;
+    this.ctx.setLineDash([3 / zoom, 2 / zoom]);
+    this.ctx.beginPath();
+    this.ctx.roundRect(-20, -14, 40, 28, 3);
+    this.ctx.fill();
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+    this.ctx.restore();
+
+    // Placement hint text
+    this.ctx.fillStyle = '#88eedd';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Chest', 0, -18);
+
+    this.ctx.restore();
+  }
+
+  /** Core chest shape drawing routine (origin = chest centre, 40×28 world units). */
+  private _drawChestShape(lw: number, _alpha: number): void {
+    const bw = 40, bh = 28;
+    const bx = -bw / 2, by = -bh / 2;
+    const lidH = bh * 0.40;
+
+    // Base body
+    this.ctx.fillStyle   = '#6a3d1e';
+    this.ctx.strokeStyle = '#3d1e08';
+    this.ctx.lineWidth   = lw;
+    this.ctx.beginPath();
+    this.ctx.roundRect(bx, by + lidH, bw, bh - lidH, [0, 0, 3, 3]);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Lid
+    this.ctx.fillStyle   = '#8b5a2a';
+    this.ctx.strokeStyle = '#3d1e08';
+    this.ctx.beginPath();
+    this.ctx.roundRect(bx, by, bw, lidH + 2, [3, 3, 0, 0]);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Lid centre stripe
+    this.ctx.strokeStyle = '#a07040';
+    this.ctx.lineWidth   = lw * 0.7;
+    this.ctx.beginPath();
+    this.ctx.moveTo(bx + 4, by + lidH / 2);
+    this.ctx.lineTo(bx + bw - 4, by + lidH / 2);
+    this.ctx.stroke();
+
+    // Latch
+    this.ctx.fillStyle   = 'rgba(220,172,50,0.92)';
+    this.ctx.strokeStyle = '#806020';
+    this.ctx.lineWidth   = lw * 0.8;
+    this.ctx.beginPath();
+    this.ctx.roundRect(-5, by + lidH - 4, 10, 8, 2);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Corner reinforcements
+    this.ctx.strokeStyle = '#5a3010';
+    this.ctx.lineWidth   = lw * 1.2;
+    for (const [cx, cy] of [[-bw / 2 + 4, -bh / 2 + 4], [bw / 2 - 4, -bh / 2 + 4],
+                              [-bw / 2 + 4, bh / 2 - 4], [bw / 2 - 4, bh / 2 - 4]]) {
+      this.ctx.beginPath();
+      this.ctx.arc(cx, cy, 3.5 * lw, 0, Math.PI * 2);
+      this.ctx.stroke();
+    }
+  }
+
+  /** Simple point-in-polygon test (ray casting) for hull vertices. */
+  private _isPointInHull(px: number, py: number, hull: Array<{x:number;y:number}>): boolean {
+    let inside = false;
+    for (let i = 0, j = hull.length - 1; i < hull.length; j = i++) {
+      const xi = hull[i].x, yi = hull[i].y;
+      const xj = hull[j].x, yj = hull[j].y;
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
   private drawShipLadders(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
@@ -17171,7 +17351,7 @@ export class RenderSystem {
     // Weight
     const MODULE_KG: Record<string, number> = {
       'cannon': 100, 'swivel': 180, 'mast': 150, 'helm': 20, 'steering-wheel': 20,
-      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50,
+      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50, 'chest': 80,
     };
     let weightKg = MODULE_KG[moduleData.kind] ?? 50;
     // Cannon weight is dynamic: 40 kg when stowed (gunport closed), 100 kg when deployed (gunport open / no gunport)
@@ -17333,51 +17513,30 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(ship.position);
     const { zoom, rotation: camRot } = camera.getState();
 
-    // In hotbar mode, find the nearest matching ghost within the 80u snap radius
-    const hotbarKind: GhostModuleKind | null =
-      this.cannonBuildMode  && !this.explicitBuildState ? 'cannon' :
-      this.mastBuildMode   && !this.explicitBuildState ? 'mast' :
-      this.swivelBuildMode && !this.explicitBuildState ? 'swivel' : null;
-    let snapGhostId: string | null = null;
-    if (hotbarKind && this.mouseWorldPos) {
-      let bestDist = 80;
-      const cos = Math.cos(ship.rotation);
-      const sin = Math.sin(ship.rotation);
-      for (const g of ghosts) {
-        if (g.kind !== hotbarKind) continue;
-        const wx = ship.position.x + g.localPos.x * cos - g.localPos.y * sin;
-        const wy = ship.position.y + g.localPos.x * sin + g.localPos.y * cos;
-        const dist = Math.hypot(this.mouseWorldPos.x - wx, this.mouseWorldPos.y - wy);
-        if (dist < bestDist) { bestDist = dist; snapGhostId = g.id; }
-      }
-    }
-
     this.ctx.save();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(zoom, zoom);
     this.ctx.rotate(ship.rotation - camRot);
 
     const t = performance.now() / 1000;
-    const pulse = 0.70 + 0.20 * Math.sin(t * 2.5);
-    const snapPulse = 0.85 + 0.15 * Math.sin(t * 5.0); // faster pulse for snap highlight
+    const pulse = 0.65 + 0.25 * Math.sin(t * 2.0);
 
     for (const g of ghosts) {
-      const isSnap = g.id === snapGhostId;
       this.ctx.save();
       this.ctx.translate(g.localPos.x, g.localPos.y);
       this.ctx.rotate(g.localRot);
-      this.ctx.globalAlpha = isSnap ? snapPulse : pulse;
+      this.ctx.globalAlpha = pulse;
 
-      // Snap target uses bright teal; normal plan marker uses faint green
-      const ghostFill   = isSnap ? 'rgba(20,180,160,0.55)' : 'rgba(40,130,70,0.55)';
-      const ghostStroke = isSnap ? '#44ffee' : '#66ee99';
+      // Blueprint style: blue wireframe, no fill
+      const blueprintStroke = '#4da6ff';
+      const blueprintFill   = 'rgba(20, 80, 200, 0.12)';
 
       switch (g.kind) {
         case 'cannon': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
-          this.ctx.setLineDash([3, 2]);
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([4, 2]);
           this.ctx.fillRect(-15, -10, 30, 20);
           this.ctx.strokeRect(-15, -10, 30, 20);
           this.ctx.fillRect(-8, -36, 16, 28);
@@ -17386,15 +17545,15 @@ export class RenderSystem {
           break;
         }
         case 'mast': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([4, 2]);
           this.ctx.beginPath();
           this.ctx.arc(0, 0, 15, 0, Math.PI * 2);
           this.ctx.fill();
           this.ctx.stroke();
-          this.ctx.fillStyle = 'rgba(40,110,60,0.13)';
+          this.ctx.fillStyle = 'rgba(20, 60, 180, 0.08)';
           this.ctx.fillRect(-40, -5, 80, 10);
           this.ctx.strokeRect(-40, -5, 80, 10);
           this.ctx.setLineDash([]);
@@ -17402,9 +17561,9 @@ export class RenderSystem {
         }
         case 'helm': {
           const R = 16;
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([3, 2]);
           this.ctx.beginPath();
           this.ctx.arc(0, 0, R, 0, Math.PI * 2);
@@ -17416,33 +17575,31 @@ export class RenderSystem {
             this.ctx.beginPath();
             this.ctx.moveTo(0, 0);
             this.ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
-            this.ctx.strokeStyle = 'rgba(80,190,130,0.45)';
+            this.ctx.strokeStyle = 'rgba(60, 140, 255, 0.55)';
             this.ctx.lineWidth = 1;
             this.ctx.stroke();
           }
           break;
         }
         case 'swivel': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([3, 2]);
-          // Pivot base circle
           this.ctx.beginPath();
           this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
           this.ctx.fill();
           this.ctx.stroke();
-          // Barrel stub (pointing up)
           this.ctx.fillRect(-3, -22, 6, 22);
           this.ctx.strokeRect(-3, -22, 6, 22);
           this.ctx.setLineDash([]);
           break;
         }
         case 'deck': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
           this.ctx.lineWidth = 1.5;
-          this.ctx.setLineDash([5, 3]);
+          this.ctx.setLineDash([6, 3]);
           this.ctx.beginPath();
           this.ctx.roundRect(-240, -60, 480, 120, 8);
           this.ctx.fill();
@@ -17450,11 +17607,53 @@ export class RenderSystem {
           this.ctx.setLineDash([]);
           break;
         }
+        case 'ramp':
+        case 'hatch_cover': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.roundRect(-20, -10, 40, 20, 4);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'gunport': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.rect(-10, -8, 20, 16);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'chest': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.roundRect(-14, -10, 28, 20, 3);
+          this.ctx.fill();
+          this.ctx.stroke();
+          // Chest lid line
+          this.ctx.beginPath();
+          this.ctx.moveTo(-14, -4);
+          this.ctx.lineTo(14, -4);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
         case 'plank':
         default: {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([3, 2]);
           this.ctx.beginPath();
           this.ctx.roundRect(-25, -8, 50, 16, 4);
@@ -17465,27 +17664,43 @@ export class RenderSystem {
         }
       }
 
-      // Outer snap ring for the hotbar-snap target
-      if (isSnap) {
-        this.ctx.globalAlpha = snapPulse * 0.9;
-        this.ctx.strokeStyle = '#44ffee';
-        this.ctx.lineWidth = 2.5;
-        this.ctx.setLineDash([4, 3]);
-        const ringR = g.kind === 'cannon' ? 28 : g.kind === 'deck' ? 250 : 32;
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, ringR, 0, Math.PI * 2);
-        this.ctx.stroke();
-        this.ctx.setLineDash([]);
+      // Blueprint corner crosshairs
+      this.ctx.globalAlpha = pulse * 0.6;
+      this.ctx.strokeStyle = blueprintStroke;
+      this.ctx.lineWidth = 1;
+      const cx = 12, cl = 5;
+      for (const [ox, oy] of [[-cx,-cx],[cx,-cx],[cx,cx],[-cx,cx]] as [number,number][]) {
+        this.ctx.beginPath(); this.ctx.moveTo(ox - cl, oy); this.ctx.lineTo(ox + cl, oy); this.ctx.stroke();
+        this.ctx.beginPath(); this.ctx.moveTo(ox, oy - cl); this.ctx.lineTo(ox, oy + cl); this.ctx.stroke();
       }
 
-      // Label
-      this.ctx.globalAlpha = (isSnap ? snapPulse : pulse) * 0.9;
-      this.ctx.fillStyle = isSnap ? '#44ffee' : '#99eebb';
-      this.ctx.font = isSnap ? 'bold 10px Georgia, serif' : '9px Georgia, serif';
+      // Label row: kind name
+      this.ctx.globalAlpha = pulse * 0.95;
+      this.ctx.fillStyle = '#88ccff';
+      this.ctx.font = '9px Georgia, serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
-      const labelY = g.kind === 'deck' ? -64 : -22;
-      this.ctx.fillText(isSnap ? '⚡ Click to place!' : g.kind, 0, labelY);
+      const labelY = g.kind === 'deck' ? -64 : -24;
+      this.ctx.fillText(`📋 ${g.kind}`, 0, labelY);
+
+      // Resource cost row
+      const cost = g.resourceCost;
+      const parts: string[] = [];
+      if (cost.wood  > 0) parts.push(`W:${cost.wood}`);
+      if (cost.fiber > 0) parts.push(`Fi:${cost.fiber}`);
+      if (cost.metal > 0) parts.push(`Fe:${cost.metal}`);
+      if (cost.stone > 0) parts.push(`St:${cost.stone}`);
+      if (parts.length > 0) {
+        this.ctx.font = '8px monospace';
+        this.ctx.fillStyle = 'rgba(130,190,255,0.85)';
+        this.ctx.fillText(parts.join(' '), 0, labelY - 10);
+      }
+
+      // "E to build" hint
+      this.ctx.font = '8px Georgia, serif';
+      this.ctx.fillStyle = 'rgba(180,220,255,0.6)';
+      this.ctx.textBaseline = 'top';
+      this.ctx.fillText('[E] build', 0, g.kind === 'deck' ? -58 : -16);
 
       this.ctx.restore();
     }

@@ -343,6 +343,65 @@ SimpleShip* find_ship(uint16_t ship_id) {
     return NULL;
 }
 
+// ── Resource pool helpers ────────────────────────────────────────────────────
+/** Grant `amount` of a resource into the player's resource pool.  Capped at 9999. */
+static void res_grant(WebSocketPlayer *p, int resource, int amount) {
+    if (amount <= 0) return;
+    switch (resource) {
+        case 0: p->res_wood  = (uint16_t)((int)p->res_wood  + amount > 9999 ? 9999 : (int)p->res_wood  + amount); break;
+        case 1: p->res_fiber = (uint16_t)((int)p->res_fiber + amount > 9999 ? 9999 : (int)p->res_fiber + amount); break;
+        case 2: p->res_metal = (uint16_t)((int)p->res_metal + amount > 9999 ? 9999 : (int)p->res_metal + amount); break;
+        case 3: p->res_stone = (uint16_t)((int)p->res_stone + amount > 9999 ? 9999 : (int)p->res_stone + amount); break;
+    }
+}
+#define RES_WOOD_ID  0
+#define RES_FIBER_ID 1
+#define RES_METAL_ID 2
+#define RES_STONE_ID 3
+
+/** Resource costs for each ship module type (wood, fiber, metal, stone). */
+static const struct { uint16_t wood, fiber, metal, stone; } MODULE_RES_COST[] = {
+    /* indexed by ModuleTypeId */
+    [MODULE_TYPE_HELM]       = { 5,  0, 3, 0 },
+    [MODULE_TYPE_CANNON]     = { 2,  0, 5, 0 },
+    [MODULE_TYPE_MAST]       = { 20, 10, 0, 0 },
+    [MODULE_TYPE_SWIVEL]     = { 1,  0, 3, 0 },
+    [MODULE_TYPE_PLANK]      = { 10, 0, 0, 0 },
+    [MODULE_TYPE_DECK]       = { 15, 0, 0, 0 },
+    [MODULE_TYPE_RAMP]       = { 8,  0, 0, 0 },
+    [MODULE_TYPE_HATCH_COVER]= { 8,  0, 0, 0 },
+    [MODULE_TYPE_GUNPORT]    = { 6,  0, 2, 0 },
+    [MODULE_TYPE_WORKBENCH]  = { 12, 0, 0, 0 },
+    [MODULE_TYPE_CHEST]      = { 12, 0, 0, 0 },
+};
+
+/** Returns true if the player has enough resources for `type`. */
+static bool res_can_afford(const WebSocketPlayer *p, ModuleTypeId type) {
+    if ((int)type >= (int)(sizeof(MODULE_RES_COST)/sizeof(MODULE_RES_COST[0]))) return true;
+    return p->res_wood  >= MODULE_RES_COST[type].wood
+        && p->res_fiber >= MODULE_RES_COST[type].fiber
+        && p->res_metal >= MODULE_RES_COST[type].metal
+        && p->res_stone >= MODULE_RES_COST[type].stone;
+}
+
+/** Deducts the resource cost of `type` from the player's resource pool. */
+static void res_consume(WebSocketPlayer *p, ModuleTypeId type) {
+    if ((int)type >= (int)(sizeof(MODULE_RES_COST)/sizeof(MODULE_RES_COST[0]))) return;
+    p->res_wood  -= MODULE_RES_COST[type].wood;
+    p->res_fiber -= MODULE_RES_COST[type].fiber;
+    p->res_metal -= MODULE_RES_COST[type].metal;
+    p->res_stone -= MODULE_RES_COST[type].stone;
+}
+
+/** Returns true if the given SimpleShip has at least one workbench module aboard. */
+static bool ship_has_workbench(const SimpleShip *ship) {
+    if (!ship) return false;
+    for (uint8_t m = 0; m < ship->module_count; m++) {
+        if (ship->modules[m].type_id == MODULE_TYPE_WORKBENCH) return true;
+    }
+    return false;
+}
+
 // Coordinate conversion helpers
 void ship_local_to_world(const SimpleShip* ship, float local_x, float local_y, float* world_x, float* world_y) {
     float cos_r = cosf(ship->rotation);
@@ -1384,14 +1443,19 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
                             "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
                             "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
-                            "\"activeSlot\":%d}",
+                            "\"activeSlot\":%d,"
+                            "\"res_wood\":%u,\"res_fiber\":%u,\"res_metal\":%u,\"res_stone\":%u}",
                             (int)snap->players[p].inventory.equipment.helm,
                             (int)snap->players[p].inventory.equipment.torso,
                             (int)snap->players[p].inventory.equipment.legs,
                             (int)snap->players[p].inventory.equipment.feet,
                             (int)snap->players[p].inventory.equipment.hands,
                             (int)snap->players[p].inventory.equipment.shield,
-                            (int)snap->players[p].inventory.active_slot);
+                            (int)snap->players[p].inventory.active_slot,
+                            (unsigned)snap->players[p].res_wood,
+                            (unsigned)snap->players[p].res_fiber,
+                            (unsigned)snap->players[p].res_metal,
+                            (unsigned)snap->players[p].res_stone);
 
         char player_entry[3072];
         snprintf(player_entry, sizeof(player_entry),
@@ -5392,15 +5456,13 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int deck_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_DECK &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            deck_slot = s; break;
-                                        }
-                                    }
-                                    if (deck_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_deck\"}");
+                                    SimpleShip* _dk_ship = find_ship(player->parent_ship_id);
+                                    bool _dk_scaffold = false;
+                                    if (_dk_ship && global_sim) { struct Ship* _tmp = NULL; for (uint32_t _si2=0;_si2<global_sim->ship_count;_si2++) if (global_sim->ships[_si2].id==player->parent_ship_id){_tmp=&global_sim->ships[_si2];break;} if (_tmp) _dk_scaffold=((_tmp->flags&SHIP_FLAG_SCAFFOLDED)!=0); }
+                                    if (!_dk_scaffold && !ship_has_workbench(_dk_ship)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_DECK)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -5431,9 +5493,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 sim_ship->modules[sim_ship->module_count++] = new_deck;
                                                 if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                                                     simple->modules[simple->module_count++] = new_deck;
-                                                player->inventory.slots[deck_slot].quantity--;
-                                                if (player->inventory.slots[deck_slot].quantity == 0)
-                                                    player->inventory.slots[deck_slot].item = ITEM_NONE;
+                                                res_consume(player, MODULE_TYPE_DECK);
                                                 log_info("🔨 Player %u placed deck on ship %u",
                                                          player->player_id, sim_ship->id);
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_placed\"}");
@@ -5559,15 +5619,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int ramp_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_RAMP &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            ramp_slot = s; break;
-                                        }
-                                    }
-                                    if (ramp_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_ramp\"}");
+                                    // Resource + workbench check for ramp
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_RAMP)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -5638,9 +5694,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 ramp_sim->modules[ramp_sim->module_count++]     = nr;
                                                 ramp_simple->modules[ramp_simple->module_count++] = nr;
 
-                                                player->inventory.slots[ramp_slot].quantity--;
-                                                if (player->inventory.slots[ramp_slot].quantity == 0)
-                                                    player->inventory.slots[ramp_slot].item = ITEM_NONE;
+                                                res_consume(player, MODULE_TYPE_RAMP);
 
                                                 log_info("🪜 Player %u placed ramp %u (snap %d) on ship %u",
                                                          player->player_id, new_id, snap_index, ramp_sim->id);
@@ -5667,15 +5721,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int hatch_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_WOOD_CEILING &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            hatch_slot = s; break;
-                                        }
-                                    }
-                                    if (hatch_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_ceiling\"}");
+                                    // Resource + workbench check for hatch cover
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_HATCH_COVER)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -5740,9 +5790,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 hatch_sim->modules[hatch_sim->module_count++]       = nh;
                                                 hatch_simple->modules[hatch_simple->module_count++] = nh;
 
-                                                player->inventory.slots[hatch_slot].quantity--;
-                                                if (player->inventory.slots[hatch_slot].quantity == 0)
-                                                    player->inventory.slots[hatch_slot].item = ITEM_NONE;
+                                                res_consume(player, MODULE_TYPE_HATCH_COVER);
 
                                                 log_info("🪟 Player %u placed hatch cover %u (snap %d) on ship %u",
                                                          player->player_id, new_id, snap_index, hatch_sim->id);
@@ -5769,15 +5817,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int gp_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_DOOR &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            gp_slot = s; break;
-                                        }
-                                    }
-                                    if (gp_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_door\"}");
+                                    // Resource + workbench check for gunport
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_GUNPORT)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -5867,9 +5911,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 gp_sim->modules[gp_sim->module_count++]       = ng;
                                                 gp_simple->modules[gp_simple->module_count++] = ng;
 
-                                                player->inventory.slots[gp_slot].quantity--;
-                                                if (player->inventory.slots[gp_slot].quantity == 0)
-                                                    player->inventory.slots[gp_slot].item = ITEM_NONE;
+                                                res_consume(player, MODULE_TYPE_GUNPORT);
 
                                                 log_info("🔳 Player %u placed gunport %u (snap %d, x=%.1f y=%.1f) on ship %u",
                                                          player->player_id, new_id, snap_index,
@@ -6103,16 +6145,14 @@ int websocket_server_update(struct Sim* sim) {
                                         log_warn("place_plank: unknown slot '%s'[%d], using first missing",
                                                  section_name, seg_index);
                                     }
-                                    // Find a plank in inventory
-                                    int plank_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_PLANK &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            plank_slot = s; break;
-                                        }
-                                    }
-                                    if (plank_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_planks\"}");
+                                    /* Check workbench and resources */
+                                    SimpleShip* _plk_ship = find_ship(target_ship_id);
+                                    bool _plk_scaffold = false;
+                                    if (_plk_ship) { struct Ship* _tmp = NULL; for (uint32_t _si2=0;_si2<global_sim->ship_count;_si2++) if (global_sim->ships[_si2].id==target_ship_id){_tmp=&global_sim->ships[_si2];break;} if (_tmp) _plk_scaffold=((_tmp->flags&SHIP_FLAG_SCAFFOLDED)!=0); }
+                                    if (!_plk_scaffold && !ship_has_workbench(_plk_ship)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_PLANK)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -6183,13 +6223,10 @@ int websocket_server_update(struct Sim* sim) {
                                                 sim_ship->modules[sim_ship->module_count++] = new_plank;
                                                 if (simple_ship->module_count < MAX_MODULES_PER_SHIP)
                                                     simple_ship->modules[simple_ship->module_count++] = new_plank;
-                                                // Consume 1 plank
-                                                player->inventory.slots[plank_slot].quantity--;
-                                                if (player->inventory.slots[plank_slot].quantity == 0)
-                                                    player->inventory.slots[plank_slot].item = ITEM_NONE;
-                                                log_info("🔨 Player %u placed plank %u (seq=%u slot=%d) on ship %u (%d planks remain)",
-                                                         player->player_id, plank_id, ship_seq, missing_idx, sim_ship->id,
-                                                         player->inventory.slots[plank_slot].quantity);
+                                                // Consume resources
+                                                res_consume(player, MODULE_TYPE_PLANK);
+                                                log_info("🔨 Player %u placed plank %u (seq=%u slot=%d) on ship %u",
+                                                         player->player_id, plank_id, ship_seq, missing_idx, sim_ship->id);
                                                 snprintf(response, sizeof(response),
                                                     "{\"type\":\"message_ack\",\"status\":\"plank_placed\",\"plank_id\":%u}",
                                                     plank_id);
@@ -6449,16 +6486,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    // Locate cannon in inventory
-                                    int cannon_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_CANNON &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            cannon_slot = s; break;
-                                        }
-                                    }
-                                    if (cannon_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_cannon\"}");
+                                    // Resource + workbench check for cannon
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_CANNON)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -6544,10 +6576,8 @@ int websocket_server_update(struct Sim* sim) {
                                             simple->modules[simple->module_count++] = nc;
                                             recalc_ship_mass(simple);
 
-                                            // Consume 1 cannon from inventory
-                                            player->inventory.slots[cannon_slot].quantity--;
-                                            if (player->inventory.slots[cannon_slot].quantity == 0)
-                                                player->inventory.slots[cannon_slot].item = ITEM_NONE;
+                                            // Consume resources
+                                            res_consume(player, MODULE_TYPE_CANNON);
 
                                             // Trigger NPC cannon sector re-dispatch so on-duty gunners
                                             // can immediately adopt the newly placed cannon if it is
@@ -6576,15 +6606,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int sail_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_SAIL &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            sail_slot = s; break;
-                                        }
-                                    }
-                                    if (sail_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_sail\"}");
+                                    // Resource + workbench check for mast
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_MAST)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -6638,9 +6664,7 @@ int websocket_server_update(struct Sim* sim) {
                                             sim_ship->modules[sim_ship->module_count++] = nm;
                                             simple_mast->modules[simple_mast->module_count++] = nm;
 
-                                            player->inventory.slots[sail_slot].quantity--;
-                                            if (player->inventory.slots[sail_slot].quantity == 0)
-                                                player->inventory.slots[sail_slot].item = ITEM_NONE;
+                                            res_consume(player, MODULE_TYPE_MAST);
 
                                             log_info("⛵ Player %u placed mast %u at (%.1f,%.1f) on ship %u",
                                                      player->player_id, new_id, local_x, local_y, sim_ship->id);
@@ -6664,15 +6688,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int sw_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_SWIVEL &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            sw_slot = s; break;
-                                        }
-                                    }
-                                    if (sw_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_swivel\"}");
+                                    // Resource + workbench check for swivel
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_SWIVEL)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -6743,9 +6763,7 @@ int websocket_server_update(struct Sim* sim) {
                                             sw_sim->modules[sw_sim->module_count++]       = ns;
                                             sw_simple->modules[sw_simple->module_count++] = ns;
 
-                                            player->inventory.slots[sw_slot].quantity--;
-                                            if (player->inventory.slots[sw_slot].quantity == 0)
-                                                player->inventory.slots[sw_slot].item = ITEM_NONE;
+                                            res_consume(player, MODULE_TYPE_SWIVEL);
 
                                             log_info("🔫 Player %u placed swivel %u at (%.1f,%.1f) rot=%.2f on ship %u",
                                                      player->player_id, new_id, local_x, local_y, rotation, sw_sim->id);
@@ -6960,15 +6978,11 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    int helm_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_HELM &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            helm_slot = s; break;
-                                        }
-                                    }
-                                    if (helm_slot < 0) {
-                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_helm_item\"}");
+                                    // Resource + workbench check for helm
+                                    if (!ship_has_workbench(find_ship(player->parent_ship_id))) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_workbench\"}");
+                                    } else if (!res_can_afford(player, MODULE_TYPE_HELM)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
                                     } else {
@@ -7012,9 +7026,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 // (used by NPC helmsmen) can see the new helm.
                                                 if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                                                     simple->modules[simple->module_count++] = *nh;
-                                                player->inventory.slots[helm_slot].quantity--;
-                                                if (player->inventory.slots[helm_slot].quantity == 0)
-                                                    player->inventory.slots[helm_slot].item = ITEM_NONE;
+                                                res_consume(player, MODULE_TYPE_HELM);
                                                 log_info("🔧 Player %u replaced helm %u on ship %u",
                                                          player->player_id, MID(seq, MODULE_OFFSET_HELM), sim_ship->id);
                                                 snprintf(response, sizeof(response),
@@ -7022,6 +7034,77 @@ int websocket_server_update(struct Sim* sim) {
                                                     nh->id);
                                             }
                                         }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_workbench_at") == 0) {
+                            // PLACE WORKBENCH: add a workbench module at the given local position.
+                            // Payload: {"type":"place_workbench_at","shipId":N,"localX":N,"localY":N}
+                            // Workbench does NOT require another workbench to build (bootstrapping exception).
+                            // Costs MODULE_RES_COST[MODULE_TYPE_WORKBENCH] resources.
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else if (!res_can_afford(player, MODULE_TYPE_WORKBENCH)) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
+                                } else if (!global_sim) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                } else {
+                                    uint16_t target_ship_id = player->parent_ship_id;
+                                    float local_x = 0.0f, local_y = 0.0f;
+                                    const char* p_sid = strstr(payload, "\"shipId\":");
+                                    const char* p_lx  = strstr(payload, "\"localX\":");
+                                    const char* p_ly  = strstr(payload, "\"localY\":");
+                                    if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                    if (p_lx) sscanf(p_lx + 9, "%f", &local_x);
+                                    if (p_ly) sscanf(p_ly + 9, "%f", &local_y);
+
+                                    struct Ship* wb_sim = NULL;
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id == target_ship_id) {
+                                            wb_sim = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                    SimpleShip* wb_simple = find_ship(target_ship_id);
+                                    if (!wb_sim || !wb_simple) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else if (wb_sim->module_count >= MAX_MODULES_PER_SHIP) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                    } else {
+                                        uint16_t max_id = 0;
+                                        for (uint8_t m = 0; m < wb_sim->module_count; m++)
+                                            if (wb_sim->modules[m].id > max_id) max_id = wb_sim->modules[m].id;
+                                        for (uint8_t m = 0; m < wb_simple->module_count; m++)
+                                            if (wb_simple->modules[m].id > max_id) max_id = wb_simple->modules[m].id;
+                                        uint16_t new_id = max_id + 1;
+
+                                        ShipModule nw;
+                                        memset(&nw, 0, sizeof(ShipModule));
+                                        nw.id          = new_id;
+                                        nw.type_id     = MODULE_TYPE_WORKBENCH;
+                                        nw.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                        nw.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                        nw.local_rot   = 0;
+                                        nw.state_bits  = MODULE_STATE_ACTIVE;
+                                        nw.health      = 10000;
+                                        nw.max_health  = 10000;
+                                        nw.deck_id     = 0;
+
+                                        wb_sim->modules[wb_sim->module_count++]       = nw;
+                                        wb_simple->modules[wb_simple->module_count++] = nw;
+
+                                        res_consume(player, MODULE_TYPE_WORKBENCH);
+
+                                        log_info("🔨 Player %u placed workbench %u at (%.1f,%.1f) on ship %u",
+                                                 player->player_id, new_id, local_x, local_y, wb_sim->id);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"message_ack\",\"status\":\"workbench_placed\",\"workbench_id\":%u}",
+                                            new_id);
                                     }
                                 }
                             }

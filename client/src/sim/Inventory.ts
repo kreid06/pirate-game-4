@@ -7,8 +7,8 @@
  */
 
 // ── Slot count ──────────────────────────────────────────────────────────────
-export const INVENTORY_SLOTS = 58;  /** total regular bag slots per player */
-export const HOTBAR_SLOTS    = 10;  /** first N slots shown on the hotbar  */
+export const INVENTORY_SLOTS = 16;  /** total regular bag slots per player */
+export const HOTBAR_SLOTS    = 8;   /** first N slots shown on the hotbar  */
 
 // ── Item identifiers (must match server ItemKind enum) ─────────────────────
 export type ItemKind =
@@ -50,10 +50,11 @@ export type ItemKind =
   | 'cloth_shirt'
   | 'cloth_pants'
   | 'cloth_shoes'
-  | 'cloth_gloves';
+  | 'cloth_gloves'
+  | 'resource_chest';
 
 // ── Category groups ─────────────────────────────────────────────────────────
-export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield';
+export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield' | 'resource';
 
 // ── Per-item metadata ───────────────────────────────────────────────────────
 export interface ItemDef {
@@ -98,12 +99,12 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   wall:          { kind: 'wall',          name: 'Wall',          category: 'building', maxStack: 20, color: '#5c3a1a', borderColor: '#2e1a08', symbol: '\u2503',      description: 'Place on a floor tile edge to build a wall segment.',                   weight: 6   },
   door_frame:    { kind: 'door_frame',    name: 'Door Frame',    category: 'building', maxStack: 10, color: '#7a4820', borderColor: '#3e200c', symbol: 'Fr',          description: 'Place on a floor tile edge. Creates a gap for a door panel.',         weight: 4   },
   door:          { kind: 'door',          name: 'Door',          category: 'building', maxStack: 4,  color: '#7a4820', borderColor: '#3e200c', symbol: '\u25a1',      description: 'Snap onto a door frame. Press E to open/close.',                        weight: 5   },
-  wood:          { kind: 'wood',          name: 'Wood',          category: 'none',     maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting.',                          weight: 2   },
-  fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'none',     maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails.',                          weight: 0.1 },
-  metal:         { kind: 'metal',         name: 'Metal',         category: 'none',     maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons and cannons.',                                  weight: 5   },
+  wood:          { kind: 'wood',          name: 'Wood',          category: 'resource', maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting and construction.',     weight: 2   },
+  fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'resource', maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails and cloth.',              weight: 0.1 },
+  metal:         { kind: 'metal',         name: 'Metal',         category: 'resource', maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons, cannons, and fittings.',                     weight: 5   },
   pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.',                         weight: 5   },
   shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.',                 weight: 80  },
-  stone:         { kind: 'stone',         name: 'Stone',         category: 'none',     maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.',                  weight: 4   },
+  stone:         { kind: 'stone',         name: 'Stone',         category: 'resource', maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.',                  weight: 4   },
   wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.',                        weight: 6   },
   claim_flag:    { kind: 'claim_flag',    name: 'Claiming Flag', category: 'building', maxStack: 5,  color: '#dd3333', borderColor: '#991111', symbol: '\uD83D\uDEA9', description: 'Plant in contested territory to capture it for your company over 60 seconds.', weight: 2 },
   flag_fort:       { kind: 'flag_fort',       name: 'Flag Fort',        category: 'building', maxStack: 1,  color: '#cc8822', borderColor: '#886611', symbol: '\uD83C\uDFF0', description: 'Place on an unclaimed island to establish your company\u2019s territory claim.', weight: 75  },
@@ -114,6 +115,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   cloth_pants:   { kind: 'cloth_pants',   name: 'Cloth Pants',   category: 'armor',    maxStack: 1,  color: '#7a7040', borderColor: '#524a28', symbol: 'Cp', description: 'Light cloth legs. +15 armour. Reduces incoming damage.',        weight: 2 },
   cloth_shoes:   { kind: 'cloth_shoes',   name: 'Cloth Shoes',   category: 'armor',    maxStack: 1,  color: '#8f7c50', borderColor: '#5c5030', symbol: 'Cx', description: 'Light cloth boots. +8 armour. Reduces incoming damage.',        weight: 1 },
   cloth_gloves:  { kind: 'cloth_gloves',  name: 'Cloth Gloves',  category: 'armor',    maxStack: 1,  color: '#9a8855', borderColor: '#635830', symbol: 'Cg', description: 'Light cloth gloves. +7 armour. Reduces incoming damage.',      weight: 1 },
+  resource_chest: { kind: 'resource_chest', name: 'Resource Chest', category: 'building', maxStack: 3,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u229f', description: 'A wooden chest for storing resources. Supplies ship auto-repair and land structure upkeep.', weight: 25 },
 };
 
 /**
@@ -160,6 +162,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   32: 'cloth_pants',
   33: 'cloth_shoes',
   34: 'cloth_gloves',
+  38: 'resource_chest',
 };
 
 /**
@@ -254,12 +257,39 @@ export interface PlayerEquipment {
   shield: ItemKind;
 }
 
+/** Raw resource amounts tracked separately from the regular item inventory. */
+export interface PlayerResources {
+  wood:  number;
+  fiber: number;
+  metal: number;
+  stone: number;
+}
+
+/**
+ * Resource cost required to complete each type of planned module.
+ * Keys match GhostModuleKind / ModuleKind strings.
+ */
+export const STRUCTURE_COSTS: Record<string, PlayerResources> = {
+  plank:       { wood: 10, fiber: 0,  metal: 0,  stone: 0 },
+  cannon:      { wood: 2,  fiber: 0,  metal: 5,  stone: 0 },
+  mast:        { wood: 20, fiber: 10, metal: 0,  stone: 0 },
+  helm:        { wood: 5,  fiber: 0,  metal: 3,  stone: 0 },
+  deck:        { wood: 15, fiber: 0,  metal: 0,  stone: 0 },
+  swivel:      { wood: 1,  fiber: 0,  metal: 3,  stone: 0 },
+  ramp:        { wood: 8,  fiber: 0,  metal: 0,  stone: 0 },
+  hatch_cover: { wood: 8,  fiber: 0,  metal: 0,  stone: 0 },
+  gunport:     { wood: 6,  fiber: 0,  metal: 2,  stone: 0 },
+  chest:       { wood: 12, fiber: 0,  metal: 0,  stone: 0 },
+};
+
 export interface PlayerInventory {
   /** INVENTORY_SLOTS hotbar slots */
   slots: InventorySlot[];
   equipment: PlayerEquipment;
   /** Which hotbar slot is currently selected (0–9). Client-authoritative. */
   activeSlot: number;
+  /** Raw resource counts — extracted from inventory slots, shown in a dedicated Resources section. */
+  resources: PlayerResources;
 }
 
 // ── Factory helpers ─────────────────────────────────────────────────────────
@@ -269,13 +299,15 @@ export function createEmptyInventory(): PlayerInventory {
     slots: Array.from({ length: INVENTORY_SLOTS }, () => ({ item: 'none' as ItemKind, quantity: 0 })),
     equipment: { helm: 'none', torso: 'none', legs: 'none', feet: 'none', hands: 'none', shield: 'none' },
     activeSlot: 0,
+    resources: { wood: 0, fiber: 0, metal: 0, stone: 0 },
   };
 }
 
 /**
  * Parse inventory from the compact server wire format.
- * `rawSlots` is a 58-element array of [itemId, quantity] pairs.
+ * `rawSlots` is a 16-element array of [itemId, quantity] pairs.
  * Equipment IDs are the numeric ItemKind values from the server.
+ * `resWood/resFiber/resMetal/resStone` come directly from the server resource pool.
  */
 export function parseInventoryFromServer(
   rawSlots: Array<[number, number]> | undefined,
@@ -286,6 +318,10 @@ export function parseInventoryFromServer(
   feetId:  number,
   handsId: number,
   shieldId: number,
+  resWood  = 0,
+  resFiber = 0,
+  resMetal = 0,
+  resStone = 0,
 ): PlayerInventory {
   const inv = createEmptyInventory();
 
@@ -304,6 +340,12 @@ export function parseInventoryFromServer(
   inv.equipment.feet   = ITEM_ID_MAP[feetId]   ?? 'none';
   inv.equipment.hands  = ITEM_ID_MAP[handsId]  ?? 'none';
   inv.equipment.shield = ITEM_ID_MAP[shieldId] ?? 'none';
+
+  // Resource pool comes directly from server fields (not stored in inventory slots)
+  inv.resources.wood  = resWood;
+  inv.resources.fiber = resFiber;
+  inv.resources.metal = resMetal;
+  inv.resources.stone = resStone;
 
   return inv;
 }

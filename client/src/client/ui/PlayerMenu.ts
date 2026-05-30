@@ -16,7 +16,7 @@ import {
   COMPANY_PIRATES,
   COMPANY_NAVY,
 } from '../../sim/Types.js';
-import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight } from '../../sim/Inventory.js';
+import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, INVENTORY_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight, PlayerResources } from '../../sim/Inventory.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -36,7 +36,7 @@ const COMPANY_COLORS: Record<number, string> = {
 
 const PANEL_W  = 640;
 const TAB_H    = 32;
-const PANEL_H  = 900;
+const PANEL_H  = 750;
 const PAD      = 18;
 const HEADER_H = 40;
 const ROW_H    = 22;
@@ -157,6 +157,8 @@ export class PlayerMenu {
   // Cached panel origin — set each render frame, used by handleClick
   private _panelX = 0;
   private _panelY = 0;
+  private _lastCanvasW = 800;
+  private _lastCanvasH = 600;
   private _btnHits: BtnHit[] = [];
   private _craftBtnHits: CraftHit[] = [];
   private _craftTab = 'SURVIVAL';
@@ -194,6 +196,34 @@ export class PlayerMenu {
 
   /** Called when the player drags an item outside the panel to drop it in the world. */
   public onDropItem: ((fromSlot: number) => void) | null = null;
+
+  /** Called when the player confirms a resource drop. */
+  public onDropResources: ((kind: keyof PlayerResources, amount: number) => void) | null = null;
+
+  // ── Resource chip drag / drop-slider state ────────────────────────────
+  /** Hit regions for the 4 resource chips — set each render frame. */
+  private _resChipHits: Array<{
+    key: keyof PlayerResources; label: string; color: string;
+    x: number; y: number; w: number; h: number; max: number;
+  }> = [];
+  /** Key being dragged out, or null. */
+  private _resDragKey: keyof PlayerResources | null = null;
+  private _resDragX = 0;
+  private _resDragY = 0;
+  private _resDragMax = 0;
+  private _resDragColor = '#888';
+  private _resDragLabel = '';
+  /** Non-null while the drop-quantity slider is open. */
+  private _resDropSlider: {
+    key:    keyof PlayerResources;
+    label:  string;
+    color:  string;
+    max:    number;
+    amount: number;                 // currently selected quantity
+    trackX: number; trackY: number; trackW: number; // slider track hit region
+    confirmHit: { x: number; y: number; w: number; h: number };
+    cancelHit:  { x: number; y: number; w: number; h: number };
+  } | null = null;
 
   toggle(): void { this.visible = !this.visible; }
   open():   void { this.visible = true; this.activeTab = 'character'; }
@@ -279,9 +309,23 @@ export class PlayerMenu {
     return true;
   }
 
-  /** Begin a drag if the mousedown lands on an inventory slot. Returns true if consumed. */
+  /** Begin a drag if the mousedown lands on an inventory slot or resource chip. Returns true if consumed. */
   handleMouseDown(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
     if (!this.visible || this.activeTab !== 'character') return false;
+
+    // Resource chip drag — only if the chip has > 0 quantity
+    for (const chip of this._resChipHits) {
+      if (chip.max > 0 && x >= chip.x && x <= chip.x + chip.w && y >= chip.y && y <= chip.y + chip.h) {
+        this._resDragKey   = chip.key;
+        this._resDragMax   = chip.max;
+        this._resDragColor = chip.color;
+        this._resDragLabel = chip.label;
+        this._resDragX     = x;
+        this._resDragY     = y;
+        return true;
+      }
+    }
+
     const slot = this._slotAt(x, y);
     if (slot === -1) return false;
     if ((inv.slots[slot]?.item ?? 'none') === 'none') return false;
@@ -294,6 +338,10 @@ export class PlayerMenu {
 
   /** Update drag ghost position. */
   handleMouseMove(x: number, y: number): void {
+    if (this._resDragKey !== null) {
+      this._resDragX = x;
+      this._resDragY = y;
+    }
     if (this._dragSlot !== -1) {
       this._dragX = x;
       this._dragY = y;
@@ -306,6 +354,35 @@ export class PlayerMenu {
    * Returns true if consumed.
    */
   handleMouseUp(x: number, y: number): boolean {
+    // Resource chip drag — if released outside panel, open the drop slider
+    if (this._resDragKey !== null) {
+      const key   = this._resDragKey;
+      const max   = this._resDragMax;
+      const color = this._resDragColor;
+      const label = this._resDragLabel;
+      this._resDragKey = null;
+      const px2 = this._panelX, py2 = this._panelY;
+      const outsidePanel2 = x < px2 || x > px2 + PANEL_W || y < py2 || y > py2 + PANEL_H;
+      if (outsidePanel2 && max > 0) {
+        // Build slider popup centered on canvas
+        const SW = 320, SH = 160;
+        const cw = this._lastCanvasW, ch = this._lastCanvasH;
+        const sx = Math.round((cw - SW) / 2);
+        const sy = Math.round((ch - SH) / 2);
+        const BTN_W = 90, BTN_H = 32;
+        const trackH = 10;
+        const trackY = sy + 90;
+        this._resDropSlider = {
+          key, label, color, max, amount: max,
+          trackX: sx + 24, trackY, trackW: SW - 48,
+          confirmHit: { x: sx + SW / 2 - BTN_W - 8, y: sy + SH - BTN_H - 12, w: BTN_W, h: BTN_H },
+          cancelHit:  { x: sx + SW / 2 + 8,          y: sy + SH - BTN_H - 12, w: BTN_W, h: BTN_H },
+        };
+        return true;
+      }
+      return false;
+    }
+
     if (this._dragSlot === -1) return false;
     const fromSlot = this._dragSlot;
     this._dragSlot = -1;
@@ -367,14 +444,14 @@ export class PlayerMenu {
     if (!this._dragISZ) return -1; // grid not rendered yet
     const ISZ    = this._dragISZ;
     const STRIDE = this._dragStride;
-    const COLS   = 10;
-    const ROWS   = 6;
+    const COLS   = 8;
+    const ROWS   = Math.ceil(INVENTORY_SLOTS / COLS);
     // must be inside the viewport
     if (y < this._invGridY || y > this._invGridY + this._invViewportH) return -1;
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         const i  = row * COLS + col;
-        if (i >= 58) break;
+        if (i >= INVENTORY_SLOTS) break;
         const sx = this._dragStartIX + col * STRIDE;
         const sy = this._invGridY + row * STRIDE - this._invScrollY;
         if (x >= sx && x <= sx + ISZ && y >= sy && y <= sy + ISZ) return i;
@@ -394,6 +471,8 @@ export class PlayerMenu {
 
     const cw = ctx.canvas.width;
     const ch = ctx.canvas.height;
+    this._lastCanvasW = cw;
+    this._lastCanvasH = ch;
 
     ctx.save();
     ctx.fillStyle = 'rgba(0,0,0,0.55)';
@@ -445,6 +524,7 @@ export class PlayerMenu {
       : null;
 
     cur = this._equipmentAndStatus(ctx, px, cur, player, ship, worldState, mouseX, mouseY);
+    cur = this._resourcesSection(ctx, px, cur, player.inventory.resources);
     cur = this._playerCrafting(ctx, px, cur, player);
     cur = this._inventoryGrid(ctx, px, cur, player, mouseX, mouseY);
 
@@ -880,6 +960,12 @@ export class PlayerMenu {
         counts[slot.item] = (counts[slot.item] ?? 0) + slot.quantity;
       }
     }
+    // Add resource pool counts (wood/fiber/metal/stone are no longer in slots)
+    const res = player.inventory.resources;
+    if (res.wood  > 0) counts['wood']  = (counts['wood']  ?? 0) + res.wood;
+    if (res.fiber > 0) counts['fiber'] = (counts['fiber'] ?? 0) + res.fiber;
+    if (res.metal > 0) counts['metal'] = (counts['metal'] ?? 0) + res.metal;
+    if (res.stone > 0) counts['stone'] = (counts['stone'] ?? 0) + res.stone;
 
     const COLS   = 2;
     const GAP    = 8;
@@ -1033,6 +1119,75 @@ export class PlayerMenu {
   // ─────────────────────────────────────────────────────────────────────────
   // 58-slot inventory grid (first 10 = hotbar, highlighted)
 
+  // ── Resources section ────────────────────────────────────────────────────
+
+  private _resourcesSection(
+    ctx: CanvasRenderingContext2D,
+    px:  number, py: number,
+    res: PlayerResources,
+  ): number {
+    py = this._sectionHeader(ctx, px, py, 'RESOURCES', '');
+    py += 6;
+
+    const items: Array<{ label: string; key: keyof PlayerResources; color: string; border: string; symbol: string }> = [
+      { label: 'Wood',  key: 'wood',  color: '#8b5e2a', border: '#5c3a10', symbol: 'W'  },
+      { label: 'Fiber', key: 'fiber', color: '#c8a46e', border: '#8a6030', symbol: 'Fi' },
+      { label: 'Metal', key: 'metal', color: '#8a8a8c', border: '#555558', symbol: 'Fe' },
+      { label: 'Stone', key: 'stone', color: '#9a9a9c', border: '#666668', symbol: 'St' },
+    ];
+
+    const RCOLS  = items.length;
+    const GAP    = 8;
+    const CHIP_W = Math.floor((PANEL_W - 2 * PAD - (RCOLS - 1) * GAP) / RCOLS);
+    const CHIP_H = 48;
+    const LAB_H  = 14;
+    const x0     = px + PAD;
+
+    for (let i = 0; i < items.length; i++) {
+      const r   = items[i];
+      const cx_ = x0 + i * (CHIP_W + GAP);
+      const qty = res[r.key];
+      const has = qty > 0;
+
+      // Background
+      ctx.fillStyle = 'rgba(14, 18, 28, 0.95)';
+      ctx.fillRect(cx_, py, CHIP_W, CHIP_H);
+
+      // Coloured tint
+      ctx.fillStyle = r.color;
+      ctx.globalAlpha = has ? 0.18 : 0.06;
+      ctx.fillRect(cx_, py, CHIP_W, CHIP_H);
+      ctx.globalAlpha = 1.0;
+
+      // Border
+      ctx.strokeStyle = has ? r.color : '#334';
+      ctx.lineWidth   = has ? 1.5 : 1;
+      ctx.strokeRect(cx_, py, CHIP_W, CHIP_H);
+
+      // Symbol
+      ctx.font         = 'bold 14px Georgia, serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = has ? r.color : '#446';
+      ctx.fillText(r.symbol, cx_ + CHIP_W / 2, py + CHIP_H / 2 - 5);
+
+      // Quantity
+      ctx.font      = has ? 'bold 13px Georgia, serif' : '12px Georgia, serif';
+      ctx.fillStyle = has ? '#fff' : '#556';
+      ctx.fillText(String(qty), cx_ + CHIP_W / 2, py + CHIP_H / 2 + 11);
+
+      // Label below chip
+      ctx.font         = '10px Georgia, serif';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.textBaseline = 'top';
+      ctx.fillText(r.label, cx_ + CHIP_W / 2, py + CHIP_H + 3);
+    }
+
+    return py + CHIP_H + LAB_H + 10;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+
   private _inventoryGrid(
     ctx:    CanvasRenderingContext2D,
     px:     number, py: number,
@@ -1040,27 +1195,26 @@ export class PlayerMenu {
     mouseX = 0, mouseY = 0,
   ): number {
     const inv    = player.inventory;
-    const COLS   = 10;
+    const COLS   = 8;
     const IGAP   = 6;
     // Slots expand to fill the inner content width
-    const ISZ    = Math.floor((PANEL_W - 2 * PAD - (COLS - 1) * IGAP) / COLS); // 55
+    const ISZ    = Math.floor((PANEL_W - 2 * PAD - (COLS - 1) * IGAP) / COLS);
     const STRIDE = ISZ + IGAP;
-    const ROWS   = Math.ceil(58 / COLS);  // 6
+    const ROWS   = Math.ceil(INVENTORY_SLOTS / COLS);  // 2
     const LABEL_ROW_H = 14; // hotbar key-number row height
 
     const activeSlot = inv.activeSlot;
-    const slotLabel  = (activeSlot === 255 || activeSlot >= 10)
+    const slotLabel  = (activeSlot === 255 || activeSlot >= HOTBAR_SLOTS)
       ? 'no selection'
       : `slot ${activeSlot + 1} active`;
 
-    py = this._sectionHeader(ctx, px, py, 'INVENTORY  (58 slots)', slotLabel);
+    py = this._sectionHeader(ctx, px, py, `INVENTORY  (${INVENTORY_SLOTS} slots)`, slotLabel);
     py += 6;
 
     const startIX  = px + PAD;
     const contentH = ROWS * STRIDE - IGAP + LABEL_ROW_H + 4;
-    // Viewport: whatever is left inside the panel minus a small bottom margin
-    const panelBottom  = this._panelY + PANEL_H - PAD;
-    const viewportH    = Math.min(contentH, Math.max(0, panelBottom - py));
+    // No scrolling needed — 16 slots fit in 2 rows
+    const viewportH = contentH;
 
     // Cache for handleWheel
     this._invGridY     = py;
@@ -1072,17 +1226,17 @@ export class PlayerMenu {
     this._dragStride  = STRIDE;
     this._dragStartIX = startIX;
 
-    // Clamp scroll
-    const maxScroll = Math.max(0, contentH - viewportH);
-    if (this._invScrollY > maxScroll) this._invScrollY = maxScroll;
+    // No scroll needed
+    this._invScrollY = 0;
+    const maxScroll = 0;
 
-    // Clip to viewport
+    // Clip to content height
     ctx.save();
     ctx.beginPath();
     ctx.rect(px, py, PANEL_W, viewportH);
     ctx.clip();
 
-    const scrollY = this._invScrollY;
+    const scrollY = 0;
 
     let hoveredSlot = -1;
     let hoveredSX   = 0;
@@ -1091,7 +1245,7 @@ export class PlayerMenu {
     for (let row = 0; row < ROWS; row++) {
       for (let col = 0; col < COLS; col++) {
         const i = row * COLS + col;
-        if (i >= 58) break;
+        if (i >= INVENTORY_SLOTS) break;
 
         const slot     = inv.slots[i] ?? { item: 'none' as ItemKind, quantity: 0 };
         const def      = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
@@ -1154,14 +1308,14 @@ export class PlayerMenu {
       }
     }
 
-    // Hotbar key-number labels below first row
+    // Hotbar key-number labels below first row (slots 1–8)
     ctx.font         = '10px Georgia, serif';
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'top';
     for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startIX + i * STRIDE;
       ctx.fillStyle = i === activeSlot ? GOLD : TEXT_DIM;
-      ctx.fillText(String(i === 9 ? 0 : i + 1), sx + ISZ / 2, py + ISZ + 3 - scrollY);
+      ctx.fillText(String(i + 1), sx + ISZ / 2, py + ISZ + 3);
     }
 
     ctx.restore();
@@ -1202,18 +1356,6 @@ export class PlayerMenu {
     }
 
     // Scrollbar (only visible when content overflows)
-    if (maxScroll > 0) {
-      const SB_W  = 4;
-      const sbX   = px + PANEL_W - PAD / 2 - SB_W;
-      const track = viewportH;
-      const thumb = Math.max(20, (viewportH / contentH) * track);
-      const thumbY = py + (scrollY / maxScroll) * (track - thumb);
-      ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      ctx.fillRect(sbX, py, SB_W, track);
-      ctx.fillStyle = 'rgba(255,215,0,0.5)';
-      ctx.fillRect(sbX, thumbY, SB_W, thumb);
-    }
-
     return py + viewportH + 8;
   }
 

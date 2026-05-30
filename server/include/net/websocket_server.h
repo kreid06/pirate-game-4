@@ -250,8 +250,8 @@ typedef struct WorldNpc {
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Player Inventory ────────────────────────────────────────────────────────
-#define INVENTORY_SLOTS 58   /* total regular inventory slots per player      */
-#define HOTBAR_SLOTS    10   /* first HOTBAR_SLOTS of slots[] shown on hotbar */
+#define INVENTORY_SLOTS 16   /* total regular inventory slots per player      */
+#define HOTBAR_SLOTS    8    /* first HOTBAR_SLOTS of slots[] shown on hotbar */
 
 typedef enum {
     ITEM_NONE          = 0,
@@ -602,6 +602,16 @@ typedef struct WebSocketPlayer {
 
     // Inventory
     PlayerInventory inventory;
+
+    /* ── Resource pool ─────────────────────────────────────────────────────
+     * Raw resource counts harvested from the world.  Stored separately from
+     * the item inventory so they do not occupy hotbar slots.  Consumed when
+     * building ship modules or island structures that cost resources.
+     * Max 9999 per resource type (fits in uint16_t, capped on grant). */
+    uint16_t res_wood;
+    uint16_t res_fiber;
+    uint16_t res_metal;
+    uint16_t res_stone;
 
     // Status effects
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0

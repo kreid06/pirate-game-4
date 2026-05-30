@@ -16,6 +16,7 @@ export type ModuleKind =
   | 'ramp'           // Deck ramp - connects lower and upper deck levels
   | 'hatch_cover'    // Hatch cover - seals a snap-point hole, blocks falling through
   | 'gunport'        // Gunport - openable hull hole for lower-deck cannons
+  | 'chest'          // Resource chest - stores raw resources for auto-repair and land supply
   | 'custom';        // User-defined module types
 
 /**
@@ -35,6 +36,7 @@ export enum ModuleTypeId {
   RAMP = 9,
   HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
   GUNPORT = 11,      // Gunport — openable hull hole for lower-deck cannons
+  CHEST = 12,        // Resource chest — stores raw resources for auto-repair and land supply
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -56,6 +58,7 @@ export const MODULE_TYPE_MAP = {
       case 'ramp': return ModuleTypeId.RAMP;
       case 'hatch_cover': return ModuleTypeId.HATCH_COVER;
       case 'gunport': return ModuleTypeId.GUNPORT;
+      case 'chest': return ModuleTypeId.CHEST;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -73,6 +76,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.RAMP: return 'ramp';
       case ModuleTypeId.HATCH_COVER: return 'hatch_cover';
       case ModuleTypeId.GUNPORT: return 'gunport';
+      case ModuleTypeId.CHEST: return 'chest';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }
@@ -121,6 +125,7 @@ export type ModuleData =
   | DeckModuleData
   | SwivelModuleData
   | GunportModuleData
+  | ChestModuleData
   | CustomModuleData;
 
 /**
@@ -250,6 +255,19 @@ export interface SwivelModuleData {
   health: number;               // Current HP (base max: 4000)
   targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
+}
+
+/**
+ * Resource chest module data — stores raw resources for ship auto-repair and land supply.
+ * Capacity is unlimited; stored weight counts towards the ship's cargo load.
+ */
+export interface ChestModuleData {
+  kind: 'chest';
+  wood:        number;  // Stored wood units
+  fiber:       number;  // Stored fiber units
+  metal:       number;  // Stored metal units
+  stone:       number;  // Stored stone units
+  cannon_ball: number;  // Stored cannonballs
 }
 
 /**
