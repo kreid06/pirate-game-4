@@ -590,12 +590,20 @@ function refreshVertCount(): void {
 
 // Island selector
 const islSelect = document.getElementById('isl-select') as HTMLSelectElement;
-ISLANDS.forEach((isl, i) => {
-  const opt = document.createElement('option');
-  opt.value = String(i); opt.textContent = isl.name;
-  islSelect.appendChild(opt);
-});
-islSelect.value = '0';
+
+function refreshIslandSelect(selectIdx?: number): void {
+  islSelect.innerHTML = '';
+  ISLANDS.forEach((isl, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i); opt.textContent = isl.name;
+    islSelect.appendChild(opt);
+  });
+  islSelect.value = String(selectIdx ?? selectedIslandIdx);
+}
+
+let nextIslandId = Math.max(...ISLANDS.map(i => i.id)) + 1;
+
+refreshIslandSelect(0);
 islSelect.addEventListener('change', () => {
   selectedIslandIdx = parseInt(islSelect.value);
   activePolyIdx = 0;
@@ -608,6 +616,74 @@ islSelect.addEventListener('change', () => {
   cam.centreOn(isl.cx, isl.cy); cam.zoom = 0.12;
   refreshPolySelect(); refreshVertCount(); refreshSubIslandList();
   updateSubIslandUI();
+});
+
+// Add new blank island
+document.getElementById('isl-add')!.addEventListener('click', () => {
+  const newId   = nextIslandId++;
+  const newName = `Island ${newId}`;
+  // Place near the current island with a small offset so it's visible
+  const cur  = ISLANDS[selectedIslandIdx];
+  const newCx = cur.cx + 1500;
+  const newCy = cur.cy;
+  ISLANDS.push({ id: newId, name: newName, cx: newCx, cy: newCy, circleRadius: 200, grassPolyScale: 0.82 });
+  const newIdx = ISLANDS.length - 1;
+  selectedIslandIdx = newIdx;
+  activePolyIdx = 0; activeLayerKey = 'islandShape'; activeSubIslandIdx = null;
+  refreshIslandSelect(newIdx);
+  const isl = ISLANDS[selectedIslandIdx];
+  cam.centreOn(isl.cx, isl.cy); cam.zoom = 0.12;
+  refreshPolySelect(); refreshVertCount(); refreshSubIslandList();
+  updateSubIslandUI();
+  toast(`Added "${newName}" (id ${newId})`);
+});
+
+// Duplicate current island — deep-copies all layer polygon data
+document.getElementById('isl-dup')!.addEventListener('click', () => {
+  const src    = ISLANDS[selectedIslandIdx];
+  const newId  = nextIslandId++;
+  const newName = `${src.name} (copy)`;
+  const offsetX = 1500;
+  const newIsl: IslandData = {
+    id: newId, name: newName,
+    cx: src.cx + offsetX, cy: src.cy,
+    circleRadius: src.circleRadius,
+    grassPolyScale: src.grassPolyScale,
+    outerVerts:  src.outerVerts  ? src.outerVerts.map(v  => ({ ...v })) : undefined,
+    sandVerts:   src.sandVerts   ? src.sandVerts.map(v   => ({ ...v })) : undefined,
+    grassVerts:  src.grassVerts  ? src.grassVerts.map(v  => ({ ...v })) : undefined,
+    shallowVerts:src.shallowVerts? src.shallowVerts.map(v=> ({ ...v })) : undefined,
+  };
+  ISLANDS.push(newIsl);
+  // Deep-copy all cached layer data from source to new island, offsetting vertices
+  for (const ld of LAYERS) {
+    const srcKey = dataKey(src.id, ld.key);
+    if (layerData.has(srcKey)) {
+      const copied = layerData.get(srcKey)!.map(ring =>
+        ring.map(v => ({ x: v.x, y: v.y }))
+      );
+      layerData.set(dataKey(newId, ld.key), copied);
+    }
+  }
+  // Copy sub-islands (islets)
+  const srcSubs = getSubIslands(src.id);
+  if (srcSubs.length) {
+    const newSubs = srcSubs.map(sub => ({
+      id: nextSubIslandId++,
+      sandVerts:  sub.sandVerts.map(v  => ({ ...v })),
+      grassVerts: sub.grassVerts.map(v => ({ ...v })),
+    }));
+    subIslandsMap.set(newId, newSubs);
+  }
+  const newIdx = ISLANDS.length - 1;
+  selectedIslandIdx = newIdx;
+  activePolyIdx = 0; activeLayerKey = 'islandShape'; activeSubIslandIdx = null;
+  refreshIslandSelect(newIdx);
+  const isl = ISLANDS[selectedIslandIdx];
+  cam.centreOn(isl.cx, isl.cy); cam.zoom = 0.12;
+  refreshPolySelect(); refreshVertCount(); refreshSubIslandList();
+  updateSubIslandUI();
+  toast(`Duplicated "${src.name}" → "${newName}" (id ${newId})`);
 });
 
 // Layer buttons
