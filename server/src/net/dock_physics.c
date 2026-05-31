@@ -198,7 +198,8 @@ static bool dock_wall_sat(const float *hdx, const float *hdy, int N,
         float ph_min = 1e30f, ph_max = -1e30f;
         for (int k = 0; k < N; k++) {
             float p = hdx[k] * nx + hdy[k] * ny;
-            if (p < ph_min) ph_min = p; if (p > ph_max) ph_max = p;
+            if (p < ph_min) { ph_min = p; }
+            if (p > ph_max) { ph_max = p; }
         }
         float ap[4] = { (dcx-dhx)*nx+(dcy-dhy)*ny, (dcx+dhx)*nx+(dcy-dhy)*ny,
                         (dcx-dhx)*nx+(dcy+dhy)*ny, (dcx+dhx)*nx+(dcy+dhy)*ny };
@@ -721,7 +722,8 @@ void handle_ship_dock_collisions(void) {
                     /* Current ship rotation in dock-local frame.
                      * ship_rad is in world; subtract dock rotation to get dock-local. */
                     float dock_rad = sy->rotation * (float)M_PI / 180.0f;
-                    float local_rot_base = ship_rad - dock_rad;
+                    (void)dock_rad; /* local_rot_base calculation preserved for future use */
+                    float local_rot_base __attribute__((unused)) = ship_rad - dock_rad;
 
                     /* Find earliest TOI across all vertices × all wall segments.
                      *

@@ -190,7 +190,7 @@ static bool ccd_swept_circle_polygon(
 /* Swept circle vs. circle (two moving entities).
  * Relative motion: A moves from (ax,ay) to (bx,by), B is static at (sx,sy).
  * Caller should pre-subtract B's motion from A's to handle both moving. */
-static bool ccd_swept_circle_circle(
+static bool __attribute__((unused)) ccd_swept_circle_circle(
     float ax, float ay, float bx, float by, float ra,
     float sx, float sy, float rb,
     float* out_t, float* out_nx, float* out_ny)

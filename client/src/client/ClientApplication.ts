@@ -1,3 +1,7 @@
+
+
+
+
 /**
  * Client Application - Main Client Coordinator
  * 
@@ -30,6 +34,7 @@ import { MENU_ID } from './ui/UIManager.js';
 import { RadialMenu, type RadialOption } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
 import { ChestMenu } from './ui/ChestMenu.js';
+import { LandChestMenu } from './ui/LandChestMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
 import { ConfirmDialog }    from './ui/ConfirmDialog.js';
@@ -68,6 +73,40 @@ export enum ClientState {
  * Main client application class
  */
 export class ClientApplication {
+
+      /**
+       * Register network event handlers for plan placement confirmation/failure.
+       * Should be called after networkManager is initialized.
+       */
+      private _registerNetworkPlanHandlers() {
+        if (!this.networkManager) return;
+        // Placement failed: show warning, keep plan ghost
+        this.networkManager.onPlacementFailed = (
+          reason: string, x: number, y: number, structureType: string, blockerId: number | null
+        ) => {
+          const ghost = this.landGhostEntries.find(g => g.kind === structureType && Math.abs(g.worldPos.x - x) < 2 && Math.abs(g.worldPos.y - y) < 2);
+          if (ghost && this.renderSystem && this.inputManager) {
+            this.renderSystem.flashCancel?.(this.inputManager.getMouseScreenPosition?.());
+            console.warn(`❌ [PLAN] Placement failed: ${structureType} @ (${x}, ${y}): ${reason}`);
+          }
+        };
+        // Placement confirmed: remove ghost plan
+        this.networkManager.onStructurePlaced = (s: any) => {
+          // Add the placed structure to the render system (authoritative confirmation)
+          if (s.id) this._structureCompanyMap?.set(s.id, s.companyId ?? 0);
+          this.renderSystem?.addPlacedStructure(s);
+          // Remove the matching ghost plan entry now that server confirmed placement
+          this.landGhostEntries = this.landGhostEntries.filter(g => {
+            if (g.kind === s.type && Math.abs(g.worldPos.x - s.x) < 2 && Math.abs(g.worldPos.y - s.y) < 2) {
+              return false;
+            }
+            return true;
+          });
+          this.renderSystem?.setLandGhostPlacements?.(this.landGhostEntries);
+          this.uiManager?.setLandGhostCounts?.(this._computeLandGhostCounts?.());
+        };
+      }
+
   private canvas: HTMLCanvasElement;
   /** Separate WebGL2 canvas stacked behind the main 2D canvas. Null if WebGL2 is disabled/unavailable. */
   private _glCanvas: HTMLCanvasElement | null = null;
@@ -159,9 +198,15 @@ export class ClientApplication {
 
   // Land build mode — B key while off-ship opens land structure panel
   private landBuildMenuOpen = false;
+  /** Plan Menu selection — the structure kind the player is planning to place as a ghost marker. */
   private pendingLandBuildKind: string | null = null;
+  /** Build Schematic Hotbar selection — the structure kind selected for triggering construction. */
+  private buildSchematicKind: string | null = null;
   /** Planned land structure ghosts — click places, Enter confirms all to server. */
   private landGhostEntries: (LandGhostPlacement & { buildAction: () => void })[] = [];
+
+  /** Last known resource pool values — used to detect gains and flash the resource panel. */
+  private _prevResources = { wood: 0, fiber: 0, metal: 0, stone: 0 };
 
   // Weapon control groups — 10 user-defined groups (0–9), persistent per session
   private controlGroups: Map<number, WeaponGroupState> = new Map(
@@ -226,7 +271,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | 'chest' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -248,6 +293,7 @@ export class ClientApplication {
   /** Crafting panel opened when the player presses E near a workbench. */
   private craftingMenu = new CraftingMenu();
   private chestMenu    = new ChestMenu();
+  private landChestMenu = new LandChestMenu();
   /** Ship construction panel opened when the player presses E at a shipyard. */
   private shipyardMenu = new ShipyardMenu();
   /** Custom rename dialog — replaces window.prompt() for ship naming. */
@@ -307,6 +353,9 @@ export class ClientApplication {
     this._loadingShownAt = Date.now();
 
     console.log(`🎮 Client initialized with ${config.prediction.clientTickRate}Hz tick rate`);
+
+    // Register network event handlers after networkManager is set up (if available)
+    setTimeout(() => this._registerNetworkPlanHandlers(), 0);
   }
 
   /** Advance the loading overlay to the given step index (0–3) and update the progress bar. */
@@ -712,6 +761,7 @@ export class ClientApplication {
         const _me0 = _id0 !== null && _ws0 ? _ws0.players.find(p => p.id === _id0) : null;
         if (success) {
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
+          this.uiManager?.flashResourceRow?.('wood', 'up');
         } else if (reason === 'no_stamina') {
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'Out of stamina!', '#e05050');
         }
@@ -726,6 +776,8 @@ export class ClientApplication {
             this.renderSystem.spawnResourcePickup(_me1.position, `+${fiber} fiber`, '#60c870');
             if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
           }
+          this.uiManager?.flashResourceRow?.('fiber', 'up');
+          if (wood) this.uiManager?.flashResourceRow?.('wood', 'up');
         } else if (reason === 'no_stamina') {
           if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'Out of stamina!', '#e05050');
         }
@@ -737,6 +789,7 @@ export class ClientApplication {
         const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
           if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+          this.uiManager?.flashResourceRow?.('metal', 'up');
         } else if (reason === 'no_stamina') {
           if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
@@ -748,6 +801,7 @@ export class ClientApplication {
         const _me3 = _id3 !== null && _ws3 ? _ws3.players.find(p => p.id === _id3) : null;
         if (success) {
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
+          this.uiManager?.flashResourceRow?.('stone', 'up');
         } else if (reason === 'no_stamina') {
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'Out of stamina!', '#e05050');
         }
@@ -758,8 +812,8 @@ export class ClientApplication {
         const myId = this.networkManager.getAssignedPlayerId();
         const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          if (me && metal > 0) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
-          if (me && stone > 0) this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a');
+          if (me && metal > 0) { this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff'); this.uiManager?.flashResourceRow?.('metal', 'up'); }
+          if (me && stone > 0) { this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a'); this.uiManager?.flashResourceRow?.('stone', 'up'); }
         } else if (reason === 'no_stamina') {
           if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
@@ -1301,6 +1355,12 @@ export class ClientApplication {
               return;
             }
           }
+          // Close land chest menu on E press (toggle off)
+          if (this.landChestMenu.visible) {
+            this.landChestMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            return;
+          }
           // Close chest menu on E press (toggle off)
           if (this.chestMenu.visible) {
             this.chestMenu.close();
@@ -1561,11 +1621,18 @@ export class ClientApplication {
 
       // Hotbar slot selection — update locally for instant UI feedback, then sync server
       this.inputManager.onSlotSelect = (slot) => {
-        // In land build mode, digits 1-8 select the land structure hotbar slot
-        if (this.uiManager?.inLandBuildMode && slot >= 0 && slot < UIManager.LAND_BUILD_PANEL_ENTRIES.length) {
-          const kind = UIManager.LAND_BUILD_PANEL_ENTRIES[slot].kind;
-          this.pendingLandBuildKind = kind;
-          this.uiManager.setLandBuildMenuState(false, kind);
+        // In land build mode, digits 1-8 select the build schematic hotbar slot
+        if (this.uiManager?.inLandBuildMode && slot >= 0 && slot < 8) {
+          const kind = this.uiManager.landHotbarSlots[slot] ?? null;
+          // Toggle: re-clicking the active slot deselects it
+          this.buildSchematicKind = (this.buildSchematicKind === kind) ? null : kind;
+          this.renderSystem.setBuildSchematicKind(this.buildSchematicKind);
+          // Mutual exclusion: selecting a schematic clears the Plan Menu selection.
+          if (this.buildSchematicKind !== null) {
+            this.pendingLandBuildKind = null;
+            this.uiManager.clearPlanKind();
+          }
+          this.uiManager.selectedLandKind = this.buildSchematicKind;
           this.checkBuildMode();
           return;
         }
@@ -1614,11 +1681,151 @@ export class ClientApplication {
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (worldPos) => {
         // Island structure placement — add ghost marker instead of sending immediately
-        if (this.islandBuildMode) {
+        // Also enter this branch when a build schematic is active (defensive: islandBuildMode
+        // may not have been re-evaluated yet after a freshly-selected hotbar schematic).
+        if (this.islandBuildMode || this.buildSchematicKind !== null) {
           const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
-          const hotbarKind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
+          const hotbarKind = p?.inventory?.slots[p?.inventory?.activeSlot ?? 0]?.item;
+
+          // ── Build Schematic Hotbar placement ─────────────────────────────
+          // If a build schematic is selected in the hotbar AND the cursor is
+          // hovering a matching plan ghost, consume resources and start construction.
+          const hoveredGhost = this.renderSystem.getHoveredLandGhost();
+          if (hoveredGhost && this.buildSchematicKind === hoveredGhost.kind) {
+            const entry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === hoveredGhost.kind);
+            const cost = entry?.cost ?? [];
+
+            // Helper: total of an item — checks inventory.resources for bulk resources, slots for others
+            const RES_KEYS = ['wood', 'fiber', 'metal', 'stone'];
+            const _haveItem = (item: string): number => {
+              const res = (p?.inventory as any)?.resources as Record<string, number> | undefined;
+              if (res && RES_KEYS.includes(item)) return res[item] ?? 0;
+              let total = 0;
+              for (const sl of (p?.inventory?.slots ?? [])) {
+                if (sl && (sl.item as string) === item) total += sl.quantity ?? 0;
+              }
+              return total;
+            };
+
+            // Check resources
+            let affordable = true;
+            const need: string[] = [];
+            for (const ing of cost) {
+              const have = _haveItem(ing.item);
+              if (have < ing.qty) {
+                affordable = false;
+                need.push(`${ing.qty - have}×${ing.item}`);
+              }
+            }
+
+            if (!affordable) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              console.log(`❌ [SCHEMATIC] Need resources: ${need.join(', ')}`);
+              return;
+            }
+
+            // Consume resources from client-predicted inventory
+            if (p) {
+              const res = (p.inventory as any).resources as Record<string, number> | undefined;
+              for (const ing of cost) {
+                if (res && RES_KEYS.includes(ing.item)) {
+                  res[ing.item] = Math.max(0, (res[ing.item] ?? 0) - ing.qty);
+                } else {
+                  let remaining = ing.qty;
+                  for (const sl of p.inventory.slots) {
+                    if (!sl || (sl.item as string) !== ing.item || remaining <= 0) continue;
+                    const take = Math.min(sl.quantity ?? 0, remaining);
+                    sl.quantity = (sl.quantity ?? 0) - take;
+                    if ((sl.quantity ?? 0) <= 0) { (sl as any).item = 'none'; sl.quantity = 0; }
+                    remaining -= take;
+                    if (remaining <= 0) break;
+                  }
+                }
+              }
+            }
+
+            // Send placement (starts at 10% HP), but do NOT remove the ghost plan yet
+            const gKind = hoveredGhost.kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            this.networkManager.sendPlaceStructure(gKind, hoveredGhost.worldPos.x, hoveredGhost.worldPos.y, hoveredGhost.rotation, true);
+            // Removal of the ghost plan will happen only on STRUCTURE_PLACED confirmation
+            console.log(`🏗️ [SCHEMATIC] Placed ${gKind} from plan — consumed resources (pending server confirmation)`);
+            return;
+          }
+
+          // ── Build Schematic free placement (no ghost hovered) ────────────────
+          // Schematic selected but cursor is not near a matching ghost plan → perform a
+          // real placement with resource check + consume + under_construction=true flag
+          // (server places structure at 10% HP and regenerates to full over time).
+          if (this.buildSchematicKind !== null) {
+            const sKind = this.buildSchematicKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            const sEntry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === sKind);
+            const sCost  = sEntry?.cost ?? [];
+
+            const sRES_KEYS = ['wood', 'fiber', 'metal', 'stone'];
+            const _haveItem2 = (item: string): number => {
+              const res = (p?.inventory as any)?.resources as Record<string, number> | undefined;
+              if (res && sRES_KEYS.includes(item)) return res[item] ?? 0;
+              let total = 0;
+              for (const sl of (p?.inventory?.slots ?? [])) {
+                if (sl && (sl.item as string) === item) total += sl.quantity ?? 0;
+              }
+              return total;
+            };
+            let sAffordable = true;
+            const sNeed: string[] = [];
+            for (const ing of sCost) {
+              const have = _haveItem2(ing.item);
+              if (have < ing.qty) { sAffordable = false; sNeed.push(`${ing.qty - have}×${ing.item}`); }
+            }
+            if (!sAffordable) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              console.log(`❌ [SCHEMATIC] Need resources: ${sNeed.join(', ')}`);
+              return;
+            }
+
+            if (p) {
+              const sRes = (p.inventory as any).resources as Record<string, number> | undefined;
+              for (const ing of sCost) {
+                if (sRes && sRES_KEYS.includes(ing.item)) {
+                  sRes[ing.item] = Math.max(0, (sRes[ing.item] ?? 0) - ing.qty);
+                } else {
+                  let remaining = ing.qty;
+                  for (const sl of p.inventory.slots) {
+                    if (!sl || (sl.item as string) !== ing.item || remaining <= 0) continue;
+                    const take = Math.min(sl.quantity ?? 0, remaining);
+                    sl.quantity = (sl.quantity ?? 0) - take;
+                    if ((sl.quantity ?? 0) <= 0) { (sl as any).item = 'none'; sl.quantity = 0; }
+                    remaining -= take;
+                    if (remaining <= 0) break;
+                  }
+                }
+              }
+            }
+
+            const sPos = sKind === 'wooden_floor'
+              ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
+              : (sKind === 'wall' || sKind === 'door_frame')
+              ? this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y)
+              : sKind === 'door'
+              ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
+              : sKind === 'wood_ceiling'
+              ? this.renderSystem.computeSnappedCeilingPos(worldPos.x, worldPos.y)
+              : { x: worldPos.x, y: worldPos.y };
+            const sRot = sKind === 'wooden_floor'
+              ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : (sKind === 'workbench' || sKind === 'shipyard' || sKind === 'cannon') ? this.islandBuildRotationDeg
+              : sKind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : 0;
+            this.networkManager.sendPlaceStructure(sKind, sPos.x, sPos.y, sRot, true);
+            console.log(`🏗️ [SCHEMATIC] Placed ${sKind} @ (${sPos.x.toFixed(0)}, ${sPos.y.toFixed(0)}) rot=${sRot} — consumed resources`);
+            return;
+          }
+
+          // ── Plan Menu placement ──────────────────────────────────────────
+          // Place a ghost plan marker for the selected plan kind (Plan Menu).
+          // Falls back to the equipped hotbar item so holding a land item still works.
           const kind = this.pendingLandBuildKind ?? hotbarKind;
           if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag') {
             // Compute snap at click time (not from stale render state)
@@ -1631,15 +1838,59 @@ export class ClientApplication {
               : kind === 'wood_ceiling'
               ? this.renderSystem.computeSnappedCeilingPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
-            // Only floors, workbenches, ceilings, and cannons carry rotation
-            const rot = kind === 'wooden_floor'
-              ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
-              : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : 0;
+            // Snap rotation for all structures that have a defined orientation
+            let rot = 0;
+            if (kind === 'wooden_floor') {
+              rot = this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg;
+            } else if (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') {
+              rot = this.islandBuildRotationDeg;
+            } else if (kind === 'wood_ceiling') {
+              rot = this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg;
+            } else if (kind === 'wall' || kind === 'door_frame') {
+              // Snap to the floor edge's rotation
+              // Find the snapped wall position and match the nearest floor's rotation
+              const snapped = this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y);
+              // Find the supporting floor at this snapped position
+              const bases = this.renderSystem.getPlacedStructures();
+              let foundRot = this.islandBuildRotationDeg;
+              for (const s of bases) {
+                if (s.type === 'wooden_floor') {
+                  const rad = (s.rotation ?? 0) * Math.PI / 180;
+                  const c = Math.cos(rad), sn = Math.sin(rad);
+                  const EDGES = [
+                    { ldx: 0, ldy: -25 }, { ldx: 0, ldy: 25 },
+                    { ldx: -25, ldy: 0 }, { ldx: 25, ldy: 0 },
+                  ];
+                  for (const e of EDGES) {
+                    const ex = s.x + e.ldx * c - e.ldy * sn;
+                    const ey = s.y + e.ldx * sn + e.ldy * c;
+                    if (Math.abs(snapped.x - ex) < 5 && Math.abs(snapped.y - ey) < 5) {
+                      foundRot = s.rotation ?? 0;
+                    }
+                  }
+                }
+              }
+              rot = foundRot;
+            } else if (kind === 'door') {
+              // Snap to the door_frame's rotation
+              const snapped = this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y);
+              const bases = this.renderSystem.getPlacedStructures();
+              let foundRot = this.islandBuildRotationDeg;
+              for (const s of bases) {
+                if (s.type === 'door_frame' && Math.abs(snapped.x - s.x) < 5 && Math.abs(snapped.y - s.y) < 5) {
+                  foundRot = s.rotation ?? 0;
+                }
+              }
+              rot = foundRot;
+            }
             const capturedKind = kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
             const capturedPos  = { x: pos.x, y: pos.y };
             const capturedRot  = rot;
+            // Reject structurally invalid plans (e.g. wall without a floor)
+            if (!this.renderSystem.isValidLandPlanPlacement(capturedKind, capturedPos.x, capturedPos.y)) {
+              console.log(`🚫 [LAND PLAN] Invalid placement: ${capturedKind} @ (${capturedPos.x.toFixed(0)}, ${capturedPos.y.toFixed(0)}) — missing required support structure`);
+              return;
+            }
             const id = `land-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
             this.landGhostEntries.push({
               id,
@@ -1824,8 +2075,8 @@ export class ClientApplication {
 
       // Right-click in build menu or island build mode: cancel ghost or remove nearest
       this.inputManager.onBuildRightClick = (worldPos: Vec2) => {
-        // Island build mode: remove nearest land ghost plan marker
-        if (this.inputManager.islandBuildMode) {
+        // Island build mode OR plan menu open: remove nearest land ghost plan marker
+        if (this.inputManager.islandBuildMode || this.landBuildMenuOpen) {
           this.removeNearestLandGhost(worldPos);
           return;
         }
@@ -1892,6 +2143,7 @@ export class ClientApplication {
         const _invClick = _wsClick?.players.find(p => p.id === _pidClick)?.inventory ?? null;
         if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height, _invClick)) return true;
         if (this.chestMenu.handleClick(x, y)) return true;
+        if (this.landChestMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
       };
@@ -1899,16 +2151,19 @@ export class ClientApplication {
       // Forward mouse-move/up to world map for drag-pan
       this.inputManager.onUIMouseMove = (x, y) => {
         if (this.craftingMenu.visible) this.craftingMenu.handleMouseMove(x, y);
+        if (this.landChestMenu.visible) this.landChestMenu.handleMouseMove(x, y);
         // ChestMenu has no hover state, but consume moves over it so world-clicks don't fire
         this.uiManager?.handleWorldMapMouseMove(x, y);
       };
       this.inputManager.onUIMouseUp = (x, y) => {
+        this.landChestMenu.handleMouseUp(x, y, this.canvas.width, this.canvas.height);
         this.uiManager?.handleWorldMapMouseUp(x, y);
       };
       // Forward wheel to world map zoom (returns true when map is visible)
       this.inputManager.onUIWheel = (deltaY, x, y) => {
         if (this.craftingMenu.visible) return this.craftingMenu.handleWheel(deltaY);
         if (this.chestMenu.visible) return true; // consume wheel so camera doesn't zoom
+        if (this.landChestMenu.visible) return true; // consume wheel so camera doesn't zoom
         return this.uiManager?.handleWorldMapWheel(deltaY, x, y) ?? false;
       };
 
@@ -2355,6 +2610,41 @@ export class ClientApplication {
         const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
         const pid = this.networkManager.getAssignedPlayerId();
         return ws?.players.find(p => p.id === pid)?.inventory ?? null;
+      };
+
+      // Supply ship chest resources for the land build resource panel.
+      // Returns the sum of all chest modules on the nearest ship to the player.
+      this.uiManager.getShipChestResources = () => {
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        if (!ws || ws.ships.length === 0) return null;
+        const pid    = this.networkManager.getAssignedPlayerId();
+        const player = ws.players.find(p => p.id === pid);
+
+        // Use the ship the player is currently on; otherwise find the nearest ship
+        let target = ws.ships.find(s => player && s.id === player.carrierId);
+        if (!target && player) {
+          let minD = Infinity;
+          for (const ship of ws.ships) {
+            const dx = ship.position.x - player.position.x;
+            const dy = ship.position.y - player.position.y;
+            const d  = dx * dx + dy * dy;
+            if (d < minD) { minD = d; target = ship; }
+          }
+        }
+        if (!target) return null;
+
+        // Aggregate all chest module resources
+        const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        for (const mod of target.modules) {
+          const data = mod.moduleData;
+          if (data?.kind === 'chest') {
+            totals.wood  += data.wood  ?? 0;
+            totals.fiber += data.fiber ?? 0;
+            totals.metal += data.metal ?? 0;
+            totals.stone += data.stone ?? 0;
+          }
+        }
+        return totals;
       };
 
       // Inventory drag-and-drop swap
@@ -2820,6 +3110,30 @@ export class ClientApplication {
         }
       };
 
+      this.networkManager.onLandChestState = (structureId, chestRes, playerRes, readOnly) => {
+        this.landChestMenu.updateChestResources(chestRes);
+        if (!this.landChestMenu.visible) {
+          this.landChestMenu.open(structureId, chestRes, readOnly);
+        } else {
+          this.landChestMenu.setReadOnly(readOnly ?? false);
+        }
+        if (playerRes) {
+          this.landChestMenu.updatePlayerResources(playerRes);
+        }
+      };
+
+      this.landChestMenu.onTransfer = (structureId, item, quantity, direction) => {
+        this.networkManager.sendLandChestTransfer(structureId, item, quantity, direction);
+      };
+
+      this.landChestMenu.onDrop = (structureId, item, quantity, fromSide) => {
+        if (fromSide === 'player') {
+          this.networkManager.sendDropResources(item, quantity);
+        } else {
+          this.networkManager.sendLandChestDrop(structureId, item, quantity);
+        }
+      };
+
       this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId) => {
         this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced, scaffoldedShipId);
         if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
@@ -2997,14 +3311,30 @@ export class ClientApplication {
         console.log(`🏗️ [GHOST] Picking up ghost: ${kind} — click on ship to place`);
       };
 
-      // Land build panel: player selected a land structure type
+      // Land build panel: player selected a land structure type from the Plan Menu
       this.uiManager.onLandBuildPanelSelect = (kind: string) => {
         if (!kind) return;
         this.pendingLandBuildKind = kind;
-        this.landBuildMenuOpen = false;
-        this.uiManager.setLandBuildMenuState(false, kind);
+        // Mutual exclusion: selecting a plan clears the Build Schematic Hotbar selection.
+        this.buildSchematicKind = null;
+        this.renderSystem.setBuildSchematicKind(null);
+        this.uiManager.setLandBuildMenuState(this.landBuildMenuOpen, kind);
+        // checkBuildMode will set selectedLandKind = null (buildSchematicKind is now null)
         this.checkBuildMode();
-        console.log(`🏗️ [LAND BUILD] Selected: ${kind}`);
+        console.log(`🏗️ [PLAN] Selected: ${kind}`);
+      };
+
+      // Build Schematic Hotbar: player clicked a hotbar slot (may deselect if toggled)
+      this.uiManager.onBuildSchematicSelect = (kind: string | null) => {
+        this.buildSchematicKind = kind;
+        this.renderSystem.setBuildSchematicKind(kind);
+        // Mutual exclusion: selecting a schematic clears the Plan Menu selection.
+        if (kind !== null) {
+          this.pendingLandBuildKind = null;
+          this.uiManager.clearPlanKind();
+        }
+        this.checkBuildMode();
+        console.log(`🏗️ [SCHEMATIC] Hotbar selected: ${kind ?? '(none)'}`);
       };
 
       // Build hotbar slot selected (click or 1-8 key in ship build mode)
@@ -3440,6 +3770,17 @@ export class ClientApplication {
         ? worldToRender.players.find(p => p.id === assignedPlayerId) ?? null
         : null;
 
+      // Detect resource gains and flash the resource panel
+      if (localPlayer) {
+        const res = (localPlayer.inventory as any)?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        const prev = this._prevResources;
+        for (const key of ['wood', 'fiber', 'metal', 'stone'] as const) {
+          if (res[key] > prev[key]) this.uiManager?.flashResourceRow?.(key, 'up');
+          else if (res[key] < prev[key]) this.uiManager?.flashResourceRow?.(key, 'down');
+        }
+        this._prevResources = { wood: res.wood, fiber: res.fiber, metal: res.metal, stone: res.stone };
+      }
+
       // Sword cooldown ring: only visible when sword is the active item and player is unmounted
       const _activeSlot  = localPlayer?.inventory?.activeSlot ?? 0;
       this.renderSystem.swordEquipped =
@@ -3499,7 +3840,7 @@ export class ClientApplication {
       if (this.islandBuildMode) {
         const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
         const hotbarKind = localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor';
-        const islandBuildKind = (this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+        const islandBuildKind = (this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
         this.uiManager.setIslandBuildState({
           kind: islandBuildKind,
           tooFar: this.renderSystem.getIslandBuildTooFar(),
@@ -3564,6 +3905,17 @@ export class ClientApplication {
           this.canvas.width,
           this.canvas.height,
           localPlayer?.inventory ?? null,
+        );
+      }
+      // Land chest menu — two-card deposit/withdraw GUI
+      if (this.landChestMenu.visible) {
+        // Sync player pack resources every frame
+        const landRes = (localPlayer?.inventory as any)?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        this.landChestMenu.updatePlayerResources(landRes);
+        this.landChestMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
         );
       }
       // Shipyard construction menu
@@ -4208,13 +4560,12 @@ export class ClientApplication {
     this.buildRotationDeg   = 0;
     this.landBuildMenuOpen  = false;
     this.pendingLandBuildKind = null;
+    this.buildSchematicKind = null;
+    this.renderSystem.setBuildSchematicKind(null);
     this.uiManager.setLandBuildMenuState(false, null);
-    // Clear any uncommitted land ghosts without sending them
-    if (this.landGhostEntries.length > 0) {
-      this.landGhostEntries = [];
-      this.renderSystem.setLandGhostPlacements([]);
-      this.uiManager.setLandGhostCounts(new Map());
-    }
+    // NOTE: landGhostEntries are intentionally kept alive so the plan persists
+    // across panel open/close. They are only cleared by Enter (confirmAllLandGhosts)
+    // or right-click removal.
     this.syncBuildModeState();
     this.checkBuildMode();
     console.log('🏗️ [BUILD] All build/plan modes exited');
@@ -4251,11 +4602,28 @@ export class ClientApplication {
     const islandItem = this.pendingLandBuildKind ?? activeItem;
     const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag']);
     const inIslandBuildMode = (player?.carrierId === 0) && LAND_BUILDABLE.has(islandItem);
-    this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
-    this.inputManager.islandBuildMode = this.islandBuildMode;
+    // Also active when a build schematic is selected in the hotbar (player may build from plan)
+    const inSchematicBuildMode = (player?.carrierId === 0) && this.buildSchematicKind !== null;
+    this.islandBuildMode = (inIslandBuildMode || inSchematicBuildMode) && !this.explicitBuildMode;
+    // Treat the land build menu as island-build-mode for InputManager so that
+    // right-click, Enter confirm, and rotation keys work even when no hotbar
+    // item is selected (plan menu open, pendingLandBuildKind drives placement).
+    this.inputManager.islandBuildMode = this.islandBuildMode || this.landBuildMenuOpen;
+    // Show the placement ghost preview:
+    //  - plan kind when the Plan Menu item is selected
+    //  - schematic kind when the Build Schematic Hotbar slot is selected (preview follows cursor,
+    //    and snaps onto the matching planned ghost when hovered)
+    const _previewKind = !this.explicitBuildMode
+      ? (inIslandBuildMode ? islandItem : (inSchematicBuildMode ? this.buildSchematicKind! : null))
+      : null;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (islandItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag') : null
+      _previewKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null
     );
+    // Push build schematic kind to render system for ghost hover detection
+    this.renderSystem.setBuildSchematicKind((player?.carrierId === 0) ? this.buildSchematicKind : null);
+    // Also show planned ghosts when holding a hammer on land (repair/inspect flow)
+    const hammerOnLand = activeItem === 'hammer' && (player?.carrierId ?? 0) === 0;
+    this.renderSystem.landBuildModeActive = this.landBuildMenuOpen || this.islandBuildMode || hammerOnLand;
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
     // Show territory claim overlay when Alt is held OR a territory item is active in the hotbar
@@ -4304,15 +4672,18 @@ export class ClientApplication {
       || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || inGunportBuildMode || inChestBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
 
-    // Show build hotbar when: build menu is open, explicit build mode is active,
-    // or the player has a hammer equipped while on a ship
+    // Show build hotbar when: build menu is open or explicit build mode is active
+    // Hammer on ship → shows island-style GUI (land build hotbar) instead of ship build mode
     const onShip = (player?.carrierId ?? 0) !== 0;
-    const hammerEquipped = activeItem === 'hammer' && onShip;
+    const hammerOnShip = activeItem === 'hammer' && onShip;
     if (this.uiManager) {
-      this.uiManager.inShipBuildMode = this.buildMenuOpen || this.explicitBuildMode || hammerEquipped;
-      this.uiManager.inLandBuildMode = this.landBuildMenuOpen || this.islandBuildMode;
-      this.uiManager.selectedLandKind = this.pendingLandBuildKind;
+      this.uiManager.inShipBuildMode = this.buildMenuOpen || this.explicitBuildMode;
+      this.uiManager.inLandBuildMode = this.landBuildMenuOpen || this.islandBuildMode || hammerOnShip;
+      // selectedLandKind drives the Build Schematic Hotbar active-slot highlight
+      this.uiManager.selectedLandKind = this.buildSchematicKind;
     }
+    // Propagate hammer equipped state to render system for repair visuals
+    if (this.renderSystem) this.renderSystem.hammerEquipped = activeItem === 'hammer';
   }
 
   /**
@@ -4921,6 +5292,15 @@ export class ClientApplication {
       }
     });
 
+    // Land chest menu: slider drag starts on mousedown
+    this.canvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (this.canvas.width / rect.width);
+      const my = (e.clientY - rect.top)  * (this.canvas.height / rect.height);
+      this.landChestMenu.handleMouseDown(mx, my);
+    });
+
     console.log('🖱️ Mouse tracking initialized for directional movement');
   }
   
@@ -4992,6 +5372,12 @@ export class ClientApplication {
           }
           if (this.chestMenu.visible) {
             this.chestMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          if (this.landChestMenu.visible) {
+            this.landChestMenu.close();
             this.uiManager.setActiveMenuId(null);
             e.preventDefault();
             break;
@@ -5074,14 +5460,6 @@ export class ClientApplication {
           // In deck build mode: cycle between lower/upper deck snap point
           if (this.renderSystem.isInDeckBuildMode()) {
             this.renderSystem.cycleDeckLevel();
-            e.preventDefault();
-            break;
-          }
-          // Otherwise open chat input
-          if (!this.uiManager.isAnyMenuOpen()
-            && !this.commandConsole.visible
-            && !this.chatBox.isOpen) {
-            this.chatBox.open();
             e.preventDefault();
           }
           break;
@@ -5282,6 +5660,13 @@ export class ClientApplication {
                 wood: 'Wood', plank: 'Plank', stone: 'Stone', metal: 'Metal',
               };
               const _have = (item: string): number => {
+                // Raw materials come from the resource pool, not inventory slots
+                const res = (meE as any).inventory?.resources;
+                if (item === 'wood'  && res) return res.wood  ?? 0;
+                if (item === 'fiber' && res) return res.fiber ?? 0;
+                if (item === 'metal' && res) return res.metal ?? 0;
+                if (item === 'stone' && res) return res.stone ?? 0;
+                // Crafted items (e.g. plank) are in slots
                 const slots = (meE as any).inventory?.slots ?? [];
                 let total = 0;
                 for (const sl of slots) {
@@ -5424,6 +5809,17 @@ export class ClientApplication {
                   if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) cannonOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
                 }, 300);
+              } else if (struct.type === 'chest') {
+                // Chest: tap E = open; hold E = radial with Open + Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const chestOpts: RadialOption[] = [{ id: 'use', label: '📦 Open Chest' }];
+                  if (isOwnCompany) chestOpts.push({ id: 'demolish', label: 'Demolish Chest' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) chestOpts.push(r); }
+                  this._radialMenu.open(mp2.x, mp2.y, chestOpts);
+                }, 400);
               } else {
                 if (isOwnCompany) {
                   this._ladderHoldTimer = setTimeout(() => {
@@ -5437,6 +5833,11 @@ export class ClientApplication {
                       : struct.type === 'door'        ? 'Demolish Door'
                       : struct.type === 'workbench'   ? 'Demolish Workbench'
                       : struct.type === 'shipyard'    ? 'Demolish Shipyard'
+                      : struct.type === 'chest'       ? 'Demolish Chest'
+                      : struct.type === 'claim_flag'  ? 'Remove Claim Flag'
+                      : struct.type === 'flag_fort'   ? 'Demolish Flag Fort'
+                      : struct.type === 'company_fortress' ? 'Demolish Fortress'
+                      : struct.type === 'cannon'      ? 'Demolish Cannon'
                       : 'Demolish Floor';
                     const defOpts: RadialOption[] = [
                       { id: 'demolish', label: _demolishLabel },
@@ -5904,6 +6305,9 @@ export class ClientApplication {
             const loot = wreckStruct?.hp ?? 1;
             this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
             this.uiManager.salvageMenu.open(structId, loot);
+          } else if (structType === 'chest') {
+            // Tap E on chest = open land chest
+            doUse();
           }
           // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
         } else if (_hasRadialPending()) {

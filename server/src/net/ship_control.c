@@ -88,6 +88,7 @@ void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* c
  * Sets target rudder angle - actual angle will gradually adjust in tick
  */
 void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, bool turning_left, bool turning_right, bool moving_backward) {
+    (void)player;
     const char* direction = "STRAIGHT";
     float target_angle = 0.0f;
     
@@ -126,6 +127,7 @@ void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient*
  * Handle sail angle control from helm-mounted player
  */
 void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, float desired_angle) {
+    (void)player;
     // Clamp to range -60 to +60 degrees
     if (desired_angle < -60.0f) desired_angle = -60.0f;
     if (desired_angle > 60.0f) desired_angle = 60.0f;

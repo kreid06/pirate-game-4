@@ -105,6 +105,8 @@ export enum MessageType {
   PLACE_SWIVEL_AT = 'place_swivel_at',
   PLACE_CHEST_AT = 'place_chest_at',
   CHEST_TRANSFER = 'chest_transfer',
+  LAND_CHEST_TRANSFER = 'land_chest_transfer',
+  LAND_CHEST_DROP = 'land_chest_drop',
   CREW_ASSIGN = 'crew_assign',
   NPC_RECRUIT = 'npc_recruit',
   NPC_MOVE_ABOARD = 'npc_move_aboard',
@@ -495,6 +497,23 @@ interface ChestTransferMessage extends NetworkMessage {
   direction: 'deposit' | 'withdraw';
 }
 
+interface LandChestTransferMessage extends NetworkMessage {
+  type: MessageType.LAND_CHEST_TRANSFER;
+  timestamp: number;
+  structure_id: number;
+  item: string;
+  quantity: number;
+  direction: 'deposit' | 'withdraw';
+}
+
+interface LandChestDropMessage extends NetworkMessage {
+  type: MessageType.LAND_CHEST_DROP;
+  timestamp: number;
+  structure_id: number;
+  item: string;
+  quantity: number;
+}
+
 interface PlaceSwivelAtMessage extends NetworkMessage {
   type: MessageType.PLACE_SWIVEL_AT;
   timestamp: number;
@@ -524,6 +543,7 @@ interface PlaceStructureMessage extends NetworkMessage {
   x: number;
   y: number;
   rotation?: number;
+  under_construction?: boolean;
 }
 
 interface StructureInteractMessage extends NetworkMessage {
@@ -565,7 +585,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | DropResourcesMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | DropResourcesMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage | LandChestTransferMessage | LandChestDropMessage;
 
 /**
  * Main network manager class
@@ -775,6 +795,8 @@ export class NetworkManager {
   public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
+  /** Fired when the server sends land chest state (after E-key interact or after a transfer). */
+  public onLandChestState: ((structureId: number, resources: { wood: number; fiber: number; metal: number; stone: number }, playerResources?: { wood: number; fiber: number; metal: number; stone: number }, readOnly?: boolean) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
   public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
@@ -1524,9 +1546,11 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest', x: number, y: number, rotationDeg = 0, underConstruction = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
+    const msg: PlaceStructureMessage = { type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg };
+    if (underConstruction) msg.under_construction = true;
+    this.sendMessage(msg);
   }
 
   /** Send a ship-construction action to the server. */
@@ -1673,6 +1697,20 @@ export class NetworkManager {
   sendChestTransfer(shipId: number, moduleId: number, item: string, quantity: number, direction: 'deposit' | 'withdraw'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.CHEST_TRANSFER, timestamp: Date.now(), shipId, moduleId, item, quantity, direction });
+  }
+
+  /**
+   * Transfer resources between a land chest (placed structure) and the player's pack.
+   * direction: 'deposit' = player → chest; 'withdraw' = chest → player.
+   */
+  sendLandChestTransfer(structureId: number, item: string, quantity: number, direction: 'deposit' | 'withdraw'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.LAND_CHEST_TRANSFER, timestamp: Date.now(), structure_id: structureId, item, quantity, direction });
+  }
+
+  sendLandChestDrop(structureId: number, item: string, quantity: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.LAND_CHEST_DROP, timestamp: Date.now(), structure_id: structureId, item, quantity });
   }
 
   /**
@@ -2878,6 +2916,7 @@ export class NetworkManager {
                    : s.structure_type === 'flag_fort'    ? 'flag_fort'
                    : s.structure_type === 'claim_flag'   ? 'claim_flag'
                    : s.structure_type === 'company_fortress' ? 'company_fortress'
+                   : s.structure_type === 'chest'        ? 'chest'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2907,6 +2946,12 @@ export class NetworkManager {
           claimPhaseProgressMs:  typeof s.claim_progress_ms === 'number' && s.claim_phase === 0 ? s.claim_progress_ms : undefined,
           claimPhaseTotalMs:     typeof s.claim_total_ms === 'number' ? s.claim_total_ms : undefined,
           targetHp:              typeof s.target_hp === 'number' ? s.target_hp : undefined,
+          chestResources: s.structure_type === 'chest' ? {
+            wood:  s.chest_wood  ?? 0,
+            fiber: s.chest_fiber ?? 0,
+            metal: s.chest_metal ?? 0,
+            stone: s.chest_stone ?? 0,
+          } : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
@@ -2931,6 +2976,7 @@ export class NetworkManager {
                    : message.structure_type === 'flag_fort'    ? 'flag_fort'
                    : message.structure_type === 'claim_flag'   ? 'claim_flag'
                    : message.structure_type === 'company_fortress' ? 'company_fortress'
+                   : message.structure_type === 'chest'        ? 'chest'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2958,6 +3004,12 @@ export class NetworkManager {
           claimPhaseProgressMs: typeof message.claim_progress_ms === 'number' && message.claim_phase === 0 ? message.claim_progress_ms : undefined,
           claimPhaseTotalMs:    typeof message.claim_total_ms === 'number' ? message.claim_total_ms : undefined,
           targetHp:             typeof message.target_hp === 'number' ? message.target_hp : undefined,
+          chestResources: message.structure_type === 'chest' ? {
+            wood:  message.chest_wood  ?? 0,
+            fiber: message.chest_fiber ?? 0,
+            metal: message.chest_metal ?? 0,
+            stone: message.chest_stone ?? 0,
+          } : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -3183,6 +3235,14 @@ export class NetworkManager {
       case 'crafting_open':
         this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');
         break;
+
+      case 'land_chest_state': {
+        const res = { wood: message.wood ?? 0, fiber: message.fiber ?? 0, metal: message.metal ?? 0, stone: message.stone ?? 0 };
+        const playerRes = (message.player_wood != null) ? { wood: message.player_wood ?? 0, fiber: message.player_fiber ?? 0, metal: message.player_metal ?? 0, stone: message.player_stone ?? 0 } : undefined;
+        const readOnly = message.read_only === true;
+        this.onLandChestState?.(message.structure_id ?? 0, res, playerRes, readOnly);
+        break;
+      }
 
       case 'shipyard_state': {
         const phase = message.phase === 'building' ? 'building' : 'empty' as const;

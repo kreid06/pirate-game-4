@@ -170,7 +170,7 @@ export class UIManager {
 
   // Island structure build mode overlay state
   private islandBuildState: {
-    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
     tooFar: boolean;
     enemyClose: boolean;
   } | null = null;
@@ -188,6 +188,8 @@ export class UIManager {
   public onHotbarSlotClick: ((slot: number) => void) | null = null;
   /** Supplier for current player inventory — used for drag-and-drop in player menu. */
   public getPlayerInventory: (() => { slots: { item: ItemKind; quantity: number }[] } | null) | null = null;
+  /** Supplier for the connected ship's aggregated chest resources — used for land build resource panel. */
+  public getShipChestResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
   private _cachedHelmActiveGroup: number = -1;
   private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
@@ -202,8 +204,10 @@ export class UIManager {
   // ── Land build menu state ─────────────────────────────────────────────────
   private landBuildMenuOpen = false;
   private _pendingLandBuildKind: string | null = null;
-  /** Called when player selects a land structure from the build panel. */
+  /** Called when player selects a land structure from the Plan Menu (left panel). */
   public onLandBuildPanelSelect: ((kind: string) => void) | null = null;
+  /** Called when player selects (or deselects) a slot in the Build Schematic Hotbar (bottom). */
+  public onBuildSchematicSelect: ((kind: string | null) => void) | null = null;
   /** Per-kind ghost counts for badge display in the land build panel. */
   private _landGhostCounts: Map<string, number> = new Map();
   /** Total number of pending land ghost placements. */
@@ -219,15 +223,18 @@ export class UIManager {
   // Entries shown in the left land build panel
   static readonly LAND_BUILD_PANEL_ENTRIES: Array<{
     kind: string; label: string; symbol: string; color: string; borderColor: string;
+    cost: { item: string; qty: number }[];
   }> = [
-    { kind: 'wooden_floor', label: 'Floor',      symbol: '\u229f', color: '#8b6914', borderColor: '#5c4008' },
-    { kind: 'wall',         label: 'Wall',        symbol: '\u258b', color: '#7a6030', borderColor: '#4a3818' },
-    { kind: 'door_frame',   label: 'Door Frame',  symbol: '\u2293', color: '#6a5028', borderColor: '#3a2808' },
-    { kind: 'door',         label: 'Door',        symbol: '\uD83D\uDEAA', color: '#7a5838', borderColor: '#4a3010' },
-    { kind: 'wood_ceiling', label: 'Ceiling',     symbol: '\u229e', color: '#7a5c2a', borderColor: '#4a3410' },
-    { kind: 'workbench',    label: 'Workbench',   symbol: '\u2692', color: '#6a4a20', borderColor: '#3a2808' },
-    { kind: 'shipyard',     label: 'Shipyard',    symbol: '\u26F5', color: '#1e6080', borderColor: '#0f3850' },
-    { kind: 'cannon',       label: 'Cannon',      symbol: '\u26AB', color: '#444444', borderColor: '#888888' },
+    { kind: 'wooden_floor', label: 'Floor',        symbol: '\u229f',       color: '#8b6914', borderColor: '#5c4008', cost: [{ item: 'wood',  qty: 40  }] },
+    { kind: 'wall',         label: 'Wall',          symbol: '\u258b',       color: '#7a6030', borderColor: '#4a3818', cost: [{ item: 'wood',  qty: 20  }] },
+    { kind: 'door_frame',   label: 'Door Frame',    symbol: '\u2293',       color: '#6a5028', borderColor: '#3a2808', cost: [{ item: 'wood',  qty: 15  }] },
+    { kind: 'door',         label: 'Door',          symbol: '\uD83D\uDEAA', color: '#7a5838', borderColor: '#4a3010', cost: [{ item: 'wood',  qty: 8   }] },
+    { kind: 'wood_ceiling', label: 'Ceiling',       symbol: '\u229e',       color: '#7a5c2a', borderColor: '#4a3410', cost: [{ item: 'wood',  qty: 25  }] },
+    { kind: 'workbench',    label: 'Workbench',     symbol: '\u2692',       color: '#6a4a20', borderColor: '#3a2808', cost: [{ item: 'wood',  qty: 12  }] },
+    { kind: 'chest',        label: 'Chest',         symbol: '\u229f',       color: '#7a4820', borderColor: '#4a2810', cost: [{ item: 'wood',  qty: 12  }] },
+    { kind: 'shipyard',     label: 'Shipyard',      symbol: '\u26F5',       color: '#1e6080', borderColor: '#0f3850', cost: [{ item: 'wood',  qty: 250 }, { item: 'stone', qty: 100 }] },
+    { kind: 'cannon',       label: 'Cannon',        symbol: '\u26AB',       color: '#444444', borderColor: '#888888', cost: [{ item: 'wood',  qty: 15  }, { item: 'metal', qty: 25  }] },
+    { kind: 'flag_fort',     label: 'Flag Fortress', symbol: '\u2302',      color: '#5a5848', borderColor: '#2a2820', cost: [{ item: 'wood',  qty: 300 }, { item: 'stone', qty: 200 }] },
   ];
 
   // Entries shown in the left build panel
@@ -323,6 +330,28 @@ export class UIManager {
     items: DroppedItem[];
     scrollY: number;
   } = { open: false, items: [], scrollY: 0 };
+
+  // ── Schematic slot picker (click empty land hotbar slot) ──────────────────
+  private _schematicPicker: { open: boolean; slotIdx: number; anchorX: number; anchorY: number } =
+    { open: false, slotIdx: 0, anchorX: 0, anchorY: 0 };
+  private _schematicPickerHits: { kind: string; x: number; y: number; w: number; h: number }[] = [];
+
+  /** Timestamp (performance.now()) until which the resource panel should remain visible after a resource gain. */
+  private _resourceFlashUntil = 0;
+
+  /** Per-resource row flash state: maps resource key → { until, direction } */
+  private _resourceRowFlash = new Map<string, { until: number; dir: 'up' | 'down' }>();
+
+  /** Flash the resource panel visible for ~3 seconds (call when resources are gained). */
+  flashResourcePanel(): void {
+    this._resourceFlashUntil = performance.now() + 3000;
+  }
+
+  /** Flash a specific resource row green (up) or red (down) for 1.2 seconds. */
+  flashResourceRow(item: string, dir: 'up' | 'down'): void {
+    this._resourceFlashUntil = Math.max(this._resourceFlashUntil, performance.now() + 3000);
+    this._resourceRowFlash.set(item, { until: performance.now() + 1200, dir });
+  }
 
   /** Called when the player confirms a pickup from the drop picker. */
   public onDropPickerPick: ((itemId: number) => void) | null = null;
@@ -520,6 +549,10 @@ export class UIManager {
   handleKeyDown(key: string): boolean {
     // Company menu key routing is handled exclusively by onKeyDown (the window listener)
     // to avoid double-processing. Only handle non-company-menu cases here.
+    if (key === 'Escape' && this._schematicPicker.open) {
+      this._schematicPicker.open = false;
+      return true;
+    }
     if (key === 'Escape' && this._dropPicker.open) {
       this._dropPicker.open = false;
       return true;
@@ -558,6 +591,39 @@ export class UIManager {
    * Also handles right-click equip of armor items in the player menu inventory.
    */
   handleRightClick(x: number, y: number): boolean {
+    // Land build hotbar right-click: clear filled slot / open picker for empty slot
+    if (this.inLandBuildMode) {
+      const N_SLOTS = this.landHotbarSlots.length;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < N_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.landHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              // Clear this slot and deselect if it was active
+              const slots = [...this.landHotbarSlots];
+              slots[i] = null;
+              this.landHotbarSlots = slots;
+              if (this.selectedLandKind === kind) {
+                this.selectedLandKind = null;
+                this.onBuildSchematicSelect?.(null);
+              }
+            } else {
+              // Empty slot — open schematic picker
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._schematicPicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+            }
+            return true;
+          }
+        }
+      }
+    }
+
     // Player menu open — check inventory for armor right-click equip first
     if (this.activeMenuId === MENU_ID.PLAYER && this.playerMenu.visible) {
       const inv = this.getPlayerInventory?.() ?? null;
@@ -683,6 +749,9 @@ export class UIManager {
       this.renderLandBuildMenuPanel(ctx, ctx.canvas);
     }
 
+    // Resource panel — shown independently (flash on gain, hammer, build mode, etc.)
+    this.renderResourcePanel(ctx, ctx.canvas);
+
     // Hammer minigame — topmost overlay, blocks all game input when active
     if (this.hammerGame.active) {
       this.renderHammerMinigame(ctx, ctx.canvas);
@@ -707,6 +776,11 @@ export class UIManager {
     // Drop picker — topmost overlay
     if (this._dropPicker.open) {
       this._renderDropPicker(ctx);
+    }
+
+    // Schematic slot picker — above hotbar
+    if (this._schematicPicker.open) {
+      this._renderSchematicPicker(ctx);
     }
 
     // Tombstone menu — rendered above everything else
@@ -1292,7 +1366,7 @@ export class UIManager {
    * Pass null to hide the overlay.
    */
   setIslandBuildState(state: {
-    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
     tooFar: boolean;
     enemyClose: boolean;
   } | null): void {
@@ -1304,6 +1378,14 @@ export class UIManager {
     this.landBuildMenuOpen = open;
     this._pendingLandBuildKind = selectedKind;
     this.selectedLandKind = selectedKind;
+  }
+
+  /**
+   * Clear only the Plan Menu row highlight without touching the Build Schematic Hotbar.
+   * Used by mutual-exclusion logic when the hotbar takes priority.
+   */
+  clearPlanKind(): void {
+    this._pendingLandBuildKind = null;
   }
 
   /**
@@ -1348,13 +1430,29 @@ export class UIManager {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
       return true;
     }
+    // Schematic slot picker intercepts all clicks when open
+    if (this._schematicPicker.open) {
+      // Check if a schematic entry was hit
+      for (const hit of this._schematicPickerHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          const slots = [...this.landHotbarSlots];
+          slots[this._schematicPicker.slotIdx] = hit.kind;
+          this.landHotbarSlots = slots;
+          this._schematicPicker.open = false;
+          return true;
+        }
+      }
+      // Click outside — close
+      this._schematicPicker.open = false;
+      return true;
+    }
     // Drop picker intercepts all clicks when open
     if (this._dropPicker.open) {
       return this.handleDropPickerClick(x, y);
     }
-    // Land build hotbar slot click (when land build mode active)
+    // Land build hotbar slot click — selects (or deselects) the Build Schematic Hotbar slot
     if (this.inLandBuildMode) {
-      const N_SLOTS = 8;
+      const N_SLOTS = this.landHotbarSlots.length;
       const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
       const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
       const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
@@ -1364,8 +1462,23 @@ export class UIManager {
         for (let i = 0; i < N_SLOTS; i++) {
           const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
           if (x >= sx && x <= sx + SLOT_SIZE) {
-            const kind = this.landHotbarSlots[i];
-            if (kind) this.onLandBuildPanelSelect?.(kind);
+            const kind = this.landHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              // Toggle: re-clicking the active slot deselects it
+              const newKind = (this.selectedLandKind === kind) ? null : kind;
+              this.selectedLandKind = newKind;
+              this.onBuildSchematicSelect?.(newKind);
+            } else {
+              // Empty slot — open inline schematic picker above this slot
+              const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+              const N_SL = this.landHotbarSlots.length;
+              const totalW2 = N_SL * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+              const totalH2 = SLOT_SIZE + PADDING * 2 + LABEL_H;
+              const startX2 = Math.round((this.canvas.width - totalW2) / 2);
+              const startY2 = this.canvas.height - totalH2 - 8;
+              const slotCx = startX2 + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._schematicPicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY2 };
+            }
             return true;
           }
         }
@@ -1580,8 +1693,8 @@ export class UIManager {
     ctx.fillStyle = '#ffcc66';
     ctx.fillText(
       this._totalLandGhosts > 0
-        ? `\uD83C\uDFD7  BUILD MODE (LAND) \u2014 Select structure  |  [B] Exit  |  [Enter] Build All (${this._totalLandGhosts})  |  [RMB] Remove`
-        : '\uD83C\uDFD7  BUILD MODE (LAND) \u2014 Select structure  |  [B] Exit  |  [Click] Place',
+        ? `\uD83C\uDFD7  LAND BUILD  \u2014  Plan Menu: select left \u25B6 click to plan  \u2502  Build Hotbar: select bottom \u25B6 click ghost  \u2502  [B] Exit  \u2502  [RMB] Remove  \u2502  [Enter] Build All (${this._totalLandGhosts})`
+        : '\uD83C\uDFD7  LAND BUILD  \u2014  Plan Menu: select \u25B6 click to place plans  \u2502  Build Hotbar: select \u25B6 click ghost to build  \u2502  [B] Exit',
       cw / 2, BANNER_H / 2
     );
     ctx.restore();
@@ -1606,7 +1719,7 @@ export class UIManager {
     ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('\uD83C\uDFD7  BUILD (LAND)  [B]', px + W / 2, py + HH / 2);
+    ctx.fillText('📋  Plan Menu  [B]', px + W / 2, py + HH / 2);
 
     // Entries
     for (let i = 0; i < entries.length; i++) {
@@ -1697,11 +1810,149 @@ export class UIManager {
     ctx.textBaseline = 'middle';
     ctx.fillText(
       this._totalLandGhosts > 0
-        ? `[R] rotate  [RMB] remove  \u25b6 [Enter] build all (${this._totalLandGhosts})`
-        : '[R] rotate  [B] close',
+        ? `[R] rotate  [RMB] remove plan  \u25b6 [Enter] build all (${this._totalLandGhosts})`
+        : '[R] rotate  [LMB] place plan  \u2502  select hotbar \u25b6 click ghost to build',
       px + W / 2, py + totalH - 6
     );
 
+
+    ctx.restore();
+  }
+
+  /** Draw the resource panel (bottom-left corner) — shown whenever the build menu is
+   *  open, build mode is active, the hammer is equipped, or resources were recently gained. */
+  private renderResourcePanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    // Show if: land build menu open, build mode active, hammer equipped, or recently gained resources
+    let showResources = false;
+    if (this.landBuildMenuOpen || (this.buildModeState?.active)) {
+      showResources = true;
+    } else {
+      // Check if hammer is equipped
+      const inv = this.getPlayerInventory?.() ?? null;
+      const activeSlot = (inv as any)?.activeSlot ?? 0;
+      const slots = inv?.slots ?? [];
+      const activeItem = slots[activeSlot]?.item ?? 'none';
+      if (activeItem === 'hammer') showResources = true;
+      // Flash visible after resource gain
+      if (performance.now() < this._resourceFlashUntil) showResources = true;
+    }
+    if (!showResources) return;
+
+    const inv       = this.getPlayerInventory?.() ?? null;
+    const invRes    = (inv as any)?.resources as { wood: number; fiber: number; metal: number; stone: number } | undefined;
+    const shipRes   = this.getShipChestResources?.() ?? null;
+    const RES_ITEMS = ['wood', 'fiber', 'stone', 'metal'] as const;
+    const RES_LABELS: Record<string, string> = { wood: 'Wood', fiber: 'Fiber', stone: 'Stone', metal: 'Metal' };
+
+    const RES_PAD  = 8;
+    const RES_ROW  = 16;
+    const HDR_H    = 14;
+    const TITLE_H  = 16;
+    const SEP      = 2;
+    const RES_W    = 200;
+    const resH     = TITLE_H + HDR_H + SEP + RES_ITEMS.length * RES_ROW + RES_PAD;
+    const HOTBAR_H = 76;
+    const resX     = 8;
+    const resY     = canvas.height - HOTBAR_H - 8 - resH - 6;
+
+    ctx.save();
+    // Panel background
+    ctx.fillStyle   = 'rgba(14,10,4,0.90)';
+    ctx.strokeStyle = 'rgba(180,130,50,0.45)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(resX, resY, RES_W, resH, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    // Build cost map for the currently selected schematic
+    const _costMap = new Map<string, number>();
+    if (this.selectedLandKind) {
+      const _selEnt = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === this.selectedLandKind);
+      if (_selEnt) for (const c of _selEnt.cost) _costMap.set(c.item, c.qty);
+    }
+    const hasCost = _costMap.size > 0;
+
+    const labelX  = resX + RES_PAD;
+    const costRX  = hasCost ? resX + RES_W - 102 : resX + RES_W - 56;
+    const packRX  = resX + RES_W - 56;
+    const chestRX = resX + RES_W - 10;
+
+    // Title
+    ctx.font         = 'bold 10px Georgia, serif';
+    ctx.fillStyle    = '#ffcc66';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('RESOURCES', labelX, resY + TITLE_H / 2);
+
+    // Column headers
+    const hdrY = resY + TITLE_H + HDR_H / 2;
+    ctx.font      = 'bold 9px Georgia, serif';
+    ctx.textAlign = 'center';
+    if (hasCost) {
+      ctx.fillStyle = '#ff6666';
+      ctx.fillText('COST', costRX - 10, hdrY);
+    }
+    ctx.fillStyle = '#cc9944';
+    ctx.fillText('PACK', packRX - 16, hdrY);
+    ctx.fillStyle = shipRes ? '#66aadd' : '#445566';
+    ctx.fillText('CHEST', chestRX - 16, hdrY);
+
+    // Separator line
+    const sepY = resY + TITLE_H + HDR_H + SEP;
+    ctx.strokeStyle = 'rgba(180,130,50,0.30)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(resX + 4, sepY);
+    ctx.lineTo(resX + RES_W - 4, sepY);
+    ctx.stroke();
+
+    // Data rows
+    for (let i = 0; i < RES_ITEMS.length; i++) {
+      const item      = RES_ITEMS[i];
+      const invCount  = invRes ? (invRes[item] ?? 0) : 0;
+      const shipCount = shipRes ? (shipRes[item] ?? 0) : 0;
+      const rowY      = sepY + i * RES_ROW + RES_ROW / 2 + 2;
+
+      // Row flash highlight (green = up, red = down)
+      const flash = this._resourceRowFlash.get(item);
+      if (flash && performance.now() < flash.until) {
+        const t = 1 - (flash.until - performance.now()) / 1200;
+        const alpha = 0.45 * (1 - t * t); // fade out
+        ctx.fillStyle = flash.dir === 'up' ? `rgba(60,200,80,${alpha.toFixed(2)})` : `rgba(220,60,40,${alpha.toFixed(2)})`;
+        ctx.fillRect(resX + 2, rowY - RES_ROW / 2, RES_W - 4, RES_ROW - 1);
+      } else if (flash && performance.now() >= flash.until) {
+        this._resourceRowFlash.delete(item);
+      }
+
+      ctx.font         = '11px Georgia, serif';
+      ctx.fillStyle    = '#c0b898';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(RES_LABELS[item], labelX, rowY);
+
+      if (hasCost) {
+        const costQty = _costMap.get(item);
+        ctx.font      = 'bold 11px Georgia, serif';
+        ctx.textAlign = 'right';
+        if (costQty !== undefined) {
+          ctx.fillStyle = '#ff4444';
+          ctx.fillText(`-${costQty}`, costRX, rowY);
+        } else {
+          ctx.fillStyle = 'rgba(100,60,60,0.4)';
+          ctx.fillText('—', costRX, rowY);
+        }
+      }
+
+      ctx.font      = 'bold 11px Georgia, serif';
+      ctx.fillStyle = invCount > 0 ? '#ffee88' : '#554433';
+      ctx.textAlign = 'right';
+      ctx.fillText(String(invCount), packRX, rowY);
+
+      ctx.fillStyle = shipCount > 0 ? '#88ccff' : (shipRes !== null ? '#334455' : '#443333');
+      ctx.textAlign = 'right';
+      ctx.fillText(shipRes !== null ? String(shipCount) : '—', chestRX, rowY);
+    }
     ctx.restore();
   }
 
@@ -2016,7 +2267,7 @@ export class UIManager {
     ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('📋  PLAN MODE  [B]', px + W / 2, py + HH / 2);
+    ctx.fillText('📋  Plan Menu  [B]', px + W / 2, py + HH / 2);
 
     // ── Module entries ─────────────────────────────────────────────────────
     const ghostCounts = new Map<GhostModuleKind, number>();
@@ -2400,6 +2651,90 @@ export class UIManager {
   // ── Drop item picker overlay ───────────────────────────────────────────────
 
   private _dropPickerHits: { itemId: number; y: number; h: number }[] = [];
+
+  private _renderSchematicPicker(ctx: CanvasRenderingContext2D): void {
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const { anchorX, anchorY } = this._schematicPicker;
+
+    const COLS = 3;
+    const CELL = 64, GAP = 6, PAD = 10, HEADER_H = 28;
+    const rows = Math.ceil(entries.length / COLS);
+    const W = COLS * CELL + (COLS - 1) * GAP + PAD * 2;
+    const H = HEADER_H + rows * CELL + (rows - 1) * GAP + PAD * 2;
+
+    // Position above the slot, centred on anchorX, above anchorY
+    let px = Math.round(anchorX - W / 2);
+    let py = anchorY - H - 6;
+    // Clamp to canvas
+    px = Math.max(4, Math.min(ctx.canvas.width - W - 4, px));
+    py = Math.max(4, py);
+
+    ctx.save();
+
+    // Panel background
+    ctx.fillStyle = 'rgba(14,10,4,0.96)';
+    ctx.strokeStyle = '#cc8822';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, H, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.fillStyle = '#ffcc66';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Assign Schematic  [Esc]', px + W / 2, py + HEADER_H / 2);
+
+    this._schematicPickerHits = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const cx = px + PAD + col * (CELL + GAP);
+      const cy = py + HEADER_H + PAD + row * (CELL + GAP);
+
+      const isHov = this.mouseX >= cx && this.mouseX <= cx + CELL &&
+                    this.mouseY >= cy && this.mouseY <= cy + CELL;
+      const isAssigned = this.landHotbarSlots.includes(e.kind);
+
+      this._schematicPickerHits.push({ kind: e.kind, x: cx, y: cy, w: CELL, h: CELL });
+
+      // Cell background
+      ctx.fillStyle = isHov ? 'rgba(180,100,20,0.45)' : (isAssigned ? 'rgba(80,50,10,0.6)' : 'rgba(25,15,5,0.8)');
+      ctx.strokeStyle = isHov ? '#ffcc44' : (isAssigned ? '#886620' : '#4a3010');
+      ctx.lineWidth = isHov ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(cx, cy, CELL, CELL, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      // Colour swatch
+      const SW = 28;
+      ctx.fillStyle = e.color;
+      ctx.fillRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+      ctx.strokeStyle = e.borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+
+      // Symbol
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, cx + CELL / 2, cy + 8 + SW / 2);
+
+      // Label
+      ctx.font = '8px Georgia, serif';
+      ctx.fillStyle = isHov ? '#ffee88' : '#b8905a';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(e.label.substring(0, 9), cx + CELL / 2, cy + CELL - 3);
+    }
+
+    ctx.restore();
+  }
 
   private _renderDropPicker(ctx: CanvasRenderingContext2D): void {
     const { items, scrollY } = this._dropPicker;
@@ -2799,7 +3134,7 @@ class HUDElement implements UIElement {
       ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
       : undefined;
     if (this.inLandBuildMode) {
-      this.renderLandBuildHotbar(ctx, ctx.canvas);
+      this.renderLandBuildHotbar(ctx, ctx.canvas, player.inventory.slots);
     } else if (this.inShipBuildMode) {
       this.renderBuildHotbar(ctx, ctx.canvas);
     } else {
@@ -3139,9 +3474,9 @@ class HUDElement implements UIElement {
   }
 
   /** Renders the land structure build hotbar (replaces regular hotbar in land build mode). */
-  private renderLandBuildHotbar(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+  private renderLandBuildHotbar(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, _invSlots: { item: ItemKind; quantity: number }[]): void {
     const slots = this.landHotbarSlots;
-    const N_SLOTS = 8;
+    const N_SLOTS = slots.length;
     const SLOT_SIZE = 48;
     const SLOT_GAP = 4;
     const PADDING = 6;
@@ -3160,12 +3495,12 @@ class HUDElement implements UIElement {
     ctx.lineWidth = 2;
     ctx.strokeRect(startX, startY, totalW, totalH);
 
-    // "BUILD LAND" label bottom-left
+    // "BUILD SCHEMATICS" label bottom-left
     ctx.font = 'bold 9px Georgia, serif';
     ctx.fillStyle = '#ffcc44';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText('BUILD LAND', startX + 4, startY + totalH - LABEL_H + 2);
+    ctx.fillText('BUILD SCHEMATICS', startX + 4, startY + totalH - LABEL_H + 2);
 
     for (let i = 0; i < N_SLOTS; i++) {
       const kind = slots[i] ?? null;

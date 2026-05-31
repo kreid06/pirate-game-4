@@ -345,7 +345,7 @@ SimpleShip* find_ship(uint16_t ship_id) {
 
 // ── Resource pool helpers ────────────────────────────────────────────────────
 /** Grant `amount` of a resource into the player's resource pool.  Capped at 9999. */
-static void res_grant(WebSocketPlayer *p, int resource, int amount) {
+static void __attribute__((unused)) res_grant(WebSocketPlayer *p, int resource, int amount) {
     if (amount <= 0) return;
     switch (resource) {
         case 0: p->res_wood  = (uint16_t)((int)p->res_wood  + amount > 9999 ? 9999 : (int)p->res_wood  + amount); break;
@@ -569,8 +569,10 @@ bool is_outside_deck(uint16_t ship_id, float local_x, float local_y) {
     for (uint8_t _v = 1; _v < sim_ship->hull_vertex_count; _v++) {
         float vx = Q16_TO_FLOAT(sim_ship->hull_vertices[_v].x);
         float vy = Q16_TO_FLOAT(sim_ship->hull_vertices[_v].y);
-        if (vx < hmin_x) hmin_x = vx; if (vx > hmax_x) hmax_x = vx;
-        if (vy < hmin_y) hmin_y = vy; if (vy > hmax_y) hmax_y = vy;
+        if (vx < hmin_x) { hmin_x = vx; }
+        if (vx > hmax_x) { hmax_x = vx; }
+        if (vy < hmin_y) { hmin_y = vy; }
+        if (vy > hmax_y) { hmax_y = vy; }
     }
     if (sx < hmin_x || sx > hmax_x || sy < hmin_y || sy > hmax_y) return true; // clearly outside
     
@@ -2107,8 +2109,7 @@ void player_die(WebSocketPlayer* player) {
             t->ship_id = 0;
             t->local_x = t->local_y = 0.0f;
         }
-        strncpy(t->owner_name, player->name, sizeof(t->owner_name) - 1);
-        t->owner_name[sizeof(t->owner_name) - 1] = '\0';
+        snprintf(t->owner_name, sizeof(t->owner_name), "%s", player->name);
         t->inventory      = player->inventory;  /* full struct copy */
         t->spawn_time_ms  = get_time_ms();
         t->active         = true;
@@ -3834,6 +3835,7 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
                                             placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
                                             placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                            placed_structures[si].type == STRUCT_CHEST        ? "chest" :
                                             "unknown";
                                         bool hs_is_door = (placed_structures[si].type == STRUCT_DOOR);
                                         bool hs_is_sy   = (placed_structures[si].type == STRUCT_SHIPYARD);
@@ -3845,7 +3847,16 @@ int websocket_server_update(struct Sim* sim) {
                                         char hs_cannon_extra[96] = "";
                                         char hs_claim_extra[320] = "";
                                         char hs_dom_extra[512] = "";
+                                        char hs_chest_extra[128] = "";
                                         format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
+                                        if (placed_structures[si].type == STRUCT_CHEST) {
+                                            snprintf(hs_chest_extra, sizeof(hs_chest_extra),
+                                                     ",\"chest_wood\":%u,\"chest_fiber\":%u,\"chest_metal\":%u,\"chest_stone\":%u",
+                                                     (unsigned)placed_structures[si].chest_wood,
+                                                     (unsigned)placed_structures[si].chest_fiber,
+                                                     (unsigned)placed_structures[si].chest_metal,
+                                                     (unsigned)placed_structures[si].chest_stone);
+                                        }
                                         if (hs_is_sy) {
                                             char hs_mj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -3919,7 +3930,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                           "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s%s%s%s%s%s}",
+                                                          ",\"rotation\":%.2f%s%s%s%s%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -3935,7 +3946,8 @@ int websocket_server_update(struct Sim* sim) {
                                                           hs_sy_extra,
                                                           hs_cannon_extra,
                                                           hs_claim_extra,
-                                                          hs_dom_extra);
+                                                          hs_dom_extra,
+                                                          hs_chest_extra);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -4294,6 +4306,22 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
+                        } else if (strcmp(msg_type, "land_chest_transfer") == 0) {
+                            // Land chest deposit / withdraw
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_land_chest_transfer(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "land_chest_drop") == 0) {
+                            // Land chest drop (discard resources from chest without giving to player)
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) handle_land_chest_drop(player, client, payload);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "demolish_structure") == 0) {
                             // Hold E: demolish a placed structure
                             if (client->player_id != 0) {
@@ -4369,8 +4397,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     if (rs_ship && player->parent_ship_id == rs_ship_id
                                         && rs_name[0] != '\0') {
-                                        strncpy(rs_ship->ship_name, rs_name, sizeof(rs_ship->ship_name) - 1);
-                                        rs_ship->ship_name[sizeof(rs_ship->ship_name) - 1] = '\0';
+                                        snprintf(rs_ship->ship_name, sizeof(rs_ship->ship_name), "%s", rs_name);
                                         /* Broadcast the new name to all clients */
                                         char rs_msg[128];
                                         snprintf(rs_msg, sizeof(rs_msg),
@@ -6373,15 +6400,8 @@ int websocket_server_update(struct Sim* sim) {
                                 if (!player || player->parent_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
                                 } else {
-                                    // Find wood in inventory
-                                    int wood_slot = -1;
-                                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                                        if (player->inventory.slots[s].item == ITEM_WOOD &&
-                                            player->inventory.slots[s].quantity > 0) {
-                                            wood_slot = s; break;
-                                        }
-                                    }
-                                    if (wood_slot < 0) {
+                                    // Check wood in resource pool
+                                    if (craft_count_item(player, ITEM_WOOD) < 1) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_wood\"}");
                                     } else if (!global_sim) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
@@ -6416,10 +6436,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 worst->target_health += boost;
                                                 if (worst->target_health > worst->max_health)
                                                     worst->target_health = worst->max_health;
-                                                // Consume 1 wood
-                                                player->inventory.slots[wood_slot].quantity--;
-                                                if (player->inventory.slots[wood_slot].quantity == 0)
-                                                    player->inventory.slots[wood_slot].item = ITEM_NONE;
+                                                // Consume 1 wood from resource pool
+                                                craft_consume(player, ITEM_WOOD, 1);
                                                 log_info("🔧 Player %u wood-repaired module %u (type %u) on ship %u: target_hp now %d/%d",
                                                          player->player_id, worst->id, worst->type_id, sim_ship->id,
                                                          (int)worst->target_health, (int)worst->max_health);
@@ -7950,8 +7968,7 @@ int websocket_server_update(struct Sim* sim) {
                                     dc->id         = next_dynamic_company_id++;
                                     dc->founder_id = client->player_id;
                                     dc->active     = true;
-                                    strncpy(dc->name, ns, sizeof(dc->name) - 1);
-                                    dc->name[sizeof(dc->name) - 1] = '\0';
+                                    snprintf(dc->name, sizeof(dc->name), "%s", ns);
 
                                     // Move the player (and their NPCs) into the new company
                                     websocket_server_set_player_company(client->player_id, (uint8_t)(dc->id > 255 ? 255 : dc->id));
@@ -9371,6 +9388,7 @@ int websocket_server_update(struct Sim* sim) {
                                             placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
                                             placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
                                             placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                            placed_structures[si].type == STRUCT_CHEST        ? "chest" :
                                             "unknown";
                                         bool is_door_s   = (placed_structures[si].type == STRUCT_DOOR);
                                         bool is_sy_s     = (placed_structures[si].type == STRUCT_SHIPYARD);
@@ -9381,7 +9399,16 @@ int websocket_server_update(struct Sim* sim) {
                                         char cannon_extra_s[96] = "";
                                         char claim_extra_s[320] = "";
                                         char dom_extra_s[512] = "";
+                                        char chest_extra_s[128] = "";
                                         format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
+                                        if (placed_structures[si].type == STRUCT_CHEST) {
+                                            snprintf(chest_extra_s, sizeof(chest_extra_s),
+                                                     ",\"chest_wood\":%u,\"chest_fiber\":%u,\"chest_metal\":%u,\"chest_stone\":%u",
+                                                     (unsigned)placed_structures[si].chest_wood,
+                                                     (unsigned)placed_structures[si].chest_fiber,
+                                                     (unsigned)placed_structures[si].chest_metal,
+                                                     (unsigned)placed_structures[si].chest_stone);
+                                        }
                                         if (is_sy_s) {
                                             char smj[128] = "[]";
                                             if (placed_structures[si].modules_placed) {
@@ -9455,7 +9482,7 @@ int websocket_server_update(struct Sim* sim) {
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s%s%s%s%s}",
+                                                         ",\"rotation\":%.2f%s%s%s%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -9472,7 +9499,8 @@ int websocket_server_update(struct Sim* sim) {
                                                          sy_extra_s,
                                                          cannon_extra_s,
                                                          claim_extra_s,
-                                                         dom_extra_s);
+                                                         dom_extra_s,
+                                                         chest_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -9508,6 +9536,7 @@ int websocket_server_update(struct Sim* sim) {
                                         placed_structures[si].type == STRUCT_FLAG_FORT    ? "flag_fort" :
                                         placed_structures[si].type == STRUCT_CLAIM_FLAG   ? "claim_flag" :
                                         placed_structures[si].type == STRUCT_COMPANY_FORTRESS ? "company_fortress" :
+                                        placed_structures[si].type == STRUCT_CHEST        ? "chest" :
                                         "unknown";
                                     bool gs_is_door   = (placed_structures[si].type == STRUCT_DOOR);
                                     bool gs_is_sy     = (placed_structures[si].type == STRUCT_SHIPYARD);
@@ -9518,7 +9547,16 @@ int websocket_server_update(struct Sim* sim) {
                                     char gs_cannon_extra[96] = "";
                                     char gs_claim_extra[320] = "";
                                     char gs_dom_extra[512] = "";
+                                    char gs_chest_extra[128] = "";
                                     format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
+                                    if (placed_structures[si].type == STRUCT_CHEST) {
+                                        snprintf(gs_chest_extra, sizeof(gs_chest_extra),
+                                                 ",\"chest_wood\":%u,\"chest_fiber\":%u,\"chest_metal\":%u,\"chest_stone\":%u",
+                                                 (unsigned)placed_structures[si].chest_wood,
+                                                 (unsigned)placed_structures[si].chest_fiber,
+                                                 (unsigned)placed_structures[si].chest_metal,
+                                                 (unsigned)placed_structures[si].chest_stone);
+                                    }
                                     if (gs_is_sy) {
                                         char gmj[128] = "[]";
                                         if (placed_structures[si].modules_placed) {
@@ -9592,7 +9630,7 @@ int websocket_server_update(struct Sim* sim) {
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                    "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                                                                     ",\"rotation\":%.2f%s%s%s%s%s}",
+                                                                                                     ",\"rotation\":%.2f%s%s%s%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -9607,7 +9645,8 @@ int websocket_server_update(struct Sim* sim) {
                                                                                                      gs_sy_extra,
                                                                                                      gs_cannon_extra,
                                                                                                      gs_claim_extra,
-                                                                                                     gs_dom_extra);
+                                                                                                     gs_dom_extra,
+                                                                                                     gs_chest_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");

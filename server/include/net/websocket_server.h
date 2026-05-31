@@ -428,6 +428,7 @@ typedef enum {
     STRUCT_FLAG_FORT    = 9,  /* radius claim anchor — one per island, 40 wood + 40 stone */
     STRUCT_CLAIM_FLAG   = 10, /* territory claiming flag — placed in enemy radius, timer-based */
     STRUCT_COMPANY_FORTRESS = 11, /* whole-island claim — 15-min build, 100w+100s+20m */
+    STRUCT_CHEST        = 12, /* storage chest — placed on a floor tile, costs 12 wood */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.
@@ -468,6 +469,7 @@ typedef struct {
     uint8_t  wreck_qtys[6];      /* quantity per loot slot                */
     uint8_t  wreck_loot_count;   /* number of remaining non-empty slots   */
     uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
+    bool     wreck_resource_cache; /* true = chest-ruin wreck (holds chest_wood/fiber/metal/stone); false = ship-wreck item loot */
     /* Island cannon state (STRUCT_CANNON only) */
     float    cannon_aim_angle;    /* current aim direction (radians, world space) */
         float    cannon_desired_aim_angle; /* desired aim direction (radians, world space) */
@@ -497,6 +499,7 @@ typedef struct {
     uint32_t repair_start_hp;     /* hp at repair start (for rate computation) */
     uint32_t repair_broadcast_acc_ms; /* ms accumulated since last hp broadcast (throttle to ~1Hz) */
     uint32_t last_damaged_ms;     /* get_time_ms() of most recent combat damage; 0 = never */
+    bool     under_construction;  /* true while newly placed from schematic; heals 10%→100% passively */
     /* ── Per-structure dominance list ──────────────────────────────────────
      * Ordered list of OTHER-company structure IDs that dominate this
      * structure on the overlap area of their claim radii. Index 0 = top
@@ -506,9 +509,17 @@ typedef struct {
 #define MAX_DOMINATORS 32
     uint32_t dominators[MAX_DOMINATORS];
     uint8_t  dominator_count;
+    /* ── Land chest storage (STRUCT_CHEST only) ─────────────────────────── */
+#define LAND_CHEST_MAX 8192
+    uint16_t chest_wood;
+    uint16_t chest_fiber;
+    uint16_t chest_metal;
+    uint16_t chest_stone;
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;
+
+#define MAX_PLACED_STRUCTURES 512
 
 #define MAX_PLACED_STRUCTURES 512
 

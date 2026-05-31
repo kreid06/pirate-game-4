@@ -350,6 +350,15 @@ int world_save(const char *path) {
             }
             snprintf(dom_buf + dp, sizeof(dom_buf) - dp, "]");
         }
+        /* Build chest inventory fields (only for STRUCT_CHEST, omitted otherwise). */
+        char chest_buf[128]; chest_buf[0] = '\0';
+        if (ps->type == STRUCT_CHEST) {
+            snprintf(chest_buf, sizeof(chest_buf),
+                     ",\n      \"chest_wood\": %u,\n      \"chest_fiber\": %u"
+                     ",\n      \"chest_metal\": %u,\n      \"chest_stone\": %u",
+                     (unsigned)ps->chest_wood, (unsigned)ps->chest_fiber,
+                     (unsigned)ps->chest_metal, (unsigned)ps->chest_stone);
+        }
         fprintf(f,
             "\n    {\n"
             "      \"id\": %u,\n"
@@ -369,7 +378,7 @@ int world_save(const char *path) {
             "      \"construction_phase\": %u,\n"
             "      \"construction_company\": %u,\n"
             "      \"modules_placed\": %u,\n"
-            "      \"scaffolded_ship_id\": %u%s\n"
+            "      \"scaffolded_ship_id\": %u%s%s\n"
             "    }",
             (unsigned)ps->id,
             (unsigned)ps->type,
@@ -389,7 +398,8 @@ int world_save(const char *path) {
             (unsigned)ps->construction_company,
             (unsigned)ps->modules_placed,
             (unsigned)ps->scaffolded_ship_id,
-            dom_buf
+            dom_buf,
+            chest_buf
         );
     }
     fprintf(f, "\n  ],\n");
@@ -581,7 +591,7 @@ int world_load(const char *path) {
                         SimpleShip *s = find_ship((uint16_t)new_id);
                         if (s) {
                             if (ship_name[0])
-                                strncpy(s->ship_name, ship_name, sizeof(s->ship_name) - 1);
+                                snprintf(s->ship_name, sizeof(s->ship_name), "%s", ship_name);
                             s->rotation           = rot;
                             s->velocity_x         = vx;
                             s->velocity_y         = vy;
@@ -971,6 +981,7 @@ int world_load(const char *path) {
                 unsigned hp = 100, max_hp = 100, target_hp = 0, placer_id = 0;
                 unsigned construction_phase = 0, construction_company = 0, scaffolded_ship_id = 0;
                 unsigned modules_placed_saved = 0;
+                unsigned chest_wood = 0, chest_fiber = 0, chest_metal = 0, chest_stone = 0;
                 float x = 0, y = 0, rot = 0;
                 bool open = false;
                 bool door_locked = false;
@@ -994,6 +1005,10 @@ int world_load(const char *path) {
                 ws_json_uint(obj,  "construction_company", &construction_company);
                 ws_json_uint(obj,  "modules_placed",       &modules_placed_saved);
                 ws_json_uint(obj,  "scaffolded_ship_id",   &scaffolded_ship_id);
+                ws_json_uint(obj,  "chest_wood",           &chest_wood);
+                ws_json_uint(obj,  "chest_fiber",          &chest_fiber);
+                ws_json_uint(obj,  "chest_metal",          &chest_metal);
+                ws_json_uint(obj,  "chest_stone",          &chest_stone);
 
                 /* dominators: [ id, id, … ] — restore dominance order list. */
                 {
@@ -1046,6 +1061,12 @@ int world_load(const char *path) {
                     }
                 }
                 ps->scaffolded_ship_id = (uint16_t)scaffolded_ship_id;
+
+                /* Restore chest inventory */
+                ps->chest_wood  = (uint16_t)chest_wood;
+                ps->chest_fiber = (uint16_t)chest_fiber;
+                ps->chest_metal = (uint16_t)chest_metal;
+                ps->chest_stone = (uint16_t)chest_stone;
 
                 /* Cannons: initialise aim to match base orientation so the barrel
                  * starts at "0 relative to base" rather than world-angle 0.
@@ -1145,7 +1166,7 @@ int world_load(const char *path) {
                             dc->id = cid;
                             dc->founder_id = fid;
                             dc->active = true;
-                            strncpy(dc->name, cname, sizeof(dc->name)-1);
+                            snprintf(dc->name, sizeof(dc->name), "%s", cname);
                             dynamic_company_count++;
                         }
                         arr = strchr(arr, '}');

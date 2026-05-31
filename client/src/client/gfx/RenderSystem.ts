@@ -1,3 +1,5 @@
+
+
 /**
  * Main Rendering System
  * 
@@ -80,6 +82,12 @@ type RenderIsland = RenderIslandInput & {
  * Main rendering system
  */
 export class RenderSystem {
+    /**
+     * Read-only access to all placed structures (for client-side validation and snapping).
+     */
+    public getPlacedStructures(): readonly PlacedStructure[] {
+      return this.placedStructures;
+    }
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private config: GraphicsConfig;
@@ -118,6 +126,8 @@ export class RenderSystem {
   /** Set to true each frame when the local player has the sword as their active item. */
   public swordEquipped: boolean = false;
   public axeEquipped: boolean = false;
+  /** Set each frame when the local player has the hammer as their active item. */
+  public hammerEquipped: boolean = false;
   /** Suppresses harvest/gather prompts while the player is in combat mode. */
   public combatMode: boolean = false;
 
@@ -355,7 +365,9 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null = null;
+  /** Active Build Schematic Hotbar selection — used to detect ghost plan hover for construction. */
+  private buildSchematicKind: string | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -372,6 +384,14 @@ export class RenderSystem {
   getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
   /** Returns the rotation (deg) inherited from the snap source tile, or null if freely placing. */
   getSnappedBuildRotation(): number | null { return this._snappedBuildRotation; }
+
+  /** ID of the land ghost plan marker the cursor is hovering while a build item is active. */
+  private _hoveredLandGhostId: string | null = null;
+  /** Returns the land ghost plan being hovered while a matching build item is active, or null. */
+  getHoveredLandGhost(): LandGhostPlacement | null {
+    if (!this._hoveredLandGhostId) return null;
+    return this.landGhostPlacements.find(g => g.id === this._hoveredLandGhostId) ?? null;
+  }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -1709,6 +1729,51 @@ export class RenderSystem {
   }
 
   /**
+   * Draw ⚒ repair icons on all damaged modules of the local player's ship.
+   * Only called when hammerEquipped is true.
+   */
+  private drawHammerRepairOverlays(worldState: WorldState, camera: Camera): void {
+    const localPlayer = this._cachedLocalPlayer;
+    if (!localPlayer || localPlayer.carrierId === 0) return;
+    const playerShip = worldState.ships.find(s => s.id === localPlayer.carrierId);
+    if (!playerShip) return;
+
+    const ctx = this.ctx;
+    const cameraState = camera.getState();
+    const zoom = cameraState.zoom;
+    const shipScreen = camera.worldToScreen(playerShip.position);
+    const shipRot = playerShip.rotation - cameraState.rotation;
+    const now = performance.now();
+    const pulse = 0.7 + 0.3 * Math.sin(now / 400);
+
+    for (const mod of playerShip.modules) {
+      // Skip planks — damage is visible via hull darkening; icons would be too dense
+      if (mod.kind === 'plank') continue;
+      const md = mod.moduleData as any;
+      if (!md) continue;
+      const health = typeof md.health === 'number' ? md.health : (md.maxHealth ?? 1);
+      const maxHealth = (md.maxHealth ?? 1) as number;
+      if (health >= maxHealth * 0.999) continue;
+
+      const lx = mod.localPos.x;
+      const ly = mod.localPos.y;
+      const sx = shipScreen.x + (lx * Math.cos(shipRot) - ly * Math.sin(shipRot)) * zoom;
+      const sy = shipScreen.y + (lx * Math.sin(shipRot) + ly * Math.cos(shipRot)) * zoom;
+
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      ctx.font = `${Math.max(10, Math.round(14 * zoom))}px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffaa33';
+      ctx.shadowColor = '#ff8800';
+      ctx.shadowBlur = 4;
+      ctx.fillText('\u2692', sx, sy);
+      ctx.restore();
+    }
+  }
+
+  /**
    * Draw an animated marching-arrow line from the commanded NPC to the mouse cursor.
    * Shown whenever Move To targeting mode is active.
    */
@@ -2662,7 +2727,9 @@ export class RenderSystem {
     const prevTargetHp = s.targetHp ?? prevHp;
     s.hp = hp;
     s.maxHp = maxHp;
-    if (typeof targetHp === 'number') s.targetHp = targetHp;
+    // Always sync targetHp — server always sends target_hp in structure_hp_changed.
+    // Leaving a stale targetHp would permanently flag the structure as a schematic.
+    s.targetHp = typeof targetHp === 'number' ? targetHp : undefined;
     return { prevHp, prevTargetHp };
   }
 
@@ -2705,9 +2772,17 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null): void {
     this.islandBuildKind = kind;
   }
+
+  /** Set the active Build Schematic Hotbar kind — used to detect ghost plan hover for construction. */
+  setBuildSchematicKind(kind: string | null): void {
+    this.buildSchematicKind = kind;
+  }
+
+  /** Mirror of ClientApplication.landBuildMenuOpen || islandBuildMode — gates ghost plan visibility. */
+  public landBuildModeActive = false;
 
   /** Set the rotation (degrees) for the island floor/workbench ghost. */
   setIslandBuildRotation(deg: number): void {
@@ -2742,6 +2817,20 @@ export class RenderSystem {
   }
 
   /**
+   * Returns a combined view of placed structures + pending land ghost placements
+   * for snap-point computation. Ghosts are treated as already built so that
+   * successive placements in the same plan snap to each other.
+   */
+  private _snapBases(): { type: string; x: number; y: number; rotation?: number; id: number | string }[] {
+    const out: { type: string; x: number; y: number; rotation?: number; id: number | string }[] = [];
+    for (const s of this.placedStructures) out.push(s);
+    for (const g of this.landGhostPlacements) {
+      out.push({ type: g.kind, x: g.worldPos.x, y: g.worldPos.y, rotation: g.rotation, id: g.id });
+    }
+    return out;
+  }
+
+  /**
    * Compute the snapped world position for a wooden_floor placement at (wx, wy).
    * If the point is within SNAP_R of an unoccupied cardinal neighbour slot of any
    * existing floor, snaps to that slot. Otherwise returns the input unchanged.
@@ -2750,14 +2839,15 @@ export class RenderSystem {
   computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
     const TILE   = 50;
     const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
-    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+    const bases = this._snapBases();
+    if (this.islandBuildKind !== 'wooden_floor' || bases.length === 0) {
       this._snappedBuildRotation = null;
       return { x: wx, y: wy };
     }
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
     let bestRot: number | null = null;
-    for (const s of this.placedStructures) {
+    for (const s of bases) {
       if (s.type !== 'wooden_floor') continue;
       // Derive the 4 neighbour slots using this tile's own rotation
       const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -2773,7 +2863,7 @@ export class RenderSystem {
         // candidateRad inherits source tile's rotation.
         // Exclude source tile (s) itself — candidate is by construction adjacent/touching it.
         const candidateRad = rad;
-        const alreadyOccupied = this.placedStructures.some(
+        const alreadyOccupied = bases.some(
           f => f.type === 'wooden_floor' && f.id !== s.id &&
                RenderSystem.floorsOverlap(nx, ny, candidateRad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
         );
@@ -2793,10 +2883,11 @@ export class RenderSystem {
   computeSnappedWallPos(wx: number, wy: number): { x: number; y: number } {
     const HALF = 25;
     const SNAP_R = 30;
-    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    const bases = this._snapBases();
+    if (bases.length === 0) return { x: wx, y: wy };
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    for (const s of this.placedStructures) {
+    for (const s of bases) {
       if (s.type !== 'wooden_floor') continue;
       // Rotate the 4 canonical edge-midpoint offsets by this floor's rotation
       const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -2811,7 +2902,7 @@ export class RenderSystem {
       for (const e of EDGES) {
         const nx = s.x + e.ldx * c - e.ldy * sn;
         const ny = s.y + e.ldx * sn + e.ldy * c;
-        const occ = this.placedStructures.some(
+        const occ = bases.some(
           w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
         );
         if (occ) continue;
@@ -2825,12 +2916,13 @@ export class RenderSystem {
   /** Snap a door panel to the nearest unoccupied door_frame position. */
   computeSnappedDoorPos(wx: number, wy: number): { x: number; y: number } {
     const SNAP_R = 30;
-    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    const bases = this._snapBases();
+    if (bases.length === 0) return { x: wx, y: wy };
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    for (const s of this.placedStructures) {
+    for (const s of bases) {
       if (s.type !== 'door_frame') continue;
-      const hasDoor = this.placedStructures.some(
+      const hasDoor = bases.some(
         d => d.type === 'door' && Math.abs(d.x - s.x) < 2 && Math.abs(d.y - s.y) < 2
       );
       if (hasDoor) continue;
@@ -2856,7 +2948,8 @@ export class RenderSystem {
     let bestX = wx, bestY = wy;
     // Candidate set: floor centres that have at least one wall, plus ceiling-adjacent positions
     const candidates: { x: number; y: number; rot: number }[] = [];
-    for (const s of this.placedStructures) {
+    const bases = this._snapBases();
+    for (const s of bases) {
       if (s.type === 'wooden_floor') {
         // Is there a wall at any edge of this floor?
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -2870,7 +2963,7 @@ export class RenderSystem {
         const hasWall = EDGES.some(e => {
           const ex = s.x + e.ldx * c - e.ldy * sn;
           const ey = s.y + e.ldx * sn + e.ldy * c;
-          return this.placedStructures.some(
+          return bases.some(
             w => (w.type === 'wall' || w.type === 'door_frame') &&
                  Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
           );
@@ -2888,7 +2981,7 @@ export class RenderSystem {
         ];
         for (const d of DIRS) {
           const nx = s.x + d.dx, ny = s.y + d.dy;
-          const alreadyOccupied = this.placedStructures.some(
+          const alreadyOccupied = bases.some(
             f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
           );
           if (!alreadyOccupied) candidates.push({ x: nx, y: ny, rot: s.rotation ?? 0 });
@@ -2904,6 +2997,87 @@ export class RenderSystem {
     }
     if (bestDist2 >= SNAP_R * SNAP_R) this._snappedBuildRotation = null;
     return { x: bestX, y: bestY };
+  }
+
+  /**
+   * Returns true if a land-plan ghost placement of `kind` at world position (px, py) is
+   * structurally valid given existing placed structures and pending ghost plans.
+   *
+   * Rules mirror server-side validation:
+   *  - wall / door_frame: must be at a floor edge midpoint
+   *  - workbench / cannon: must be inside a floor tile
+   *  - door: must snap onto an existing door_frame
+   *  - wood_ceiling: must have wall/door_frame at an edge midpoint OR be adjacent to an existing ceiling
+   *  - everything else (wooden_floor, shipyard, …): always valid client-side (server enforces further)
+   */
+  isValidLandPlanPlacement(kind: string, px: number, py: number): boolean {
+    const EDGE_TOL = 5;
+    const HALF = 25;
+    const TILE = 50;
+    const bases = this._snapBases();
+
+    if (kind === 'wall' || kind === 'door_frame') {
+      return bases.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        return [
+          { ldx: 0, ldy: -HALF }, { ldx: 0, ldy: HALF },
+          { ldx: -HALF, ldy: 0 }, { ldx: HALF, ldy: 0 },
+        ].some(e => {
+          const ex = s.x + e.ldx * c - e.ldy * sn;
+          const ey = s.y + e.ldx * sn + e.ldy * c;
+          return Math.abs(px - ex) < EDGE_TOL && Math.abs(py - ey) < EDGE_TOL;
+        });
+      });
+    }
+
+    if (kind === 'workbench' || kind === 'cannon') {
+      return bases.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const dx = px - s.x, dy = py - s.y;
+        const lx = dx * Math.cos(-rad) - dy * Math.sin(-rad);
+        const ly = dx * Math.sin(-rad) + dy * Math.cos(-rad);
+        return Math.abs(lx) <= HALF && Math.abs(ly) <= HALF;
+      });
+    }
+
+    if (kind === 'door') {
+      return bases.some(s =>
+        s.type === 'door_frame' &&
+        Math.abs(s.x - px) < EDGE_TOL && Math.abs(s.y - py) < EDGE_TOL
+      );
+    }
+
+    if (kind === 'wood_ceiling') {
+      const crot = (this._snappedBuildRotation ?? 0) * Math.PI / 180;
+      const cc = Math.cos(crot), cs = Math.sin(crot);
+      const EDGES = [
+        { ldx: 0, ldy: -HALF }, { ldx: 0, ldy: HALF },
+        { ldx: -HALF, ldy: 0 }, { ldx: HALF, ldy: 0 },
+      ];
+      // Wall/door_frame at any edge midpoint of this ceiling tile
+      const hasWallAtEdge = EDGES.some(e => {
+        const ex = px + e.ldx * cc - e.ldy * cs;
+        const ey = py + e.ldx * cs + e.ldy * cc;
+        return bases.some(
+          w => (w.type === 'wall' || w.type === 'door_frame') &&
+               Math.abs(w.x - ex) < EDGE_TOL && Math.abs(w.y - ey) < EDGE_TOL
+        );
+      });
+      if (hasWallAtEdge) return true;
+      // Adjacent existing ceiling
+      return bases.some(s => {
+        if (s.type !== 'wood_ceiling') return false;
+        const adx = Math.abs(s.x - px), ady = Math.abs(s.y - py);
+        return (Math.abs(adx - TILE) < EDGE_TOL && ady < EDGE_TOL) ||
+               (Math.abs(ady - TILE) < EDGE_TOL && adx < EDGE_TOL);
+      });
+    }
+
+    // wooden_floor, shipyard, and other types: always valid client-side
+    return true;
   }
 
   /**
@@ -3994,7 +4168,7 @@ export class RenderSystem {
     if (this.config.showGrid) this.drawGrid(camera);
     this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
-    this.drawLandGhostPlacements(camera);
+    if (this.landBuildModeActive) this.drawLandGhostPlacements(camera);
     
     // ── Snap scaffolded ships into their shipyard docks ───────────────────────
     // Temporarily override position/rotation so every draw call renders the ship
@@ -4101,6 +4275,8 @@ export class RenderSystem {
     this.drawMoveToArrowLine(worldState, camera);
     // Module hover glow (always-on, independent of move-to mode)
     this.drawModuleHoverHighlight(camera);
+    // Hammer repair overlays — damaged module icons when hammer is equipped
+    if (this.hammerEquipped) this.drawHammerRepairOverlays(worldState, camera);
     // Ship hull hover glow (always-on, normal hover)
     this.drawShipHullHighlight(camera);
     // Ship hull highlight when multi-select NPCs are pending a destination
@@ -5360,8 +5536,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 445 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'shipyard' ? 170 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'shipyard' ? 445 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'shipyard') {
             // For empty shipyard: only highlight the physical U-shaped dock arms,
@@ -5489,9 +5665,10 @@ export class RenderSystem {
       const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
       if (s.type === 'wooden_floor') {
+        const floorTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const floorIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        // Darken the fill as hp drops (up to 50% darker at 0 hp)
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const baseColor = isBlocker ? '#cc3322' : isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
         if (s.rotation) {
@@ -5526,6 +5703,28 @@ export class RenderSystem {
         const stripH = Math.max(2, 3 * zoom);
         ctx.fillStyle = floorCompanyColor;
         ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, stripH);
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && floorIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+          const flBuildFrac = Math.max(0, Math.min(1, floorTargetHp > 0 ? s.hp / floorTargetHp : 0));
+          const flBarW = sz * 0.7; const flBarH = Math.max(2, 4 * zoom);
+          const flBarX = ssp.x - flBarW / 2; const flBarY = ssp.y - sz / 2 - flBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(flBarX, flBarY, flBarW, flBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(flBarX, flBarY, flBarW * flBuildFrac, flBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, flBarY - 2);
+        }
+        // Repair icon when hammer equipped and floor is actually damaged (not schematic)
+        if (this.hammerEquipped && !floorIsSchematic && hpFrac < 0.999) {
+          ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
         ctx.restore();
       } else if (s.type === 'workbench') {
         // Top-down view: wide rectangular bench filling most of the floor tile
@@ -5606,10 +5805,32 @@ export class RenderSystem {
         ctx.fillRect(bx, by, bw, wbStripH);
         // Damage darkening overlay
         const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const wbDmgDarken = (1 - wbHpFrac) * 0.5;
+        const wbTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const wbIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const wbDmgDarken = Math.max(0, 1 - wbHpFrac) * 0.75;
         if (wbDmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${wbDmgDarken.toFixed(2)})`;
           ctx.fillRect(bx, by, bw, bh);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && wbIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(bx, by, bw, bh);
+          const wbBuildFrac = Math.max(0, Math.min(1, wbTargetHp > 0 ? s.hp / wbTargetHp : 0));
+          const wbBarW = bw * 0.7; const wbBarH = Math.max(2, 4 * zoom);
+          const wbBarX = ssp.x - wbBarW / 2; const wbBarY = by - wbBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(wbBarX, wbBarY, wbBarW, wbBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(wbBarX, wbBarY, wbBarW * wbBuildFrac, wbBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, wbBarY - 2);
+        }
+        // Repair icon for non-schematic damaged workbench when hammer equipped
+        if (this.hammerEquipped && !wbIsSchematic && wbDmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
 
         ctx.restore();
@@ -5625,12 +5846,16 @@ export class RenderSystem {
         const ww = sz;          // long axis (rotated by wallRotRad)
         const wh = sz * THICK;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        // Schematic/repair state detection
+        const targetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const isSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(wallRotRad);
         ctx.translate(-ssp.x, -ssp.y);
+        // Main wall fill
         ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
         ctx.strokeStyle = '#2e1a08';
         ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
@@ -5650,6 +5875,37 @@ export class RenderSystem {
         const stripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = wallCompanyColor;
         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
+        // Schematic/repair overlay and progress bar — only visible when hammer is equipped
+        if (this.hammerEquipped && isSchematic) {
+          // Ghost overlay
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+          // Progress bar (shows build/repair progress)
+          const barW = ww * 0.7;
+          const barH = Math.max(2, 4 * zoom);
+          const barX = ssp.x - barW / 2;
+          const barY = ssp.y - wh / 2 - barH - 2;
+          const buildFrac = Math.max(0, Math.min(1, s.hp / targetHp));
+          ctx.strokeStyle = '#b0e0ff';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+          ctx.fillStyle = '#55ddff';
+          ctx.fillRect(barX, barY, barW * buildFrac, barH);
+          // Repair icon
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, barY - 2);
+        }
+        // Repair icon for non-schematic damaged walls when hammer equipped
+        if (this.hammerEquipped && !isSchematic && dmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
         // Damage darkening
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
@@ -5668,8 +5924,10 @@ export class RenderSystem {
         const ww = sz;          // long axis
         const wh = sz * THICK;
         const POST = sz * 0.14; // post square size
+        const dfTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const dfIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
@@ -5697,10 +5955,30 @@ export class RenderSystem {
         const dfStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = dfCompanyColor;
         ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
-        if (dmgDarken > 0.01) {
+        if (!dfIsSchematic && dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
           ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
           ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && dfIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, ww, POST);
+          const dfBuildFrac = Math.max(0, Math.min(1, dfTargetHp > 0 ? s.hp / dfTargetHp : 0));
+          const dfBarW = ww * 0.7; const dfBarH = Math.max(2, 4 * zoom);
+          const dfBarX = ssp.x - dfBarW / 2; const dfBarY = ssp.y - POST / 2 - dfBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(dfBarX, dfBarY, dfBarW, dfBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(dfBarX, dfBarY, dfBarW * dfBuildFrac, dfBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, dfBarY - 2);
+        }
+        // Repair icon for non-schematic damaged door frames when hammer equipped
+        if (this.hammerEquipped && !dfIsSchematic && dmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
         ctx.restore();
       } else if (s.type === 'door') {
@@ -5715,8 +5993,10 @@ export class RenderSystem {
         const THICK = 0.18;
         const ww = sz;
         const wh = sz * THICK;
+        const doorTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const doorIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const isOpen = s.doorOpen === true;
 
         ctx.save();
@@ -5758,10 +6038,30 @@ export class RenderSystem {
         const doorStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = doorCompanyColor;
         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
-        // Damage darkening
-        if (!isOpen && dmgDarken > 0.01) {
+        // Damage darkening (skip for schematics)
+        if (!isOpen && !doorIsSchematic && dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
           ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && doorIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+          const doorBuildFrac = Math.max(0, Math.min(1, doorTargetHp > 0 ? s.hp / doorTargetHp : 0));
+          const doorBarW = ww * 0.7; const doorBarH = Math.max(2, 4 * zoom);
+          const doorBarX = ssp.x - doorBarW / 2; const doorBarY = ssp.y - wh / 2 - doorBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(doorBarX, doorBarY, doorBarW, doorBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(doorBarX, doorBarY, doorBarW * doorBuildFrac, doorBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, doorBarY - 2);
+        }
+        // Repair icon for non-schematic damaged doors when hammer equipped
+        if (this.hammerEquipped && !doorIsSchematic && dmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
         ctx.restore();
       } else if (s.type === 'shipyard') {
@@ -5775,7 +6075,8 @@ export class RenderSystem {
         const hw = totalW / 2, hh = totalH / 2;
         const cx = ssp.x, cy = ssp.y;
         const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const shipyardTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         ctx.save();
         ctx.translate(cx, cy);
         ctx.rotate((s.rotation ?? 0) * Math.PI / 180);
@@ -6012,7 +6313,8 @@ export class RenderSystem {
         // ── Placed island cannon — same visual as ship cannon ──
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const cannonTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const lw = Math.max(0.5, 1.5 * zoom);
 
         // If locally mounted, use the live aim angle for the barrel; otherwise match base rotation.
@@ -6556,6 +6858,92 @@ export class RenderSystem {
         }
 
         ctx.restore();
+      } else if (s.type === 'chest') {
+        // ── Land chest — top-down view: rectangular body with lid strip and latch ──
+        const cw = sz * 0.72;   // chest width
+        const ch = sz * 0.52;   // chest depth
+        const cx2 = ssp.x - cw / 2;
+        const cy2 = ssp.y - ch / 2;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
+        const chestTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const chestIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+
+        ctx.save();
+
+        // Body (bottom half of chest, darker brown)
+        ctx.fillStyle   = isHovered ? '#7a4820' : '#5c3210';
+        ctx.strokeStyle = '#2a1204';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.rect(cx2, cy2, cw, ch);
+        ctx.fill();
+        ctx.stroke();
+
+        // Lid strip (top ~35% of the box, lighter tan)
+        const lidH = ch * 0.35;
+        ctx.fillStyle = isHovered ? '#c0813a' : '#a06428';
+        ctx.beginPath();
+        ctx.rect(cx2, cy2, cw, lidH);
+        ctx.fill();
+        // Lid border
+        ctx.strokeStyle = '#2a1204';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.strokeRect(cx2, cy2, cw, lidH);
+
+        // Latch — small rectangle centred on the lid/body seam
+        const ltW = Math.max(2, cw * 0.12);
+        const ltH = Math.max(2, ch * 0.20);
+        const ltX = ssp.x - ltW / 2;
+        const ltY = ssp.y - ch / 2 + lidH - ltH / 2;
+        ctx.fillStyle   = '#d4a040';
+        ctx.strokeStyle = '#7a5010';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        ctx.fillRect(ltX, ltY, ltW, ltH);
+        ctx.strokeRect(ltX, ltY, ltW, ltH);
+
+        // Corner band lines (horizontal stripe across full width, at lid seam)
+        ctx.strokeStyle = 'rgba(40, 20, 8, 0.55)';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        const seamY = cy2 + lidH;
+        ctx.beginPath();
+        ctx.moveTo(cx2, seamY);
+        ctx.lineTo(cx2 + cw, seamY);
+        ctx.stroke();
+
+        // Company color strip along the top edge
+        const chestCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const stripH = Math.max(2, 2.5 * zoom);
+        ctx.fillStyle = chestCompanyColor;
+        ctx.fillRect(cx2, cy2, cw, stripH);
+
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(cx2, cy2, cw, ch);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && chestIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(cx2, cy2, cw, ch);
+          const chBuildFrac = Math.max(0, Math.min(1, chestTargetHp > 0 ? s.hp / chestTargetHp : 0));
+          const chBarW = cw * 0.7; const chBarH = Math.max(2, 4 * zoom);
+          const chBarX = ssp.x - chBarW / 2; const chBarY = cy2 - chBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(chBarX, chBarY, chBarW, chBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(chBarX, chBarY, chBarW * chBuildFrac, chBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, chBarY - 2);
+        }
+        // Repair icon when hammer equipped and chest is damaged (not schematic)
+        if (this.hammerEquipped && !chestIsSchematic && hpFrac < 0.999) {
+          ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
+
+        ctx.restore();
       }
     } // end for sorted
 
@@ -6586,8 +6974,8 @@ export class RenderSystem {
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
       // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -6676,6 +7064,7 @@ export class RenderSystem {
                  : s.type === 'flag_fort' ? 'Flag Fort'
                  : s.type === 'company_fortress' ? 'Company Fortress'
                  : s.type === 'claim_flag' ? 'Claiming Flag'
+                 : s.type === 'chest' ? 'Chest'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -6717,6 +7106,7 @@ export class RenderSystem {
                            : s.type === 'shipyard' ? 'Hold [E] to build ships'
                            : s.type === 'wreck' ? '[E] to salvage loot'
                            : s.type === 'cannon' ? 'Hold [E] to fire'
+                           : s.type === 'chest' ? '[E] to open'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -6897,8 +7287,8 @@ export class RenderSystem {
           }
 
           const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
-          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
 
           ctx.save();
           ctx.globalAlpha = flashAlpha;
@@ -6929,8 +7319,10 @@ export class RenderSystem {
 
     for (const { s, ssp, sz, isHovered } of this._pendingCeilings) {
       const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+      const targetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+      const isSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
       const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-      const dmgDarken = (1 - hpFrac) * 0.5;
+      const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
       const half = sz / 2;
       const fillCol  = isHovered ? '#c8924a' : '#96642a';
       const stripCol = RenderSystem.structureCompanyColor(s.companyId);
@@ -6964,7 +7356,36 @@ export class RenderSystem {
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
 
-      if (visPolyValid) {
+      if (isSchematic) {
+        // Schematic (under construction): always draw at full opacity, skip vis-poly transparency
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(-half, -half, sz, sz);
+        ctx.clip();
+        drawCeilContent(1);
+        ctx.restore();
+        // Ghost overlay + progress bar + repair icon when hammer equipped
+        if (this.hammerEquipped) {
+          ctx.globalAlpha = 1;
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(-half, -half, sz, sz);
+          const buildFrac = Math.max(0, Math.min(1, targetHp > 0 ? s.hp / targetHp : 0));
+          const barW = sz * 0.7;
+          const barH = Math.max(2, 4 * zoom);
+          const barX = -barW / 2;
+          const barY = -half - barH - 2;
+          ctx.strokeStyle = '#b0e0ff';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+          ctx.fillStyle = '#55ddff';
+          ctx.fillRect(barX, barY, barW * buildFrac, barH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', 0, barY - 2);
+        }
+      } else if (visPolyValid) {
         const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
         const vp = new Float32Array(visPolyPts.length);
         for (let i = 0; i < visPolyPts.length; i += 2) {
@@ -6997,6 +7418,16 @@ export class RenderSystem {
         ctx.clip();
         drawCeilContent(MIN_CEIL_ALPHA);
         ctx.restore();
+
+        // Repair icon for non-schematic damaged ceilings when hammer equipped
+        if (this.hammerEquipped && dmgDarken > 0.01) {
+          ctx.globalAlpha = 1;
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', 0, 0);
+        }
       } else {
         ctx.save();
         ctx.beginPath();
@@ -7004,6 +7435,16 @@ export class RenderSystem {
         ctx.clip();
         drawCeilContent(1);
         ctx.restore();
+
+        // Repair icon for non-schematic damaged ceilings when hammer equipped
+        if (this.hammerEquipped && dmgDarken > 0.01) {
+          ctx.globalAlpha = 1;
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', 0, 0);
+        }
       }
 
       ctx.globalAlpha = 1;
@@ -7039,6 +7480,7 @@ export class RenderSystem {
       flag_fort:    [20, 20],
       company_fortress: [30, 30],
       claim_flag:   [10, 10],
+      chest:        [20, 14],
     };
     const DEFAULT_DIMS: [number, number] = [20, 20];
 
@@ -7047,38 +7489,58 @@ export class RenderSystem {
       const [hw, hh] = DIMS[g.kind] ?? DEFAULT_DIMS;
       const structRad = g.rotation * Math.PI / 180;
       const drawRot = structRad - camRot;
+      const isHovered = g.id === this._hoveredLandGhostId;
 
-      // Pulse alpha between 0.55 and 0.85
-      const pulse = 0.55 + 0.30 * (0.5 + 0.5 * Math.sin(t * 2.5 + idx * 0.7));
+      // Pulse alpha between 0.55 and 0.85 (faster + brighter when hovered)
+      const pulse = isHovered
+        ? 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(t * 5.0))
+        : 0.55 + 0.30 * (0.5 + 0.5 * Math.sin(t * 2.5 + idx * 0.7));
 
       ctx.save();
       ctx.translate(sp.x, sp.y);
       ctx.scale(zoom, zoom);
       ctx.rotate(drawRot);
 
-      // Blueprint fill
-      ctx.fillStyle = `rgba(180, 120, 40, ${pulse * 0.25})`;
-      ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+      if (isHovered) {
+        // Bright green glow fill to show this ghost can be built here
+        ctx.fillStyle = `rgba(80, 220, 80, ${pulse * 0.30})`;
+        ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
 
-      // Dashed amber outline
-      ctx.strokeStyle = `rgba(240, 160, 40, ${pulse})`;
-      ctx.lineWidth = 2 / zoom;
-      ctx.setLineDash([4 / zoom, 3 / zoom]);
-      ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
-      ctx.setLineDash([]);
+        // Solid green outline
+        ctx.strokeStyle = `rgba(100, 255, 100, ${pulse})`;
+        ctx.lineWidth = 3 / zoom;
+        ctx.setLineDash([]);
+        ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+
+        // Inner shadow for depth
+        ctx.strokeStyle = `rgba(40, 180, 40, ${pulse * 0.5})`;
+        ctx.lineWidth = 1.5 / zoom;
+        ctx.strokeRect(-hw + 3 / zoom, -hh + 3 / zoom, hw * 2 - 6 / zoom, hh * 2 - 6 / zoom);
+      } else {
+        // Blueprint fill — blue
+        ctx.fillStyle = `rgba(40, 100, 220, ${pulse * 0.25})`;
+        ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+
+        // Dashed blue outline
+        ctx.strokeStyle = `rgba(80, 160, 255, ${pulse})`;
+        ctx.lineWidth = 2 / zoom;
+        ctx.setLineDash([4 / zoom, 3 / zoom]);
+        ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+        ctx.setLineDash([]);
+      }
 
       ctx.restore();
 
-      // Number badge (screen-space, no rotation)
-      const badge = `${idx + 1}`;
+      // Number badge (screen-space, no rotation) — green on hover, amber otherwise
+      const badge = isHovered ? '✓' : `${idx + 1}`;
       ctx.save();
       ctx.translate(sp.x, sp.y);
       ctx.font = `bold ${Math.round(11 * zoom)}px monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillStyle = isHovered ? 'rgba(0,60,0,0.85)' : 'rgba(0,20,80,0.8)';
       ctx.fillRect(-8 * zoom, -8 * zoom, 16 * zoom, 16 * zoom);
-      ctx.fillStyle = '#ffcc66';
+      ctx.fillStyle = isHovered ? '#88ff88' : '#66aaff';
       ctx.fillText(badge, 0, 0);
       ctx.restore();
     });
@@ -7088,12 +7550,38 @@ export class RenderSystem {
     this._islandGhostTooFar    = false;
     this._snappedBuildPos      = null;
     this._snappedBuildRotation = null;
-    if (!this.islandBuildKind || !this.mouseWorldPos) return;
-    const zoom = camera.getState().zoom;
-    const ctx  = this.ctx;
-    const TILE = 50; // world px — floor tile size
+    this._hoveredLandGhostId   = null;
 
-    // Helper: sample bumpy island boundary at an angle (mirrors server island_boundary_r)
+    // ── Build Schematic Hotbar hover detection ─────────────────────────────
+    // When a schematic is selected, find the nearest matching plan ghost within
+    // hover range.  If found: mark it as hovered (green highlight) and store
+    // its position so the placement preview snaps there.  The preview still
+    // renders — it just locks to the ghost rather than free-following the cursor.
+    let _hoverGhostPos: { x: number; y: number; rotation: number } | null = null;
+    if (this.buildSchematicKind && this.mouseWorldPos && this.landGhostPlacements.length > 0) {
+      const HOVER_R = 50;
+      let nearestGhost: LandGhostPlacement | null = null;
+      let nearestDist = HOVER_R;
+      for (const g of this.landGhostPlacements) {
+        if (g.kind !== this.buildSchematicKind) continue;
+        const dx = this.mouseWorldPos.x - g.worldPos.x;
+        const dy = this.mouseWorldPos.y - g.worldPos.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < nearestDist) { nearestDist = d; nearestGhost = g; }
+      }
+      if (nearestGhost) {
+        this._hoveredLandGhostId   = nearestGhost.id;
+        this._snappedBuildPos      = { x: nearestGhost.worldPos.x, y: nearestGhost.worldPos.y };
+        this._snappedBuildRotation = nearestGhost.rotation;
+        _hoverGhostPos = { x: nearestGhost.worldPos.x, y: nearestGhost.worldPos.y, rotation: nearestGhost.rotation };
+        // Fall through — the placement preview will render snapped to this position.
+      }
+    }
+
+    if (!this.islandBuildKind || !this.mouseWorldPos) return;
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+    const TILE = 50; // world px — floor tile size
     const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
       const TWO_PI = Math.PI * 2;
       const n = bumps.length;
@@ -7108,14 +7596,16 @@ export class RenderSystem {
     // ── Snap to adjacent floor neighbour ────────────────────────────────────
     // When cursor is within SNAP_R world px of any unoccupied cardinal neighbour
     // slot of an existing floor, lock the ghost position there.
-    let mx = this.mouseWorldPos.x;
-    let my = this.mouseWorldPos.y;
-    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
+    let mx = _hoverGhostPos ? _hoverGhostPos.x : this.mouseWorldPos.x;
+    let my = _hoverGhostPos ? _hoverGhostPos.y : this.mouseWorldPos.y;
+    // Merge placed structures + pending ghost plan so hover snap sees both
+    const bases = this._snapBases();
+    if (this.islandBuildKind === 'wooden_floor' && bases.length > 0) {
       const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
       let bestSnapRot: number | null = null;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type !== 'wooden_floor') continue;
         // Derive the 4 neighbour slots using this tile's own rotation
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -7130,7 +7620,7 @@ export class RenderSystem {
           const nx = s.x + d.dx, ny = s.y + d.dy;
           // Skip neighbour slots occupied by a *different* floor.
           // Source tile (s) is excluded by id — candidate is adjacent/touching it by construction.
-          const blocker = this.placedStructures.find(
+          const blocker = bases.find(
             f => f.type === 'wooden_floor' && f.id !== s.id &&
                  RenderSystem.floorsOverlap(nx, ny, rad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
           );
@@ -7147,14 +7637,14 @@ export class RenderSystem {
       }
       mx = bestX; my = bestY;
       this._snappedBuildRotation = bestSnapRot;
-    } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
+    } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && bases.length > 0) {
       // Reset rotation so stale value never persists when no snap is found
       this._wallGhostRotRad = 0;
       const HALF = TILE / 2; // 25 px
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type !== 'wooden_floor') continue;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
         const c = Math.cos(rad), sn = Math.sin(rad);
@@ -7168,7 +7658,7 @@ export class RenderSystem {
         for (const e of EDGES) {
           const nx = s.x + e.ldx * c - e.ldy * sn;
           const ny = s.y + e.ldx * sn + e.ldy * c;
-          const occ = this.placedStructures.some(
+          const occ = bases.some(
             w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
           );
           if (occ) continue;
@@ -7181,14 +7671,14 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
-    } else if (this.islandBuildKind === 'door' && this.placedStructures.length > 0) {
+    } else if (this.islandBuildKind === 'door' && bases.length > 0) {
       // Snap to unoccupied door_frame positions
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type !== 'door_frame') continue;
-        const hasDoor = this.placedStructures.some(
+        const hasDoor = bases.some(
           d => d.type === 'door' && Math.abs(d.x - s.x) < 2 && Math.abs(d.y - s.y) < 2
         );
         if (hasDoor) continue;
@@ -7204,14 +7694,14 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
-    } else if (this.islandBuildKind === 'wood_ceiling' && this.placedStructures.length > 0) {
+    } else if (this.islandBuildKind === 'wood_ceiling' && bases.length > 0) {
       // Snap ceiling to: (1) floor centres with a wall at edge, or (2) adjacent ceiling positions
       const SNAP_R = TILE * 0.7;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
       let bestRot: number | null = null;
       const HALF = TILE / 2;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type === 'wooden_floor') {
           // Only a valid start position if it has a wall at one of its edges
           const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -7225,13 +7715,13 @@ export class RenderSystem {
           const hasWall = EDGES.some(e => {
             const ex = s.x + e.ldx * c - e.ldy * sn;
             const ey = s.y + e.ldx * sn + e.ldy * c;
-            return this.placedStructures.some(
+            return bases.some(
               w => (w.type === 'wall' || w.type === 'door_frame') &&
                    Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
             );
           });
           if (!hasWall) continue;
-          const alreadyCeiling = this.placedStructures.some(
+          const alreadyCeiling = bases.some(
             f => f.type === 'wood_ceiling' && Math.abs(f.x - s.x) < 3 && Math.abs(f.y - s.y) < 3
           );
           if (alreadyCeiling) continue;
@@ -7248,7 +7738,7 @@ export class RenderSystem {
           ];
           for (const d of DIRS) {
             const nx = s.x + d.dx, ny = s.y + d.dy;
-            const occ = this.placedStructures.some(
+            const occ = bases.some(
               f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
             );
             if (occ) continue;
@@ -7534,7 +8024,7 @@ export class RenderSystem {
       }
     }
 
-    // Workbench needs a floor tile whose AABB contains the cursor point
+    // Workbench/cannon needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
     if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
       noFloor = !this.placedStructures.some(s => {
@@ -7700,7 +8190,7 @@ export class RenderSystem {
     // claim what they hold. Mirrors server's slice_already_owned check.
     const cfSliceAlreadyOwned  = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && cfInEnemyClaim && inMyDominantArea;
 
-    // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
+    // Workbench/cannon on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
       !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
@@ -8016,6 +8506,50 @@ export class RenderSystem {
       ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
+    } else if (this.islandBuildKind === 'flag_fort') {
+      // Ghost shaped like a flag fort: stone square base with battlements on top edge
+      const ts = sz * 0.9;
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Base square
+      ctx.fillRect(msp.x - ts / 2, msp.y - ts / 2, ts, ts);
+      ctx.strokeRect(msp.x - ts / 2, msp.y - ts / 2, ts, ts);
+      // Battlements — 3 merlons along top edge
+      const mw = ts * 0.22, mh = ts * 0.22;
+      ctx.setLineDash([]);
+      for (let m = -1; m <= 1; m++) {
+        const bx = msp.x + m * ts * 0.3 - mw / 2;
+        const by = msp.y - ts / 2 - mh;
+        ctx.fillRect(bx, by, mw, mh);
+        ctx.strokeRect(bx, by, mw, mh);
+      }
+      // Flag pole
+      ctx.beginPath();
+      ctx.moveTo(msp.x + ts * 0.08, msp.y - ts / 2);
+      ctx.lineTo(msp.x + ts * 0.08, msp.y - ts / 2 - ts * 0.75);
+      ctx.stroke();
+      // Flag pennant
+      ctx.beginPath();
+      ctx.moveTo(msp.x + ts * 0.08, msp.y - ts / 2 - ts * 0.75);
+      ctx.lineTo(msp.x + ts * 0.08 + ts * 0.4, msp.y - ts / 2 - ts * 0.55);
+      ctx.lineTo(msp.x + ts * 0.08, msp.y - ts / 2 - ts * 0.35);
+      ctx.closePath();
+      ctx.fill();
+    } else if (this.islandBuildKind === 'chest') {
+      // Ghost shaped like a wooden chest (lid + base + latch)
+      const bw = sz * 0.80, bh = sz * 0.56;
+      const lidH = bh * 0.40;
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Base body
+      ctx.fillRect(msp.x - bw / 2, msp.y - bh / 2 + lidH, bw, bh - lidH);
+      ctx.strokeRect(msp.x - bw / 2, msp.y - bh / 2 + lidH, bw, bh - lidH);
+      // Lid
+      ctx.fillRect(msp.x - bw / 2, msp.y - bh / 2, bw, lidH + 2);
+      ctx.strokeRect(msp.x - bw / 2, msp.y - bh / 2, bw, lidH + 2);
+      ctx.setLineDash([]);
+      // Latch
+      const latchW = bw * 0.20, latchH = bh * 0.22;
+      ctx.fillRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
+      ctx.strokeRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
     } else {
       ctx.beginPath();
       ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
@@ -8024,8 +8558,11 @@ export class RenderSystem {
       ctx.setLineDash([]);
     }
 
-    // Label above the ghost
-    const labelY = msp.y - ghostH / 2 - 6;
+    // Label above the ghost — for flag_fort and chest, account for their actual top extent
+    const labelTopOffset = this.islandBuildKind === 'flag_fort' ? sz * 0.9 * 0.5 + sz * 0.9 * 0.22 + 6
+                         : this.islandBuildKind === 'chest' ? sz * 0.56 / 2 + 6
+                         : ghostH / 2 + 6;
+    const labelY = msp.y - labelTopOffset;
     ctx.globalAlpha = 1;
     ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
     ctx.textAlign    = 'center';
@@ -8083,6 +8620,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
                   : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
                   : this.islandBuildKind === 'claim_flag' ? 'Claim Flag — Contested Area'
+                  : this.islandBuildKind === 'chest' ? 'Chest'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }

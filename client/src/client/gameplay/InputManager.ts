@@ -1267,14 +1267,10 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In explicit build mode, plan mode, or island build mode: rotate the placement ghost.
         // In ramp build mode: cycle the ramp facing by 90°.
         // Mounted at cannon: toggle gunport at that position.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
-          this.onBuildRotate(15);
-          event.preventDefault();
-        } else if (this.inRampBuildMode && this.onCycleRampFacing) {
+        if (this.inRampBuildMode && this.onCycleRampFacing) {
           this.onCycleRampFacing();
           event.preventDefault();
         } else if (this.mountKind === 'cannon' && this.onToggleGunportAtCannon) {
@@ -1367,6 +1363,17 @@ export class InputManager {
         // In build mode or island build mode: rotate ghost left; otherwise no-op
         if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
           this.onBuildRotate(-15);
+          event.preventDefault();
+        }
+        break;
+      case 'KeyE':
+        // In build mode or island build mode: rotate ghost right; otherwise let interact mapping fire normally
+        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+          this.onBuildRotate(15);
+          // Suppress interact so the same keypress doesn't also trigger an interaction
+          for (const m of this.actionMappings) {
+            if (m.action === 'interact' || m.action === 'ship_interact') m.pressed = false;
+          }
           event.preventDefault();
         }
         break;
@@ -1616,7 +1623,9 @@ export class InputManager {
         return;
       }
       // Build menu or island build mode: right-click fires ghost-cancel / ghost-remove callback
+      // UI gets first chance (e.g. hotbar slot clear) — only fall through if not consumed.
       if ((this.buildMenuOpen || this.islandBuildMode) && this.onBuildRightClick) {
+        if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;
         this.onBuildRightClick(this.inputState.mouseWorldPosition);
       } else {
         if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;

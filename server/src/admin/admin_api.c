@@ -479,7 +479,8 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
                     ps[si].type == STRUCT_SHIPYARD        ? "shipyard" :
                     ps[si].type == STRUCT_FLAG_FORT       ? "flag_fort" :
                     ps[si].type == STRUCT_CLAIM_FLAG      ? "claim_flag" :
-                    ps[si].type == STRUCT_COMPANY_FORTRESS? "company_fortress" : "unknown";
+                    ps[si].type == STRUCT_COMPANY_FORTRESS? "company_fortress" :
+                    ps[si].type == STRUCT_CHEST           ? "chest" : "unknown";
                 /* Base fields for all structures — claim_orphaned included for all
                  * because the BFS graph sweep sets it on any disconnected structure */
                 offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
@@ -650,6 +651,8 @@ int admin_api_websocket_entities(struct HttpResponse* resp) {
             case PLAYER_STATE_WALKING: state_str = "WALKING"; break;
             case PLAYER_STATE_SWIMMING: state_str = "SWIMMING"; break;
             case PLAYER_STATE_FALLING: state_str = "FALLING"; break;
+            case PLAYER_STATE_IDLE: state_str = "IDLE"; break;
+            default: break;
         }
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,

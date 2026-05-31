@@ -98,6 +98,7 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
                                  const struct AOIGrid* aoi, entity_id player_id,
                                  uint32_t current_time, uint8_t* packet_buffer,
                                  size_t buffer_size, size_t* packet_size) {
+    (void)buffer_size;
     if (!mgr || !sim || !aoi || !packet_buffer || !packet_size) return -1;
     
     struct PlayerSnapshotState* player_state = find_player_state(mgr, player_id);
@@ -160,21 +161,27 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
             // Try to find entity in simulation and convert to snapshot
             struct Ship* ship = sim_get_ship((struct Sim*)sim, entity_id);
             if (ship) {
-                quantize_entity_data(ship, &packet->baseline_entities[entity_count]);
+                struct EntitySnapshot _tmp_snap;
+                quantize_entity_data(ship, &_tmp_snap);
+                memcpy(&packet->baseline_entities[entity_count], &_tmp_snap, sizeof(_tmp_snap));
                 entity_count++;
                 continue;
             }
             
             struct Player* other_player = sim_get_player((struct Sim*)sim, entity_id);
             if (other_player) {
-                quantize_player_data(other_player, &packet->baseline_entities[entity_count]);
+                struct EntitySnapshot _tmp_snap;
+                quantize_player_data(other_player, &_tmp_snap);
+                memcpy(&packet->baseline_entities[entity_count], &_tmp_snap, sizeof(_tmp_snap));
                 entity_count++;
                 continue;
             }
             
             struct Projectile* proj = sim_get_projectile((struct Sim*)sim, entity_id);
             if (proj) {
-                quantize_projectile_data(proj, &packet->baseline_entities[entity_count]);
+                struct EntitySnapshot _tmp_snap;
+                quantize_projectile_data(proj, &_tmp_snap);
+                memcpy(&packet->baseline_entities[entity_count], &_tmp_snap, sizeof(_tmp_snap));
                 entity_count++;
                 continue;
             }

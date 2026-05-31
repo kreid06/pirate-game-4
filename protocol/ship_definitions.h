@@ -120,6 +120,6 @@ static const struct {
 #define BRIGANTINE_DECK_0 BRIGANTINE_DECK_UPPER  /* id=1, upper (old name kept for compat) */
 #define BRIGANTINE_DECK_1 BRIGANTINE_DECK_LOWER  /* id=0, lower (old name kept for compat) */
 /* Array ordered by deck id: [0]=lower, [1]=upper — matches BRIGANTINE_DECK_LOWER_ID / UPPER_ID */
-static const void* BRIGANTINE_DECKS[2] = { &BRIGANTINE_DECK_LOWER, &BRIGANTINE_DECK_UPPER };
+static const void* BRIGANTINE_DECKS[2] __attribute__((unused)) = { &BRIGANTINE_DECK_LOWER, &BRIGANTINE_DECK_UPPER };
 
 #endif /* SHIP_DEFINITIONS_H */

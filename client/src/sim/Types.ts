@@ -165,7 +165,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | 'chest';
   islandId: number;
   x: number;
   y: number;
@@ -219,6 +219,8 @@ export interface PlacedStructure {
    *  and never recovers; the auto-repair heals current `hp` up to `targetHp` (not maxHp).
    *  Render "REPAIRING" label whenever `hp < targetHp`. Defaults to maxHp when absent. */
   targetHp?: number;
+  /** Land chest resource storage (STRUCT_CHEST only). Present in STRUCTURES snapshot. */
+  chestResources?: { wood: number; fiber: number; metal: number; stone: number };
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

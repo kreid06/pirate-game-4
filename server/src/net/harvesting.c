@@ -163,7 +163,7 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
 
     {
         /* Find the island */
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"island_not_found\"}");
@@ -262,7 +262,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
     player->stamina_last_used_ms = get_time_ms();
 
     {
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"island_not_found\"}");
@@ -324,7 +324,7 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
     }
 
     {
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_stone_failure\",\"reason\":\"island_not_found\"}");
@@ -409,7 +409,7 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
     player->stamina_last_used_ms = get_time_ms();
 
     {
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"island_not_found\"}");
