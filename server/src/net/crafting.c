@@ -9,8 +9,12 @@
 
 
 
-/** Count total quantity of an item across all inventory slots. */
+/** Count total quantity of an item — checks resource pool for raw materials, slots for everything else. */
 int craft_count_item(WebSocketPlayer* player, ItemKind item) {
+    if (item == ITEM_WOOD)  return (int)player->res_wood;
+    if (item == ITEM_FIBER) return (int)player->res_fiber;
+    if (item == ITEM_METAL) return (int)player->res_metal;
+    if (item == ITEM_STONE) return (int)player->res_stone;
     int total = 0;
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
         if (player->inventory.slots[s].item == item)
@@ -19,8 +23,28 @@ int craft_count_item(WebSocketPlayer* player, ItemKind item) {
     return total;
 }
 
-/** Consume `amount` units of `item` from inventory. Returns true on success. */
+/** Consume `amount` units of `item` — deducts from resource pool for raw materials, slots otherwise. */
 bool craft_consume(WebSocketPlayer* player, ItemKind item, int amount) {
+    if (item == ITEM_WOOD) {
+        if ((int)player->res_wood < amount) return false;
+        player->res_wood -= (uint16_t)amount;
+        return true;
+    }
+    if (item == ITEM_FIBER) {
+        if ((int)player->res_fiber < amount) return false;
+        player->res_fiber -= (uint16_t)amount;
+        return true;
+    }
+    if (item == ITEM_METAL) {
+        if ((int)player->res_metal < amount) return false;
+        player->res_metal -= (uint16_t)amount;
+        return true;
+    }
+    if (item == ITEM_STONE) {
+        if ((int)player->res_stone < amount) return false;
+        player->res_stone -= (uint16_t)amount;
+        return true;
+    }
     int remaining = amount;
     for (int s = 0; s < INVENTORY_SLOTS && remaining > 0; s++) {
         if (player->inventory.slots[s].item == item) {

@@ -44,7 +44,7 @@ import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
-import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
+import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
@@ -156,6 +156,12 @@ export class ClientApplication {
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
+
+  // Land build mode — B key while off-ship opens land structure panel
+  private landBuildMenuOpen = false;
+  private pendingLandBuildKind: string | null = null;
+  /** Planned land structure ghosts — click places, Enter confirms all to server. */
+  private landGhostEntries: (LandGhostPlacement & { buildAction: () => void })[] = [];
 
   // Weapon control groups — 10 user-defined groups (0–9), persistent per session
   private controlGroups: Map<number, WeaponGroupState> = new Map(
@@ -853,9 +859,11 @@ export class ClientApplication {
       
       // HYBRID PROTOCOL: Wire up state change callbacks
       this.inputManager.onMovementStateChange = (movement, isMoving, isSprinting) => {
+        if (this.uiManager?.isAnyMenuOpen()) return;
         this.networkManager.sendMovementState(movement, isMoving, isSprinting);
       };
       this.inputManager.onRotationUpdate = (rotation) => {
+        if (this.uiManager?.isAnyMenuOpen()) return;
         this.networkManager.sendRotationUpdate(rotation);
       };
       this.inputManager.onActionEvent = (action, target) => {
@@ -1553,6 +1561,14 @@ export class ClientApplication {
 
       // Hotbar slot selection — update locally for instant UI feedback, then sync server
       this.inputManager.onSlotSelect = (slot) => {
+        // In land build mode, digits 1-8 select the land structure hotbar slot
+        if (this.uiManager?.inLandBuildMode && slot >= 0 && slot < UIManager.LAND_BUILD_PANEL_ENTRIES.length) {
+          const kind = UIManager.LAND_BUILD_PANEL_ENTRIES[slot].kind;
+          this.pendingLandBuildKind = kind;
+          this.uiManager.setLandBuildMenuState(false, kind);
+          this.checkBuildMode();
+          return;
+        }
         // In ship build mode, digits 1-8 select the build schematic hotbar slot
         // instead of the regular inventory hotbar slot
         if (this.uiManager?.inShipBuildMode && slot >= 0 && slot < 8) {
@@ -1586,18 +1602,24 @@ export class ClientApplication {
           this.pendingGhostKind = null;
           this.syncBuildModeState();
         }
+        // Selecting a hotbar item also clears the land build panel kind (hotbar takes priority)
+        if (this.pendingLandBuildKind !== null) {
+          this.pendingLandBuildKind = null;
+          this.uiManager.setLandBuildMenuState(false, null);
+        }
         // Re-evaluate build mode: plank in active slot → build mode on
         this.checkBuildMode();
       };
 
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (worldPos) => {
-        // Island structure placement (wooden floor or workbench)
+        // Island structure placement — add ghost marker instead of sending immediately
         if (this.islandBuildMode) {
           const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
-          const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
+          const hotbarKind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
+          const kind = this.pendingLandBuildKind ?? hotbarKind;
           if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
@@ -1615,7 +1637,20 @@ export class ClientApplication {
               : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
               : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
-            this.networkManager.sendPlaceStructure(kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', pos.x, pos.y, rot);
+            const capturedKind = kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            const capturedPos  = { x: pos.x, y: pos.y };
+            const capturedRot  = rot;
+            const id = `land-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            this.landGhostEntries.push({
+              id,
+              kind: capturedKind,
+              worldPos: capturedPos,
+              rotation: capturedRot,
+              buildAction: () => this.networkManager.sendPlaceStructure(capturedKind, capturedPos.x, capturedPos.y, capturedRot),
+            });
+            this.renderSystem.setLandGhostPlacements(this.landGhostEntries);
+            this.uiManager.setLandGhostCounts(this._computeLandGhostCounts());
+            console.log(`🏗️ [LAND PLAN] Added ghost #${this.landGhostEntries.length}: ${capturedKind} @ (${capturedPos.x.toFixed(0)}, ${capturedPos.y.toFixed(0)}) rot=${capturedRot}`);
           }
           return;
         }
@@ -1746,29 +1781,32 @@ export class ClientApplication {
         this.combatMode = !this.combatMode;
       };
       this.inputManager.onBuildModeToggle = () => {
-        if (this.buildMenuOpen || this.explicitBuildMode) {
+        if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) {
           // Close everything via the single exit helper
           this.exitAllBuildModes();
           console.log('🏗️ [BUILD MENU] CLOSED');
         } else {
-          // Open — require player to be on a ship
           const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
           const playerId = this.networkManager?.getAssignedPlayerId();
           const player = ws?.players.find(p => p.id === playerId);
-          if (!player?.carrierId) {
-            console.log('🏗️ [BUILD MENU] Cannot open — not on a ship');
-            return;
+          if (player?.carrierId) {
+            // On a ship — open ship ghost build panel
+            this.buildMenuOpen = true;
+            this.inputManager.buildMenuOpen = true;
+            // If a buildable item is in the hotbar, also enter free-placement mode
+            const activeSlot = player.inventory?.activeSlot ?? 0;
+            const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
+            if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
+              this.explicitBuildMode = true;
+              this.buildSelectedItem = activeItem as 'cannon' | 'sail' | 'swivel';
+            }
+            console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
+          } else {
+            // On land — open land structure build panel
+            this.landBuildMenuOpen = true;
+            this.uiManager.setLandBuildMenuState(true, this.pendingLandBuildKind);
+            console.log('🏗️ [LAND BUILD] OPENED');
           }
-          this.buildMenuOpen = true;
-          this.inputManager.buildMenuOpen = true;
-          // If a buildable item is in the hotbar, also enter free-placement mode
-          const activeSlot = player.inventory?.activeSlot ?? 0;
-          const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
-            this.explicitBuildMode = true;
-            this.buildSelectedItem = activeItem as 'cannon' | 'sail' | 'swivel';
-          }
-          console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
         }
         this.syncBuildModeState();
       };
@@ -1784,8 +1822,13 @@ export class ClientApplication {
         }
       };
 
-      // Right-click in build menu: cancel pending ghost or remove nearest placed ghost
+      // Right-click in build menu or island build mode: cancel ghost or remove nearest
       this.inputManager.onBuildRightClick = (worldPos: Vec2) => {
+        // Island build mode: remove nearest land ghost plan marker
+        if (this.inputManager.islandBuildMode) {
+          this.removeNearestLandGhost(worldPos);
+          return;
+        }
         if (this.pendingGhostKind !== null) {
           // Cancel the ghost currently attached to the cursor
           this.pendingGhostKind = null;
@@ -1796,7 +1839,12 @@ export class ClientApplication {
           this.removeNearestGhost(worldPos);
         }
       };
-      
+
+      // Enter key in island build mode: confirm all land ghost plans and send to server
+      this.inputManager.onBuildConfirm = () => {
+        if (this.landGhostEntries.length > 0) this.confirmAllLandGhosts();
+      };
+
       // Set up scroll-wheel zoom — accumulate into _userZoomMul so AOI base zoom
       // remains separate and the two combine correctly. We update only targetZoom
       // here; the per-frame lerp (see updateCamera) smoothly animates camera.zoom
@@ -2341,6 +2389,11 @@ export class ClientApplication {
         }
         this.networkManager.sendDropItem(fromSlot);
         if (_dropLabel && _dropPos) this.renderSystem.spawnResourcePickup(_dropPos, _dropLabel, '#e07070');
+      };
+
+      // Drop resources by dragging a resource chip outside the panel
+      this.uiManager.playerMenu.onDropResources = (kind, amount) => {
+        this.networkManager.sendDropResources(kind, amount);
       };
 
       // Hand-craft from inventory (no workbench needed)
@@ -2944,6 +2997,16 @@ export class ClientApplication {
         console.log(`🏗️ [GHOST] Picking up ghost: ${kind} — click on ship to place`);
       };
 
+      // Land build panel: player selected a land structure type
+      this.uiManager.onLandBuildPanelSelect = (kind: string) => {
+        if (!kind) return;
+        this.pendingLandBuildKind = kind;
+        this.landBuildMenuOpen = false;
+        this.uiManager.setLandBuildMenuState(false, kind);
+        this.checkBuildMode();
+        console.log(`🏗️ [LAND BUILD] Selected: ${kind}`);
+      };
+
       // Build hotbar slot selected (click or 1-8 key in ship build mode)
       this.uiManager.onBuildHotbarSlotChange = (slot: number, kind: GhostModuleKind | null) => {
         if (!kind) return;
@@ -3385,6 +3448,7 @@ export class ClientApplication {
       this.renderSystem.axeEquipped =
         (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe') &&
         !(localPlayer?.isMounted ?? false);
+      this.renderSystem.combatMode = this.combatMode;
       if (this.explicitBuildMode) this.syncBuildModeState();
 
       // Sync tombstones into the render system on every frame
@@ -3434,7 +3498,8 @@ export class ClientApplication {
       // Update island build mode overlay state
       if (this.islandBuildMode) {
         const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
-        const islandBuildKind = (localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor') as 'wooden_floor' | 'workbench';
+        const hotbarKind = localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor';
+        const islandBuildKind = (this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
         this.uiManager.setIslandBuildState({
           kind: islandBuildKind,
           tooFar: this.renderSystem.getIslandBuildTooFar(),
@@ -3777,6 +3842,8 @@ export class ClientApplication {
   private onInputFrame(inputFrame: InputFrame): void {
     // Don't send input while the player is dead / respawn screen is open.
     if (this.uiManager?.isRespawnScreenVisible()) return;
+    // Don't send input (including rotation) while any menu is open.
+    if (this.uiManager?.isAnyMenuOpen()) return;
     // Send input to server
     this.networkManager.sendInput(inputFrame);
   }
@@ -4133,12 +4200,21 @@ export class ClientApplication {
   }
 
   private exitAllBuildModes(): void {
-    if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null) return;
+    if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null && !this.landBuildMenuOpen) return;
     this.buildMenuOpen      = false;
     this.inputManager.buildMenuOpen = false;
     this.explicitBuildMode  = false;
     this.pendingGhostKind   = null;
     this.buildRotationDeg   = 0;
+    this.landBuildMenuOpen  = false;
+    this.pendingLandBuildKind = null;
+    this.uiManager.setLandBuildMenuState(false, null);
+    // Clear any uncommitted land ghosts without sending them
+    if (this.landGhostEntries.length > 0) {
+      this.landGhostEntries = [];
+      this.renderSystem.setLandGhostPlacements([]);
+      this.uiManager.setLandGhostCounts(new Map());
+    }
     this.syncBuildModeState();
     this.checkBuildMode();
     console.log('🏗️ [BUILD] All build/plan modes exited');
@@ -4171,11 +4247,14 @@ export class ClientApplication {
     const inChestBuildMode   = ((player?.carrierId ?? 0) !== 0 && activeItem === 'resource_chest') || pgk === 'chest';
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress' || activeItem === 'claim_flag');
+    // Also activated when pendingLandBuildKind is set (via the land build panel)
+    const islandItem = this.pendingLandBuildKind ?? activeItem;
+    const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag']);
+    const inIslandBuildMode = (player?.carrierId === 0) && LAND_BUILDABLE.has(islandItem);
     this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
     this.inputManager.islandBuildMode = this.islandBuildMode;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag') : null
+      this.islandBuildMode ? (islandItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag') : null
     );
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
@@ -4231,6 +4310,8 @@ export class ClientApplication {
     const hammerEquipped = activeItem === 'hammer' && onShip;
     if (this.uiManager) {
       this.uiManager.inShipBuildMode = this.buildMenuOpen || this.explicitBuildMode || hammerEquipped;
+      this.uiManager.inLandBuildMode = this.landBuildMenuOpen || this.islandBuildMode;
+      this.uiManager.selectedLandKind = this.pendingLandBuildKind;
     }
   }
 
@@ -4516,6 +4597,44 @@ export class ClientApplication {
       console.log(`🏗️ [GHOST] Removed ghost`);
     }
   }
+
+  /** Remove the land ghost closest to worldPos (within 75 world px). */
+  private removeNearestLandGhost(worldPos: Vec2): void {
+    let nearestId: string | null = null;
+    let nearestDist = Infinity;
+    for (const g of this.landGhostEntries) {
+      const dx = worldPos.x - g.worldPos.x;
+      const dy = worldPos.y - g.worldPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < nearestDist) { nearestDist = dist; nearestId = g.id; }
+    }
+    if (nearestId && nearestDist < 75) {
+      this.landGhostEntries = this.landGhostEntries.filter(g => g.id !== nearestId);
+      this.renderSystem.setLandGhostPlacements(this.landGhostEntries);
+      this.uiManager.setLandGhostCounts(this._computeLandGhostCounts());
+      console.log(`🏗️ [LAND PLAN] Removed land ghost`);
+    }
+  }
+
+  /** Send all planned land ghosts to server (staggered), then clear the list. */
+  private confirmAllLandGhosts(): void {
+    const ghosts = [...this.landGhostEntries];
+    this.landGhostEntries = [];
+    this.renderSystem.setLandGhostPlacements([]);
+    this.uiManager.setLandGhostCounts(new Map());
+    ghosts.forEach((g, i) => setTimeout(() => g.buildAction(), i * 50));
+    console.log(`🏗️ [LAND PLAN] Confirmed ${ghosts.length} planned structure(s)`);
+  }
+
+  /** Return a Map<kind, count> of pending land ghost entries per structure type. */
+  private _computeLandGhostCounts(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const g of this.landGhostEntries) {
+      counts.set(g.kind, (counts.get(g.kind) ?? 0) + 1);
+    }
+    return counts;
+  }
+
 
   /**
    * Previously: clicked near ghost with matching hotbar item → build immediately.

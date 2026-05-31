@@ -323,10 +323,9 @@ const ROW_GAP    = 6;
 const CONTENT_PAD = 10;
 
 const CATEGORIES: { id: Category; icon: string }[] = [
-  { id: 'Weapons',    icon: '⚔' },
-  { id: 'Structures', icon: '🏗' },
-  { id: 'Tools',      icon: '⛏' },
-  { id: 'Ship',       icon: '⛵' },
+  { id: 'Weapons', icon: '⚔' },
+  { id: 'Tools',   icon: '⛏' },
+  { id: 'Ship',    icon: '⛵' },
 ];
 
 const BG_PANEL    = 'rgba(14, 10, 5, 0.97)';
@@ -347,9 +346,19 @@ const INGREDIENT_KIND: Record<string, ItemKind> = {
 };
 
 /** Sum total quantity of a given item kind across all inventory slots. */
+/** Count available quantity of an ingredient kind.
+ * Wood/Fiber/Metal/Stone are read from the dedicated resources pool;
+ * other kinds (e.g. Plank) are counted from inventory slots. */
 function countInInventory(inv: PlayerInventory | null, kind: ItemKind): number {
   if (!inv) return 0;
-  return inv.slots.reduce((sum, s) => sum + (s.item === kind ? s.quantity : 0), 0);
+  switch (kind) {
+    case 'wood':  return inv.resources.wood;
+    case 'fiber': return inv.resources.fiber;
+    case 'metal': return inv.resources.metal;
+    case 'stone': return inv.resources.stone;
+    default:
+      return inv.slots.reduce((sum, s) => sum + (s.item === kind ? s.quantity : 0), 0);
+  }
 }
 
 /** Returns true if the player has enough materials for all ingredients. */

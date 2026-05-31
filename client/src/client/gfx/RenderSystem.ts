@@ -9,7 +9,7 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company } from '../../sim/Types.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company, LandGhostPlacement } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -118,6 +118,8 @@ export class RenderSystem {
   /** Set to true each frame when the local player has the sword as their active item. */
   public swordEquipped: boolean = false;
   public axeEquipped: boolean = false;
+  /** Suppresses harvest/gather prompts while the player is in combat mode. */
+  public combatMode: boolean = false;
 
   // Build mode state
   private buildMode: boolean = false;
@@ -3415,6 +3417,8 @@ export class RenderSystem {
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostState: { kind: GhostModuleKind; rotDeg: number } | null = null;
   private buildMenuOpen = false;
+  /** Planned land structure ghosts (placed but not yet sent to server). */
+  private landGhostPlacements: LandGhostPlacement[] = [];
 
   /**
    * Set explicit build mode state for ghost preview rendering.
@@ -3427,6 +3431,11 @@ export class RenderSystem {
   /** Update the list of ghost planning markers to render on ships. */
   setGhostPlacements(ghosts: GhostPlacement[]): void {
     this.ghostPlacements = ghosts;
+  }
+
+  /** Update the list of planned land structure ghost markers. */
+  setLandGhostPlacements(ghosts: LandGhostPlacement[]): void {
+    this.landGhostPlacements = ghosts;
   }
 
   /** Track whether the build menu is open so ghost plans are only shown then. */
@@ -3985,6 +3994,7 @@ export class RenderSystem {
     if (this.config.showGrid) this.drawGrid(camera);
     this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
+    this.drawLandGhostPlacements(camera);
     
     // ── Snap scaffolded ships into their shipyard docks ───────────────────────
     // Temporarily override position/rotation so every draw call renders the ship
@@ -4024,18 +4034,22 @@ export class RenderSystem {
     // ── Hover prompts + health bars (always on top) ───────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type === 'wood' && e.isHovered) {
-        if (this._pendingAxeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
-        else                          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        if (!this.combatMode) {
+          if (this._pendingAxeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+          else                          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        }
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
       } else if (e.res.type === 'fiber' && e.isHovered) {
-        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+        if (!this.combatMode) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
       } else if (e.res.type === 'rock' && e.isHovered) {
-        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Pick Up');
+        if (!this.combatMode) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Pick Up');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
       } else if (e.res.type === 'boulder' && e.isHovered) {
-        if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Boulder');
-        else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if (!this.combatMode) {
+          if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Boulder');
+          else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        }
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 64);
       }
     }
@@ -7004,6 +7018,72 @@ export class RenderSystem {
   }
 
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
+  /** Render committed-but-unbuilt land structure ghost plan markers. */
+  private drawLandGhostPlacements(camera: Camera): void {
+    const ghosts = this.landGhostPlacements;
+    if (ghosts.length === 0) return;
+    const ctx = this.ctx;
+    const { zoom, rotation: camRot } = camera.getState();
+    const t = performance.now() / 1000;
+
+    // Approximate bounding half-sizes per structure kind (world pixels)
+    const DIMS: Record<string, [number, number]> = {
+      wooden_floor: [25, 25],
+      wall:         [25,  5],
+      door_frame:   [25,  5],
+      door:         [25,  5],
+      wood_ceiling: [25, 25],
+      workbench:    [22, 17],
+      cannon:       [18, 10],
+      shipyard:     [55, 35],
+      flag_fort:    [20, 20],
+      company_fortress: [30, 30],
+      claim_flag:   [10, 10],
+    };
+    const DEFAULT_DIMS: [number, number] = [20, 20];
+
+    ghosts.forEach((g, idx) => {
+      const sp = camera.worldToScreen(Vec2.from(g.worldPos.x, g.worldPos.y));
+      const [hw, hh] = DIMS[g.kind] ?? DEFAULT_DIMS;
+      const structRad = g.rotation * Math.PI / 180;
+      const drawRot = structRad - camRot;
+
+      // Pulse alpha between 0.55 and 0.85
+      const pulse = 0.55 + 0.30 * (0.5 + 0.5 * Math.sin(t * 2.5 + idx * 0.7));
+
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.scale(zoom, zoom);
+      ctx.rotate(drawRot);
+
+      // Blueprint fill
+      ctx.fillStyle = `rgba(180, 120, 40, ${pulse * 0.25})`;
+      ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+
+      // Dashed amber outline
+      ctx.strokeStyle = `rgba(240, 160, 40, ${pulse})`;
+      ctx.lineWidth = 2 / zoom;
+      ctx.setLineDash([4 / zoom, 3 / zoom]);
+      ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+      ctx.setLineDash([]);
+
+      ctx.restore();
+
+      // Number badge (screen-space, no rotation)
+      const badge = `${idx + 1}`;
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.font = `bold ${Math.round(11 * zoom)}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(-8 * zoom, -8 * zoom, 16 * zoom, 16 * zoom);
+      ctx.fillStyle = '#ffcc66';
+      ctx.fillText(badge, 0, 0);
+      ctx.restore();
+    });
+  }
+
   private drawIslandBuildGhost(camera: Camera): void {
     this._islandGhostTooFar    = false;
     this._snappedBuildPos      = null;

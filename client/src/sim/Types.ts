@@ -515,6 +515,18 @@ export interface GhostPlacement {
   buildAction: () => void;
 }
 
+/** A planned (ghost) land structure placement — client-local, not yet sent to server. */
+export interface LandGhostPlacement {
+  /** Unique client-local identifier. */
+  id: string;
+  /** Land structure type (wooden_floor, wall, etc.). */
+  kind: string;
+  /** World-absolute position. */
+  worldPos: { x: number; y: number };
+  /** Rotation in degrees. */
+  rotation: number;
+}
+
 // ── Weapon control groups ──────────────────────────────────────────────────
 
 /** Firing mode for a weapon control group. */

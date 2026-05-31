@@ -6,7 +6,7 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem } from '../../sim/Types.js';
+import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem, IslandResource } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
@@ -170,7 +170,7 @@ export class UIManager {
 
   // Island structure build mode overlay state
   private islandBuildState: {
-    kind: 'wooden_floor' | 'workbench';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
     tooFar: boolean;
     enemyClose: boolean;
   } | null = null;
@@ -198,6 +198,37 @@ export class UIManager {
   private buildMenuPending: GhostModuleKind | null = null;
   /** Called when player clicks a module type in the left build panel. */
   public onBuildPanelSelect: ((kind: GhostModuleKind) => void) | null = null;
+
+  // ── Land build menu state ─────────────────────────────────────────────────
+  private landBuildMenuOpen = false;
+  private _pendingLandBuildKind: string | null = null;
+  /** Called when player selects a land structure from the build panel. */
+  public onLandBuildPanelSelect: ((kind: string) => void) | null = null;
+  /** Per-kind ghost counts for badge display in the land build panel. */
+  private _landGhostCounts: Map<string, number> = new Map();
+  /** Total number of pending land ghost placements. */
+  private get _totalLandGhosts(): number {
+    let n = 0; this._landGhostCounts.forEach(v => n += v); return n;
+  }
+
+  /** Update the pending ghost counts per land structure kind. */
+  setLandGhostCounts(counts: Map<string, number>): void {
+    this._landGhostCounts = counts;
+  }
+
+  // Entries shown in the left land build panel
+  static readonly LAND_BUILD_PANEL_ENTRIES: Array<{
+    kind: string; label: string; symbol: string; color: string; borderColor: string;
+  }> = [
+    { kind: 'wooden_floor', label: 'Floor',      symbol: '\u229f', color: '#8b6914', borderColor: '#5c4008' },
+    { kind: 'wall',         label: 'Wall',        symbol: '\u258b', color: '#7a6030', borderColor: '#4a3818' },
+    { kind: 'door_frame',   label: 'Door Frame',  symbol: '\u2293', color: '#6a5028', borderColor: '#3a2808' },
+    { kind: 'door',         label: 'Door',        symbol: '\uD83D\uDEAA', color: '#7a5838', borderColor: '#4a3010' },
+    { kind: 'wood_ceiling', label: 'Ceiling',     symbol: '\u229e', color: '#7a5c2a', borderColor: '#4a3410' },
+    { kind: 'workbench',    label: 'Workbench',   symbol: '\u2692', color: '#6a4a20', borderColor: '#3a2808' },
+    { kind: 'shipyard',     label: 'Shipyard',    symbol: '\u26F5', color: '#1e6080', borderColor: '#0f3850' },
+    { kind: 'cannon',       label: 'Cannon',      symbol: '\u26AB', color: '#444444', borderColor: '#888888' },
+  ];
 
   // Entries shown in the left build panel
   static readonly BUILD_PANEL_ENTRIES: Array<{
@@ -260,6 +291,28 @@ export class UIManager {
   public set inShipBuildMode(v: boolean) {
     const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
     if (hud) hud.inShipBuildMode = v;
+  }
+  public get inLandBuildMode(): boolean {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.inLandBuildMode ?? false;
+  }
+  public set inLandBuildMode(v: boolean) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.inLandBuildMode = v;
+  }
+  public get selectedLandKind(): string | null {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.selectedLandKind ?? null;
+  }
+  public set selectedLandKind(v: string | null) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.selectedLandKind = v;
+  }
+  /** Land schematic hotbar slots (8 slots, kind string or null). */
+  public get landHotbarSlots(): (string | null)[] {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.landHotbarSlots ?? [];
+  }
+  public set landHotbarSlots(v: (string | null)[]) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.landHotbarSlots = v;
   }
   /** Callback fired when the player selects a new build hotbar slot. */
   public onBuildHotbarSlotChange: ((slot: number, kind: GhostModuleKind | null) => void) | null = null;
@@ -475,6 +528,7 @@ export class UIManager {
       this.tombstoneMenu.close();
       return true;
     }
+    if (this.playerMenu.visible && this.playerMenu.handleKeyDown(key)) return true;
     if (!this.hammerGame.active) return false;
     if (key === ' ' || key === 'Enter') {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
@@ -593,6 +647,12 @@ export class UIManager {
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    // Provide current hotbar slot arrays to the player menu before render
+    const _hudEl = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (_hudEl) {
+      this.playerMenu.landHotbarSlots = _hudEl.landHotbarSlots;
+      this.playerMenu.shipHotbarSlots = _hudEl.buildHotbarSlots as (string | null)[];
+    }
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
@@ -616,6 +676,11 @@ export class UIManager {
     // Ghost build menu panel — left side of screen
     if (this.buildMenuOpen) {
       this.renderBuildMenuPanel(ctx, ctx.canvas);
+    }
+
+    // Land build panel — left side of screen
+    if (this.landBuildMenuOpen) {
+      this.renderLandBuildMenuPanel(ctx, ctx.canvas);
     }
 
     // Hammer minigame — topmost overlay, blocks all game input when active
@@ -1189,6 +1254,15 @@ export class UIManager {
    */
   syncPlayerLevelUpCallback(): void {
     this.playerMenu.onPlayerLevelUp = () => this.onPlayerLevelUp?.();
+    // Wire hotbar slot assignment callbacks so the schematics tab can edit hotbars
+    this.playerMenu.onSetLandHotbarSlot = (idx, kind) => {
+      const slots = this.landHotbarSlots;
+      if (idx >= 0 && idx < slots.length) { slots[idx] = kind; this._saveHotbars(); }
+    };
+    this.playerMenu.onSetShipHotbarSlot = (idx, kind) => {
+      const slots = this.buildHotbarSlots;
+      if (idx >= 0 && idx < slots.length) { slots[idx] = kind as (typeof slots)[0]; this._saveHotbars(); }
+    };
   }
 
   /**
@@ -1218,11 +1292,18 @@ export class UIManager {
    * Pass null to hide the overlay.
    */
   setIslandBuildState(state: {
-    kind: 'wooden_floor' | 'workbench';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
     tooFar: boolean;
     enemyClose: boolean;
   } | null): void {
     this.islandBuildState = state;
+  }
+
+  /** Open or close the land build panel and track the currently selected kind. */
+  setLandBuildMenuState(open: boolean, selectedKind: string | null): void {
+    this.landBuildMenuOpen = open;
+    this._pendingLandBuildKind = selectedKind;
+    this.selectedLandKind = selectedKind;
   }
 
   /**
@@ -1270,6 +1351,29 @@ export class UIManager {
     // Drop picker intercepts all clicks when open
     if (this._dropPicker.open) {
       return this.handleDropPickerClick(x, y);
+    }
+    // Land build hotbar slot click (when land build mode active)
+    if (this.inLandBuildMode) {
+      const N_SLOTS = 8;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < N_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.landHotbarSlots[i];
+            if (kind) this.onLandBuildPanelSelect?.(kind);
+            return true;
+          }
+        }
+      }
+    }
+    // Land build panel (left side) — check before ship build panel
+    if (this.landBuildMenuOpen) {
+      if (this.handleLandBuildPanelClick(x, y)) return true;
     }
     // Build panel (left side) — check before other panels
     if (this.buildMenuOpen) {
@@ -1411,6 +1515,197 @@ export class UIManager {
   }
 
   /**
+   * Handle a click on the left-side land build panel.
+   * Returns true if the click landed inside the panel.
+   */
+  private handleLandBuildPanelClick(x: number, y: number): boolean {
+    const W = UIManager.BUILD_PANEL_W;
+    const ENTRY_H = UIManager.BUILD_PANEL_ENTRY_H;
+    const HEADER_H = UIManager.BUILD_PANEL_HEADER_H;
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const totalH = HEADER_H + entries.length * ENTRY_H + 8;
+    const panelY = (this.canvas.height - totalH) / 2;
+
+    if (x < 0 || x > W || y < panelY || y > panelY + totalH) {
+      // Click outside panel closes it
+      if (x > W) {
+        this.onLandBuildPanelSelect?.(this._pendingLandBuildKind ?? '');
+        // Let caller close via callback; don't consume click
+      }
+      return false;
+    }
+
+    const relY = y - panelY - HEADER_H;
+    if (relY < 0) return true; // clicked header area
+
+    const idx = Math.floor(relY / ENTRY_H);
+    if (idx >= 0 && idx < entries.length) {
+      this._pendingLandBuildKind = entries[idx].kind;
+      this.onLandBuildPanelSelect?.(entries[idx].kind);
+    }
+    return true;
+  }
+
+  /**
+   * Render the land build panel on the left side of the screen.
+   */
+  private renderLandBuildMenuPanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const W      = UIManager.BUILD_PANEL_W;
+    const EH     = UIManager.BUILD_PANEL_ENTRY_H;
+    const HH     = UIManager.BUILD_PANEL_HEADER_H;
+    const PAD    = 10;
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const totalH = HH + entries.length * EH + 8;
+    const px     = 0;
+    const py     = Math.round((canvas.height - totalH) / 2);
+
+    // Top banner
+    const BANNER_H = 40;
+    const cw = canvas.width;
+    ctx.save();
+    const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+    bannerGrad.addColorStop(0, '#3d2800');
+    bannerGrad.addColorStop(1, '#1e1200');
+    ctx.fillStyle = bannerGrad;
+    ctx.fillRect(0, 0, cw, BANNER_H);
+    ctx.strokeStyle = '#cc8833';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, BANNER_H);
+    ctx.lineTo(cw, BANNER_H);
+    ctx.stroke();
+    ctx.font = 'bold 18px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffcc66';
+    ctx.fillText(
+      this._totalLandGhosts > 0
+        ? `\uD83C\uDFD7  BUILD MODE (LAND) \u2014 Select structure  |  [B] Exit  |  [Enter] Build All (${this._totalLandGhosts})  |  [RMB] Remove`
+        : '\uD83C\uDFD7  BUILD MODE (LAND) \u2014 Select structure  |  [B] Exit  |  [Click] Place',
+      cw / 2, BANNER_H / 2
+    );
+    ctx.restore();
+
+    ctx.save();
+
+    // Panel background
+    ctx.fillStyle = 'rgba(14,10,4,0.90)';
+    ctx.strokeStyle = 'rgba(180,130,50,0.45)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, totalH, [0, 8, 8, 0]);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = 'rgba(60,40,10,0.90)';
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, HH, [0, 8, 0, 0]);
+    ctx.fill();
+    ctx.fillStyle = '#ffcc66';
+    ctx.font = 'bold 12px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('\uD83C\uDFD7  BUILD (LAND)  [B]', px + W / 2, py + HH / 2);
+
+    // Entries
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const ey = py + HH + i * EH;
+      const isPending = this._pendingLandBuildKind === e.kind;
+      const isHovered = this.mouseX >= px && this.mouseX < px + W
+        && this.mouseY >= ey && this.mouseY < ey + EH;
+
+      // Row background
+      if (isPending) {
+        ctx.fillStyle = 'rgba(180,100,20,0.30)';
+      } else if (isHovered) {
+        ctx.fillStyle = 'rgba(120,80,20,0.22)';
+      } else {
+        ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.03)' : 'transparent';
+      }
+      ctx.fillRect(px + 2, ey + 1, W - 4, EH - 2);
+
+      // Color swatch circle
+      const swatchX = px + PAD + 10;
+      const swatchY = ey + EH / 2;
+      const swatchR = 10;
+      ctx.fillStyle = e.color;
+      ctx.strokeStyle = isPending ? '#ffaa44' : e.borderColor;
+      ctx.lineWidth = isPending ? 2 : 1.5;
+      ctx.beginPath();
+      ctx.arc(swatchX, swatchY, swatchR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Symbol
+      ctx.fillStyle = '#fff';
+      ctx.font = `${swatchR * 1.1}px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, swatchX, swatchY + 1);
+
+      // Label
+      ctx.fillStyle = isPending ? '#ffcc66' : isHovered ? '#ffe0aa' : '#d0c8b0';
+      ctx.font = isPending ? 'bold 13px Georgia, serif' : '13px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.label, swatchX + swatchR + 8, ey + EH / 2);
+
+      // Ghost count badge
+      const ghostCount = this._landGhostCounts.get(e.kind) ?? 0;
+      if (ghostCount > 0) {
+        const badgeText = `×${ghostCount}`;
+        ctx.font = 'bold 11px monospace';
+        const badgeW = ctx.measureText(badgeText).width + 8;
+        const badgeX = px + W - 24 - badgeW;
+        const badgeY = ey + (EH - 16) / 2;
+        ctx.fillStyle = 'rgba(220,110,20,0.85)';
+        ctx.beginPath();
+        ctx.roundRect(badgeX, badgeY, badgeW, 16, 4);
+        ctx.fill();
+        ctx.fillStyle = '#fff8e0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, badgeX + badgeW / 2, badgeY + 8);
+      }
+
+      // Pending arrow
+      if (isPending) {
+        ctx.fillStyle = '#ffaa44';
+        ctx.font = '13px Georgia, serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('\u25B6', px + W - 8, ey + EH / 2);
+      }
+
+      // Separator
+      if (i < entries.length - 1) {
+        ctx.strokeStyle = 'rgba(180,130,50,0.18)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px + 8, ey + EH);
+        ctx.lineTo(px + W - 8, ey + EH);
+        ctx.stroke();
+      }
+    }
+
+    // Footer hint
+    ctx.fillStyle = 'rgba(200,160,80,0.6)';
+    ctx.font = '10px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      this._totalLandGhosts > 0
+        ? `[R] rotate  [RMB] remove  \u25b6 [Enter] build all (${this._totalLandGhosts})`
+        : '[R] rotate  [B] close',
+      px + W / 2, py + totalH - 6
+    );
+
+    ctx.restore();
+  }
+
+  /**
    * Test whether a click hits one of the build mode item buttons.
    * Returns true and fires the callback if so.
    * (Buttons removed — item type is determined by hotbar. Kept as stub so
@@ -1540,7 +1835,20 @@ export class UIManager {
     ctx.stroke();
 
     // Item label
-    const itemLabel = kind === 'wooden_floor' ? '\u229f WOODEN FLOOR' : '\u2692 WORKBENCH';
+    const STRUCT_LABELS: Record<string, string> = {
+      wooden_floor:      '\u229f WOODEN FLOOR',
+      workbench:         '\u2692 WORKBENCH',
+      wall:              '\u258b WALL',
+      door_frame:        '\u2293 DOOR FRAME',
+      door:              '\uD83D\uDEAA DOOR',
+      wood_ceiling:      '\u229e CEILING',
+      shipyard:          '\u26F5 SHIPYARD',
+      cannon:            '\u26AB CANNON',
+      flag_fort:         '\uD83D\uDEA9 FLAG FORT',
+      company_fortress:  '\uD83C\uDFF0 FORTRESS',
+      claim_flag:        '\uD83C\uDFF3 CLAIM FLAG',
+    };
+    const itemLabel = STRUCT_LABELS[kind] ?? `\u229f ${kind.toUpperCase()}`;
 
     // Status suffix
     let status = '';
@@ -1551,8 +1859,11 @@ export class UIManager {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
+    const confirmHint = this._totalLandGhosts > 0
+      ? `  |  [Enter] Build All (${this._totalLandGhosts})  |  [RMB] Remove`
+      : '  |  [Esc / change slot] Cancel';
     ctx.fillText(
-      `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Place  |  [Esc / change slot] Cancel${status}`,
+      `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Plan${confirmHint}${status}`,
       cw / 2, BANNER_H / 2
     );
 
@@ -1812,6 +2123,7 @@ export class UIManager {
   private initializeUIElements(): void {
     // Initialize HUD
     this.elements.set(UIElementType.HUD, new HUDElement());
+    this._loadHotbars();
     
     // Initialize Debug Overlay
     this.elements.set(UIElementType.DEBUG_OVERLAY, new DebugOverlayElement());
@@ -1825,6 +2137,38 @@ export class UIManager {
     this.updateElementVisibility();
   }
   
+  /** Persist current hotbar selections to localStorage. */
+  private _saveHotbars(): void {
+    try {
+      localStorage.setItem('pirate_mmo_land_hotbar', JSON.stringify(this.landHotbarSlots));
+      localStorage.setItem('pirate_mmo_ship_hotbar', JSON.stringify(this.buildHotbarSlots));
+    } catch { /* quota exceeded or private mode — ignore */ }
+  }
+
+  /** Restore hotbar selections from localStorage, validating each entry. */
+  private _loadHotbars(): void {
+    const validLand = new Set(UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind));
+    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','chest']);
+    try {
+      const landRaw = localStorage.getItem('pirate_mmo_land_hotbar');
+      if (landRaw) {
+        const parsed: unknown[] = JSON.parse(landRaw);
+        if (Array.isArray(parsed) && parsed.length === 8) {
+          this.landHotbarSlots = parsed.map(v => (typeof v === 'string' && validLand.has(v)) ? v : null);
+        }
+      }
+    } catch { /* corrupt data — keep defaults */ }
+    try {
+      const shipRaw = localStorage.getItem('pirate_mmo_ship_hotbar');
+      if (shipRaw) {
+        const parsed: unknown[] = JSON.parse(shipRaw);
+        if (Array.isArray(parsed) && parsed.length === 8) {
+          this.buildHotbarSlots = parsed.map(v => (typeof v === 'string' && validShip.has(v)) ? v as GhostModuleKind : null);
+        }
+      }
+    } catch { /* corrupt data — keep defaults */ }
+  }
+
   private updateElementVisibility(): void {
     this.elements.get(UIElementType.HUD)!.visible = true;
     this.elements.get(UIElementType.DEBUG_OVERLAY)!.visible = this.showDebugOverlay;
@@ -2228,6 +2572,12 @@ class HUDElement implements UIElement {
   public buildHotbarActiveSlot = 0;
   /** Set to true when ship build mode is active. */
   public inShipBuildMode = false;
+  /** Set to true when land build mode is active (panel open or structure selected). */
+  public inLandBuildMode = false;
+  /** The currently selected land structure kind (highlighted in land build hotbar). */
+  public selectedLandKind: string | null = null;
+  /** 8 land schematic hotbar slots; string kind or null = empty. */
+  public landHotbarSlots: (string | null)[] = UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind);
 
   // ── Tooltip hover-delay tracking (500 ms) ─────────────────────────────
   private _ttHoverKey   = '';
@@ -2328,12 +2678,34 @@ class HUDElement implements UIElement {
     ctx.fillStyle = '#aaffcc';
     ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52);
 
-    // Ship + current deck
-    ctx.fillStyle = '#cccccc';
-    const _deckLabel = player.onDeck
-      ? (player.deckId === 0 ? 'Lower deck' : 'Upper deck')
-      : 'Off ship';
-    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '\u2014'}  ${_deckLabel}`, BX + 10, BY + 68);
+    // Ship info OR island info depending on where the player is
+    if (player.onIslandId > 0) {
+      const island = context.worldState.islands?.find(i => i.id === player.onIslandId);
+      const preset = island ? (island.preset.charAt(0).toUpperCase() + island.preset.slice(1)) : '?';
+      ctx.fillStyle = '#aaffaa';
+      ctx.fillText(`Island #${player.onIslandId}  ${preset}`, BX + 10, BY + 68);
+      if (island) {
+        const live = (type: IslandResource['type']) =>
+          island.resources.filter(r => r.type === type && (r.hp ?? 0) > 0).length;
+        const wood   = live('wood');
+        const fiber  = live('fiber');
+        const rock   = live('rock');
+        const boulder = live('boulder');
+        const parts: string[] = [];
+        if (wood)    parts.push(`${wood}W`);
+        if (fiber)   parts.push(`${fiber}Fi`);
+        if (rock)    parts.push(`${rock}Rk`);
+        if (boulder) parts.push(`${boulder}Bo`);
+        ctx.fillStyle = '#88cc88';
+        ctx.fillText(parts.length ? `Res: ${parts.join('  ')}` : 'No resources', BX + 10, BY + 82);
+      }
+    } else {
+      const _deckLabel = player.onDeck
+        ? (player.deckId === 0 ? 'Lower deck' : 'Upper deck')
+        : 'Off ship';
+      ctx.fillStyle = '#cccccc';
+      ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '\u2014'}  ${_deckLabel}`, BX + 10, BY + 68);
+    }
 
     // Velocity
     ctx.fillStyle = '#bbbbbb';
@@ -2426,7 +2798,9 @@ class HUDElement implements UIElement {
     const helmMode = context.mountKind === 'helm'
       ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
       : undefined;
-    if (this.inShipBuildMode) {
+    if (this.inLandBuildMode) {
+      this.renderLandBuildHotbar(ctx, ctx.canvas);
+    } else if (this.inShipBuildMode) {
       this.renderBuildHotbar(ctx, ctx.canvas);
     } else {
       this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
@@ -2756,6 +3130,95 @@ class HUDElement implements UIElement {
       // Slot key number
       ctx.font = '9px monospace';
       ctx.fillStyle = isActive ? '#ffcc44' : '#776655';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i + 1), sx + 3, sy + 3);
+    }
+
+    ctx.restore();
+  }
+
+  /** Renders the land structure build hotbar (replaces regular hotbar in land build mode). */
+  private renderLandBuildHotbar(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const slots = this.landHotbarSlots;
+    const N_SLOTS = 8;
+    const SLOT_SIZE = 48;
+    const SLOT_GAP = 4;
+    const PADDING = 6;
+    const LABEL_H = 16;
+    const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const startY = canvas.height - totalH - 8;
+
+    ctx.save();
+
+    // Background — amber/brown tint
+    ctx.fillStyle = 'rgba(20,12,0,0.88)';
+    ctx.fillRect(startX, startY, totalW, totalH);
+    ctx.strokeStyle = '#cc8822';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(startX, startY, totalW, totalH);
+
+    // "BUILD LAND" label bottom-left
+    ctx.font = 'bold 9px Georgia, serif';
+    ctx.fillStyle = '#ffcc44';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('BUILD LAND', startX + 4, startY + totalH - LABEL_H + 2);
+
+    for (let i = 0; i < N_SLOTS; i++) {
+      const kind = slots[i] ?? null;
+      const e = kind ? UIManager.LAND_BUILD_PANEL_ENTRIES.find(ent => ent.kind === kind) : null;
+      const isActive = kind !== null && this.selectedLandKind === kind;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+
+      // Slot background
+      ctx.fillStyle = isActive ? 'rgba(180,100,0,0.50)' : 'rgba(25,15,5,0.75)';
+      ctx.strokeStyle = isActive ? '#ffcc44' : '#6a4400';
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, SLOT_SIZE, SLOT_SIZE, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      if (e) {
+        // Module color swatch
+        const swatchSize = 28;
+        const swatchX = sx + (SLOT_SIZE - swatchSize) / 2;
+        const swatchY = sy + 6;
+        ctx.fillStyle = e.color;
+        ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
+        ctx.strokeStyle = e.borderColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(swatchX, swatchY, swatchSize, swatchSize);
+
+        // Symbol
+        ctx.font = 'bold 13px Georgia, serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(e.symbol, sx + SLOT_SIZE / 2, swatchY + swatchSize / 2);
+
+        // Short label
+        ctx.font = '8px Georgia, serif';
+        ctx.fillStyle = isActive ? '#ffee88' : '#b8905a';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(e.label.substring(0, 8), sx + SLOT_SIZE / 2, sy + SLOT_SIZE - 2);
+      } else {
+        // Empty slot
+        ctx.font = '14px Georgia, serif';
+        ctx.fillStyle = '#443322';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('—', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+      }
+
+      // Slot key number
+      ctx.font = '9px monospace';
+      ctx.fillStyle = isActive ? '#ffcc44' : '#665533';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillText(String(i + 1), sx + 3, sy + 3);

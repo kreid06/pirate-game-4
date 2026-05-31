@@ -163,8 +163,10 @@ export class InputManager {
   // Build menu (B key — open panel + ghost placement system)
   /** True while the build menu panel is open. Affects right-click and other input. */
   public buildMenuOpen: boolean = false;
-  /** Right-click while build menu is open — fires with world position. */
+  /** Right-click while build menu or island build mode is active — fires with world position. */
   public onBuildRightClick: ((worldPos: Vec2) => void) | null = null;
+  /** Enter key while in island build mode — confirm all pending land ghosts. */
+  public onBuildConfirm: (() => void) | null = null;
 
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
@@ -1251,6 +1253,13 @@ export class InputManager {
         if (this.onBuildModeToggle) this.onBuildModeToggle();
         event.preventDefault();
         break;
+      case 'Enter':
+        // Confirm all pending land structure ghosts (island build mode)
+        if (this.islandBuildMode && this.onBuildConfirm) {
+          this.onBuildConfirm();
+          event.preventDefault();
+        }
+        break;
       case 'KeyZ':
         if (!event.repeat) {
           if (this.onCombatModeToggle) this.onCombatModeToggle();
@@ -1606,8 +1615,8 @@ export class InputManager {
         if (this.onNpcStateCycle) this.onNpcStateCycle();
         return;
       }
-      // Build menu: right-click fires ghost-cancel / ghost-remove callback
-      if (this.buildMenuOpen && this.onBuildRightClick) {
+      // Build menu or island build mode: right-click fires ghost-cancel / ghost-remove callback
+      if ((this.buildMenuOpen || this.islandBuildMode) && this.onBuildRightClick) {
         this.onBuildRightClick(this.inputState.mouseWorldPosition);
       } else {
         if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;

@@ -67,6 +67,7 @@ export enum MessageType {
   SLOT_SELECT = 'slot_select',
   INV_SWAP = 'inv_swap',
   DROP_ITEM = 'drop_item',
+  DROP_RESOURCES = 'drop_resources',
   PICKUP_ITEM = 'pickup_item',
   UNEQUIP = 'unequip',
   GIVE_ITEM = 'give_item',
@@ -544,6 +545,13 @@ interface DropItemMessage extends NetworkMessage {
   slot: number;
 }
 
+interface DropResourcesMessage extends NetworkMessage {
+  type: MessageType.DROP_RESOURCES;
+  timestamp: number;
+  kind: string;
+  amount: number;
+}
+
 interface PickupItemMessage extends NetworkMessage {
   type: MessageType.PICKUP_ITEM;
   timestamp: number;
@@ -557,7 +565,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | DropResourcesMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage;
 
 /**
  * Main network manager class
@@ -1371,6 +1379,11 @@ export class NetworkManager {
   sendDropItem(slot: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.DROP_ITEM, timestamp: Date.now(), slot });
+  }
+
+  sendDropResources(kind: string, amount: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.DROP_RESOURCES, timestamp: Date.now(), kind, amount });
   }
 
   sendChatMessage(channel: string, text: string): void {

@@ -364,6 +364,12 @@ export function computeInventoryWeight(inv: PlayerInventory): number {
       total += (ITEM_DEFS[slot.item]?.weight ?? 0) * slot.quantity;
     }
   }
+  // Resource pool (wood/fiber/metal/stone) lives outside slots
+  const res = inv.resources;
+  total += (ITEM_DEFS.wood.weight  ?? 0) * res.wood;
+  total += (ITEM_DEFS.fiber.weight ?? 0) * res.fiber;
+  total += (ITEM_DEFS.metal.weight ?? 0) * res.metal;
+  total += (ITEM_DEFS.stone.weight ?? 0) * res.stone;
   return total;
 }
 

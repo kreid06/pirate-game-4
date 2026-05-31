@@ -1024,6 +1024,11 @@ static float player_inventory_weight(const WebSocketPlayer* p) {
 #define _EQ(f) do { unsigned k=(unsigned)p->inventory.equipment.f; if(k>0&&k<64) w+=ITEM_WEIGHT_KG[k]; } while(0)
     _EQ(helm); _EQ(torso); _EQ(legs); _EQ(feet); _EQ(hands); _EQ(shield);
 #undef _EQ
+    /* Resource pool — raw materials stored outside inventory slots */
+    w += ITEM_WEIGHT_KG[ITEM_WOOD]  * (float)p->res_wood;
+    w += ITEM_WEIGHT_KG[ITEM_FIBER] * (float)p->res_fiber;
+    w += ITEM_WEIGHT_KG[ITEM_METAL] * (float)p->res_metal;
+    w += ITEM_WEIGHT_KG[ITEM_STONE] * (float)p->res_stone;
     return w;
 }
 
@@ -2476,7 +2481,7 @@ static void handle_drop_item(WebSocketPlayer* player,
     di->quantity      = isl->quantity;
     /* Throw the item ~80 units ahead of the player so it can be tossed off a ship */
     {
-        const float THROW_DIST = 80.0f;
+        const float THROW_DIST = 40.0f;
         di->x = player->x + cosf(player->rotation) * THROW_DIST;
         di->y = player->y + sinf(player->rotation) * THROW_DIST;
     }
@@ -2490,6 +2495,84 @@ static void handle_drop_item(WebSocketPlayer* player,
     ws_send_text(client->fd, resp);
     log_info("📦  Player %u dropped item %u qty %u at (%.1f,%.1f) id=%u",
              player->player_id, (unsigned)di->item_kind, (unsigned)di->quantity,
+             (double)di->x, (double)di->y, di->id);
+}
+
+/* ── Drop a resource stack from the player's resource pool ──────────────────
+ * Message: {"type":"drop_resources","timestamp":N,"kind":"wood","amount":N}
+ * Creates a DroppedItem in the world so other players can pick it up. */
+static void handle_drop_resources(WebSocketPlayer* player,
+                                   struct WebSocketClient* client,
+                                   const char* payload)
+{
+    /* Parse kind */
+    char kind[32] = "";
+    const char* kp = strstr(payload, "\"kind\":");
+    if (kp) {
+        kp += 7;
+        while (*kp == ' ' || *kp == '"') kp++;
+        int ki = 0;
+        while (*kp && *kp != '"' && ki < 31) kind[ki++] = *kp++;
+        kind[ki] = '\0';
+    }
+    /* Parse amount */
+    int amount = 0;
+    const char* ap = strstr(payload, "\"amount\":");
+    if (ap) sscanf(ap + 9, "%d", &amount);
+
+    if (kind[0] == '\0' || amount <= 0) {
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_drop_resources\"}");
+        return;
+    }
+
+    /* Map kind → resource field and item kind */
+    uint16_t* res_field = NULL;
+    uint8_t   item_kind = 0;
+    if      (strcmp(kind, "wood")  == 0) { res_field = &player->res_wood;  item_kind = ITEM_WOOD;  }
+    else if (strcmp(kind, "fiber") == 0) { res_field = &player->res_fiber; item_kind = ITEM_FIBER; }
+    else if (strcmp(kind, "metal") == 0) { res_field = &player->res_metal; item_kind = ITEM_METAL; }
+    else if (strcmp(kind, "stone") == 0) { res_field = &player->res_stone; item_kind = ITEM_STONE; }
+    else {
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"unknown_resource_kind\"}");
+        return;
+    }
+
+    /* Clamp to what the player actually has */
+    if (amount > (int)*res_field) amount = (int)*res_field;
+    if (amount <= 0) {
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"no_resources\"}");
+        return;
+    }
+
+    /* Find a free dropped-item slot */
+    DroppedItem* di = NULL;
+    for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
+        if (!dropped_items[i].active) { di = &dropped_items[i]; break; }
+    }
+    if (!di) {
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"world_full\"}");
+        return;
+    }
+
+    /* Deduct */
+    *res_field = (uint16_t)(*res_field - amount);
+
+    /* Spawn the dropped item slightly ahead of the player */
+    di->id           = next_dropped_item_id++;
+    if (next_dropped_item_id == 0) next_dropped_item_id = 1;
+    di->item_kind    = item_kind;
+    di->quantity     = (uint16_t)amount;
+    di->x            = player->x + cosf(player->rotation) * 40.0f;
+    di->y            = player->y + sinf(player->rotation) * 40.0f;
+    di->spawn_time_ms = get_time_ms();
+    di->active       = true;
+
+    char resp[128];
+    snprintf(resp, sizeof(resp),
+        "{\"type\":\"message_ack\",\"status\":\"resources_dropped\",\"drop_id\":%u}", di->id);
+    ws_send_text(client->fd, resp);
+    log_info("🪵  Player %u dropped %d %s at (%.1f,%.1f) id=%u",
+             player->player_id, amount, kind,
              (double)di->x, (double)di->y, di->id);
 }
 
@@ -2520,6 +2603,33 @@ static void handle_pickup_item(WebSocketPlayer* player,
         ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"too_far\"}");
         return;
     }
+
+    /* ── Resource items go into the resource pool, not inventory slots ── */
+    {
+        uint16_t* res_field = NULL;
+        if      (di->item_kind == ITEM_WOOD)  res_field = &player->res_wood;
+        else if (di->item_kind == ITEM_FIBER) res_field = &player->res_fiber;
+        else if (di->item_kind == ITEM_METAL) res_field = &player->res_metal;
+        else if (di->item_kind == ITEM_STONE) res_field = &player->res_stone;
+        if (res_field) {
+            int new_val = (int)*res_field + (int)di->quantity;
+            if (new_val > 9999) new_val = 9999;
+            *res_field = (uint16_t)new_val;
+            di->active = false;
+            char resp[128];
+            snprintf(resp, sizeof(resp),
+                "{\"type\":\"message_ack\",\"status\":\"item_picked_up\",\"slot\":-1}");
+            ws_send_text(client->fd, resp);
+            log_info("🪵  Player %u picked up %u %s (drop id %u) into resource pool",
+                     player->player_id, (unsigned)di->quantity,
+                     di->item_kind == ITEM_WOOD  ? "wood"  :
+                     di->item_kind == ITEM_FIBER ? "fiber" :
+                     di->item_kind == ITEM_METAL ? "metal" : "stone",
+                     item_id);
+            return;
+        }
+    }
+
     int free_slot = -1;
     /* First: try to stack into an existing slot with the same item */
     for (int i = 0; i < INVENTORY_SLOTS; i++) {
@@ -5382,6 +5492,21 @@ int websocket_server_update(struct Sim* sim) {
                                     handle_drop_item(player, client, payload);
                                     if (player->parent_ship_id != 0)
                                         recalc_ship_mass(find_ship(player->parent_ship_id));
+                                } else {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "drop_resources") == 0) {
+                            // DROP RESOURCES: player dropped a stack from the resource pool
+                            // {"type":"drop_resources","kind":"wood","amount":N}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_drop_resources(player, client, payload);
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }

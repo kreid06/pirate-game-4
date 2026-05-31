@@ -120,13 +120,6 @@ const HAND_RECIPES: HandRecipe[] = [
   { output: 'pickaxe',       outputQty: 1, cost: [{ item: 'wood',  qty: 3  }, { item: 'stone', qty: 4 }],         category: 'TOOLS'        },
   { output: 'hammer',        outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'TOOLS'        },
   { output: 'claim_flag',    outputQty: 1, cost: [{ item: 'wood',  qty: 5  }],                                    category: 'TOOLS'        },
-  // Construction
-  { output: 'wooden_floor',  outputQty: 1, cost: [{ item: 'wood',  qty: 20 }],                                    category: 'CONSTRUCTION' },
-  { output: 'wood_ceiling',  outputQty: 1, cost: [{ item: 'wood',  qty: 15 }],                                    category: 'CONSTRUCTION' },
-  { output: 'wall',          outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
-  { output: 'door_frame',    outputQty: 1, cost: [{ item: 'wood',  qty: 6  }],                                    category: 'CONSTRUCTION' },
-  { output: 'door',          outputQty: 1, cost: [{ item: 'wood',  qty: 4  }],                                    category: 'CONSTRUCTION' },
-  { output: 'workbench',     outputQty: 1, cost: [{ item: 'wood',  qty: 10 }],                                    category: 'CONSTRUCTION' },
 ];
 
 /** Mirrors server player_armor_value() — sum of flat armour from cloth gear. */
@@ -143,7 +136,7 @@ function _calcArmorValue(eq: { helm: ItemKind; torso: ItemKind; legs: ItemKind; 
 
 export class PlayerMenu {
   public visible = false;
-  private activeTab: 'character' | 'skills' = 'character';
+  private activeTab: 'character' | 'skills' | 'schematics' = 'character';
 
   /** Set by UIManager; called when the player clicks an affordable upgrade button. */
   public onUpgradeRequest: ((stat: string) => void) | null = null;
@@ -163,6 +156,23 @@ export class PlayerMenu {
   private _craftBtnHits: CraftHit[] = [];
   private _craftTab = 'SURVIVAL';
   private _craftTabHits: Array<{ label: string; x: number; y: number; w: number; h: number }> = [];
+  private _schematicsSubTab: 'LAND' | 'SHIP' = 'LAND';
+  private _schematicsSubTabHits: Array<{ label: 'LAND' | 'SHIP'; x: number; y: number; w: number; h: number }> = [];
+  /** Which hotbar slot is currently selected for assignment (-1 = none). */
+  private _schematicsSelectedSlot = -1;
+  /** Hit areas for the 8 hotbar slots in the schematics tab. */
+  private _schematicsHotbarHits: Array<{ slot: number; x: number; y: number; w: number; h: number }> = [];
+  /** Hit areas for each schematic card (for click-to-assign). */
+  private _schematicsCardHits: Array<{ idx: number; kind: string; x: number; y: number; w: number; h: number }> = [];
+
+  /** Current land hotbar slots — set by UIManager before each render. */
+  public landHotbarSlots: (string | null)[] = [];
+  /** Current ship hotbar slots — set by UIManager before each render. */
+  public shipHotbarSlots: (string | null)[] = [];
+  /** Callback to assign a kind to a land hotbar slot (null = clear). */
+  public onSetLandHotbarSlot: ((idx: number, kind: string | null) => void) | null = null;
+  /** Callback to assign a kind to a ship hotbar slot (null = clear). */
+  public onSetShipHotbarSlot: ((idx: number, kind: string | null) => void) | null = null;
 
   /** Called when player clicks an affordable CRAFT button. */
   public onCraftRequest: ((outputItem: ItemKind, qty: number) => void) | null = null;
@@ -176,11 +186,17 @@ export class PlayerMenu {
   // Equipment slot hit-test records (slot name → canvas rect) set each frame
   private _equipSlotHits: Array<{ slot: string; item: ItemKind; x: number; y: number; w: number; h: number }> = [];
 
-  // Inventory grid scroll state
+  // Inventory grid scroll state (kept for drag hit-testing caches)
   private _invScrollY    = 0;
-  private _invGridY      = 0;   // canvas-y where the grid slots start
-  private _invContentH   = 0;   // total pixel height of all rows
-  private _invViewportH  = 0;   // clipped viewport height
+  private _invGridY      = 0;
+  private _invContentH   = 0;
+  private _invViewportH  = 0;
+
+  // Whole-panel scroll (character tab)
+  private _panelScrollY    = 0;   // current scroll offset in px
+  private _panelContentH   = 0;   // total content height (measured each frame)
+  private _contentStartY   = 0;   // canvas Y where scrollable content begins
+  private _contentViewH    = 0;   // height of the visible content area
 
   // Drag-and-drop state
   private _dragSlot    = -1;   // source slot index, -1 = not dragging
@@ -213,24 +229,128 @@ export class PlayerMenu {
   private _resDragMax = 0;
   private _resDragColor = '#888';
   private _resDragLabel = '';
+
+  // Schematic card drag-and-drop state
+  private _schemDragKind: string | null = null;
+  private _schemDragX = 0;
+  private _schemDragY = 0;
+  /** Bounds of the card where the drag started — ghost is hidden until cursor leaves this area. */
+  private _schemDragSrc: { x: number; y: number; w: number; h: number } | null = null;
+  private _schemDragActive = false; // true once cursor has left the source card
+
+  /** Last known cursor position — updated in handleMouseMove, used by handleKeyDown. */
+  private _lastMouseX = 0;
+  private _lastMouseY = 0;
+  /** Non-null while mouse is hovering a resource chip — drives the tooltip render. */
+  private _resHoverTooltip: {
+    cx: number; cy: number; // chip centre-x, chip top-y
+    label: string; color: string;
+    desc: string; kgPerUnit: number; qty: number;
+  } | null = null;
   /** Non-null while the drop-quantity slider is open. */
   private _resDropSlider: {
     key:    keyof PlayerResources;
     label:  string;
     color:  string;
     max:    number;
-    amount: number;                 // currently selected quantity
-    trackX: number; trackY: number; trackW: number; // slider track hit region
+    amount: number;
+    sliderDragging: boolean;
+    typing:     boolean;   // true while user is typing a number
+    typingStr:  string;    // raw typed digits
+    amountHit: { x: number; y: number; w: number; h: number }; // click to type
+    trackX: number; trackY: number; trackW: number;
     confirmHit: { x: number; y: number; w: number; h: number };
     cancelHit:  { x: number; y: number; w: number; h: number };
   } | null = null;
 
+  /** Keyboard listener registered while the drop slider is open. */
+  private _sliderKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+
   toggle(): void { this.visible = !this.visible; }
-  open():   void { this.visible = true; this.activeTab = 'character'; }
-  close():  void { this.visible = false; }
+  open():   void { this.visible = true; this.activeTab = 'character'; this._panelScrollY = 0; this._schematicsSubTab = 'LAND'; this._schematicsSelectedSlot = -1; }
+  close():  void { this.visible = false; this._closeDropSlider(); }
 
   /** Open directly to the Skills tab. */
   openSkillsTab(): void { this.visible = true; this.activeTab = 'skills'; }
+
+  // ── Drop-slider helpers ────────────────────────────────────────────────
+
+  private _closeDropSlider(): void {
+    this._resDropSlider = null;
+    if (this._sliderKeyHandler) {
+      document.removeEventListener('keydown', this._sliderKeyHandler, true);
+      this._sliderKeyHandler = null;
+    }
+  }
+
+  private _openDropSlider(key: keyof PlayerResources, label: string, color: string, max: number, cw: number, ch: number): void {
+    this._closeDropSlider(); // clean up any previous
+    const SW = 320, SH = 200;
+    const BTN_W = 90, BTN_H = 32;
+    const sx = Math.round((cw - SW) / 2);
+    const sy = Math.round((ch - SH) / 2);
+    const trackY = sy + 110;
+    const inputW = 80, inputH = 30;
+    this._resDropSlider = {
+      key, label, color, max, amount: max,
+      sliderDragging: false,
+      typing: false, typingStr: String(max),
+      amountHit: { x: sx + SW / 2 - inputW / 2, y: sy + 36, w: inputW, h: inputH },
+      trackX: sx + 24, trackY, trackW: SW - 48,
+      confirmHit: { x: sx + SW / 2 - BTN_W - 8, y: sy + SH - BTN_H - 12, w: BTN_W, h: BTN_H },
+      cancelHit:  { x: sx + SW / 2 + 8,          y: sy + SH - BTN_H - 12, w: BTN_W, h: BTN_H },
+    };
+    // Register keyboard handler for typing mode
+    this._sliderKeyHandler = (e: KeyboardEvent) => {
+      const s = this._resDropSlider;
+      if (!s) return;
+      if (!s.typing) {
+        // Pressing a digit while not in typing mode activates it
+        if (e.key >= '0' && e.key <= '9') {
+          s.typing = true;
+          s.typingStr = e.key;
+          s.amount = parseInt(s.typingStr, 10) || 1;
+          s.amount = Math.min(s.max, s.amount);
+          s.typingStr = String(s.amount);
+          e.preventDefault(); e.stopPropagation();
+        } else if (e.key === 'Enter') {
+          if (s.amount > 0) this.onDropResources?.(s.key, s.amount);
+          this._closeDropSlider();
+          e.preventDefault(); e.stopPropagation();
+        } else if (e.key === 'Escape') {
+          this._closeDropSlider();
+          e.preventDefault(); e.stopPropagation();
+        }
+        return;
+      }
+      // In typing mode
+      if (e.key >= '0' && e.key <= '9') {
+        s.typingStr += e.key;
+        const v = parseInt(s.typingStr, 10);
+        s.amount = isNaN(v) ? 1 : Math.max(1, Math.min(s.max, v));
+        // Keep display string in sync with the clamped value
+        if (!isNaN(v) && v > s.max) s.typingStr = String(s.max);
+      } else if (e.key === 'Backspace') {
+        s.typingStr = s.typingStr.slice(0, -1);
+        if (s.typingStr === '') {
+          s.amount = 1;
+        } else {
+          const v = parseInt(s.typingStr, 10);
+          s.amount = isNaN(v) ? 1 : Math.max(1, Math.min(s.max, v));
+        }
+      } else if (e.key === 'Enter') {
+        s.typing = false;
+        if (s.amount > 0) this.onDropResources?.(s.key, s.amount);
+        this._closeDropSlider();
+      } else if (e.key === 'Escape') {
+        s.typing = false;
+        s.typingStr = String(s.amount);
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    document.addEventListener('keydown', this._sliderKeyHandler, true);
+  }
 
   /**
    * Handle a click inside the player menu.
@@ -239,6 +359,33 @@ export class PlayerMenu {
    */
   handleClick(x: number, y: number): boolean {
     if (!this.visible) return false;
+
+    // Resource drop slider — takes priority over everything
+    if (this._resDropSlider) {
+      const s = this._resDropSlider;
+      // Click on amount display → enter typing mode
+      if (x >= s.amountHit.x && x <= s.amountHit.x + s.amountHit.w &&
+          y >= s.amountHit.y && y <= s.amountHit.y + s.amountHit.h) {
+        s.typing = true;
+        s.typingStr = '';
+        return true;
+      }
+      // Cancel
+      if (x >= s.cancelHit.x && x <= s.cancelHit.x + s.cancelHit.w &&
+          y >= s.cancelHit.y && y <= s.cancelHit.y + s.cancelHit.h) {
+        this._closeDropSlider();
+        return true;
+      }
+      // Confirm / drop
+      if (x >= s.confirmHit.x && x <= s.confirmHit.x + s.confirmHit.w &&
+          y >= s.confirmHit.y && y <= s.confirmHit.y + s.confirmHit.h) {
+        if (s.amount > 0) this.onDropResources?.(s.key, s.amount);
+        this._closeDropSlider();
+        return true;
+      }
+      return true; // consume all clicks while slider is open
+    }
+
     const px = this._panelX, py = this._panelY;
     // Outside panel → signal UIManager to close
     if (x < px || x > px + PANEL_W || y < py || y > py + PANEL_H) return false;
@@ -246,21 +393,61 @@ export class PlayerMenu {
     // Tab bar region
     const tabBarY = py + HEADER_H;
     if (y >= tabBarY && y < tabBarY + TAB_H) {
-      const tabW = PANEL_W / 2;
-      this.activeTab = x < px + tabW ? 'character' : 'skills';
+      const tabW = PANEL_W / 3;
+      const rel = x - px;
+      if      (rel < tabW)         this.activeTab = 'character';
+      else if (rel < tabW * 2)     this.activeTab = 'skills';
+      else                         this.activeTab = 'schematics';
       return true;
+    }
+
+    // Schematics sub-tab clicks
+    for (const hit of this._schematicsSubTabHits) {
+      if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+        this._schematicsSubTab = hit.label;
+        this._schematicsSelectedSlot = -1; // reset selection on sub-tab switch
+        return true;
+      }
+    }
+
+    // Schematics hotbar slot clicks
+    for (const hit of this._schematicsHotbarHits) {
+      if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+        // Toggle selection: clicking selected slot deselects it
+        this._schematicsSelectedSlot = this._schematicsSelectedSlot === hit.slot ? -1 : hit.slot;
+        return true;
+      }
+    }
+
+    // Schematics card clicks — assign to selected hotbar slot (or clear if already there)
+    if (this._schematicsSelectedSlot >= 0) {
+      for (const hit of this._schematicsCardHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          const slotIdx = this._schematicsSelectedSlot;
+          const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
+          const newKind = currentHotbar[slotIdx] === hit.kind ? null : hit.kind;
+          if (this._schematicsSubTab === 'LAND') {
+            this.onSetLandHotbarSlot?.(slotIdx, newKind);
+          } else {
+            this.onSetShipHotbarSlot?.(slotIdx, newKind);
+          }
+          this._schematicsSelectedSlot = -1; // deselect after assignment
+          return true;
+        }
+      }
     }
 
     // Level-up button
     const lub = this._levelUpBtnHit;
-    if (lub && x >= lub.x && x <= lub.x + lub.w && y >= lub.y && y <= lub.y + lub.h) {
+    if (lub && y >= this._contentStartY &&
+        x >= lub.x && x <= lub.x + lub.w && y >= lub.y && y <= lub.y + lub.h) {
       this.onPlayerLevelUp?.();
       return true;
     }
 
     // Upgrade buttons
     for (const btn of this._btnHits) {
-      if (btn.affordable &&
+      if (btn.affordable && y >= this._contentStartY &&
           x >= btn.x && x <= btn.x + btn.w &&
           y >= btn.y && y <= btn.y + btn.h) {
         this.onUpgradeRequest?.(btn.serverKey);
@@ -270,7 +457,8 @@ export class PlayerMenu {
 
     // Craft category tabs
     for (const tab of this._craftTabHits) {
-      if (x >= tab.x && x <= tab.x + tab.w &&
+      if (y >= this._contentStartY &&
+          x >= tab.x && x <= tab.x + tab.w &&
           y >= tab.y && y <= tab.y + tab.h) {
         this._craftTab = tab.label;
         return true;
@@ -279,7 +467,8 @@ export class PlayerMenu {
 
     // Craft buttons
     for (const btn of this._craftBtnHits) {
-      if (x >= btn.x && x <= btn.x + btn.w &&
+      if (y >= this._contentStartY &&
+          x >= btn.x && x <= btn.x + btn.w &&
           y >= btn.y && y <= btn.y + btn.h) {
         const r = HAND_RECIPES[btn.recipeIdx];
         this.onCraftRequest?.(r.output, r.outputQty);
@@ -289,7 +478,8 @@ export class PlayerMenu {
 
     // Equipment slot clicks — unequip filled slots
     for (const hit of this._equipSlotHits) {
-      if (x >= hit.x && x <= hit.x + hit.w &&
+      if (y >= this._contentStartY &&
+          x >= hit.x && x <= hit.x + hit.w &&
           y >= hit.y && y <= hit.y + hit.h) {
         this.onUnequipSlot?.(hit.slot);
         return true;
@@ -299,19 +489,61 @@ export class PlayerMenu {
     return true; // click inside panel — consume to avoid accidental close
   }
 
-  /** Handle mouse-wheel over the inventory grid. Returns true if consumed. */
+  /** Handle mouse-wheel over the character panel or drop slider. Returns true if consumed. */
   handleWheel(deltaY: number, _x: number, y: number): boolean {
-    if (!this.visible || this.activeTab !== 'character') return false;
-    if (y < this._invGridY || y > this._invGridY + this._invViewportH) return false;
-    const maxScroll = Math.max(0, this._invContentH - this._invViewportH);
+    if (!this.visible) return false;
+    // Adjust slider amount with scroll wheel
+    if (this._resDropSlider) {
+      const delta = deltaY > 0 ? -1 : 1;
+      const s = this._resDropSlider;
+      s.amount = Math.max(1, Math.min(s.max, s.amount + delta));
+      return true;
+    }
+    if (this.activeTab !== 'character' && this.activeTab !== 'schematics') return false;
+    if (y < this._contentStartY || y > this._panelY + PANEL_H) return false;
+    const maxScroll = Math.max(0, this._panelContentH - this._contentViewH);
     if (maxScroll === 0) return false;
-    this._invScrollY = Math.max(0, Math.min(maxScroll, this._invScrollY + deltaY * 0.4));
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this._panelScrollY + deltaY * 0.5));
     return true;
   }
 
-  /** Begin a drag if the mousedown lands on an inventory slot or resource chip. Returns true if consumed. */
+  /** Begin a drag if the mousedown lands on an inventory slot, resource chip, or schematic card. Returns true if consumed. */
   handleMouseDown(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
-    if (!this.visible || this.activeTab !== 'character') return false;
+    if (!this.visible) return false;
+
+    // Schematics tab: drag a card to assign it to a hotbar slot
+    if (this.activeTab === 'schematics') {
+      for (const hit of this._schematicsCardHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          this._schemDragKind   = hit.kind;
+          this._schemDragX      = x;
+          this._schemDragY      = y;
+          this._schemDragSrc    = { x: hit.x, y: hit.y, w: hit.w, h: hit.h };
+          this._schemDragActive = false;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (this.activeTab !== 'character') return false;
+
+    // Slider thumb drag — start dragging if mousedown on track
+    if (this._resDropSlider) {
+      const s = this._resDropSlider;
+      const tY = s.trackY + 4;
+      const TRACK_HIT = 20;
+      if (y >= tY - TRACK_HIT && y <= tY + TRACK_HIT &&
+          x >= s.trackX - 8 && x <= s.trackX + s.trackW + 8) {
+        s.sliderDragging = true;
+        s.typing = false; // exit typing mode when starting drag
+        const ratio = Math.max(0, Math.min(1, (x - s.trackX) / s.trackW));
+        s.amount = Math.max(1, Math.round(ratio * s.max));
+        s.typingStr = String(s.amount);
+        return true;
+      }
+      return false; // let handleClick process button/amountHit taps
+    }
 
     // Resource chip drag — only if the chip has > 0 quantity
     for (const chip of this._resChipHits) {
@@ -338,9 +570,30 @@ export class PlayerMenu {
 
   /** Update drag ghost position. */
   handleMouseMove(x: number, y: number): void {
+    this._lastMouseX = x;
+    this._lastMouseY = y;
+    // Slider thumb drag
+    if (this._resDropSlider?.sliderDragging) {
+      const s = this._resDropSlider;
+      const ratio = Math.max(0, Math.min(1, (x - s.trackX) / s.trackW));
+      s.amount = Math.max(1, Math.round(ratio * s.max));
+      s.typingStr = String(s.amount);
+      return;
+    }
     if (this._resDragKey !== null) {
       this._resDragX = x;
       this._resDragY = y;
+    }
+    if (this._schemDragKind !== null) {
+      this._schemDragX = x;
+      this._schemDragY = y;
+      // Activate ghost once cursor leaves the source card
+      if (!this._schemDragActive && this._schemDragSrc) {
+        const s = this._schemDragSrc;
+        if (x < s.x || x > s.x + s.w || y < s.y || y > s.y + s.h) {
+          this._schemDragActive = true;
+        }
+      }
     }
     if (this._dragSlot !== -1) {
       this._dragX = x;
@@ -354,6 +607,12 @@ export class PlayerMenu {
    * Returns true if consumed.
    */
   handleMouseUp(x: number, y: number): boolean {
+    // End slider thumb drag
+    if (this._resDropSlider?.sliderDragging) {
+      this._resDropSlider.sliderDragging = false;
+      return true;
+    }
+
     // Resource chip drag — if released outside panel, open the drop slider
     if (this._resDragKey !== null) {
       const key   = this._resDragKey;
@@ -364,23 +623,27 @@ export class PlayerMenu {
       const px2 = this._panelX, py2 = this._panelY;
       const outsidePanel2 = x < px2 || x > px2 + PANEL_W || y < py2 || y > py2 + PANEL_H;
       if (outsidePanel2 && max > 0) {
-        // Build slider popup centered on canvas
-        const SW = 320, SH = 160;
-        const cw = this._lastCanvasW, ch = this._lastCanvasH;
-        const sx = Math.round((cw - SW) / 2);
-        const sy = Math.round((ch - SH) / 2);
-        const BTN_W = 90, BTN_H = 32;
-        const trackH = 10;
-        const trackY = sy + 90;
-        this._resDropSlider = {
-          key, label, color, max, amount: max,
-          trackX: sx + 24, trackY, trackW: SW - 48,
-          confirmHit: { x: sx + SW / 2 - BTN_W - 8, y: sy + SH - BTN_H - 12, w: BTN_W, h: BTN_H },
-          cancelHit:  { x: sx + SW / 2 + 8,          y: sy + SH - BTN_H - 12, w: BTN_W, h: BTN_H },
-        };
+        this._openDropSlider(key, label, color, max, this._lastCanvasW, this._lastCanvasH);
         return true;
       }
       return false;
+    }
+
+    // Schematic drag: drop onto a hotbar slot to assign (or clear if already there)
+    if (this._schemDragKind !== null) {
+      const kind = this._schemDragKind;
+      this._schemDragKind = null;
+      for (const hit of this._schematicsHotbarHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
+          const newKind = currentHotbar[hit.slot] === kind ? null : kind;
+          if (this._schematicsSubTab === 'LAND') this.onSetLandHotbarSlot?.(hit.slot, newKind);
+          else this.onSetShipHotbarSlot?.(hit.slot, newKind);
+          this._schematicsSelectedSlot = -1;
+          return true;
+        }
+      }
+      return true;
     }
 
     if (this._dragSlot === -1) return false;
@@ -413,12 +676,54 @@ export class PlayerMenu {
   }
 
   /**
+   * Handle a key press while the player menu is open.
+   * Pressing 1–8 while hovering a schematic card assigns it to that hotbar slot.
+   * Returns true if consumed.
+   */
+  handleKeyDown(key: string): boolean {
+    if (!this.visible || this.activeTab !== 'schematics') return false;
+    const slotIdx = parseInt(key, 10);
+    if (isNaN(slotIdx) || slotIdx < 1 || slotIdx > 8) return false;
+    const idx = slotIdx - 1; // 0-based
+    // Find which schematic the cursor is currently over
+    const hovered = this._schematicsCardHits.find(
+      h => this._lastMouseX >= h.x && this._lastMouseX <= h.x + h.w &&
+           this._lastMouseY >= h.y && this._lastMouseY <= h.y + h.h,
+    );
+    if (!hovered) return false;
+    const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
+    const newKind = currentHotbar[idx] === hovered.kind ? null : hovered.kind;
+    if (this._schematicsSubTab === 'LAND') this.onSetLandHotbarSlot?.(idx, newKind);
+    else this.onSetShipHotbarSlot?.(idx, newKind);
+    this._schematicsSelectedSlot = -1;
+    return true;
+  }
+
+  /**
    * Handle a right-click inside the player menu (character tab).
    * Right-clicking an armour/shield item in the inventory bag equips it.
    * Returns true if consumed.
    */
   handleRightClick(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
-    if (!this.visible || this.activeTab !== 'character') return false;
+    if (!this.visible) return false;
+
+    // Schematics tab: right-click hotbar slot to clear it
+    if (this.activeTab === 'schematics') {
+      for (const hit of this._schematicsHotbarHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          if (this._schematicsSubTab === 'LAND') {
+            this.onSetLandHotbarSlot?.(hit.slot, null);
+          } else {
+            this.onSetShipHotbarSlot?.(hit.slot, null);
+          }
+          this._schematicsSelectedSlot = -1;
+          return true;
+        }
+      }
+      return false;
+    }
+
+    if (this.activeTab !== 'character') return false;
     // Right-click on a filled equipment slot → unequip
     for (const hit of this._equipSlotHits) {
       if (hit.item !== 'none' && x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
@@ -498,6 +803,7 @@ export class PlayerMenu {
     this._btnHits = [];
     this._craftBtnHits = [];
     this._craftTabHits = [];
+    this._schematicsSubTabHits = [];
 
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
@@ -505,6 +811,12 @@ export class PlayerMenu {
 
     if (this.activeTab === 'skills') {
       this._skillsTab(ctx, px, cur, py + PANEL_H, player ?? null);
+      ctx.restore();
+      return;
+    }
+
+    if (this.activeTab === 'schematics') {
+      this._schematicsTab(ctx, px, cur, py + PANEL_H, player ?? null);
       ctx.restore();
       return;
     }
@@ -523,10 +835,292 @@ export class PlayerMenu {
       ? worldState.ships.find(s => s.id === player.carrierId) ?? null
       : null;
 
+    // ── Scrollable content area ────────────────────────────────────────────
+    const contentStartY = cur;
+    const contentViewH  = py + PANEL_H - contentStartY;
+    this._contentStartY = contentStartY;
+    this._contentViewH  = contentViewH;
+
+    // Clamp scroll
+    const maxPanelScroll = Math.max(0, this._panelContentH - contentViewH);
+    if (this._panelScrollY > maxPanelScroll) this._panelScrollY = maxPanelScroll;
+    if (this._panelScrollY < 0) this._panelScrollY = 0;
+
+    // Clip to content viewport and scroll
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, contentStartY, PANEL_W, contentViewH);
+    ctx.clip();
+
+    cur = contentStartY - this._panelScrollY;   // shifted start
+
     cur = this._equipmentAndStatus(ctx, px, cur, player, ship, worldState, mouseX, mouseY);
-    cur = this._resourcesSection(ctx, px, cur, player.inventory.resources);
+    cur = this._resourcesSection(ctx, px, cur, player.inventory.resources, mouseX, mouseY);
     cur = this._playerCrafting(ctx, px, cur, player);
     cur = this._inventoryGrid(ctx, px, cur, player, mouseX, mouseY);
+
+    // Measure total content so next frame's clamp is accurate
+    this._panelContentH = (cur + this._panelScrollY) - contentStartY;
+
+    ctx.restore(); // remove content clip
+
+    // Scrollbar for panel content
+    if (this._panelContentH > contentViewH + 4) {
+      const SB_W   = 4;
+      const sbX    = px + PANEL_W - 6;
+      const track  = contentViewH;
+      const thumb  = Math.max(24, (contentViewH / this._panelContentH) * track);
+      const thumbY = contentStartY + (this._panelScrollY / Math.max(1, this._panelContentH - contentViewH)) * (track - thumb);
+      ctx.fillStyle = 'rgba(255,255,255,0.1)';
+      ctx.fillRect(sbX, contentStartY, SB_W, track);
+      ctx.fillStyle = 'rgba(255,215,0,0.55)';
+      ctx.fillRect(sbX, thumbY, SB_W, thumb);
+    }
+
+    ctx.restore(); // remove the outer ctx.save() from render()
+
+    // Resource drop-quantity slider — rendered above everything else
+    if (this._resDropSlider) {
+      this._renderResDropSlider(ctx);
+    }
+
+    // Resource hover tooltip — rendered above everything, outside clip
+    if (this._resHoverTooltip) {
+      const tt = this._resHoverTooltip;
+      const TW = 178, TH = 100;
+      let ttX = tt.cx - TW / 2;
+      let ttY = tt.cy - TH - 6;
+      ttX = Math.max(4, Math.min(this._lastCanvasW - TW - 4, ttX));
+      ttY = Math.max(4, Math.min(this._lastCanvasH - TH - 4, ttY));
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.55)';
+      ctx.shadowBlur  = 10;
+      ctx.fillStyle   = 'rgba(8,12,22,0.97)';
+      ctx.beginPath();
+      ctx.roundRect(ttX, ttY, TW, TH, 5);
+      ctx.fill();
+      ctx.shadowBlur  = 0;
+      ctx.strokeStyle = tt.color;
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(ttX, ttY, TW, TH, 5);
+      ctx.stroke();
+
+      // Name
+      ctx.font         = 'bold 13px Georgia, serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = tt.color;
+      ctx.fillText(tt.label, ttX + 10, ttY + 10);
+
+      // Divider
+      ctx.strokeStyle = 'rgba(255,255,255,0.10)';
+      ctx.lineWidth   = 1;
+      ctx.beginPath();
+      ctx.moveTo(ttX + 8, ttY + 28); ctx.lineTo(ttX + TW - 8, ttY + 28);
+      ctx.stroke();
+
+      // Description
+      ctx.font      = '10px Georgia, serif';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText(tt.desc, ttX + 10, ttY + 33);
+
+      // Weight per unit row
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.textAlign    = 'left';
+      ctx.fillText('Weight per unit:', ttX + 10, ttY + 52);
+      ctx.fillStyle    = '#c4d8ee';
+      ctx.textAlign    = 'right';
+      ctx.fillText(`${tt.kgPerUnit.toFixed(1)} kg`, ttX + TW - 10, ttY + 52);
+
+      // Total weight row
+      const totalKg = tt.qty * tt.kgPerUnit;
+      ctx.textAlign    = 'left';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText('Total carried:', ttX + 10, ttY + 68);
+      ctx.textAlign    = 'right';
+      ctx.fillStyle    = totalKg > 0 ? '#a8e0a8' : '#556';
+      ctx.fillText(totalKg > 0 ? `${totalKg.toFixed(1)} kg` : '— empty', ttX + TW - 10, ttY + 68);
+
+      // In pool count
+      ctx.textAlign    = 'left';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText('In resource pool:', ttX + 10, ttY + 82);
+      ctx.textAlign    = 'right';
+      ctx.fillStyle    = tt.qty > 0 ? '#ffffff' : '#556';
+      ctx.fillText(tt.qty > 0 ? String(tt.qty) : 'none', ttX + TW - 10, ttY + 82);
+
+      ctx.restore();
+    }
+
+    // Resource drag ghost — small colored chip following the cursor
+    if (this._resDragKey !== null) {
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = this._resDragColor;
+      ctx.fillRect(this._resDragX - 16, this._resDragY - 16, 32, 32);
+      ctx.strokeStyle = '#fff';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(this._resDragX - 16, this._resDragY - 16, 32, 32);
+      ctx.font = 'bold 9px Georgia, serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(this._resDragLabel.substring(0, 2).toUpperCase(), this._resDragX, this._resDragY);
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    }
+  }
+
+  /** Render the drop-quantity slider popup (pure canvas, no HTML elements). */
+  private _renderResDropSlider(ctx: CanvasRenderingContext2D): void {
+    const s = this._resDropSlider!;
+    const SW = 320, SH = 200;
+    const sx = s.trackX - 24;
+    const sy = s.confirmHit.y - (SH - s.confirmHit.h - 12);
+
+    ctx.save();
+
+    // Backdrop dim
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(0, 0, this._lastCanvasW, this._lastCanvasH);
+
+    // Panel background
+    ctx.fillStyle = 'rgba(14,18,30,0.98)';
+    ctx.fillRect(sx, sy, SW, SH);
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(sx, sy, SW, SH);
+
+    // Title
+    ctx.font = 'bold 15px Georgia, serif';
+    ctx.fillStyle = s.color;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`Drop ${s.label}`, sx + SW / 2, sy + 12);
+
+    // ── Amount display / typing field ─────────────────────────────────────
+    const { amountHit: ah } = s;
+    const isTyping = s.typing;
+    const displayStr = isTyping
+      ? (s.typingStr.length > 0 ? s.typingStr : '0')
+      : String(s.amount);
+
+    // Field background
+    ctx.fillStyle = isTyping ? 'rgba(30,36,58,0.98)' : 'rgba(20,24,40,0.9)';
+    ctx.fillRect(ah.x, ah.y, ah.w, ah.h);
+
+    // Field border — gold when focused, dimmer otherwise
+    ctx.strokeStyle = isTyping ? '#ffee88' : '#ffcc44';
+    ctx.lineWidth = isTyping ? 2 : 1.5;
+    ctx.strokeRect(ah.x, ah.y, ah.w, ah.h);
+
+    // Amount text
+    ctx.font = 'bold 18px Georgia, serif';
+    ctx.fillStyle = isTyping ? '#ffee88' : '#fff8e0';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(displayStr, ah.x + ah.w / 2, ah.y + ah.h / 2);
+
+    // Blinking cursor when typing
+    if (isTyping && Math.floor(Date.now() / 500) % 2 === 0) {
+      const tw = ctx.measureText(displayStr).width;
+      const cx = ah.x + ah.w / 2 + tw / 2 + 2;
+      const cy = ah.y + 5;
+      ctx.fillStyle = '#ffee88';
+      ctx.fillRect(cx, cy, 2, ah.h - 10);
+    }
+
+    // Click hint below field
+    ctx.font = '10px Georgia, serif';
+    ctx.fillStyle = isTyping ? '#aaa' : '#556';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText(
+      isTyping ? 'type a number • Enter to confirm' : 'click to type  ·  of ' + s.max,
+      ah.x + ah.w / 2, ah.y + ah.h + 3,
+    );
+
+    // ── Slider track ──────────────────────────────────────────────────────
+    const TRACK_H = 8;
+    const { trackX, trackY, trackW } = s;
+    const tY = trackY + 4;
+
+    // Track background
+    ctx.fillStyle = '#1a1e2e';
+    ctx.fillRect(trackX, tY - TRACK_H / 2, trackW, TRACK_H);
+    ctx.strokeStyle = '#334';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(trackX, tY - TRACK_H / 2, trackW, TRACK_H);
+
+    // Filled portion
+    const ratio   = s.max > 0 ? s.amount / s.max : 0;
+    const fillW   = Math.round(trackW * ratio);
+    ctx.fillStyle = s.color;
+    ctx.fillRect(trackX, tY - TRACK_H / 2, fillW, TRACK_H);
+
+    // Min / Max labels
+    ctx.font = '9px Georgia, serif';
+    ctx.fillStyle = '#446';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('1', trackX, tY + TRACK_H / 2 + 3);
+    ctx.textAlign = 'right';
+    ctx.fillText(String(s.max), trackX + trackW, tY + TRACK_H / 2 + 3);
+
+    // Thumb — grows when dragging
+    const thumbX = trackX + fillW;
+    const thumbR  = s.sliderDragging ? 11 : 9;
+    // Shadow
+    ctx.shadowColor   = s.sliderDragging ? s.color : 'rgba(0,0,0,0.5)';
+    ctx.shadowBlur    = s.sliderDragging ? 8 : 4;
+    ctx.fillStyle     = s.sliderDragging ? '#fff' : '#dde';
+    ctx.beginPath();
+    ctx.arc(thumbX, tY, thumbR, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur    = 0;
+    ctx.strokeStyle   = s.sliderDragging ? '#ffee88' : s.color;
+    ctx.lineWidth     = s.sliderDragging ? 2.5 : 2;
+    ctx.stroke();
+    // Grip lines
+    ctx.strokeStyle   = s.sliderDragging ? '#888' : '#667';
+    ctx.lineWidth     = 1.5;
+    for (const dx of [-3, 0, 3]) {
+      ctx.beginPath();
+      ctx.moveTo(thumbX + dx, tY - 4);
+      ctx.lineTo(thumbX + dx, tY + 4);
+      ctx.stroke();
+    }
+
+    // ── Buttons ───────────────────────────────────────────────────────────
+    const c = s.confirmHit;
+    ctx.fillStyle = 'rgba(180,100,0,0.9)';
+    ctx.fillRect(c.x, c.y, c.w, c.h);
+    ctx.strokeStyle = '#ffcc44';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(c.x, c.y, c.w, c.h);
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.fillStyle = '#fff8e0';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('DROP', c.x + c.w / 2, c.y + c.h / 2);
+
+    const cc = s.cancelHit;
+    ctx.fillStyle = 'rgba(40,40,60,0.9)';
+    ctx.fillRect(cc.x, cc.y, cc.w, cc.h);
+    ctx.strokeStyle = '#445';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(cc.x, cc.y, cc.w, cc.h);
+    ctx.fillStyle = '#aaa';
+    ctx.fillText('CANCEL', cc.x + cc.w / 2, cc.y + cc.h / 2);
+
+    // Hint — rendered below the buttons
+    ctx.font = '10px Georgia, serif';
+    ctx.fillStyle = '#445';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('Drag • Scroll • Click amount to type', sx + SW / 2, s.confirmHit.y + s.confirmHit.h + 8);
 
     ctx.restore();
   }
@@ -953,19 +1547,20 @@ export class PlayerMenu {
     py = this._sectionHeader(ctx, px, py, 'HAND CRAFTING', 'no workbench required');
     py += 4;
 
-    // Count materials in player inventory
-    const counts: Partial<Record<ItemKind, number>> = {};
+    // Read materials from the resource pool (wood/fiber/metal/stone live there, not in slots)
+    const res = player.inventory.resources;
+    const counts: Partial<Record<ItemKind, number>> = {
+      wood:  res.wood,
+      fiber: res.fiber,
+      metal: res.metal,
+      stone: res.stone,
+    };
+    // Also count non-resource items still in slots (e.g. planks, repair kits used as ingredients)
     for (const slot of player.inventory.slots) {
-      if (slot.item !== 'none') {
+      if (slot.item !== 'none' && !(slot.item in counts)) {
         counts[slot.item] = (counts[slot.item] ?? 0) + slot.quantity;
       }
     }
-    // Add resource pool counts (wood/fiber/metal/stone are no longer in slots)
-    const res = player.inventory.resources;
-    if (res.wood  > 0) counts['wood']  = (counts['wood']  ?? 0) + res.wood;
-    if (res.fiber > 0) counts['fiber'] = (counts['fiber'] ?? 0) + res.fiber;
-    if (res.metal > 0) counts['metal'] = (counts['metal'] ?? 0) + res.metal;
-    if (res.stone > 0) counts['stone'] = (counts['stone'] ?? 0) + res.stone;
 
     const COLS   = 2;
     const GAP    = 8;
@@ -1125,60 +1720,103 @@ export class PlayerMenu {
     ctx: CanvasRenderingContext2D,
     px:  number, py: number,
     res: PlayerResources,
+    mouseX = 0, mouseY = 0,
   ): number {
-    py = this._sectionHeader(ctx, px, py, 'RESOURCES', '');
+    py = this._sectionHeader(ctx, px, py, 'RESOURCES', 'drag outside to drop');
     py += 6;
 
-    const items: Array<{ label: string; key: keyof PlayerResources; color: string; border: string; symbol: string }> = [
-      { label: 'Wood',  key: 'wood',  color: '#8b5e2a', border: '#5c3a10', symbol: 'W'  },
-      { label: 'Fiber', key: 'fiber', color: '#c8a46e', border: '#8a6030', symbol: 'Fi' },
-      { label: 'Metal', key: 'metal', color: '#8a8a8c', border: '#555558', symbol: 'Fe' },
-      { label: 'Stone', key: 'stone', color: '#9a9a9c', border: '#666668', symbol: 'St' },
+    const items: Array<{
+      label: string; key: keyof PlayerResources;
+      color: string; border: string; symbol: string;
+      kgPerUnit: number; desc: string;
+    }> = [
+      { label: 'Wood',  key: 'wood',  color: '#8b5e2a', border: '#5c3a10', symbol: 'W',  kgPerUnit: 2.0, desc: 'Harvested from trees. Used in construction.' },
+      { label: 'Fiber', key: 'fiber', color: '#c8a46e', border: '#8a6030', symbol: 'Fi', kgPerUnit: 0.1, desc: 'Gathered from plants. Used in cloth crafting.' },
+      { label: 'Metal', key: 'metal', color: '#8a8a8c', border: '#555558', symbol: 'Fe', kgPerUnit: 5.0, desc: 'Mined from ore deposits. Used in metalwork.' },
+      { label: 'Stone', key: 'stone', color: '#9a9a9c', border: '#666668', symbol: 'St', kgPerUnit: 4.0, desc: 'Quarried from boulders. Used in fortifications.' },
     ];
 
     const RCOLS  = items.length;
     const GAP    = 8;
     const CHIP_W = Math.floor((PANEL_W - 2 * PAD - (RCOLS - 1) * GAP) / RCOLS);
-    const CHIP_H = 48;
+    const CHIP_H = 58;
     const LAB_H  = 14;
     const x0     = px + PAD;
+
+    // Reset hit regions and hover tooltip for this frame
+    this._resChipHits    = [];
+    this._resHoverTooltip = null;
 
     for (let i = 0; i < items.length; i++) {
       const r   = items[i];
       const cx_ = x0 + i * (CHIP_W + GAP);
       const qty = res[r.key];
       const has = qty > 0;
+      const isDragging = this._resDragKey === r.key;
+      const isHovered  = !isDragging &&
+                         mouseX >= cx_ && mouseX <= cx_ + CHIP_W &&
+                         mouseY >= py  && mouseY <= py + CHIP_H;
+
+      // Register hit region
+      this._resChipHits.push({ key: r.key, label: r.label, color: r.color, x: cx_, y: py, w: CHIP_W, h: CHIP_H, max: qty });
+
+      // Store hover data for tooltip rendered outside clip
+      if (isHovered) {
+        this._resHoverTooltip = {
+          cx: cx_ + CHIP_W / 2, cy: py,
+          label: r.label, color: r.color,
+          desc: r.desc, kgPerUnit: r.kgPerUnit, qty,
+        };
+      }
 
       // Background
       ctx.fillStyle = 'rgba(14, 18, 28, 0.95)';
       ctx.fillRect(cx_, py, CHIP_W, CHIP_H);
 
-      // Coloured tint
+      // Coloured tint — brighter when dragging or hovered
       ctx.fillStyle = r.color;
-      ctx.globalAlpha = has ? 0.18 : 0.06;
+      ctx.globalAlpha = isDragging ? 0.38 : isHovered ? 0.28 : has ? 0.18 : 0.06;
       ctx.fillRect(cx_, py, CHIP_W, CHIP_H);
       ctx.globalAlpha = 1.0;
 
       // Border
-      ctx.strokeStyle = has ? r.color : '#334';
-      ctx.lineWidth   = has ? 1.5 : 1;
+      ctx.strokeStyle = isDragging ? '#fff' : isHovered ? '#fff' : has ? r.color : '#334';
+      ctx.lineWidth   = (isDragging || isHovered || has) ? 1.5 : 1;
       ctx.strokeRect(cx_, py, CHIP_W, CHIP_H);
 
+      // Drag hint arrow (top-right corner)
+      if (has) {
+        ctx.font         = '10px Georgia, serif';
+        ctx.fillStyle    = 'rgba(255,255,255,0.3)';
+        ctx.textAlign    = 'right';
+        ctx.textBaseline = 'top';
+        ctx.fillText('⤤', cx_ + CHIP_W - 3, py + 3);
+      }
+
       // Symbol
-      ctx.font         = 'bold 14px Georgia, serif';
+      ctx.font         = 'bold 13px Georgia, serif';
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle    = has ? r.color : '#446';
-      ctx.fillText(r.symbol, cx_ + CHIP_W / 2, py + CHIP_H / 2 - 5);
+      ctx.fillText(r.symbol, cx_ + CHIP_W / 2, py + 14);
 
       // Quantity
       ctx.font      = has ? 'bold 13px Georgia, serif' : '12px Georgia, serif';
       ctx.fillStyle = has ? '#fff' : '#556';
-      ctx.fillText(String(qty), cx_ + CHIP_W / 2, py + CHIP_H / 2 + 11);
+      ctx.fillText(String(qty), cx_ + CHIP_W / 2, py + 30);
+
+      // Weight line (dim, small)
+      const totalKg = qty * r.kgPerUnit;
+      ctx.font      = '9px Georgia, serif';
+      ctx.fillStyle = has ? 'rgba(180,200,220,0.70)' : '#334';
+      ctx.fillText(
+        has ? `${totalKg < 1 ? totalKg.toFixed(2) : totalKg.toFixed(1)} kg` : '0 kg',
+        cx_ + CHIP_W / 2, py + 44,
+      );
 
       // Label below chip
       ctx.font         = '10px Georgia, serif';
-      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillStyle    = isHovered ? '#fff' : TEXT_DIM;
       ctx.textBaseline = 'top';
       ctx.fillText(r.label, cx_ + CHIP_W / 2, py + CHIP_H + 3);
     }
@@ -1213,10 +1851,10 @@ export class PlayerMenu {
 
     const startIX  = px + PAD;
     const contentH = ROWS * STRIDE - IGAP + LABEL_ROW_H + 4;
-    // No scrolling needed — 16 slots fit in 2 rows
+    // Viewport: show all content (panel scroll handles any overflow)
     const viewportH = contentH;
 
-    // Cache for handleWheel
+    // Cache for handleWheel (kept for drag hit-testing)
     this._invGridY     = py;
     this._invContentH  = contentH;
     this._invViewportH = viewportH;
@@ -1226,11 +1864,10 @@ export class PlayerMenu {
     this._dragStride  = STRIDE;
     this._dragStartIX = startIX;
 
-    // No scroll needed
     this._invScrollY = 0;
-    const maxScroll = 0;
+    const maxScroll  = 0;
 
-    // Clip to content height
+    // Clip to inventory grid
     ctx.save();
     ctx.beginPath();
     ctx.rect(px, py, PANEL_W, viewportH);
@@ -1355,7 +1992,7 @@ export class PlayerMenu {
       }
     }
 
-    // Scrollbar (only visible when content overflows)
+    // Scrollbar handled at the panel level
     return py + viewportH + 8;
   }
 
@@ -1492,12 +2129,377 @@ export class PlayerMenu {
 
   // ────────────────────────────────────────────────────────────────────────────
 
+  // ── Schematics data ──────────────────────────────────────────────────────
+
+  private static readonly SCHEMATICS: {
+    subTab: 'LAND' | 'SHIP';
+    kind: string;
+    name: string;
+    symbol: string;
+    color: string;
+    wood: number; fiber: number; metal: number; stone: number;
+  }[] = [
+    // LAND
+    { subTab: 'LAND', kind: 'wooden_floor',    name: 'Wooden Floor',    symbol: '\u229f', color: '#8b6914', wood: 10, fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'wall',             name: 'Wall',            symbol: '\u258b', color: '#7a6030', wood: 10, fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'door_frame',       name: 'Door Frame',      symbol: '\u2293', color: '#6a5028', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'door',             name: 'Door',            symbol: '\uD83D\uDEAA', color: '#7a5838', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'wood_ceiling',     name: 'Wood Ceiling',    symbol: '\u229e', color: '#7a5c2a', wood: 8,  fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'workbench',        name: 'Workbench',       symbol: '\u2692', color: '#6b4c1e', wood: 15, fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'shipyard',         name: 'Shipyard',        symbol: '\u26F5', color: '#4a6080', wood: 20, fiber: 0, metal: 5,  stone: 0 },
+    { subTab: 'LAND', kind: 'cannon',           name: 'Cannon',          symbol: '\u25CF', color: '#333333', wood: 8,  fiber: 0, metal: 20, stone: 0 },
+    { subTab: 'LAND', kind: 'flag_fort',        name: 'Flag Fort',       symbol: '\uD83D\uDEA9', color: '#2a5c2a', wood: 20, fiber: 0, metal: 10, stone: 10 },
+    { subTab: 'LAND', kind: 'company_fortress', name: 'Fortress',        symbol: '\uD83C\uDFF0', color: '#4a3060', wood: 40, fiber: 0, metal: 20, stone: 20 },
+    { subTab: 'LAND', kind: 'claim_flag',       name: 'Claim Flag',      symbol: '\uD83C\uDFF3', color: '#c0a020', wood: 5,  fiber: 5, metal: 0,  stone: 0 },
+    // SHIP
+    { subTab: 'SHIP', kind: 'plank',     name: 'Plank',      symbol: '\u25A1', color: '#7a5c2a', wood: 10, fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'deck',      name: 'Deck',       symbol: '\u25A0', color: '#4a3820', wood: 15, fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'cannon',    name: 'Cannon',     symbol: '\u25CF', color: '#333333', wood: 2,  fiber: 0,  metal: 5, stone: 0 },
+    { subTab: 'SHIP', kind: 'swivel',    name: 'Swivel Gun', symbol: '\u203A', color: '#7a4a2a', wood: 1,  fiber: 0,  metal: 3, stone: 0 },
+    { subTab: 'SHIP', kind: 'mast',      name: 'Mast',       symbol: '\u2021', color: '#8b6914', wood: 20, fiber: 10, metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'helm',      name: 'Helm',       symbol: '\u2388', color: '#6a4820', wood: 5,  fiber: 0,  metal: 3, stone: 0 },
+    { subTab: 'SHIP', kind: 'ramp',      name: 'Ramp',       symbol: '\u2571', color: '#5c4018', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'hatch',     name: 'Hatch',      symbol: '\u25A3', color: '#4a3010', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'helm_kit',  name: 'Helm Kit',   symbol: '\u2388', color: '#7a5838', wood: 5,  fiber: 0,  metal: 3, stone: 0 },
+    { subTab: 'SHIP', kind: 'sail',      name: 'Sail',       symbol: '\u25B3', color: '#e0e0e0', wood: 0,  fiber: 20, metal: 0, stone: 0 },
+  ];
+
+  private _schematicsTab(
+    ctx:          CanvasRenderingContext2D,
+    px:           number,
+    contentTop:   number,
+    contentBottom: number,
+    player:       NonNullable<ReturnType<WorldState['players']['find']>> | null,
+  ): void {
+    const res = player?.inventory?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const INNER_PAD = 14;
+    const SUB_TAB_H = 30;
+    const CARD_H    = 64;
+    const CARD_GAP  = 6;
+    const CARD_W    = PANEL_W - INNER_PAD * 2;
+
+    let cy = contentTop + INNER_PAD;
+
+    // ── Sub-tab bar (LAND / SHIP) ─────────────────────────────────────────
+    this._schematicsSubTabHits = [];
+    this._schematicsHotbarHits = [];
+    this._schematicsCardHits   = [];
+    const subTabs: ('LAND' | 'SHIP')[] = ['LAND', 'SHIP'];
+    const subTabW = Math.floor(CARD_W / subTabs.length);
+    for (let i = 0; i < subTabs.length; i++) {
+      const id   = subTabs[i];
+      const tx   = px + INNER_PAD + i * subTabW;
+      const isActive = this._schematicsSubTab === id;
+      ctx.fillStyle = isActive ? 'rgba(255,215,0,0.12)' : 'rgba(0,0,0,0.30)';
+      ctx.fillRect(tx, cy, subTabW, SUB_TAB_H);
+      ctx.strokeStyle = isActive ? GOLD : BORDER;
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.moveTo(tx, cy + SUB_TAB_H);
+      ctx.lineTo(tx + subTabW, cy + SUB_TAB_H);
+      ctx.stroke();
+      if (i < subTabs.length - 1) {
+        ctx.strokeStyle = BORDER;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(tx + subTabW, cy);
+        ctx.lineTo(tx + subTabW, cy + SUB_TAB_H);
+        ctx.stroke();
+      }
+      ctx.font = `${isActive ? 'bold ' : ''}12px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isActive ? GOLD : TEXT_DIM;
+      const icon = id === 'LAND' ? '\uD83C\uDFD7' : '\u26F5';
+      ctx.fillText(`${icon}  ${id}`, tx + subTabW / 2, cy + SUB_TAB_H / 2);
+      this._schematicsSubTabHits.push({ label: id, x: tx, y: cy, w: subTabW, h: SUB_TAB_H });
+    }
+    cy += SUB_TAB_H + INNER_PAD;
+
+    // ── Hotbar strip ──────────────────────────────────────────────────────
+    const N_SLOTS = 8;
+    const HS = 38;   // slot size px
+    const HG = 3;    // gap between slots
+    const HP = 6;    // inner padding of strip
+    const STRIP_H = HS + HP * 2 + 10; // extra 10 for "HOTBAR" label
+    const baseHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
+    const currentHotbar: (string | null)[] = Array.from({ length: N_SLOTS }, (_, i) => baseHotbar[i] ?? null);
+
+    // Strip background
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.strokeStyle = BORDER;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(px + INNER_PAD, cy, CARD_W, STRIP_H, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    // "HOTBAR" label
+    ctx.font = 'bold 8px Georgia, serif';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('HOTBAR — drag or click a schematic onto a slot  |  right-click to clear', px + INNER_PAD + 6, cy + 3);
+
+    const slotsAreaW = N_SLOTS * (HS + HG) - HG;
+    const slotsStartX = px + INNER_PAD + Math.floor((CARD_W - slotsAreaW) / 2);
+    const slotsTopY   = cy + 13;
+
+    for (let i = 0; i < N_SLOTS; i++) {
+      const kind  = currentHotbar[i];
+      const entry = kind ? PlayerMenu.SCHEMATICS.find(s => s.kind === kind) : null;
+      const isSelected  = this._schematicsSelectedSlot === i;
+      const sx = slotsStartX + i * (HS + HG);
+      const sy = slotsTopY;
+      const isDragTarget = this._schemDragKind !== null &&
+        this._schemDragX >= sx && this._schemDragX <= sx + HS &&
+        this._schemDragY >= sy && this._schemDragY <= sy + HS;
+
+      this._schematicsHotbarHits.push({ slot: i, x: sx, y: sy, w: HS, h: HS });
+
+      // Slot background
+      ctx.fillStyle   = isDragTarget ? 'rgba(0,200,100,0.22)' : isSelected ? 'rgba(255,215,0,0.18)' : 'rgba(30,20,10,0.55)';
+      ctx.strokeStyle = isDragTarget ? '#00cc66'              : isSelected ? GOLD                   : 'rgba(120,90,30,0.45)';
+      ctx.lineWidth   = isDragTarget || isSelected ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, HS, HS, 3);
+      ctx.fill();
+      ctx.stroke();
+
+      if (entry) {
+        // Small icon swatch
+        const SW = 18;
+        const swX = sx + (HS - SW) / 2;
+        const swY = sy + 3;
+        ctx.fillStyle = entry.color;
+        ctx.beginPath();
+        ctx.roundRect(swX, swY, SW, SW, 2);
+        ctx.fill();
+        ctx.font = 'bold 9px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(entry.symbol, sx + HS / 2, swY + SW / 2);
+        // Name below icon
+        ctx.font = '6px Georgia, serif';
+        ctx.fillStyle = isSelected ? GOLD : TEXT_DIM;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(entry.name.substring(0, 7), sx + HS / 2, sy + HS);
+      } else {
+        ctx.font = '14px Georgia, serif';
+        ctx.fillStyle = '#443322';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('—', sx + HS / 2, sy + HS / 2);
+      }
+
+      // Slot number
+      ctx.font = '7px monospace';
+      ctx.fillStyle = isSelected ? GOLD : '#665533';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i + 1), sx + 2, sy + 2);
+    }
+    cy += STRIP_H + 4;
+
+    // Hint when a slot is selected
+    if (this._schematicsSelectedSlot >= 0) {
+      ctx.font = '10px Georgia, serif';
+      ctx.fillStyle = GOLD;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillText(
+        `Slot ${this._schematicsSelectedSlot + 1} selected — click a schematic to assign`,
+        px + PANEL_W / 2, cy,
+      );
+      cy += 15;
+    }
+    cy += Math.floor(INNER_PAD / 2);
+
+    // ── Scrollable schematic cards ────────────────────────────────────────
+    const viewH  = contentBottom - cy - INNER_PAD;
+    const items  = PlayerMenu.SCHEMATICS.filter(s => s.subTab === this._schematicsSubTab);
+    const totalH = items.length * (CARD_H + CARD_GAP);
+
+    // Clamp scroll
+    this._panelScrollY = Math.max(0, Math.min(this._panelScrollY, Math.max(0, totalH - viewH)));
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, cy, PANEL_W, viewH);
+    ctx.clip();
+
+    let cardY = cy - this._panelScrollY;
+    for (let si = 0; si < items.length; si++) {
+      const s = items[si];
+      const cardX = px + INNER_PAD;
+
+      // Which hotbar slot (if any) is this schematic assigned to?
+      const hotbarSlotIdx = currentHotbar.findIndex(k => k === s.kind);
+      // Is the currently-selected slot pointing at this card?
+      const isAssignTarget = this._schematicsSelectedSlot >= 0 &&
+        currentHotbar[this._schematicsSelectedSlot] === s.kind;
+
+      // Card background
+      ctx.fillStyle = isAssignTarget ? 'rgba(255,215,0,0.10)' : 'rgba(255,255,255,0.04)';
+      ctx.strokeStyle = isAssignTarget
+        ? GOLD
+        : hotbarSlotIdx >= 0
+          ? 'rgba(255,180,0,0.35)'
+          : 'rgba(120,90,30,0.35)';
+      ctx.lineWidth = isAssignTarget || hotbarSlotIdx >= 0 ? 1.5 : 1;
+      ctx.beginPath();
+      ctx.roundRect(cardX, cardY, CARD_W, CARD_H, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      // Register card hit area
+      this._schematicsCardHits.push({ idx: si, kind: s.kind, x: cardX, y: cardY, w: CARD_W, h: CARD_H });
+
+      // Icon box
+      const ICON_SZ = 42;
+      const iconX = cardX + 10;
+      const iconY = cardY + (CARD_H - ICON_SZ) / 2;
+      ctx.fillStyle = s.color;
+      ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(iconX, iconY, ICON_SZ, ICON_SZ, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = 'bold 18px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(s.symbol, iconX + ICON_SZ / 2, iconY + ICON_SZ / 2);
+
+      // Name
+      const textX = iconX + ICON_SZ + 12;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.font = 'bold 14px Georgia, serif';
+      ctx.fillStyle = TEXT_HEAD;
+      ctx.fillText(s.name, textX, cardY + 12);
+
+      // Quality badge — all defaults are Common
+      const QUAL_LABEL = '\u25c6 Common';
+      ctx.font = '10px Georgia, serif';
+      const qualW = ctx.measureText(QUAL_LABEL).width + 8;
+      const qualX = cardX + CARD_W - qualW - 8;
+      const qualY = cardY + 8;
+      ctx.fillStyle = 'rgba(180,180,200,0.18)';
+      ctx.beginPath();
+      ctx.roundRect(qualX, qualY, qualW, 16, 3);
+      ctx.fill();
+      ctx.fillStyle = '#c0bcd0';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(QUAL_LABEL, qualX + 4, qualY + 3);
+
+      // Slot badge — shown when this schematic is already in a hotbar slot
+      if (hotbarSlotIdx >= 0) {
+        const slotLabel = `#${hotbarSlotIdx + 1}`;
+        ctx.font = 'bold 9px monospace';
+        const badgeW = ctx.measureText(slotLabel).width + 8;
+        const badgeX = qualX - badgeW - 4;
+        ctx.fillStyle = 'rgba(255,180,0,0.28)';
+        ctx.beginPath();
+        ctx.roundRect(badgeX, qualY, badgeW, 16, 3);
+        ctx.fill();
+        ctx.fillStyle = GOLD;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(slotLabel, badgeX + badgeW / 2, qualY + 8);
+      }
+
+      // Resource costs inline
+      const costs: Array<{ label: string; cost: number; have: number }> = [
+        { label: 'Wood',  cost: s.wood,  have: res.wood  },
+        { label: 'Fiber', cost: s.fiber, have: res.fiber },
+        { label: 'Metal', cost: s.metal, have: res.metal },
+        { label: 'Stone', cost: s.stone, have: res.stone },
+      ].filter(c => c.cost > 0);
+
+      ctx.font = '11px Georgia, serif';
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      let rx = textX;
+      const costY = cardY + 34;
+      for (const c of costs) {
+        const ok = c.have >= c.cost;
+        const chip = `${c.cost}\u00d7 ${c.label}`;
+        const chipW = ctx.measureText(chip).width + 10;
+        ctx.fillStyle = ok ? 'rgba(40,100,40,0.55)' : 'rgba(120,30,30,0.55)';
+        ctx.beginPath();
+        ctx.roundRect(rx, costY, chipW, 18, 3);
+        ctx.fill();
+        ctx.fillStyle = ok ? '#88ee88' : '#ee8888';
+        ctx.fillText(chip, rx + 5, costY + 4);
+        rx += chipW + 5;
+      }
+      if (costs.length === 0) {
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText('No resources required', rx, costY + 3);
+      }
+
+      cardY += CARD_H + CARD_GAP;
+    }
+
+    ctx.restore();
+
+    // Scrollbar
+    if (totalH > viewH) {
+      const SB_W  = 4;
+      const sbX   = px + PANEL_W - 8;
+      const thumb = Math.max(24, (viewH / totalH) * viewH);
+      const thumbY = cy + (this._panelScrollY / Math.max(1, totalH - viewH)) * (viewH - thumb);
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(sbX, cy, SB_W, viewH);
+      ctx.fillStyle = 'rgba(255,215,0,0.50)';
+      ctx.fillRect(sbX, thumbY, SB_W, thumb);
+    }
+
+    // Schematic drag ghost — rendered above the clip region
+    if (this._schemDragKind !== null && this._schemDragActive) {
+      const entry = PlayerMenu.SCHEMATICS.find(s => s.kind === this._schemDragKind);
+      if (entry) {
+        const GS = 46;
+        const gx = this._schemDragX - GS / 2;
+        const gy = this._schemDragY - GS / 2;
+        ctx.save();
+        ctx.globalAlpha = 0.87;
+        ctx.fillStyle = 'rgba(12,12,24,0.80)';
+        ctx.beginPath();
+        ctx.roundRect(gx, gy, GS, GS, 5);
+        ctx.fill();
+        ctx.strokeStyle = GOLD;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.roundRect(gx, gy, GS, GS, 5);
+        ctx.stroke();
+        ctx.fillStyle = entry.color;
+        ctx.beginPath();
+        ctx.roundRect(gx + 4, gy + 4, GS - 8, GS - 8, 3);
+        ctx.fill();
+        ctx.font = 'bold 17px Georgia, serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(entry.symbol, this._schemDragX, this._schemDragY);
+        ctx.globalAlpha = 1;
+        ctx.restore();
+      }
+    }
+  }
+
   private _tabBar(ctx: CanvasRenderingContext2D, px: number, py: number): number {
-    const tabs: Array<{ label: string; id: 'character' | 'skills' }> = [
-      { label: '⚔  CHARACTER', id: 'character' },
-      { label: '✦  SKILLS',    id: 'skills'    },
+    const tabs: Array<{ label: string; id: 'character' | 'skills' | 'schematics' }> = [
+      { label: '⚔  CHARACTER',   id: 'character'  },
+      { label: '✦  SKILLS',      id: 'skills'     },
+      { label: '📐  SCHEMATICS', id: 'schematics' },
     ];
-    const tabW = PANEL_W / tabs.length;
+    const tabW = Math.floor(PANEL_W / tabs.length);
 
     for (let i = 0; i < tabs.length; i++) {
       const { label, id } = tabs[i];
