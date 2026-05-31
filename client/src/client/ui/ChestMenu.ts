@@ -4,7 +4,6 @@
  * Canvas-drawn resource chest inventory panel for ship chests.
  * Two-column layout matching LandChestMenu: player resources on the left,
  * chest storage on the right, with arrow buttons in the middle.
- * Adds cannonball as a fifth storable resource not present in land chests.
  */
 
 import { type PlayerInventory } from '../../sim/Inventory.js';
@@ -12,7 +11,7 @@ import { type ChestModuleData } from '../../sim/modules.js';
 
 // ── Layout constants ─────────────────────────────────────────────────────────
 const PANEL_W   = 620;
-const PANEL_H   = 330;
+const PANEL_H   = 282;
 const HDR_H     = 44;
 const ROW_H     = 48;
 const CARD_W    = 220;
@@ -25,7 +24,6 @@ const RESOURCES: Array<{ key: keyof ChestModuleData; label: string; color: strin
   { key: 'fiber',       label: 'Fiber',      color: '#c8a46e', border: '#8a6030', symbol: '🌿' },
   { key: 'metal',       label: 'Metal',      color: '#8a8a8c', border: '#555558', symbol: '⚙' },
   { key: 'stone',       label: 'Stone',      color: '#9a9a9c', border: '#666668', symbol: '🪨' },
-  { key: 'cannon_ball', label: 'Cannonball', color: '#555555', border: '#333333', symbol: '●' },
 ];
 
 // ── Colour palette ─────────────────────────────────────────────────────────────

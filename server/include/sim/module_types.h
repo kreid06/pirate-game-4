@@ -140,8 +140,7 @@ typedef struct {
     uint16_t fiber;
     uint16_t metal;
     uint16_t stone;
-    uint16_t cannon_ball;
-    uint8_t  _pad[2];
+    uint8_t  _pad[4];
 } ChestModuleData;
 
 /**

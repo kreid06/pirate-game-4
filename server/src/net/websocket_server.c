@@ -947,19 +947,17 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
         // collide on all decks.  Deck-specific modules only collide when the
         // player is on the same deck.
         //
-        // Lower deck (player_deck_level=0): only masts (deck-independent) and
-        //   cannons collide; everything else (helm, swivel, etc.) is skipped.
-        //   Cannons are kept because broadside cannons sit at deck-edge level
-        //   and historically acted as physical obstacles on both decks.
-        //   NOTE: the symmetric upper-deck filter now skips lower-deck cannons,
-        //   so a cannon placed on deck 0 will NOT push an upper-deck player.
+        // Lower deck (player_deck_level=0): masts (deck-independent), cannons,
+        //   and any module explicitly placed on deck 0 (deck_id==0) block
+        //   movement.  Upper-deck-only modules (deck_id==1) are skipped.
         //
         // Upper deck (player_deck_level=1): skip any module explicitly tagged
         //   as a lower-deck module (deck_id=0).  Deck-independent modules
         //   (deck_id=255) still collide on every deck.
         if (player_deck_level == 0) {
             if (mod->type_id != MODULE_TYPE_MAST &&
-                mod->type_id != MODULE_TYPE_CANNON) {
+                mod->type_id != MODULE_TYPE_CANNON &&
+                mod->deck_id  != 0) {
                 continue;
             }
         } else if (player_deck_level == 1) {
@@ -1136,8 +1134,7 @@ void recalc_ship_mass(SimpleShip* ship) {
             + ITEM_WEIGHT_KG[ITEM_WOOD]        * (float)ch->wood
             + ITEM_WEIGHT_KG[ITEM_FIBER]       * (float)ch->fiber
             + ITEM_WEIGHT_KG[ITEM_METAL]       * (float)ch->metal
-            + ITEM_WEIGHT_KG[ITEM_STONE]       * (float)ch->stone
-            + ITEM_WEIGHT_KG[ITEM_CANNON_BALL] * (float)ch->cannon_ball;
+            + ITEM_WEIGHT_KG[ITEM_STONE]       * (float)ch->stone;
     }
 
     float new_mass = ship->base_mass + cargo_kg + cannon_kg + chest_kg;
@@ -1818,7 +1815,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     } else if (module->type_id == MODULE_TYPE_CHEST) {
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                             "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u"
-                            ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u,\"cannon_ball\":%u}",
+                            ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, (unsigned)module->state_bits,
                             (int)module->health, (int)module->max_health,
@@ -1826,8 +1823,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->data.chest.wood,
                             (unsigned)module->data.chest.fiber,
                             (unsigned)module->data.chest.metal,
-                            (unsigned)module->data.chest.stone,
-                            (unsigned)module->data.chest.cannon_ball);
+                            (unsigned)module->data.chest.stone);
                     } else {
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                             "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
@@ -1963,14 +1959,13 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 } else if (module->type_id == MODULE_TYPE_CHEST) {
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                         "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u"
-                        ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u,\"cannon_ball\":%u}",
+                        ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u}",
                         m > 0 ? "," : "", module->id, module->type_id,
                         module_x, module_y, module_rot, (unsigned)module->state_bits,
                         (unsigned)module->data.chest.wood,
                         (unsigned)module->data.chest.fiber,
                         (unsigned)module->data.chest.metal,
-                        (unsigned)module->data.chest.stone,
-                        (unsigned)module->data.chest.cannon_ball);
+                        (unsigned)module->data.chest.stone);
                 } else {
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                         "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",

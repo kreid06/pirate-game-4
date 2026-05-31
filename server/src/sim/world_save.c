@@ -239,12 +239,11 @@ int world_save(const char *path) {
             );
             if (mod->type_id == MODULE_TYPE_CHEST)
                 fprintf(f,
-                    ",\"cw\":%u,\"cf\":%u,\"cm\":%u,\"cs\":%u,\"cb\":%u",
+                    ",\"cw\":%u,\"cf\":%u,\"cm\":%u,\"cs\":%u",
                     (unsigned)mod->data.chest.wood,
                     (unsigned)mod->data.chest.fiber,
                     (unsigned)mod->data.chest.metal,
-                    (unsigned)mod->data.chest.stone,
-                    (unsigned)mod->data.chest.cannon_ball);
+                    (unsigned)mod->data.chest.stone);
             fprintf(f, "}");
         }
 
@@ -701,13 +700,11 @@ int world_load(const char *path) {
                                         new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
                                         new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                     } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
-                                        unsigned cw=0,cf=0,cm=0,cs=0,cb=0;
+                                        unsigned cw=0,cf=0,cm=0,cs=0;
                                         ws_json_uint(mobj, "cw", &cw); ws_json_uint(mobj, "cf", &cf);
                                         ws_json_uint(mobj, "cm", &cm); ws_json_uint(mobj, "cs", &cs);
-                                        ws_json_uint(mobj, "cb", &cb);
                                         new_mod.data.chest.wood=cw; new_mod.data.chest.fiber=cf;
                                         new_mod.data.chest.metal=cm; new_mod.data.chest.stone=cs;
-                                        new_mod.data.chest.cannon_ball=cb;
                                     }
                                     new_mod.deck_id = (uint8_t)mdeck;
                                     /* Add to SimpleShip layer */
@@ -773,13 +770,11 @@ int world_load(const char *path) {
                                             m->data.gunport.snap_idx = (uint8_t)mgp_snap;
                                             m->data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                         } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
-                                            unsigned cw=0,cf=0,cm=0,cs=0,cb=0;
+                                            unsigned cw=0,cf=0,cm=0,cs=0;
                                             ws_json_uint(mobj,"cw",&cw); ws_json_uint(mobj,"cf",&cf);
                                             ws_json_uint(mobj,"cm",&cm); ws_json_uint(mobj,"cs",&cs);
-                                            ws_json_uint(mobj,"cb",&cb);
                                             m->data.chest.wood=cw; m->data.chest.fiber=cf;
                                             m->data.chest.metal=cm; m->data.chest.stone=cs;
-                                            m->data.chest.cannon_ball=cb;
                                         }
                                         m->deck_id = (uint8_t)mdeck;
                                         /* Mirror health + chest data into sim layer for the same module (by ID) */
@@ -834,13 +829,11 @@ int world_load(const char *path) {
                                             new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
                                             new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                         } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
-                                            unsigned cw=0,cf=0,cm=0,cs=0,cb=0;
+                                            unsigned cw=0,cf=0,cm=0,cs=0;
                                             ws_json_uint(mobj,"cw",&cw); ws_json_uint(mobj,"cf",&cf);
                                             ws_json_uint(mobj,"cm",&cm); ws_json_uint(mobj,"cs",&cs);
-                                            ws_json_uint(mobj,"cb",&cb);
                                             new_mod.data.chest.wood=cw; new_mod.data.chest.fiber=cf;
                                             new_mod.data.chest.metal=cm; new_mod.data.chest.stone=cs;
-                                            new_mod.data.chest.cannon_ball=cb;
                                         }
                                         new_mod.deck_id = (uint8_t)mdeck;
                                         if (s->module_count < MAX_MODULES_PER_SHIP)

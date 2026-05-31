@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1780269597,
+    "timestamp": 1780271158,
     "ship_count": 12,
     "npc_count": 48,
     "structure_count": 36
@@ -201,7 +201,7 @@
       "company": 99,
       "x": 6683.403,
       "y": 78694.047,
-      "rot": 4.536957,
+      "rot": 3.824768,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000031,
@@ -257,7 +257,7 @@
       "company": 99,
       "x": 81611.422,
       "y": 23215.855,
-      "rot": 4.894730,
+      "rot": 4.182541,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -481,7 +481,7 @@
       "company": 99,
       "x": 32704.287,
       "y": 16017.749,
-      "rot": 5.049393,
+      "rot": 4.337204,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -537,7 +537,7 @@
       "company": 99,
       "x": 3767.999,
       "y": 34571.766,
-      "rot": 3.085358,
+      "rot": 2.373169,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -660,6 +660,7 @@
       "is_sinking": false,
       "is_scaffolded": true,
       "modules": [
+        {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},

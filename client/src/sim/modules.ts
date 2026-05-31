@@ -36,7 +36,7 @@ export enum ModuleTypeId {
   RAMP = 9,
   HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
   GUNPORT = 11,      // Gunport — openable hull hole for lower-deck cannons
-  CHEST = 12,        // Resource chest — stores raw resources for auto-repair and land supply
+  CHEST = 13,        // Resource chest — stores raw resources for auto-repair and land supply
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -267,7 +267,6 @@ export interface ChestModuleData {
   fiber:       number;  // Stored fiber units
   metal:       number;  // Stored metal units
   stone:       number;  // Stored stone units
-  cannon_ball: number;  // Stored cannonballs
 }
 
 /**

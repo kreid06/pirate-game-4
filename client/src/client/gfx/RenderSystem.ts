@@ -9041,12 +9041,13 @@ export class RenderSystem {
       // Full opacity — the planks at layer 3 cover them naturally when the player is on the upper deck.
       this.queueRenderItem(1, `cannons-lower-${ship.id}`,  () => this.drawShipCannons(ship, camera, 0), 3);
       this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
+      this.queueRenderItem(1, `chests-lower-${ship.id}`,   () => this.drawShipChests(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
       this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
       this.queueRenderItem(4, `swivel-guns-upper-${ship.id}`, _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
       this.queueRenderItem(4, `cannon-aim-guides-${ship.id}`, _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
       this.queueRenderItem(4, `swivel-aim-guides-${ship.id}`, _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
-      this.queueRenderItem(4, `chests-${ship.id}`, _da(() => this.drawShipChests(ship, camera)));
+      this.queueRenderItem(4, `chests-upper-${ship.id}`, _da(() => this.drawShipChests(ship, camera, 1)));
       this.queueRenderItem(4, `rudder-${ship.id}`, _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         // Always render at full opacity so active groups remain visible from the steering wheel.
@@ -14906,10 +14907,14 @@ export class RenderSystem {
    * Draw all resource chest modules on a ship.
    * Chests are classic wooden box shapes (40×28 world units) with a golden latch.
    */
-  private drawShipChests(ship: Ship, camera: Camera): void {
+  private drawShipChests(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    const chests = ship.modules.filter(m => m.kind === 'chest');
+    const chests = ship.modules.filter(m => m.kind === 'chest' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      /* deckFilter === 1 */ m.deckId === 1 || m.deckId === 255
+    ));
     if (chests.length === 0) return;
 
     const screenPos   = camera.worldToScreen(ship.position);
@@ -15000,7 +15005,7 @@ export class RenderSystem {
   /** Core chest shape drawing routine (origin = chest centre, 40×28 world units).
    *  Matches the island chest visual: body, lid strip, latch, company strip, hover tint. */
   private _drawChestShape(lw: number, _alpha: number, isHovered = false, companyId = 0, hpFrac = 1): void {
-    const bw = 40, bh = 28;
+    const bw = 22, bh = 16;
     const bx = -bw / 2, by = -bh / 2;
     const lidH = bh * 0.35;
 
@@ -18036,7 +18041,6 @@ export class RenderSystem {
       stats.push({ label: 'Fiber',       value: String(moduleData.fiber) });
       stats.push({ label: 'Metal',       value: String(moduleData.metal) });
       stats.push({ label: 'Stone',       value: String(moduleData.stone) });
-      stats.push({ label: 'Cannonballs', value: String(moduleData.cannon_ball) });
     }
 
     // Deck assignment — shown for interactive modules (not layout-only planks / decks)
@@ -18058,8 +18062,7 @@ export class RenderSystem {
         + moduleData.wood        * 0.5
         + moduleData.fiber       * 0.1
         + moduleData.metal       * 1.0
-        + moduleData.stone       * 0.75
-        + moduleData.cannon_ball * 5.0;
+        + moduleData.stone       * 0.75;
     }
     // Cannon weight is dynamic: 40 kg when stowed (gunport closed), 100 kg when deployed (gunport open / no gunport)
     if (moduleData.kind === 'cannon') {

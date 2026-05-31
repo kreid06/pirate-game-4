@@ -2253,7 +2253,6 @@ export class NetworkManager {
                       fiber:       mod.fiber       ?? 0,
                       metal:       mod.metal       ?? 0,
                       stone:       mod.stone       ?? 0,
-                      cannon_ball: mod.cannon_ball ?? 0,
                     };
                   }
                   
