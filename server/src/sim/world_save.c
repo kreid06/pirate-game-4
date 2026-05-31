@@ -224,8 +224,7 @@ int world_save(const char *path) {
                 "\"target_health\":%u,"
                 "\"gp_snap\":%u,"
                 "\"gp_open\":%u,"
-                "\"deck\":%u"
-                "}",
+                "\"deck\":%u",
                 (unsigned)mod->id,
                 (unsigned)mod->type_id,
                 (double)((float)mod->local_pos.x / 65536.0f),
@@ -238,6 +237,15 @@ int world_save(const char *path) {
                 save_gp_open,
                 (unsigned)mod->deck_id
             );
+            if (mod->type_id == MODULE_TYPE_CHEST)
+                fprintf(f,
+                    ",\"cw\":%u,\"cf\":%u,\"cm\":%u,\"cs\":%u,\"cb\":%u",
+                    (unsigned)mod->data.chest.wood,
+                    (unsigned)mod->data.chest.fiber,
+                    (unsigned)mod->data.chest.metal,
+                    (unsigned)mod->data.chest.stone,
+                    (unsigned)mod->data.chest.cannon_ball);
+            fprintf(f, "}");
         }
 
         fprintf(f, "\n      ]");
@@ -692,6 +700,14 @@ int world_load(const char *path) {
                                     else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
                                         new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
                                         new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
+                                    } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
+                                        unsigned cw=0,cf=0,cm=0,cs=0,cb=0;
+                                        ws_json_uint(mobj, "cw", &cw); ws_json_uint(mobj, "cf", &cf);
+                                        ws_json_uint(mobj, "cm", &cm); ws_json_uint(mobj, "cs", &cs);
+                                        ws_json_uint(mobj, "cb", &cb);
+                                        new_mod.data.chest.wood=cw; new_mod.data.chest.fiber=cf;
+                                        new_mod.data.chest.metal=cm; new_mod.data.chest.stone=cs;
+                                        new_mod.data.chest.cannon_ball=cb;
                                     }
                                     new_mod.deck_id = (uint8_t)mdeck;
                                     /* Add to SimpleShip layer */
@@ -750,21 +766,31 @@ int world_load(const char *path) {
                                         m->local_rot     = (q16_t)(int32_t)(mlr * 65536.0f);
                                         if (mmax > 0) m->max_health = (int32_t)mmax;
                                         m->target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)m->max_health);
-                                        /* Restore gunport / cannon link data */
+                                        /* Restore gunport / cannon / chest data */
                                         if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
                                             m->data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
                                         else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
                                             m->data.gunport.snap_idx = (uint8_t)mgp_snap;
                                             m->data.gunport.is_open  = (uint8_t)(mgp_open & 1);
+                                        } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
+                                            unsigned cw=0,cf=0,cm=0,cs=0,cb=0;
+                                            ws_json_uint(mobj,"cw",&cw); ws_json_uint(mobj,"cf",&cf);
+                                            ws_json_uint(mobj,"cm",&cm); ws_json_uint(mobj,"cs",&cs);
+                                            ws_json_uint(mobj,"cb",&cb);
+                                            m->data.chest.wood=cw; m->data.chest.fiber=cf;
+                                            m->data.chest.metal=cm; m->data.chest.stone=cs;
+                                            m->data.chest.cannon_ball=cb;
                                         }
                                         m->deck_id = (uint8_t)mdeck;
-                                        /* Mirror health into sim layer for the same module (by ID) */
+                                        /* Mirror health + chest data into sim layer for the same module (by ID) */
                                         if (sim_fin) {
                                             for (uint8_t si = 0; si < sim_fin->module_count; si++) {
                                                 if (sim_fin->modules[si].id == m->id) {
                                                     sim_fin->modules[si].health        = m->health;
                                                     sim_fin->modules[si].max_health    = m->max_health;
                                                     sim_fin->modules[si].target_health = m->target_health;
+                                                    if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST)
+                                                        sim_fin->modules[si].data.chest = m->data.chest;
                                                     break;
                                                 }
                                             }
@@ -801,12 +827,20 @@ int world_load(const char *path) {
                                         new_mod.health        = (int32_t)mhealth;
                                         new_mod.max_health    = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
                                         new_mod.target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)new_mod.max_health);
-                                        /* Restore gunport / cannon link data for dynamically-placed modules */
+                                        /* Restore gunport / cannon / chest data for dynamically-placed modules */
                                         if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
                                             new_mod.data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
                                         else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
                                             new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
                                             new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
+                                        } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
+                                            unsigned cw=0,cf=0,cm=0,cs=0,cb=0;
+                                            ws_json_uint(mobj,"cw",&cw); ws_json_uint(mobj,"cf",&cf);
+                                            ws_json_uint(mobj,"cm",&cm); ws_json_uint(mobj,"cs",&cs);
+                                            ws_json_uint(mobj,"cb",&cb);
+                                            new_mod.data.chest.wood=cw; new_mod.data.chest.fiber=cf;
+                                            new_mod.data.chest.metal=cm; new_mod.data.chest.stone=cs;
+                                            new_mod.data.chest.cannon_ball=cb;
                                         }
                                         new_mod.deck_id = (uint8_t)mdeck;
                                         if (s->module_count < MAX_MODULES_PER_SHIP)

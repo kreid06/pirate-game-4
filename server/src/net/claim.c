@@ -881,7 +881,7 @@ static void flag_fort_tick(uint32_t delta_ms) {
                         /* Post-capture countdown expired — fort is destroyed */
                         log_info("🚩 Flag Fort #%u (company %u, island %u) reclaim window expired → destroyed",
                                  s->id, co, isl);
-                        destroy_placed_structure(s->id);
+                        destroy_placed_structure(s->id, NAN, NAN);
                         continue;
                     }
                     /* Claim phase complete → enter BUILDING.

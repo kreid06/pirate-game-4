@@ -2246,6 +2246,15 @@ export class NetworkManager {
                       isOpen: !!(mod.isOpen ?? mod.is_open ?? false),
                       snapIndex: mod.snapIndex ?? -1,
                     };
+                  } else if (kind === 'chest') {
+                    moduleData = {
+                      kind: 'chest',
+                      wood:        mod.wood        ?? 0,
+                      fiber:       mod.fiber       ?? 0,
+                      metal:       mod.metal       ?? 0,
+                      stone:       mod.stone       ?? 0,
+                      cannon_ball: mod.cannon_ball ?? 0,
+                    };
                   }
                   
                   gameplayModules.push({

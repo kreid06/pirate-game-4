@@ -14923,10 +14923,15 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
     for (const chest of chests) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === chest.id;
+      const chestHp    = (chest.moduleData as any)?.health    ?? 5000;
+      const chestMaxHp = (chest.moduleData as any)?.maxHealth ?? 5000;
+      const hpFrac = chestMaxHp > 0 ? Math.min(1, chestHp / chestMaxHp) : 1;
       this.ctx.save();
       this.ctx.translate(chest.localPos.x, chest.localPos.y);
       this.ctx.rotate(chest.localRot);
-      this._drawChestShape(lw, 1.0);
+      this._drawChestShape(lw, 1.0, isHovered, ship.companyId ?? 0, hpFrac);
       this.ctx.restore();
     }
 
@@ -14992,54 +14997,63 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  /** Core chest shape drawing routine (origin = chest centre, 40×28 world units). */
-  private _drawChestShape(lw: number, _alpha: number): void {
+  /** Core chest shape drawing routine (origin = chest centre, 40×28 world units).
+   *  Matches the island chest visual: body, lid strip, latch, company strip, hover tint. */
+  private _drawChestShape(lw: number, _alpha: number, isHovered = false, companyId = 0, hpFrac = 1): void {
     const bw = 40, bh = 28;
     const bx = -bw / 2, by = -bh / 2;
-    const lidH = bh * 0.40;
+    const lidH = bh * 0.35;
 
-    // Base body
-    this.ctx.fillStyle   = '#6a3d1e';
-    this.ctx.strokeStyle = '#3d1e08';
+    // Body (bottom portion, darker brown)
+    this.ctx.fillStyle   = isHovered ? '#7a4820' : '#5c3210';
+    this.ctx.strokeStyle = '#2a1204';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.rect(bx, by, bw, bh);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Lid strip (top ~35% of box, lighter tan)
+    this.ctx.fillStyle = isHovered ? '#c0813a' : '#a06428';
+    this.ctx.beginPath();
+    this.ctx.rect(bx, by, bw, lidH);
+    this.ctx.fill();
+    this.ctx.strokeStyle = '#2a1204';
     this.ctx.lineWidth   = lw;
-    this.ctx.beginPath();
-    this.ctx.roundRect(bx, by + lidH, bw, bh - lidH, [0, 0, 3, 3]);
-    this.ctx.fill();
-    this.ctx.stroke();
+    this.ctx.strokeRect(bx, by, bw, lidH);
 
-    // Lid
-    this.ctx.fillStyle   = '#8b5a2a';
-    this.ctx.strokeStyle = '#3d1e08';
-    this.ctx.beginPath();
-    this.ctx.roundRect(bx, by, bw, lidH + 2, [3, 3, 0, 0]);
-    this.ctx.fill();
-    this.ctx.stroke();
-
-    // Lid centre stripe
-    this.ctx.strokeStyle = '#a07040';
-    this.ctx.lineWidth   = lw * 0.7;
-    this.ctx.beginPath();
-    this.ctx.moveTo(bx + 4, by + lidH / 2);
-    this.ctx.lineTo(bx + bw - 4, by + lidH / 2);
-    this.ctx.stroke();
-
-    // Latch
-    this.ctx.fillStyle   = 'rgba(220,172,50,0.92)';
-    this.ctx.strokeStyle = '#806020';
+    // Latch — centred on lid/body seam
+    const ltW = Math.max(2, bw * 0.12);
+    const ltH = Math.max(2, bh * 0.20);
+    const ltX = -ltW / 2;
+    const ltY = by + lidH - ltH / 2;
+    this.ctx.fillStyle   = '#d4a040';
+    this.ctx.strokeStyle = '#7a5010';
     this.ctx.lineWidth   = lw * 0.8;
+    this.ctx.fillRect(ltX, ltY, ltW, ltH);
+    this.ctx.strokeRect(ltX, ltY, ltW, ltH);
+
+    // Seam line
+    this.ctx.strokeStyle = 'rgba(40,20,8,0.55)';
+    this.ctx.lineWidth   = lw * 0.8;
+    const seamY = by + lidH;
     this.ctx.beginPath();
-    this.ctx.roundRect(-5, by + lidH - 4, 10, 8, 2);
-    this.ctx.fill();
+    this.ctx.moveTo(bx, seamY);
+    this.ctx.lineTo(bx + bw, seamY);
     this.ctx.stroke();
 
-    // Corner reinforcements
-    this.ctx.strokeStyle = '#5a3010';
-    this.ctx.lineWidth   = lw * 1.2;
-    for (const [cx, cy] of [[-bw / 2 + 4, -bh / 2 + 4], [bw / 2 - 4, -bh / 2 + 4],
-                              [-bw / 2 + 4, bh / 2 - 4], [bw / 2 - 4, bh / 2 - 4]]) {
-      this.ctx.beginPath();
-      this.ctx.arc(cx, cy, 3.5 * lw, 0, Math.PI * 2);
-      this.ctx.stroke();
+    // Company colour strip along the top edge
+    const companyColors: Record<number, string> = { 0: '#aaaaaa', 1: '#ddaa44', 2: '#ff6644', 3: '#4488ff' };
+    const stripColor = companyColors[companyId] ?? '#aaaaaa';
+    const stripH = Math.max(1.5, 2.5 * lw);
+    this.ctx.fillStyle = stripColor;
+    this.ctx.fillRect(bx, by, bw, stripH);
+
+    // Damage darkening
+    const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
+    if (dmgDarken > 0.01) {
+      this.ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+      this.ctx.fillRect(bx, by, bw, bh);
     }
   }
 
@@ -17957,6 +17971,7 @@ export class RenderSystem {
       'ladder':         { name: 'Ladder',        color: '#334455', border: '#5577aa', desc: 'Allows crew to move between deck levels.' },
       'seat':           { name: 'Seat',          color: '#553344', border: '#886677', desc: 'Resting position for crew members.' },
       'custom':         { name: 'Custom Module', color: '#444455', border: '#7777aa', desc: 'A custom-built module with unique properties.' },
+      'chest':          { name: 'Chest',          color: '#886622', border: '#d4a040', desc: 'Stores raw resources. Contents add weight to the ship.' },
     };
     const meta = KIND_META[moduleData.kind] ?? { name: moduleData.kind, color: '#555566', border: '#8888aa', desc: '' };
 
@@ -18012,6 +18027,16 @@ export class RenderSystem {
       stats.push({ label: 'Sail State',     value: moduleData.sailState.toUpperCase() });
       stats.push({ label: 'Openness',       value: `${moduleData.openness.toFixed(0)}%` });
       stats.push({ label: 'Wind Eff.',      value: `${(moduleData.windEfficiency * 100).toFixed(0)}%` });
+    } else if (moduleData.kind === 'chest') {
+      const hp    = Math.round((moduleData as any).health    ?? 5000);
+      const maxHp = Math.round((moduleData as any).maxHealth ?? 5000);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Wood',        value: String(moduleData.wood) });
+      stats.push({ label: 'Fiber',       value: String(moduleData.fiber) });
+      stats.push({ label: 'Metal',       value: String(moduleData.metal) });
+      stats.push({ label: 'Stone',       value: String(moduleData.stone) });
+      stats.push({ label: 'Cannonballs', value: String(moduleData.cannon_ball) });
     }
 
     // Deck assignment — shown for interactive modules (not layout-only planks / decks)
@@ -18025,9 +18050,17 @@ export class RenderSystem {
     // Weight
     const MODULE_KG: Record<string, number> = {
       'cannon': 100, 'swivel': 180, 'mast': 150, 'helm': 20, 'steering-wheel': 20,
-      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50, 'chest': 80,
+      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50,
     };
     let weightKg = MODULE_KG[moduleData.kind] ?? 50;
+    if (moduleData.kind === 'chest') {
+      weightKg = 40
+        + moduleData.wood        * 0.5
+        + moduleData.fiber       * 0.1
+        + moduleData.metal       * 1.0
+        + moduleData.stone       * 0.75
+        + moduleData.cannon_ball * 5.0;
+    }
     // Cannon weight is dynamic: 40 kg when stowed (gunport closed), 100 kg when deployed (gunport open / no gunport)
     if (moduleData.kind === 'cannon') {
       const snapIdx = (moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx;
@@ -18054,7 +18087,10 @@ export class RenderSystem {
       } else {
         dist = worldPos.sub(Vec2.from(mwx, mwy)).length();
       }
-      interactLabel = dist <= MAX_INTERACT_DIST ? '[E] Interact' : 'Not in Range';
+      const baseLabel = moduleData.kind === 'chest' ? '[E] to open' : '[E] Interact';
+      interactLabel = dist <= MAX_INTERACT_DIST ? baseLabel : 'Not in Range';
+    } else if (moduleData.kind === 'chest') {
+      interactLabel = '[E] to open';
     }
 
     // ── Layout ───────────────────────────────────────────────────────────

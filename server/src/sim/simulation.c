@@ -2047,7 +2047,8 @@ static int find_module_hit(const struct Ship* ship, float lx, float ly, uint8_t 
         const ShipModule* mod = &ship->modules[m];
         if (mod->type_id != MODULE_TYPE_CANNON &&
             mod->type_id != MODULE_TYPE_MAST   &&
-            mod->type_id != MODULE_TYPE_HELM)   continue;
+            mod->type_id != MODULE_TYPE_HELM    &&
+            mod->type_id != MODULE_TYPE_CHEST)  continue;
         if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
         // Only hit modules on the target deck; deck-independent (255) are always eligible.
         if (mod->deck_id != 255 && mod->deck_id != target_deck) continue;
@@ -2058,6 +2059,7 @@ static int find_module_hit(const struct Ship* ship, float lx, float ly, uint8_t 
             case MODULE_TYPE_CANNON: radius = CLIENT_TO_SERVER(15.0f); break; // Reduced from 28
             case MODULE_TYPE_MAST:   radius = CLIENT_TO_SERVER(25.0f); break; // Reduced from 38
             case MODULE_TYPE_HELM:   radius = CLIENT_TO_SERVER(15.0f); break; // Reduced from 28
+            case MODULE_TYPE_CHEST:  radius = CLIENT_TO_SERVER(12.0f); break;
             default:                 radius = 0.0f;                    break;
         }
         float mx = Q16_TO_FLOAT(mod->local_pos.x);

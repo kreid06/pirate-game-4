@@ -806,7 +806,13 @@ void handle_module_interact(WebSocketPlayer* player, struct WebSocketClient* cli
             log_warn("Cannot interact with structural module type %d", module->type_id);
             send_interaction_failure(client, "not_interactive");
             break;
-            
+
+        case MODULE_TYPE_CHEST:
+            // Chest is opened client-side from module data in the ship state.
+            // Server just confirms accessibility.
+            send_interaction_success(client, "chest_accessible");
+            break;
+
         default:
             log_warn("Unhandled module type: %d", module->type_id);
             send_interaction_failure(client, "unknown_module_type");

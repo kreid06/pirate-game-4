@@ -2058,7 +2058,7 @@ sya_send:;
  *
  * Safe to call from any code path (demolish, cannon hit, etc.).
  */
-void destroy_placed_structure(uint32_t structure_id) {
+void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y) {
     /* Find the target */
     uint32_t idx = UINT32_MAX;
     for (uint32_t i = 0; i < placed_structure_count; i++) {
@@ -2085,9 +2085,15 @@ void destroy_placed_structure(uint32_t structure_id) {
 
     /* Mark primary dead and broadcast */
     placed_structures[idx].active = false;
-    char msg[192];
-    snprintf(msg, sizeof(msg),
-             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
+    char msg[256];
+    if (!isnan(hit_x) && !isnan(hit_y)) {
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                 ",\"x\":%.1f,\"y\":%.1f}", structure_id, hit_x, hit_y);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
+    }
     websocket_server_broadcast(msg);
     log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
 
@@ -2277,7 +2283,7 @@ void destroy_placed_structure(uint32_t structure_id) {
  * and delegates to destroy_placed_structure on death.
  * Returns true if the structure was destroyed (s is then stale).
  */
-bool apply_structure_damage(PlacedStructure *s, uint32_t dmg) {
+bool apply_structure_damage(PlacedStructure *s, uint32_t dmg, float hit_x, float hit_y) {
     /* Claim flags are immune to damage — they only "die" by completing/reversing
      * their territory-claim timer (handled in claim.c). */
     if (s->type == STRUCT_CLAIM_FLAG) return false;
@@ -2295,15 +2301,19 @@ bool apply_structure_damage(PlacedStructure *s, uint32_t dmg) {
     s->last_damaged_ms = get_time_ms();
     if (s->hp == 0) {
         uint32_t sid = s->id;
-        destroy_placed_structure(sid);
+        destroy_placed_structure(sid, hit_x, hit_y);
         return true;
     }
+    /* Use impact position (hit_x/hit_y) so the client shows the damage number
+     * at the cannonball's point of impact rather than the structure's centre. */
+    float bx = (!isnan(hit_x)) ? hit_x : s->x;
+    float by = (!isnan(hit_y)) ? hit_y : s->y;
     char msg[224];
     snprintf(msg, sizeof(msg),
              "{\"type\":\"structure_hp_changed\","
              "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u"
              ",\"x\":%.1f,\"y\":%.1f}",
-             s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, s->x, s->y);
+             s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, bx, by);
     websocket_server_broadcast(msg);
     return false;
 }
@@ -2358,7 +2368,7 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
             placed_structures[i].scaffolded_ship_id  = 0;
         }
         log_info("🔨 Player %u demolished structure %u", player->player_id, sid);
-        destroy_placed_structure(sid);
+        destroy_placed_structure(sid, NAN, NAN);
         return; /* already sent via broadcast */
     }
 
@@ -3059,7 +3069,7 @@ void structure_garbage_collect(void) {
             log_info("🗑️ GC: purging dead structure id=%u type=%u at (%.0f, %.0f)",
                      (unsigned)s->id, (unsigned)s->type, s->x, s->y);
             uint32_t sid = s->id;
-            destroy_placed_structure(sid); /* may compact array — restart scan */
+            destroy_placed_structure(sid, NAN, NAN); /* may compact array — restart scan */
             purged++;
             found = true;
             break; /* restart outer while loop with fresh indices */

@@ -133,6 +133,18 @@ typedef struct {
 } SwivelModuleData;
 
 /**
+ * Chest-specific module data — stores raw resources on a ship.
+ */
+typedef struct {
+    uint16_t wood;
+    uint16_t fiber;
+    uint16_t metal;
+    uint16_t stone;
+    uint16_t cannon_ball;
+    uint8_t  _pad[2];
+} ChestModuleData;
+
+/**
  * Generic ship module structure
  */
 typedef struct {
@@ -147,13 +159,14 @@ typedef struct {
     q16_t max_health;           // Maximum HP
 
     union {
-        CannonModuleData cannon;
-        MastModuleData mast;
-        HelmModuleData helm;
-        SeatModuleData seat;
-        PlankModuleData plank;
-        SwivelModuleData swivel;
+        CannonModuleData  cannon;
+        MastModuleData    mast;
+        HelmModuleData    helm;
+        SeatModuleData    seat;
+        PlankModuleData   plank;
+        SwivelModuleData  swivel;
         GunportModuleData gunport;
+        ChestModuleData   chest;
     } data;
 
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0

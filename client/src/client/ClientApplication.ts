@@ -2156,7 +2156,7 @@ export class ClientApplication {
         const _pidClick = this.networkManager.getAssignedPlayerId();
         const _invClick = _wsClick?.players.find(p => p.id === _pidClick)?.inventory ?? null;
         if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height, _invClick)) return true;
-        if (this.chestMenu.handleClick(x, y)) return true;
+        if (this.chestMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.landChestMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
@@ -2166,10 +2166,11 @@ export class ClientApplication {
       this.inputManager.onUIMouseMove = (x, y) => {
         if (this.craftingMenu.visible) this.craftingMenu.handleMouseMove(x, y);
         if (this.landChestMenu.visible) this.landChestMenu.handleMouseMove(x, y);
-        // ChestMenu has no hover state, but consume moves over it so world-clicks don't fire
+        if (this.chestMenu.visible) this.chestMenu.handleMouseMove(x, y);
         this.uiManager?.handleWorldMapMouseMove(x, y);
       };
       this.inputManager.onUIMouseUp = (x, y) => {
+        this.chestMenu.handleMouseUp(x, y);
         this.landChestMenu.handleMouseUp(x, y, this.canvas.width, this.canvas.height);
         this.uiManager?.handleWorldMapMouseUp(x, y);
       };

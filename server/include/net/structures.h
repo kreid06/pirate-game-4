@@ -19,7 +19,7 @@ void handle_salvage_module(WebSocketPlayer* player, struct WebSocketClient* clie
  * structures (workbenches/walls/ceilings/doors). Finally compacts inactive
  * entries out of placed_structures[]. Safe to call from any path.
  */
-void destroy_placed_structure(uint32_t structure_id);
+void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y);
 
 /**
  * Apply damage to a placed structure. Subtracts dmg from hp (clamped to 0),
@@ -27,7 +27,7 @@ void destroy_placed_structure(uint32_t structure_id);
  * destroy_placed_structure on death. Returns true if the structure was destroyed.
  * The pointer s may be invalidated after this call returns true.
  */
-bool apply_structure_damage(PlacedStructure *s, uint32_t dmg);
+bool apply_structure_damage(PlacedStructure *s, uint32_t dmg, float hit_x, float hit_y);
 
 /**
  * handle_repair_structure: player initiates a constant-rate repair on a

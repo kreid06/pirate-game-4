@@ -604,6 +604,7 @@ static float module_collision_radius(ModuleTypeId type) {
         case MODULE_TYPE_MAST:           return 14.0f;
         case MODULE_TYPE_CANNON:         return 13.0f;
         case MODULE_TYPE_SWIVEL:         return 10.0f;
+        case MODULE_TYPE_CHEST:          return 12.0f;
         default:                         return 0.0f; // ladder/plank/deck/seat — passable
     }
 }
@@ -1126,7 +1127,20 @@ void recalc_ship_mass(SimpleShip* ship) {
         }
     }
 
-    float new_mass = ship->base_mass + cargo_kg + cannon_kg;
+    /* Chest weights: 40 kg base + contents (same per-unit weights as player inventory). */
+    float chest_kg = 0.0f;
+    for (uint8_t cm = 0; cm < ship->module_count; cm++) {
+        if (ship->modules[cm].type_id != MODULE_TYPE_CHEST) continue;
+        const ChestModuleData* ch = &ship->modules[cm].data.chest;
+        chest_kg += 40.0f  /* empty chest */
+            + ITEM_WEIGHT_KG[ITEM_WOOD]        * (float)ch->wood
+            + ITEM_WEIGHT_KG[ITEM_FIBER]       * (float)ch->fiber
+            + ITEM_WEIGHT_KG[ITEM_METAL]       * (float)ch->metal
+            + ITEM_WEIGHT_KG[ITEM_STONE]       * (float)ch->stone
+            + ITEM_WEIGHT_KG[ITEM_CANNON_BALL] * (float)ch->cannon_ball;
+    }
+
+    float new_mass = ship->base_mass + cargo_kg + cannon_kg + chest_kg;
     ship->mass     = new_mass;
 
     /* Sync into authoritative sim ship */
@@ -1801,6 +1815,19 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->state_bits,
                             (unsigned)module->deck_id,
                             (unsigned)module->data.gunport.snap_idx);
+                    } else if (module->type_id == MODULE_TYPE_CHEST) {
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u"
+                            ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u,\"cannon_ball\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, (unsigned)module->state_bits,
+                            (int)module->health, (int)module->max_health,
+                            (unsigned)module->deck_id,
+                            (unsigned)module->data.chest.wood,
+                            (unsigned)module->data.chest.fiber,
+                            (unsigned)module->data.chest.metal,
+                            (unsigned)module->data.chest.stone,
+                            (unsigned)module->data.chest.cannon_ball);
                     } else {
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                             "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
@@ -1933,6 +1960,17 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                         module_x, module_y, module_rot, wheel_rot,
                         (module->data.helm.occupied_by != 0) ? "true" : "false",
                         (unsigned)module->state_bits);
+                } else if (module->type_id == MODULE_TYPE_CHEST) {
+                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u"
+                        ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u,\"cannon_ball\":%u}",
+                        m > 0 ? "," : "", module->id, module->type_id,
+                        module_x, module_y, module_rot, (unsigned)module->state_bits,
+                        (unsigned)module->data.chest.wood,
+                        (unsigned)module->data.chest.fiber,
+                        (unsigned)module->data.chest.metal,
+                        (unsigned)module->data.chest.stone,
+                        (unsigned)module->data.chest.cannon_ball);
                 } else {
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                         "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
@@ -4377,6 +4415,100 @@ int websocket_server_update(struct Sim* sim) {
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) handle_land_chest_drop(player, client, payload);
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "chest_transfer") == 0) {
+                            // SHIP CHEST TRANSFER: deposit/withdraw raw resources between player pack and
+                            // a MODULE_TYPE_CHEST on a ship.
+                            // Payload: {"type":"chest_transfer","shipId":N,"moduleId":N,"item":"wood"|"fiber"|"metal"|"stone","quantity":N,"direction":"deposit"|"withdraw"}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                char ct_resp[256];
+                                if (!player) {
+                                    strcpy(ct_resp, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                                    char ct_frame[320];
+                                    size_t ct_flen = websocket_create_frame(WS_OPCODE_TEXT, ct_resp, strlen(ct_resp), ct_frame, sizeof(ct_frame));
+                                    if (ct_flen > 0) send(client->fd, ct_frame, ct_flen, 0);
+                                } else {
+                                    uint32_t ct_ship_id = 0, ct_module_id = 0;
+                                    int ct_qty = 0;
+                                    char ct_item[32] = "", ct_dir[16] = "";
+                                    { const char* p = strstr(payload, "\"shipId\":"); if (p) sscanf(p + 9, "%u", &ct_ship_id); }
+                                    { const char* p = strstr(payload, "\"moduleId\":"); if (p) sscanf(p + 11, "%u", &ct_module_id); }
+                                    { const char* p = strstr(payload, "\"quantity\":"); if (p) sscanf(p + 11, "%d", &ct_qty); }
+                                    { const char* p = strstr(payload, "\"item\":\""); if (p) { p += 8; size_t k=0; while(*p && *p!='"' && k<31) ct_item[k++]=*p++; ct_item[k]='\0'; } }
+                                    { const char* p = strstr(payload, "\"direction\":\""); if (p) { p += 13; size_t k=0; while(*p && *p!='"' && k<15) ct_dir[k++]=*p++; ct_dir[k]='\0'; } }
+
+                                    /* Find the ship module */
+                                    SimpleShip* ct_simple = find_ship((uint16_t)ct_ship_id);
+                                    ShipModule* ct_mod = ct_simple ? find_module_by_id(ct_simple, ct_module_id) : NULL;
+                                    /* Also update sim layer */
+                                    ShipModule* ct_sim_mod = NULL;
+                                    if (global_sim) {
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == (entity_id)ct_ship_id) {
+                                                for (uint8_t mi = 0; mi < global_sim->ships[si].module_count; mi++) {
+                                                    if (global_sim->ships[si].modules[mi].id == (uint16_t)ct_module_id) {
+                                                        ct_sim_mod = &global_sim->ships[si].modules[mi]; break;
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+
+                                    if (!ct_mod || ct_mod->type_id != MODULE_TYPE_CHEST) {
+                                        strcpy(ct_resp, "{\"type\":\"error\",\"message\":\"not_chest\"}");
+                                    } else if (ct_qty <= 0 || ct_item[0] == '\0' || ct_dir[0] == '\0') {
+                                        strcpy(ct_resp, "{\"type\":\"error\",\"message\":\"bad_params\"}");
+                                    } else {
+                                        /* Map item string to chest field + player field */
+                                        uint16_t* chest_f  = NULL;
+                                        uint16_t* player_f = NULL;
+                                        if      (strcmp(ct_item, "wood")  == 0) { chest_f = &ct_mod->data.chest.wood;  player_f = &player->res_wood;  }
+                                        else if (strcmp(ct_item, "fiber") == 0) { chest_f = &ct_mod->data.chest.fiber; player_f = &player->res_fiber; }
+                                        else if (strcmp(ct_item, "metal") == 0) { chest_f = &ct_mod->data.chest.metal; player_f = &player->res_metal; }
+                                        else if (strcmp(ct_item, "stone") == 0) { chest_f = &ct_mod->data.chest.stone; player_f = &player->res_stone; }
+
+                                        if (!chest_f) {
+                                            strcpy(ct_resp, "{\"type\":\"error\",\"message\":\"unknown_item\"}");
+                                        } else {
+                                            bool deposit = (strcmp(ct_dir, "deposit") == 0);
+                                            int actual = 0;
+                                            if (deposit) {
+                                                int avail = (int)*player_f;
+                                                int cap   = LAND_CHEST_MAX - (int)*chest_f;
+                                                actual = ct_qty < avail ? ct_qty : avail;
+                                                if (actual > cap) actual = cap;
+                                                if (actual > 0) { *player_f -= (uint16_t)actual; *chest_f += (uint16_t)actual; }
+                                                else strcpy(ct_resp, "{\"type\":\"error\",\"message\":\"no_space\"}");
+                                            } else {
+                                                int avail = (int)*chest_f;
+                                                actual = ct_qty < avail ? ct_qty : avail;
+                                                if (actual > 0) { *chest_f -= (uint16_t)actual; *player_f += (uint16_t)actual; }
+                                                else strcpy(ct_resp, "{\"type\":\"error\",\"message\":\"chest_empty\"}");
+                                            }
+                                            /* Mirror to sim layer */
+                                            if (actual > 0 && ct_sim_mod && ct_sim_mod->type_id == MODULE_TYPE_CHEST)
+                                                ct_sim_mod->data.chest = ct_mod->data.chest;
+                                            if (actual > 0) {
+                                                log_info("📦 Player %u %s %d %s %s ship-chest %u",
+                                                         player->player_id,
+                                                         deposit ? "deposited" : "withdrew",
+                                                         actual, ct_item,
+                                                         deposit ? "into" : "from",
+                                                         ct_module_id);
+                                                snprintf(ct_resp, sizeof(ct_resp),
+                                                         "{\"type\":\"message_ack\",\"status\":\"chest_transfer_ok\"}");
+                                                recalc_ship_mass(ct_simple);
+                                            }
+                                        }
+                                    }
+                                    char ct_frame[320];
+                                    size_t ct_flen = websocket_create_frame(WS_OPCODE_TEXT, ct_resp, strlen(ct_resp), ct_frame, sizeof(ct_frame));
+                                    if (ct_flen > 0) send(client->fd, ct_frame, ct_flen, 0);
+                                }
                             }
                             handled = true;
 
@@ -7313,6 +7445,83 @@ int websocket_server_update(struct Sim* sim) {
                                                  player->player_id, new_id, local_x, local_y, wb_sim->id);
                                         snprintf(response, sizeof(response),
                                             "{\"type\":\"message_ack\",\"status\":\"workbench_placed\",\"workbench_id\":%u}",
+                                            new_id);
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_chest_at") == 0) {
+                            // PLACE CHEST: add a storage chest module at the given local position.
+                            // Payload: {"type":"place_chest_at","shipId":N,"localX":F,"localY":F,"rotation":F,"deckId":N}
+                            // Costs MODULE_RES_COST[MODULE_TYPE_CHEST] resources (12 wood).
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else if (!res_can_afford(player, MODULE_TYPE_CHEST)) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
+                                } else if (!global_sim) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                } else {
+                                    uint16_t target_ship_id = player->parent_ship_id;
+                                    float local_x = 0.0f, local_y = 0.0f;
+                                    const char* p_sid = strstr(payload, "\"shipId\":");
+                                    const char* p_lx  = strstr(payload, "\"localX\":");
+                                    const char* p_ly  = strstr(payload, "\"localY\":");
+                                    const char* p_dk  = strstr(payload, "\"deckId\":");
+                                    if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                    if (p_lx) sscanf(p_lx + 9, "%f", &local_x);
+                                    if (p_ly) sscanf(p_ly + 9, "%f", &local_y);
+                                    uint8_t req_deck_id = player->deck_level;
+                                    if (p_dk) { unsigned dk = 0; sscanf(p_dk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : player->deck_level; }
+
+                                    struct Ship* ch_sim = NULL;
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id == target_ship_id) {
+                                            ch_sim = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                    SimpleShip* ch_simple = find_ship(target_ship_id);
+                                    if (!ch_sim || !ch_simple) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else if (ch_sim->module_count >= MAX_MODULES_PER_SHIP ||
+                                               ch_simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                    } else if (modules_overlap_at(ch_simple, MODULE_TYPE_CHEST, local_x, local_y, req_deck_id)) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"placement_overlap\"}");
+                                    } else {
+                                        uint16_t max_id = 0;
+                                        for (uint8_t m = 0; m < ch_sim->module_count; m++)
+                                            if (ch_sim->modules[m].id > max_id) max_id = ch_sim->modules[m].id;
+                                        for (uint8_t m = 0; m < ch_simple->module_count; m++)
+                                            if (ch_simple->modules[m].id > max_id) max_id = ch_simple->modules[m].id;
+                                        uint16_t new_id = max_id + 1;
+
+                                        ShipModule nch;
+                                        memset(&nch, 0, sizeof(ShipModule));
+                                        nch.id          = new_id;
+                                        nch.type_id     = MODULE_TYPE_CHEST;
+                                        nch.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                        nch.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                        nch.local_rot   = 0;
+                                        nch.state_bits  = MODULE_STATE_ACTIVE;
+                                        nch.health      = 5000;
+                                        nch.max_health  = 5000;
+                                        nch.deck_id     = req_deck_id;
+
+                                        ch_sim->modules[ch_sim->module_count++]       = nch;
+                                        ch_simple->modules[ch_simple->module_count++] = nch;
+
+                                        res_consume(player, MODULE_TYPE_CHEST);
+
+                                        log_info("📦 Player %u placed chest %u at (%.1f,%.1f) deck=%u on ship %u",
+                                                 player->player_id, new_id, local_x, local_y,
+                                                 req_deck_id, ch_sim->id);
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"message_ack\",\"status\":\"chest_placed\",\"chest_id\":%u}",
                                             new_id);
                                     }
                                 }
@@ -10475,6 +10684,32 @@ void websocket_server_tick(float dt) {
                 if (ev->destroyed) {
                     // Interior module destroyed through breach: remove from SimpleShip and sim ship, then broadcast MODULE_HIT
                     SimpleShip* simple = find_ship(ev->ship_id);
+
+                    // Capture chest contents + world position before removal
+                    bool     chest_ruin_active = false;
+                    float    chest_ruin_wx = 0.0f, chest_ruin_wy = 0.0f;
+                    uint16_t chest_ruin_wood = 0, chest_ruin_fiber = 0,
+                             chest_ruin_metal = 0, chest_ruin_stone = 0;
+                    if (simple) {
+                        for (int m = 0; m < simple->module_count; m++) {
+                            if (simple->modules[m].id == ev->module_id &&
+                                simple->modules[m].type_id == MODULE_TYPE_CHEST) {
+                                const ShipModule* cmod = &simple->modules[m];
+                                chest_ruin_wood  = cmod->data.chest.wood;
+                                chest_ruin_fiber = cmod->data.chest.fiber;
+                                chest_ruin_metal = cmod->data.chest.metal;
+                                chest_ruin_stone = cmod->data.chest.stone;
+                                float lx = SERVER_TO_CLIENT((float)cmod->local_pos.x / 65536.0f);
+                                float ly = SERVER_TO_CLIENT((float)cmod->local_pos.y / 65536.0f);
+                                float cr = cosf(simple->rotation), sr = sinf(simple->rotation);
+                                chest_ruin_wx = simple->x + lx * cr - ly * sr;
+                                chest_ruin_wy = simple->y + lx * sr + ly * cr;
+                                chest_ruin_active = true;
+                                break;
+                            }
+                        }
+                    }
+
                     if (simple) {
                         for (int m = 0; m < simple->module_count; m++) {
                             if (simple->modules[m].id == ev->module_id) {
@@ -10575,6 +10810,44 @@ void websocket_server_tick(float dt) {
                                 players[pi].controlling_ship_id = 0;
                             }
                         }
+                    }
+
+                    // Spawn chest_ruin wreck if the destroyed module was a chest with resources
+                    if (chest_ruin_active &&
+                        (chest_ruin_wood + chest_ruin_fiber + chest_ruin_metal + chest_ruin_stone) > 0 &&
+                        placed_structure_count < MAX_PLACED_STRUCTURES) {
+                        PlacedStructure *wr = &placed_structures[placed_structure_count];
+                        memset(wr, 0, sizeof(*wr));
+                        wr->active               = true;
+                        wr->id                   = next_structure_id++;
+                        wr->type                 = STRUCT_WRECK;
+                        wr->x                    = chest_ruin_wx;
+                        wr->y                    = chest_ruin_wy;
+                        wr->island_id            = 0; /* at sea */
+                        wr->wreck_resource_cache = true;
+                        wr->chest_wood           = chest_ruin_wood;
+                        wr->chest_fiber          = chest_ruin_fiber;
+                        wr->chest_metal          = chest_ruin_metal;
+                        wr->chest_stone          = chest_ruin_stone;
+                        wr->wreck_expires_ms     = get_time_ms() + 900000u; /* 15 min */
+                        snprintf(wr->placer_name, sizeof(wr->placer_name), "chest_ruin");
+                        placed_structure_count++;
+                        char wbcast[256];
+                        snprintf(wbcast, sizeof(wbcast),
+                            "{\"type\":\"wreck_spawned\",\"id\":%u,\"x\":%.1f,\"y\":%.1f"
+                            ",\"wreck_type\":\"chest_ruin\""
+                            ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u"
+                            ",\"expires_ms\":%u}",
+                            (unsigned)wr->id, chest_ruin_wx, chest_ruin_wy,
+                            (unsigned)chest_ruin_wood, (unsigned)chest_ruin_fiber,
+                            (unsigned)chest_ruin_metal, (unsigned)chest_ruin_stone,
+                            (unsigned)wr->wreck_expires_ms);
+                        websocket_server_broadcast(wbcast);
+                        log_info("📦 Ship chest ruin %u spawned at (%.0f,%.0f) [w=%u f=%u m=%u s=%u]",
+                                 (unsigned)wr->id, chest_ruin_wx, chest_ruin_wy,
+                                 (unsigned)chest_ruin_wood, (unsigned)chest_ruin_fiber,
+                                 (unsigned)chest_ruin_metal, (unsigned)chest_ruin_stone);
+                        recalc_ship_mass(find_ship(ev->ship_id));
                     }
 
                     snprintf(msg, sizeof(msg),
