@@ -52,3 +52,11 @@ void handle_door_lock(WebSocketPlayer* player, struct WebSocketClient* client, c
  * Emits repair_complete when target_hp reaches max_hp.
  */
 void structure_repair_tick(uint32_t delta_ms);
+
+/**
+ * Scan placed_structures[] and destroy any active entry whose hp has reached 0
+ * but was not properly cleaned up (e.g. due to a missed destroy path). Runs at
+ * most once every 30 s. Claim flags and flag forts in CLAIMING phase are exempt
+ * (they use timer-based removal, not HP). Logs each structure it purges.
+ */
+void structure_garbage_collect(void);

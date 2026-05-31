@@ -7,7 +7,7 @@
  *   "ships":   [ { id, seq, type, company, x, y, rot, vx, vy, av,
  *                  sail_openness, sail_angle, ammo, infinite_ammo,
  *                  is_sinking,
- *                  "modules": [ { id, type, lx, ly, lr, health, max_health } ],
+ *                  "modules": [ { id, type, lx, ly, lr, health, max_health, target_health } ],
  *                  "weapon_groups": [...],
  *                  "level_stats": { xp, w, r, d, c, s } } ],
  *   "world_npcs": [ { id, name, role, company, x, y, rot,
@@ -137,12 +137,16 @@ int world_save(const char *path) {
         if (!first_ship) fprintf(f, ",");
         first_ship = false;
 
-        /* Check if the sim-layer ship still has SHIP_FLAG_SCAFFOLDED set */
+        /* Check if the sim-layer ship still has SHIP_FLAG_SCAFFOLDED set.
+         * Also cache a pointer to the sim-layer ship so we can save up-to-date
+         * module health (passive healing updates the sim layer, not SimpleShip). */
         bool is_scaffolded = false;
+        const struct Ship *sim_save = NULL;
         if (global_sim) {
             for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                 if (global_sim->ships[si].id == (uint32_t)s->ship_id) {
                     is_scaffolded = (global_sim->ships[si].flags & SHIP_FLAG_SCAFFOLDED) != 0;
+                    sim_save = &global_sim->ships[si];
                     break;
                 }
             }
@@ -196,6 +200,18 @@ int world_save(const char *path) {
                 (mod->type_id == MODULE_TYPE_GUNPORT) ? (unsigned)mod->data.gunport.snap_idx : 0xFFu;
             unsigned save_gp_open =
                 (mod->type_id == MODULE_TYPE_GUNPORT) ? (unsigned)mod->data.gunport.is_open : 0u;
+            /* Prefer sim-layer health: passive healing updates global_sim, not SimpleShip */
+            int32_t  eff_health = mod->health;
+            int32_t  eff_target = mod->max_health; /* default: full ceiling */
+            if (sim_save) {
+                for (uint8_t si = 0; si < sim_save->module_count; si++) {
+                    if (sim_save->modules[si].id == mod->id) {
+                        eff_health = sim_save->modules[si].health;
+                        eff_target = sim_save->modules[si].target_health;
+                        break;
+                    }
+                }
+            }
             fprintf(f,
                 "\n        {"
                 "\"id\":%u,"
@@ -205,6 +221,7 @@ int world_save(const char *path) {
                 "\"lr\":%.6f,"
                 "\"health\":%u,"
                 "\"max_health\":%u,"
+                "\"target_health\":%u,"
                 "\"gp_snap\":%u,"
                 "\"gp_open\":%u,"
                 "\"deck\":%u"
@@ -214,8 +231,9 @@ int world_save(const char *path) {
                 (double)((float)mod->local_pos.x / 65536.0f),
                 (double)((float)mod->local_pos.y / 65536.0f),
                 (double)((float)mod->local_rot    / 65536.0f),
-                (unsigned)(mod->health    < 0 ? 0 : (uint32_t)mod->health),
+                (unsigned)(eff_health  < 0 ? 0 : (uint32_t)eff_health),
                 (unsigned)(mod->max_health < 0 ? 0 : (uint32_t)mod->max_health),
+                (unsigned)(eff_target  < 0 ? 0 : (uint32_t)eff_target),
                 save_gp_snap,
                 save_gp_open,
                 (unsigned)mod->deck_id
@@ -642,19 +660,20 @@ int world_load(const char *path) {
                                     }
                                 }
                                 while ((mobj = next_json_object(&marr)) != NULL) {
-                                    unsigned saved_id = 0, mtype = 0, mhealth = 0, mmax = 0;
+                                    unsigned saved_id = 0, mtype = 0, mhealth = 0, mmax = 0, mtarget = 0;
                                     unsigned mgp_snap = 0xFF, mgp_open = 0, mdeck = 0xFF;
                                     float mlx = 0, mly = 0, mlr = 0;
-                                    ws_json_uint(mobj,  "id",         &saved_id);
-                                    ws_json_uint(mobj,  "type",       &mtype);
-                                    ws_json_float(mobj, "lx",         &mlx);
-                                    ws_json_float(mobj, "ly",         &mly);
-                                    ws_json_float(mobj, "lr",         &mlr);
-                                    ws_json_uint(mobj,  "health",     &mhealth);
-                                    ws_json_uint(mobj,  "max_health", &mmax);
-                                    ws_json_uint(mobj,  "gp_snap",    &mgp_snap);
-                                    ws_json_uint(mobj,  "gp_open",    &mgp_open);
-                                    ws_json_uint(mobj,  "deck",       &mdeck);
+                                    ws_json_uint(mobj,  "id",            &saved_id);
+                                    ws_json_uint(mobj,  "type",          &mtype);
+                                    ws_json_float(mobj, "lx",            &mlx);
+                                    ws_json_float(mobj, "ly",            &mly);
+                                    ws_json_float(mobj, "lr",            &mlr);
+                                    ws_json_uint(mobj,  "health",        &mhealth);
+                                    ws_json_uint(mobj,  "max_health",    &mmax);
+                                    ws_json_uint(mobj,  "target_health", &mtarget);
+                                    ws_json_uint(mobj,  "gp_snap",       &mgp_snap);
+                                    ws_json_uint(mobj,  "gp_open",       &mgp_open);
+                                    ws_json_uint(mobj,  "deck",          &mdeck);
                                     /* Rebuild MID with new ship_seq, preserving the offset */
                                     uint8_t offset = (uint8_t)(saved_id & 0xFF);
                                     uint16_t new_mid = (uint16_t)((s->ship_seq << 8) | offset);
@@ -664,8 +683,9 @@ int world_load(const char *path) {
                                     };
                                     q16_t rot = (q16_t)(int32_t)(mlr * 65536.0f);
                                     ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
-                                    new_mod.health     = (int32_t)mhealth;
-                                    new_mod.max_health = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                    new_mod.health        = (int32_t)mhealth;
+                                    new_mod.max_health    = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                    new_mod.target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)new_mod.max_health);
                                     /* Restore gunport / cannon link data */
                                     if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
                                         new_mod.data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
@@ -687,32 +707,49 @@ int world_load(const char *path) {
                                 /* Finished ship: modules were created by websocket_server_create_ship;
                                  * match saved modules by type + position to restore health.
                                  * Dynamically-placed modules (ramps) have no default slot — add them. */
+                                /* Cache sim-ship pointer once for matched-module sim-layer updates */
+                                struct Ship *sim_fin = NULL;
+                                if (global_sim) {
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if ((uint32_t)global_sim->ships[si].id == new_id) {
+                                            sim_fin = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                }
                                 while ((mobj = next_json_object(&marr)) != NULL) {
-                                    unsigned mtype = 0, mhealth = 0, mmax = 0, msaved_id = 0;
+                                    unsigned mtype = 0, mhealth = 0, mmax = 0, msaved_id = 0, mtarget = 0;
                                     unsigned mgp_snap = 0xFF, mgp_open = 0, mdeck = 0xFF;
                                     float mlx = 0, mly = 0, mlr = 0;
-                                    ws_json_uint(mobj,  "id",         &msaved_id);
-                                    ws_json_uint(mobj,  "type",       &mtype);
-                                    ws_json_float(mobj, "lx",         &mlx);
-                                    ws_json_float(mobj, "ly",         &mly);
-                                    ws_json_float(mobj, "lr",         &mlr);
-                                    ws_json_uint(mobj,  "health",     &mhealth);
-                                    ws_json_uint(mobj,  "max_health", &mmax);
-                                    ws_json_uint(mobj,  "gp_snap",    &mgp_snap);
-                                    ws_json_uint(mobj,  "gp_open",    &mgp_open);
-                                    ws_json_uint(mobj,  "deck",       &mdeck);
+                                    ws_json_uint(mobj,  "id",            &msaved_id);
+                                    ws_json_uint(mobj,  "type",          &mtype);
+                                    ws_json_float(mobj, "lx",            &mlx);
+                                    ws_json_float(mobj, "ly",            &mly);
+                                    ws_json_float(mobj, "lr",            &mlr);
+                                    ws_json_uint(mobj,  "health",        &mhealth);
+                                    ws_json_uint(mobj,  "max_health",    &mmax);
+                                    ws_json_uint(mobj,  "target_health", &mtarget);
+                                    ws_json_uint(mobj,  "gp_snap",       &mgp_snap);
+                                    ws_json_uint(mobj,  "gp_open",       &mgp_open);
+                                    ws_json_uint(mobj,  "deck",          &mdeck);
 
                                     bool matched = false;
-                                    /* Match module by type + approximate position */
+                                    /* Match module by type + approximate position.
+                                     * DECK modules are a special case: both lower (deck_id=0) and
+                                     * upper (deck_id=1) share the same local_pos (0,0), so we must
+                                     * also match on deck_id to avoid the upper deck overwriting the
+                                     * lower deck and never being added as a separate module. */
                                     for (uint8_t k = 0; k < s->module_count; k++) {
                                         ShipModule *m = &s->modules[k];
                                         if ((unsigned)m->type_id != mtype) continue;
+                                        /* Deck disambiguation: same position, different deck_id → no match */
+                                        if (mtype == (unsigned)MODULE_TYPE_DECK && m->deck_id != (uint8_t)mdeck) continue;
                                         float dx = (float)m->local_pos.x / 65536.0f - mlx;
                                         float dy = (float)m->local_pos.y / 65536.0f - mly;
                                         if (dx * dx + dy * dy > 0.01f) continue;
-                                        m->health    = (int32_t)mhealth;
-                                        m->local_rot = (q16_t)(int32_t)(mlr * 65536.0f);
+                                        m->health        = (int32_t)mhealth;
+                                        m->local_rot     = (q16_t)(int32_t)(mlr * 65536.0f);
                                         if (mmax > 0) m->max_health = (int32_t)mmax;
+                                        m->target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)m->max_health);
                                         /* Restore gunport / cannon link data */
                                         if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
                                             m->data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
@@ -721,6 +758,17 @@ int world_load(const char *path) {
                                             m->data.gunport.is_open  = (uint8_t)(mgp_open & 1);
                                         }
                                         m->deck_id = (uint8_t)mdeck;
+                                        /* Mirror health into sim layer for the same module (by ID) */
+                                        if (sim_fin) {
+                                            for (uint8_t si = 0; si < sim_fin->module_count; si++) {
+                                                if (sim_fin->modules[si].id == m->id) {
+                                                    sim_fin->modules[si].health        = m->health;
+                                                    sim_fin->modules[si].max_health    = m->max_health;
+                                                    sim_fin->modules[si].target_health = m->target_health;
+                                                    break;
+                                                }
+                                            }
+                                        }
                                         matched = true;
                                         break;
                                     }
@@ -750,8 +798,9 @@ int world_load(const char *path) {
                                             new_mid = max_id + 1;
                                         }
                                         ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
-                                        new_mod.health     = (int32_t)mhealth;
-                                        new_mod.max_health = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                        new_mod.health        = (int32_t)mhealth;
+                                        new_mod.max_health    = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
+                                        new_mod.target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)new_mod.max_health);
                                         /* Restore gunport / cannon link data for dynamically-placed modules */
                                         if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
                                             new_mod.data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
@@ -762,16 +811,9 @@ int world_load(const char *path) {
                                         new_mod.deck_id = (uint8_t)mdeck;
                                         if (s->module_count < MAX_MODULES_PER_SHIP)
                                             s->modules[s->module_count++] = new_mod;
-                                        /* Mirror into sim layer */
-                                        if (global_sim) {
-                                            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                                if ((uint32_t)global_sim->ships[si].id != new_id) continue;
-                                                struct Ship *sim_s = &global_sim->ships[si];
-                                                if (sim_s->module_count < MAX_MODULES_PER_SHIP)
-                                                    sim_s->modules[sim_s->module_count++] = new_mod;
-                                                break;
-                                            }
-                                        }
+                                        /* Mirror into sim layer (use cached sim_fin pointer) */
+                                        if (sim_fin && sim_fin->module_count < MAX_MODULES_PER_SHIP)
+                                            sim_fin->modules[sim_fin->module_count++] = new_mod;
                                     }
                                     free(mobj);
                                     mi++;

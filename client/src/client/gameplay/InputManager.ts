@@ -203,6 +203,11 @@ export class InputManager {
    * refill without instantly draining again.
    */
   private sprintLocked: boolean = false;
+  /**
+   * Current player carry-weight ratio (carried_kg / capacity_kg, 0–1+).
+   * Sprint is disabled when this is ≥ 0.85, matching server behaviour.
+   */
+  private carryRatio: number = 0;
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
@@ -433,7 +438,11 @@ export class InputManager {
     // Auto-clear the sprint lock as soon as Shift is released, so the next
     // Shift press can sprint again (assuming there is stamina available).
     if (!shiftHeld && this.sprintLocked) this.sprintLocked = false;
-    const isSprinting = shiftHeld && this.isActionActive('move_forward') && !this.sprintLocked;
+    // Carry-weight gate: server only grants sprint speed when carry_ratio < 0.85.
+    // Match here so the client doesn't predict sprint or drain server-side stamina
+    // for a sprint that has no effect.
+    const carryAllowsSprint = this.carryRatio < 0.85;
+    const isSprinting = shiftHeld && this.isActionActive('move_forward') && !this.sprintLocked && carryAllowsSprint;
     const movementChanged = !currentMovement.equals(this.previousMovementState);
     const sprintChanged = isSprinting !== this.previousSprintState;
     if (movementChanged || sprintChanged) {
@@ -520,13 +529,23 @@ export class InputManager {
 
   /**
    * Notify the input manager of the player's current stamina. When stamina
-   * reaches zero, sprint is locked out until Shift is released and re-pressed
-   * so the bar can refill without instantly draining again.
+   * reaches zero, sprint is locked out. The lock auto-clears when stamina
+   * regens back to ≥ 85% of max (or immediately when Shift is released).
    */
-  setPlayerStamina(stamina: number): void {
+  setPlayerStamina(stamina: number, maxStamina: number): void {
     if (stamina <= 0 && this.isShiftHeld()) {
       this.sprintLocked = true;
+    } else if (this.sprintLocked && stamina >= maxStamina * 0.85) {
+      this.sprintLocked = false;
     }
+  }
+
+  /**
+   * Notify the input manager of the player's current carry-weight ratio.
+   * Sprint is gated to match server behaviour: only allowed when ratio < 0.85.
+   */
+  setPlayerCarryRatio(ratio: number): void {
+    this.carryRatio = ratio;
   }
   
   /**
@@ -1148,8 +1167,8 @@ export class InputManager {
     }
     
     // Sprint action (Shift + forward key) — suppressed when out of stamina
-    // until Shift is released and re-pressed.
-    if (this.isShiftHeld() && this.isActionActive('move_forward') && !this.sprintLocked) {
+    // until Shift is released and re-pressed, and when carrying ≥ 85 % of capacity.
+    if (this.isShiftHeld() && this.isActionActive('move_forward') && !this.sprintLocked && this.carryRatio < 0.85) {
       actions |= PlayerActions.SPRINT;
     }
     

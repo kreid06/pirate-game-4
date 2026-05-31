@@ -2098,8 +2098,9 @@ export class NetworkManager {
             if (!this._shipTemplates.has(shipId)) {
               const s = createShipAtPosition(Vec2.from(0, 0), 0);
               const shipSeq = (ship.seq !== undefined ? ship.seq : shipId) & 0xFF;
-              const MID_PLANK_BASE = 0x0C;            // MODULE_OFFSET_PLANK(0)
-              const MID_DECK       = 0x16;            // MODULE_OFFSET_DECK
+              const MID_PLANK_BASE  = 0x0C;           // MODULE_OFFSET_PLANK(0)
+              const MID_DECK_LOWER  = 0x16;           // MODULE_OFFSET_DECK_LOWER
+              const MID_DECK_UPPER  = 0x17;           // MODULE_OFFSET_DECK_UPPER
               let plankIdx = 0;
               s.modules = s.modules.map(m => {
                 if (m.kind === 'plank') {
@@ -2107,7 +2108,9 @@ export class NetworkManager {
                   return { ...m, id: newId };
                 }
                 if (m.kind === 'deck') {
-                  return { ...m, id: (shipSeq << 8) | MID_DECK };
+                  // Assign distinct IDs per deck level so hammer targeting works correctly
+                  const deckOff = m.deckId === 1 ? MID_DECK_UPPER : MID_DECK_LOWER;
+                  return { ...m, id: (shipSeq << 8) | deckOff };
                 }
                 return m;
               });
@@ -2137,11 +2140,8 @@ export class NetworkManager {
               const gameplayModules: ShipModule[] = [];
               const plankHealthBuf = this._plankHealthBuf;
               plankHealthBuf.clear();
-              let deckStateBitsFromServer: number | undefined;
-              let hasDeckFromServer = false;
-              let deckHealthFromServer:       number | undefined;
-              let deckTargetHealthFromServer: number | undefined;
-              let deckMaxHealthFromServer:    number | undefined;
+              // Track health per deck_id (0=lower, 1=upper) — replaced single-deck variables
+              const deckHealthMap = new Map<number, { health: number; targetHealth: number; maxHealth: number; stateBits: number }>();
               
               for (const mod of ship.modules) {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
@@ -2155,17 +2155,17 @@ export class NetworkManager {
                   });
                 } else if (kind === 'deck') {
                   // Deck: client generates polygon from hull; only include if server confirms it exists
-                  // AND its health is > 0. Health=0 means destroyed — treat as absent so the hull
-                  // stops rendering the filled deck even if the server still broadcasts the slot.
+                  // AND its health is > 0. Health=0 means destroyed — treat as absent.
                   const deckHealth = mod.health ?? 1; // fall back to 1 (alive) for old server builds
                   if (deckHealth > 0) {
-                    hasDeckFromServer = true;
-                    deckHealthFromServer       = mod.health;
-                    deckTargetHealthFromServer = mod.targetHealth ?? mod.maxHealth;
-                    deckMaxHealthFromServer    = mod.maxHealth;
-                    if (mod.stateBits !== undefined) {
-                      deckStateBitsFromServer = mod.stateBits ?? 0;
-                    }
+                    // deck_id 0=lower, 1=upper; old server (no deck_id field) defaults to 0
+                    const deckId = mod.deck_id ?? 0;
+                    deckHealthMap.set(deckId, {
+                      health:       mod.health         ?? deckHealth,
+                      targetHealth: mod.targetHealth   ?? mod.maxHealth ?? deckHealth,
+                      maxHealth:    mod.maxHealth      ?? deckHealth,
+                      stateBits:    mod.stateBits      ?? 0,
+                    });
                   }
                 } else {
                   // Gameplay modules: Full transform data from server
@@ -2262,21 +2262,24 @@ export class NetworkManager {
               }
               
               // Merge: Keep client-generated planks/deck (shallow-cloned from template) + server gameplay modules.
-              // Deck is only included when the server confirmed it exists — skeleton ships have no deck.
-              // Plank objects are cloned so health can be updated per-tick without mutating the template.
-              const clientDeck = hasDeckFromServer ? tmpl.deck.map(p => {
-                const dmd = p.moduleData as any;
-                return {
-                  ...p,
-                  stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
-                  moduleData: dmd ? {
-                    ...dmd,
-                    health:       deckHealthFromServer       ?? dmd.health,
-                    targetHealth: deckTargetHealthFromServer ?? dmd.targetHealth,
-                    maxHealth:    deckMaxHealthFromServer    ?? dmd.maxHealth,
-                  } : dmd,
-                } as ShipModule;
-              }) : [];
+              // Only include each template deck if the server reported that deck level as present.
+              // This ensures lower and upper deck health are tracked independently.
+              const clientDeck = tmpl.deck
+                .filter(p => deckHealthMap.has(p.deckId))
+                .map(p => {
+                  const dmd  = p.moduleData as any;
+                  const dhd  = deckHealthMap.get(p.deckId)!;
+                  return {
+                    ...p,
+                    stateBits: dhd.stateBits,
+                    moduleData: dmd ? {
+                      ...dmd,
+                      health:       dhd.health,
+                      targetHealth: dhd.targetHealth,
+                      maxHealth:    dhd.maxHealth,
+                    } : dmd,
+                  } as ShipModule;
+                });
 
               // Include ALL 10 template plank slots. Slots the server reports get real health;
               // slots absent from the server (never placed or destroyed) get health=0 so the

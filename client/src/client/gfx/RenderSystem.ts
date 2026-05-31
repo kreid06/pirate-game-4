@@ -136,7 +136,7 @@ export class RenderSystem {
   /** Whether cannon replacement build mode is active (cannon item held). */
   private cannonBuildMode: boolean = false;
   /** The cannon slot (index+ship) currently under the cursor in cannon build mode. */
-  private hoveredCannonSlot: { ship: Ship; cannonIndex: number } | null = null;
+  private hoveredCannonSlot: { ship: Ship; cannonIndex: number; localX: number; localY: number; rot: number } | null = null;
   /** A gunport on the ship that the cursor is over in cannon build mode (snap cannon to this gunport). */
   private hoveredGunportCannonSnap: { ship: Ship; module: ShipModule } | null = null;
   /** Per-gunport animation state: gunportId → { targetOpen, startProgress, startTime }. */
@@ -3507,7 +3507,7 @@ export class RenderSystem {
   /**
    * Get the cannon slot currently under the cursor (only in cannon build mode)
    */
-  getHoveredCannonSlot(): { ship: Ship; cannonIndex: number } | null {
+  getHoveredCannonSlot(): { ship: Ship; cannonIndex: number; localX: number; localY: number; rot: number } | null {
     return this.hoveredCannonSlot;
   }
 
@@ -4124,7 +4124,8 @@ export class RenderSystem {
       this.detectHoveredGunportCannonSnap(worldState);
     } else {
       this.hoveredCannonSlot = null;
-      this.hoveredGunportCannonSnap = null;
+      // Gunport build mode also uses hoveredGunportCannonSnap — clear only when neither mode is active
+      if (!this.gunportBuildMode) this.hoveredGunportCannonSnap = null;
     }
 
     // In mast build mode, detect which missing mast slot is under the cursor
@@ -4159,8 +4160,10 @@ export class RenderSystem {
     }
 
     // In gunport build mode, detect which gunport snap is under the cursor
+    // Also detect hovered cannon snap at existing gunport positions (preview)
     if (this.gunportBuildMode) {
       this.detectHoveredGunportSnap(worldState);
+      if (!this.cannonBuildMode) this.detectHoveredGunportCannonSnap(worldState);
     } else {
       this.hoveredGunportSnap = null;
     }
@@ -8982,6 +8985,11 @@ export class RenderSystem {
       for (const ship of worldState.ships) {
         this.queueRenderItem(4, 'cannon-ghosts', () => this.drawMissingCannonGhosts(ship, camera), 1);
       }
+    } else if (this.gunportBuildMode) {
+      // In gunport build mode, show only the gunport-linked cannon ghosts (preview of cannon snap positions)
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `cannon-ghosts-gp-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera, true), 1);
+      }
     }
 
     // In mast build mode, overlay ghost masts at destroyed slots (layer 7, after real masts)
@@ -10640,15 +10648,19 @@ export class RenderSystem {
       // Upper deck installed — show upper bar and a lower deck bar (depleted if absent)
       const udmd = upperDeckMod.moduleData as any;
       if (udmd && typeof udmd.health === 'number' && typeof udmd.maxHealth === 'number'
-          && udmd.maxHealth > 0 && udmd.health < udmd.maxHealth) {
-        this.drawDeckHealthBar(0, -5, udmd.health / udmd.maxHealth);
+          && udmd.maxHealth > 0
+          && (udmd.health < udmd.maxHealth || (udmd.targetHealth != null && udmd.targetHealth < udmd.maxHealth))) {
+        const uTarget = udmd.targetHealth != null ? udmd.targetHealth / udmd.maxHealth : 1;
+        this.drawDeckHealthBar(0, -5, udmd.health / udmd.maxHealth, uTarget);
       }
       // Lower deck bar: show actual health or 0 (depleted) if lower deck missing
       if (lowerDeckMod) {
         const ldmd = lowerDeckMod.moduleData as any;
         if (ldmd && typeof ldmd.health === 'number' && typeof ldmd.maxHealth === 'number'
-            && ldmd.maxHealth > 0 && ldmd.health < ldmd.maxHealth) {
-          this.drawDeckHealthBar(0, 5, ldmd.health / ldmd.maxHealth);
+            && ldmd.maxHealth > 0
+            && (ldmd.health < ldmd.maxHealth || (ldmd.targetHealth != null && ldmd.targetHealth < ldmd.maxHealth))) {
+          const lTarget = ldmd.targetHealth != null ? ldmd.targetHealth / ldmd.maxHealth : 1;
+          this.drawDeckHealthBar(0, 5, ldmd.health / ldmd.maxHealth, lTarget);
         }
       } else {
         // No lower deck — show it as fully depleted
@@ -10658,8 +10670,10 @@ export class RenderSystem {
       // Only lower deck present — show its bar at centre
       const dmd = lowerDeckMod!.moduleData as any;
       if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number'
-          && dmd.maxHealth > 0 && dmd.health < dmd.maxHealth) {
-        this.drawDeckHealthBar(0, 0, dmd.health / dmd.maxHealth);
+          && dmd.maxHealth > 0
+          && (dmd.health < dmd.maxHealth || (dmd.targetHealth != null && dmd.targetHealth < dmd.maxHealth))) {
+        const dTarget = dmd.targetHealth != null ? dmd.targetHealth / dmd.maxHealth : 1;
+        this.drawDeckHealthBar(0, 0, dmd.health / dmd.maxHealth, dTarget);
       }
     }
 
@@ -10698,8 +10712,9 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  /** Small horizontal health bar drawn at ship-local (cx, cy) for the deck module. */
-  private drawDeckHealthBar(cx: number, cy: number, fraction: number): void {
+  /** Small horizontal health bar drawn at ship-local (cx, cy) for the deck module.
+   *  @param targetFraction  repair ceiling (target_health / max_health); default 1 = full. */
+  private drawDeckHealthBar(cx: number, cy: number, fraction: number, targetFraction = 1): void {
     const barW = 44;
     const barH = 6;
     const x0 = cx - barW / 2;
@@ -10714,13 +10729,34 @@ export class RenderSystem {
     this.ctx.roundRect(x0 - 1, y0 - 1, barW + 2, barH + 2, 3);
     this.ctx.fill();
 
+    // Amber fill up to repair ceiling (only if ceiling is below max)
+    const clampedTarget = Math.max(0, Math.min(1, targetFraction));
+    if (clampedTarget < 0.999) {
+      this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
+      this.ctx.beginPath();
+      this.ctx.roundRect(x0, y0, Math.max(2, barW * clampedTarget), barH, 2);
+      this.ctx.fill();
+    }
+
     // Filled portion — gradient from orange (low) to green (full)
-    const r = Math.round(255 * (1 - fraction));
-    const g = Math.round(200 * fraction);
+    const clampedFrac = Math.max(0, Math.min(1, fraction));
+    const r = Math.round(255 * (1 - clampedFrac));
+    const g = Math.round(200 * clampedFrac);
     this.ctx.fillStyle = `rgb(${r},${g},30)`;
     this.ctx.beginPath();
-    this.ctx.roundRect(x0, y0, Math.max(2, barW * fraction), barH, 2);
+    this.ctx.roundRect(x0, y0, Math.max(2, barW * clampedFrac), barH, 2);
     this.ctx.fill();
+
+    // Tick mark at repair ceiling (amber line, only if ceiling is below max)
+    if (clampedTarget < 0.999) {
+      const tx = x0 + barW * clampedTarget;
+      this.ctx.strokeStyle = 'rgba(255,200,60,0.9)';
+      this.ctx.lineWidth = 1.2;
+      this.ctx.beginPath();
+      this.ctx.moveTo(tx, y0 - 1);
+      this.ctx.lineTo(tx, y0 + barH + 1);
+      this.ctx.stroke();
+    }
 
     // Border
     this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
@@ -10886,6 +10922,7 @@ export class RenderSystem {
   private detectHoveredCannonSlot(worldState: WorldState): void {
     this.hoveredCannonSlot = null;
     if (!this.mouseWorldPos) return;
+    if (this._playerDeckLevel !== 1) return; // fixed cannon slots are upper-deck (deck_id=1)
 
     for (const ship of worldState.ships) {
       const helm = ship.modules.find(m => m.kind === 'helm');
@@ -10911,7 +10948,8 @@ export class RenderSystem {
         const ddx = localX - cx;
         const ddy = localY - cy;
         if (Math.sqrt(ddx * ddx + ddy * ddy) <= 22) {
-          this.hoveredCannonSlot = { ship, cannonIndex: i };
+          const rot = i < 3 ? Math.PI : 0;
+          this.hoveredCannonSlot = { ship, cannonIndex: i, localX: cx, localY: cy, rot };
           return;
         }
       }
@@ -10925,7 +10963,6 @@ export class RenderSystem {
   private detectHoveredGunportCannonSnap(worldState: WorldState): void {
     this.hoveredGunportCannonSnap = null;
     if (!this.mouseWorldPos) return;
-    if (this._playerDeckLevel !== 0) return; // only snap from lower deck
 
     for (const ship of worldState.ships) {
       const dx = this.mouseWorldPos.x - ship.position.x;
@@ -10937,6 +10974,8 @@ export class RenderSystem {
 
       for (const mod of ship.modules) {
         if (mod.kind !== 'gunport') continue;
+        // Only consider gunports on the current deck (255 = deck-independent, always shown)
+        if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue;
         // Skip if a cannon is already linked to this gunport's snap index
         const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
         const hasCannon = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 && ship.modules.some(
@@ -10958,8 +10997,10 @@ export class RenderSystem {
 
   /**
    * Draw ghost outlines at missing cannon positions (cannon build mode).
+   * @param gunportOnly When true, skip the fixed-position helm-offset slots and only draw
+   *   ghost cannons at gunport snap positions (used in gunport build mode preview).
    */
-  private drawMissingCannonGhosts(ship: Ship, camera: Camera): void {
+  private drawMissingCannonGhosts(ship: Ship, camera: Camera, gunportOnly = false): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
     const helm = ship.modules.find(m => m.kind === 'helm');
@@ -10978,7 +11019,8 @@ export class RenderSystem {
 
     const lw = 1.5 / cameraState.zoom;
 
-    for (let i = 0; i < 6; i++) {
+    // Fixed 6 broadside slots are on deck_id=1 (upper deck) — only show when on upper deck
+    if (!gunportOnly && this._playerDeckLevel === 1) for (let i = 0; i < 6; i++) {
       if (presentIds.has(base + 1 + i)) continue;
 
       const cx = RenderSystem.CANNON_XS[i % 3];
@@ -11027,6 +11069,8 @@ export class RenderSystem {
     const gpHalfWGhost = 11; // match visual gpHalfW
     for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
+      // Only show gunport cannon ghosts for the current deck (255 = deck-independent)
+      if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue;
       // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
       // because the cannon is now far from the gunport hull edge when stowed/deployed).
       const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
@@ -11313,14 +11357,12 @@ export class RenderSystem {
       const hasUpper = decks.some(m => m.deckId === 1);
       if (hasLower && hasUpper) continue; // both present — nothing to place
 
-      // When both are missing, respect the T-key override; default to lower (0) first.
-      // When only one is missing, always use that one.
-      let missingLevel: number;
-      if (!hasLower && !hasUpper) {
-        missingLevel = this.deckLevelOverride >= 0 ? this.deckLevelOverride : 0;
-      } else {
-        missingLevel = !hasLower ? 0 : 1;
-      }
+      // Always respect the T-key override; default to lower (0) first.
+      const selectedLevel = this.deckLevelOverride >= 0 ? this.deckLevelOverride : 0;
+
+      // Only register a hover slot if the selected level is actually missing
+      const selectedIsMissing = selectedLevel === 0 ? !hasLower : !hasUpper;
+      if (!selectedIsMissing) continue;
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -11331,7 +11373,7 @@ export class RenderSystem {
 
       // Hit-test against the ship's walkable deck area (slightly inset from full hull)
       if (Math.abs(localX) <= 280 && Math.abs(localY) <= 75) {
-        this.hoveredDeckSlot = { ship, deckLevel: missingLevel };
+        this.hoveredDeckSlot = { ship, deckLevel: selectedLevel };
         return;
       }
     }
@@ -11349,6 +11391,14 @@ export class RenderSystem {
     const hasLower = decks.some(m => m.deckId === 0);
     const hasUpper = decks.some(m => m.deckId === 1);
     if (hasLower && hasUpper) return; // both present — nothing to draw
+
+    // Determine which deck level is currently selected via T-key override
+    const selectedLevel = this.deckLevelOverride >= 0 ? this.deckLevelOverride : 0;
+    // If the selected level is already present, flip to the missing one
+    const bothMissing = !hasLower && !hasUpper;
+    const displayLevel = bothMissing
+      ? selectedLevel
+      : (!hasLower ? 0 : 1);
 
     this.ctx.save();
     const screenPos  = camera.worldToScreen(ship.position);
@@ -11416,7 +11466,10 @@ export class RenderSystem {
       this.ctx.fillStyle     = labelCol;
       this.ctx.textAlign     = 'center';
       this.ctx.textBaseline  = 'middle';
-      this.ctx.fillText(deckLevel === 0 ? '[ LOWER DECK ]' : '[ UPPER DECK ]', 0, 0);
+      const deckName = deckLevel === 0 ? '[ LOWER DECK ]' : '[ UPPER DECK ]';
+      // When both decks are missing show a T-cycle hint alongside the label
+      const cycleHint = bothMissing ? '  [T]' : '';
+      this.ctx.fillText(deckName + cycleHint, 0, 0);
 
       // Hover: outer glow ring
       if (isHovered) {
@@ -11437,8 +11490,9 @@ export class RenderSystem {
       }
     };
 
-    drawLevel(0, hasLower);
-    drawLevel(1, hasUpper);
+    // Only draw the currently-selected deck level, not both simultaneously.
+    // When both are missing, T cycles which one is shown.
+    drawLevel(displayLevel, displayLevel === 0 ? hasLower : hasUpper);
 
     this.ctx.restore();
   }
@@ -18369,6 +18423,8 @@ export class RenderSystem {
         const newFp = getModuleFootprint(newKind as any);
         for (const mod of nearestShip.modules) {
           if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+          if (newKind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
+          if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue; // different deck — no collision
           const existFp = getModuleFootprint(mod.kind);
           if (footprintsOverlap(newFp, localX, localY, rotRad, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
             valid = false;
@@ -18567,6 +18623,7 @@ export class RenderSystem {
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+        if (newKind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
         if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue; // different deck — no collision
         const existingFp = getModuleFootprint(mod.kind);
         if (footprintsOverlap(newFp, localX, localY, rotRad,

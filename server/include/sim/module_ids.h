@@ -95,8 +95,10 @@ typedef uint16_t module_id_t;
 #define MODULE_OFFSET_MAST_MID      0x0Au  /* middle mast                          */
 #define MODULE_OFFSET_MAST_STERN    0x0Bu  /* aft mast                             */
 #define MODULE_OFFSET_PLANK_BASE    0x0Cu  /* first plank (planks 0–9 = 0x0C–0x15) */
-#define MODULE_OFFSET_DECK          0x16u  /* centre deck                           */
-#define MODULE_OFFSET_DYNAMIC_BASE  0x17u  /* first dynamically placed module slot  */
+#define MODULE_OFFSET_DECK          0x16u  /* lower deck floor (deck_id = 0)        */
+#define MODULE_OFFSET_DECK_LOWER    0x16u  /* alias: lower deck                     */
+#define MODULE_OFFSET_DECK_UPPER    0x17u  /* upper deck floor (deck_id = 1)        */
+#define MODULE_OFFSET_DYNAMIC_BASE  0x18u  /* first dynamically placed module slot  */
 
 /* ── Per-plank helper (n = 0..9) ─────────────────────────────────────────── */
 #define MODULE_OFFSET_PLANK(n)  ((uint8_t)(MODULE_OFFSET_PLANK_BASE + (n)))

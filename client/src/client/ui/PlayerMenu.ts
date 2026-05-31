@@ -247,6 +247,10 @@ export class PlayerMenu {
     label: string; color: string;
     desc: string; kgPerUnit: number; qty: number;
   } | null = null;
+  /** Non-null when an equipment slot is hovered — deferred outside the clip region. */
+  private _equipTooltip: { item: ItemKind; sx: number; sy: number; slotSz: number } | null = null;
+  /** Non-null when an inventory slot is hovered — deferred outside the clip region. */
+  private _invSlotTooltip: { slot: { item: ItemKind; quantity: number }; sx: number; sy: number; slotSz: number } | null = null;
   /** Non-null while the drop-quantity slider is open. */
   private _resDropSlider: {
     key:    keyof PlayerResources;
@@ -854,6 +858,9 @@ export class PlayerMenu {
 
     cur = contentStartY - this._panelScrollY;   // shifted start
 
+    // Reset equipment tooltip each frame before the clipped section renders
+    this._equipTooltip    = null;
+    this._invSlotTooltip  = null;
     cur = this._equipmentAndStatus(ctx, px, cur, player, ship, worldState, mouseX, mouseY);
     cur = this._resourcesSection(ctx, px, cur, player.inventory.resources, mouseX, mouseY);
     cur = this._playerCrafting(ctx, px, cur, player);
@@ -878,6 +885,18 @@ export class PlayerMenu {
     }
 
     ctx.restore(); // remove the outer ctx.save() from render()
+
+    // Equipment slot tooltip — drawn outside all clips so it overlays the panel borders
+    const _et = this._equipTooltip as { item: ItemKind; sx: number; sy: number; slotSz: number } | null;
+    if (_et) {
+      this._invTooltip(ctx, { item: _et.item, quantity: 1 }, _et.sx, _et.sy, _et.slotSz, 'Equipped  ·  click to unequip');
+    }
+
+    // Inventory slot tooltip — drawn outside all clips so it overlays the panel borders
+    const _it = this._invSlotTooltip as { slot: { item: ItemKind; quantity: number }; sx: number; sy: number; slotSz: number } | null;
+    if (_it) {
+      this._invTooltip(ctx, _it.slot, _it.sx, _it.sy, _it.slotSz);
+    }
 
     // Resource drop-quantity slider — rendered above everything else
     if (this._resDropSlider) {
@@ -1230,24 +1249,9 @@ export class PlayerMenu {
         ctx.fillStyle    = item !== 'none' ? TEXT_HEAD : TEXT_DIM;
         ctx.fillText(label, sx + ESLOTSZ / 2, sy + ESLOTSZ + 2);
 
-        // Hover tooltip: item name + "click to unequip"
+        // Hover tooltip: deferred outside clip so it can overlap panel borders
         if (item !== 'none' && isHovered) {
-          const tipLines = [def.name, 'click to unequip'];
-          const TIP_PAD = 5;
-          ctx.font = '10px Georgia, serif';
-          const tipW = Math.max(...tipLines.map(l => ctx.measureText(l).width)) + TIP_PAD * 2;
-          const tipH = tipLines.length * 14 + TIP_PAD * 2;
-          const tipX = Math.min(sx + ESLOTSZ + 4, equipX + 3 * ESLOTSZ + 2 * ESGAP - tipW - 2);
-          const tipY = sy;
-          ctx.fillStyle   = '#1a1a2c';
-          ctx.strokeStyle = '#667';
-          ctx.lineWidth   = 1;
-          ctx.fillRect(tipX, tipY, tipW, tipH);
-          ctx.strokeRect(tipX, tipY, tipW, tipH);
-          ctx.fillStyle    = '#ccd';
-          ctx.textAlign    = 'left';
-          ctx.textBaseline = 'top';
-          tipLines.forEach((line, li) => ctx.fillText(line, tipX + TIP_PAD, tipY + TIP_PAD + li * 14));
+          this._equipTooltip = { item, sx, sy, slotSz: ESLOTSZ };
         }
       }
     }
@@ -1730,10 +1734,10 @@ export class PlayerMenu {
       color: string; border: string; symbol: string;
       kgPerUnit: number; desc: string;
     }> = [
-      { label: 'Wood',  key: 'wood',  color: '#8b5e2a', border: '#5c3a10', symbol: 'W',  kgPerUnit: 2.0, desc: 'Harvested from trees. Used in construction.' },
-      { label: 'Fiber', key: 'fiber', color: '#c8a46e', border: '#8a6030', symbol: 'Fi', kgPerUnit: 0.1, desc: 'Gathered from plants. Used in cloth crafting.' },
-      { label: 'Metal', key: 'metal', color: '#8a8a8c', border: '#555558', symbol: 'Fe', kgPerUnit: 5.0, desc: 'Mined from ore deposits. Used in metalwork.' },
-      { label: 'Stone', key: 'stone', color: '#9a9a9c', border: '#666668', symbol: 'St', kgPerUnit: 4.0, desc: 'Quarried from boulders. Used in fortifications.' },
+      { label: 'Wood',  key: 'wood',  color: '#8b5e2a', border: '#5c3a10', symbol: 'W',  kgPerUnit: ITEM_DEFS.wood.weight,  desc: 'Harvested from trees. Used in construction.' },
+      { label: 'Fiber', key: 'fiber', color: '#c8a46e', border: '#8a6030', symbol: 'Fi', kgPerUnit: ITEM_DEFS.fiber.weight, desc: 'Gathered from plants. Used in cloth crafting.' },
+      { label: 'Metal', key: 'metal', color: '#8a8a8c', border: '#555558', symbol: 'Fe', kgPerUnit: ITEM_DEFS.metal.weight, desc: 'Mined from ore deposits. Used in metalwork.' },
+      { label: 'Stone', key: 'stone', color: '#9a9a9c', border: '#666668', symbol: 'St', kgPerUnit: ITEM_DEFS.stone.weight, desc: 'Quarried from boulders. Used in fortifications.' },
     ];
 
     const RCOLS  = items.length;
@@ -1957,10 +1961,10 @@ export class PlayerMenu {
 
     ctx.restore();
 
-    // Tooltip — drawn unclipped so it can overlap above/outside the grid
+    // Tooltip — deferred to outer render() so it can overlap the panel borders
     if (hoveredSlot !== -1 && this._dragSlot === -1) {
       const slot = inv.slots[hoveredSlot]!;
-      this._invTooltip(ctx, slot, hoveredSX, hoveredSY, ISZ);
+      this._invSlotTooltip = { slot: { item: slot.item, quantity: slot.quantity }, sx: hoveredSX, sy: hoveredSY, slotSz: ISZ };
     }
 
     // Drag ghost — follows cursor
@@ -1996,12 +2000,15 @@ export class PlayerMenu {
     return py + viewportH + 8;
   }
 
-  /** Draw tooltip for a hovered inventory slot. */
+  /** Draw tooltip for a hovered inventory slot.
+   * @param hint  Optional dimmed hint line shown at the very bottom (e.g. "click to unequip").
+   */
   private _invTooltip(
     ctx:  CanvasRenderingContext2D,
     slot: { item: ItemKind; quantity: number },
     sx: number, sy: number,
     slotSize: number,
+    hint?: string,
   ): void {
     const def    = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
     const itemId = ITEM_KIND_ID[slot.item] ?? 0;
@@ -2012,7 +2019,8 @@ export class PlayerMenu {
     const nameH  = 18;
     const descLines = this._wrapText(ctx, def.description, W - PAD_T * 2, '12px Georgia, serif');
     const quantityLine = slot.quantity > 1 ? 1 : 0;
-    const totalH = PAD_T + nameH + 4 + LINE + 4 + descLines.length * LINE + quantityLine * LINE + LINE + PAD_T;
+    const hintLine = hint ? 1 : 0;
+    const totalH = PAD_T + nameH + 4 + LINE + 4 + descLines.length * LINE + quantityLine * LINE + LINE + hintLine * LINE + PAD_T;
 
     // Position above slot, clamped to canvas
     const cw = ctx.canvas.width;
@@ -2074,6 +2082,13 @@ export class PlayerMenu {
     ctx.fillStyle = '#8ab4cc';
     ctx.font      = '11px Georgia, serif';
     ctx.fillText(weightTxt, tx + PAD_T + 4, cy);
+    cy += LINE;
+
+    if (hint) {
+      ctx.fillStyle = 'rgba(255,255,255,0.30)';
+      ctx.font      = '10px Georgia, serif';
+      ctx.fillText(hint, tx + PAD_T + 4, cy);
+    }
 
     ctx.restore();
   }
@@ -2128,6 +2143,142 @@ export class PlayerMenu {
   }
 
   // ────────────────────────────────────────────────────────────────────────────
+
+  /** Draw tooltip popup for a hovered schematic card icon. */
+  private _drawSchemCardIconTooltip(
+    ctx:   CanvasRenderingContext2D,
+    iconX: number,
+    iconY: number,
+    iconSz: number,
+    entry: { name: string; color: string; symbol: string; wood: number; fiber: number; metal: number; stone: number },
+    res:   { wood: number; fiber: number; metal: number; stone: number },
+  ): void {
+    const PAD  = 10;
+    const LINE = 16;
+    const W    = 210;
+
+    const costs: Array<{ label: string; need: number; have: number }> = [
+      { label: 'Wood',  need: entry.wood,  have: res.wood  },
+      { label: 'Fiber', need: entry.fiber, have: res.fiber },
+      { label: 'Metal', need: entry.metal, have: res.metal },
+      { label: 'Stone', need: entry.stone, have: res.stone },
+    ].filter(c => c.need > 0);
+
+    const totalH = PAD + 18 + (costs.length > 0 ? 8 + costs.length * LINE : 0) + PAD;
+
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
+    let tx = iconX + iconSz / 2 - W / 2;
+    let ty = iconY - totalH - 6;
+    tx = Math.max(4, Math.min(cw - W - 4, tx));
+    if (ty < 4) ty = iconY + iconSz + 6;
+    if (ty + totalH > ch - 4) ty = ch - totalH - 4;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.65)';
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = 'rgba(12,12,20,0.95)';
+    ctx.strokeStyle = 'rgba(180,130,40,0.80)';
+    ctx.lineWidth   = 1.5;
+    this._roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left colour accent bar
+    ctx.fillStyle = entry.color;
+    this._roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+
+    // Name
+    ctx.fillStyle    = '#ffffff';
+    ctx.font         = 'bold 14px Georgia, serif';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(entry.name, tx + PAD + 4, cy);
+    cy += 18;
+
+    // Resource costs with have/need
+    if (costs.length > 0) {
+      cy += 8;
+      ctx.font = '11px Georgia, serif';
+      for (const c of costs) {
+        const ok = c.have >= c.need;
+        ctx.fillStyle = ok ? '#88ee88' : '#ee8888';
+        ctx.fillText(`${c.label}: ${c.need}  (have ${c.have})`, tx + PAD + 4, cy);
+        cy += LINE;
+      }
+    }
+
+    ctx.restore();
+  }
+
+  /** Draw tooltip popup for a hovered schematic hotbar slot. */
+  private _drawSchemHotbarTooltip(
+    ctx:   CanvasRenderingContext2D,
+    sx:    number,
+    sy:    number,
+    hs:    number,
+    entry: { name: string; color: string; wood: number; fiber: number; metal: number; stone: number },
+  ): void {
+    const PAD   = 10;
+    const LINE  = 15;
+    const W     = 185;
+
+    const costs: string[] = [
+      entry.wood  > 0 ? `Wood:  ${entry.wood}`  : null,
+      entry.fiber > 0 ? `Fiber: ${entry.fiber}` : null,
+      entry.metal > 0 ? `Metal: ${entry.metal}` : null,
+      entry.stone > 0 ? `Stone: ${entry.stone}` : null,
+    ].filter((l): l is string => l !== null);
+
+    const totalH = PAD + 18 + (costs.length > 0 ? 6 + costs.length * LINE : 0) + PAD;
+
+    const cw = ctx.canvas.width;
+    let tx = sx + hs / 2 - W / 2;
+    let ty = sy - totalH - 6;
+    tx = Math.max(4, Math.min(cw - W - 4, tx));
+    if (ty < 4) ty = sy + hs + 6;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = 'rgba(180,130,40,0.80)';
+    ctx.lineWidth   = 1.5;
+    this._roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left colour accent bar
+    ctx.fillStyle = entry.color;
+    this._roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+
+    ctx.fillStyle    = '#ffffff';
+    ctx.font         = 'bold 13px Georgia, serif';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(entry.name, tx + PAD + 4, cy);
+    cy += 18;
+
+    if (costs.length > 0) {
+      cy += 6;
+      ctx.fillStyle = '#aaaaaa';
+      ctx.font      = '11px Georgia, serif';
+      for (const line of costs) {
+        ctx.fillText(line, tx + PAD + 4, cy);
+        cy += LINE;
+      }
+    }
+
+    ctx.restore();
+  }
 
   // ── Schematics data ──────────────────────────────────────────────────────
 
@@ -2301,6 +2452,20 @@ export class PlayerMenu {
       ctx.textBaseline = 'top';
       ctx.fillText(String(i + 1), sx + 2, sy + 2);
     }
+
+    // Hotbar slot tooltip — draw for whichever slot the mouse is hovering
+    for (let i = 0; i < N_SLOTS; i++) {
+      const kind  = currentHotbar[i];
+      const entry = kind ? PlayerMenu.SCHEMATICS.find(s => s.kind === kind) : null;
+      if (!entry) continue;
+      const sx = slotsStartX + i * (HS + HG);
+      const sy = slotsTopY;
+      if (this._lastMouseX >= sx && this._lastMouseX <= sx + HS &&
+          this._lastMouseY >= sy && this._lastMouseY <= sy + HS) {
+        this._drawSchemHotbarTooltip(ctx, sx, sy, HS, entry);
+      }
+    }
+
     cy += STRIP_H + 4;
 
     // Hint when a slot is selected
@@ -2329,6 +2494,12 @@ export class PlayerMenu {
     ctx.beginPath();
     ctx.rect(px, cy, PANEL_W, viewH);
     ctx.clip();
+
+    // Track which card icon (if any) is hovered — tooltip drawn after ctx.restore()
+    let _hovIconEntry: (typeof items)[number] | null = null;
+    let _hovIconX = 0;
+    let _hovIconY = 0;
+    const _ICON_SZ = 42;
 
     let cardY = cy - this._panelScrollY;
     for (let si = 0; si < items.length; si++) {
@@ -2373,6 +2544,14 @@ export class PlayerMenu {
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#ffffff';
       ctx.fillText(s.symbol, iconX + ICON_SZ / 2, iconY + ICON_SZ / 2);
+
+      // Detect icon hover for deferred tooltip
+      if (this._lastMouseX >= iconX && this._lastMouseX <= iconX + ICON_SZ &&
+          this._lastMouseY >= iconY && this._lastMouseY <= iconY + ICON_SZ) {
+        _hovIconEntry = s;
+        _hovIconX = iconX;
+        _hovIconY = iconY;
+      }
 
       // Name
       const textX = iconX + ICON_SZ + 12;
@@ -2447,6 +2626,11 @@ export class PlayerMenu {
     }
 
     ctx.restore();
+
+    // Card icon tooltip — drawn after clip restore so it overlays panel borders
+    if (_hovIconEntry !== null) {
+      this._drawSchemCardIconTooltip(ctx, _hovIconX, _hovIconY, _ICON_SZ, _hovIconEntry, res);
+    }
 
     // Scrollbar
     if (totalH > viewH) {

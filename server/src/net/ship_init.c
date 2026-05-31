@@ -244,12 +244,15 @@ void init_brigantine_ship(int idx, float world_x, float world_y, uint8_t ship_se
     }
 
     /* Helm — offset 0x02 */
-    s->modules[s->module_count].id           = MID(ship_seq, MODULE_OFFSET_HELM);
-    s->modules[s->module_count].type_id      = MODULE_TYPE_HELM;
-    s->modules[s->module_count].local_pos.x  = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f));
-    s->modules[s->module_count].local_pos.y  = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
-    s->modules[s->module_count].local_rot    = Q16_FROM_FLOAT(0.0f);
-    s->modules[s->module_count].state_bits   = MODULE_STATE_ACTIVE;
+    s->modules[s->module_count].id              = MID(ship_seq, MODULE_OFFSET_HELM);
+    s->modules[s->module_count].type_id         = MODULE_TYPE_HELM;
+    s->modules[s->module_count].local_pos.x     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-90.0f));
+    s->modules[s->module_count].local_pos.y     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
+    s->modules[s->module_count].local_rot       = Q16_FROM_FLOAT(0.0f);
+    s->modules[s->module_count].state_bits      = MODULE_STATE_ACTIVE;
+    s->modules[s->module_count].health          = 10000;
+    s->modules[s->module_count].target_health   = 10000;
+    s->modules[s->module_count].max_health      = 10000;
     s->modules[s->module_count].data.helm.occupied_by    = 0;
     s->modules[s->module_count].data.helm.wheel_rotation = Q16_FROM_FLOAT(0.0f);
     s->module_count++;

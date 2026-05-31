@@ -2463,8 +2463,12 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
         }
 
+        /* Capture type and deck before the memmove invalidates the pointer */
+        ModuleTypeId demolished_type   = mod->type_id;
+        uint8_t      demolished_deck   = mod->deck_id;
+
         log_info("🪓 Player %u demolished module %u (type %u) on ship %u",
-                 player->player_id, module_id, (unsigned)mod->type_id, ship_id);
+                 player->player_id, module_id, (unsigned)demolished_type, ship_id);
 
         /* Remove from SimpleShip */
         memmove(&ship->modules[mod_idx],
@@ -2489,7 +2493,7 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
         }
 
-        /* Broadcast removal to all clients */
+        /* Broadcast primary demolish to all clients */
         {
             char bcast[128];
             snprintf(bcast, sizeof(bcast),
@@ -2497,6 +2501,73 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
                      ship_id, module_id);
             websocket_server_broadcast(bcast);
         }
+
+        /* ── Cascade: if a deck was demolished, remove all modules on that deck ── */
+        if (demolished_type == MODULE_TYPE_DECK) {
+            log_info("🪓 Deck %u demolished on ship %u — cascading deck modules", (unsigned)demolished_deck, ship_id);
+
+            /* Cascade on SimpleShip */
+            {
+                uint8_t m = 0;
+                while (m < ship->module_count) {
+                    ModuleTypeId t = ship->modules[m].type_id;
+                    uint8_t      d = ship->modules[m].deck_id;
+                    /* Skip masts (deck_id=255), ladders, planks, other decks */
+                    if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER ||
+                        t == MODULE_TYPE_PLANK || t == MODULE_TYPE_DECK) { m++; continue; }
+                    /* Only cascade modules on the demolished deck */
+                    if (d != demolished_deck) { m++; continue; }
+
+                    uint32_t cascaded_id = ship->modules[m].id;
+
+                    /* Dismount any player on this module */
+                    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                        if (!players[pi].active) continue;
+                        if (players[pi].is_mounted &&
+                            players[pi].mounted_module_id == (module_id_t)cascaded_id) {
+                            players[pi].is_mounted          = false;
+                            players[pi].mounted_module_id   = 0;
+                            players[pi].controlling_ship_id = 0;
+                        }
+                    }
+
+                    /* Broadcast cascade demolish */
+                    {
+                        char cbcast[128];
+                        snprintf(cbcast, sizeof(cbcast),
+                                 "{\"type\":\"module_demolished\",\"shipId\":%u,\"moduleId\":%u}",
+                                 ship_id, cascaded_id);
+                        websocket_server_broadcast(cbcast);
+                    }
+
+                    memmove(&ship->modules[m], &ship->modules[m + 1],
+                            ((size_t)ship->module_count - m - 1) * sizeof(ShipModule));
+                    ship->module_count--;
+                    /* do NOT increment m — we've shifted the array */
+                }
+            }
+
+            /* Cascade on sim ship */
+            if (global_sim) {
+                for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                    if (global_sim->ships[si].id != (entity_id)ship_id) continue;
+                    struct Ship* sim_ship = &global_sim->ships[si];
+                    uint8_t m = 0;
+                    while (m < sim_ship->module_count) {
+                        ModuleTypeId t = sim_ship->modules[m].type_id;
+                        uint8_t      d = sim_ship->modules[m].deck_id;
+                        if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER ||
+                            t == MODULE_TYPE_PLANK || t == MODULE_TYPE_DECK) { m++; continue; }
+                        if (d != demolished_deck) { m++; continue; }
+                        memmove(&sim_ship->modules[m], &sim_ship->modules[m + 1],
+                                (sim_ship->module_count - m - 1) * sizeof(ShipModule));
+                        sim_ship->module_count--;
+                    }
+                    break;
+                }
+            }
+        }
+
         return; /* already broadcast */
     }
 
@@ -2848,6 +2919,9 @@ rs_send:;
 
 void structure_repair_tick(uint32_t delta_ms) {
     if (delta_ms == 0) return;
+    /* Opportunistically run the garbage collector on every tick — the
+     * function is self-throttled to at most once every 30 s. */
+    structure_garbage_collect();
     /* Rate: STRUCTURE_REPAIR_FULL_MS restores max_hp worth of HP.
      * Under-construction structures also regen passively (no player required),
      * but at half the rate (60s for full HP vs 30s for player-assisted). */
@@ -2946,6 +3020,53 @@ void structure_repair_tick(uint32_t delta_ms) {
                 log_info("🔧 Repair complete on structure %u (player %u)", s->id, pid);
             }
         }
+    }
+}
+
+/*
+ * structure_garbage_collect — remove any active structure left with hp=0.
+ *
+ * Under normal operation every 0-hp structure is destroyed immediately via
+ * apply_structure_damage → destroy_placed_structure. This function is a
+ * safety net for cases where a code path forgets that call (e.g. direct
+ * field writes, save-file corruption, or a future bug). It runs at most
+ * once every 30 seconds so the overhead is negligible.
+ *
+ * Exempt types (they die via non-HP timers):
+ *   • STRUCT_CLAIM_FLAG  — claim progress timer drives removal
+ *   • STRUCT_FLAG_FORT during FLAG_FORT_PHASE_CLAIMING — HP damage immune
+ */
+void structure_garbage_collect(void) {
+    static uint32_t next_run_ms = 0;
+    uint32_t now = get_time_ms();
+    if (now < next_run_ms) return;
+    next_run_ms = now + 30000u; /* run at most every 30 s */
+
+    uint32_t purged = 0;
+    bool found = true;
+    while (found) {
+        found = false;
+        for (uint32_t i = 0; i < placed_structure_count; i++) {
+            PlacedStructure *s = &placed_structures[i];
+            if (!s->active)     continue;
+            if (s->max_hp == 0) continue; /* 0 max_hp = intentionally has no health bar */
+            if (s->hp != 0)     continue; /* still alive */
+
+            /* Exemptions */
+            if (s->type == STRUCT_CLAIM_FLAG) continue;
+            if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) continue;
+
+            log_info("🗑️ GC: purging dead structure id=%u type=%u at (%.0f, %.0f)",
+                     (unsigned)s->id, (unsigned)s->type, s->x, s->y);
+            uint32_t sid = s->id;
+            destroy_placed_structure(sid); /* may compact array — restart scan */
+            purged++;
+            found = true;
+            break; /* restart outer while loop with fresh indices */
+        }
+    }
+    if (purged > 0) {
+        log_info("🗑️ GC: purged %u dead structure(s)", purged);
     }
 }
 

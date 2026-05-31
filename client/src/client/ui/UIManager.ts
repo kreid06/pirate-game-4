@@ -336,8 +336,17 @@ export class UIManager {
     { open: false, slotIdx: 0, anchorX: 0, anchorY: 0 };
   private _schematicPickerHits: { kind: string; x: number; y: number; w: number; h: number }[] = [];
 
+  // ── Ship module picker (click empty ship build hotbar slot) ───────────────
+  private _shipModulePicker: { open: boolean; slotIdx: number; anchorX: number; anchorY: number } =
+    { open: false, slotIdx: 0, anchorX: 0, anchorY: 0 };
+  private _shipModulePickerHits: { kind: GhostModuleKind; x: number; y: number; w: number; h: number }[] = [];
+
   /** Timestamp (performance.now()) until which the resource panel should remain visible after a resource gain. */
   private _resourceFlashUntil = 0;
+
+  /** Timestamp when the resource panel started fading out, or null when it is fully visible. */
+  private _resourceFadeOutStart: number | null = null;
+  private static readonly RESOURCE_FADE_MS = 350;
 
   /** Per-resource row flash state: maps resource key → { until, direction } */
   private _resourceRowFlash = new Map<string, { until: number; dir: 'up' | 'down' }>();
@@ -553,6 +562,10 @@ export class UIManager {
       this._schematicPicker.open = false;
       return true;
     }
+    if (key === 'Escape' && this._shipModulePicker.open) {
+      this._shipModulePicker.open = false;
+      return true;
+    }
     if (key === 'Escape' && this._dropPicker.open) {
       this._dropPicker.open = false;
       return true;
@@ -628,6 +641,41 @@ export class UIManager {
     if (this.activeMenuId === MENU_ID.PLAYER && this.playerMenu.visible) {
       const inv = this.getPlayerInventory?.() ?? null;
       if (inv && this.playerMenu.handleRightClick(x, y, inv)) return true;
+    }
+
+    // Ship build hotbar right-click: clear filled slot / open picker for empty slot
+    if (this.inShipBuildMode) {
+      const BUILD_SLOTS = 8;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < BUILD_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.buildHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              // Clear this slot
+              const slots = [...this.buildHotbarSlots];
+              slots[i] = null;
+              this.buildHotbarSlots = slots;
+              this._saveHotbars();
+              // Deselect if it was the active slot
+              if (this.buildHotbarActiveSlot === i) {
+                this.buildHotbarActiveSlot = -1;
+                this.onBuildHotbarSlotChange?.(i, null);
+              }
+            } else {
+              // Empty slot — open ship module picker above this slot
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._shipModulePicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+            }
+            return true;
+          }
+        }
+      }
     }
 
     if (!this._cachedControlGroups) return false;
@@ -781,6 +829,11 @@ export class UIManager {
     // Schematic slot picker — above hotbar
     if (this._schematicPicker.open) {
       this._renderSchematicPicker(ctx);
+    }
+
+    // Ship module picker — above build hotbar
+    if (this._shipModulePicker.open) {
+      this._renderShipModulePicker(ctx);
     }
 
     // Tombstone menu — rendered above everything else
@@ -1446,6 +1499,22 @@ export class UIManager {
       this._schematicPicker.open = false;
       return true;
     }
+    // Ship module picker intercepts all clicks when open
+    if (this._shipModulePicker.open) {
+      for (const hit of this._shipModulePickerHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          const slots = [...this.buildHotbarSlots];
+          slots[this._shipModulePicker.slotIdx] = hit.kind;
+          this.buildHotbarSlots = slots;
+          this._shipModulePicker.open = false;
+          this._saveHotbars();
+          return true;
+        }
+      }
+      // Click outside — close
+      this._shipModulePicker.open = false;
+      return true;
+    }
     // Drop picker intercepts all clicks when open
     if (this._dropPicker.open) {
       return this.handleDropPickerClick(x, y);
@@ -1537,9 +1606,16 @@ export class UIManager {
         for (let i = 0; i < BUILD_SLOTS; i++) {
           const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
           if (x >= sx && x <= sx + SLOT_SIZE) {
-            this.buildHotbarActiveSlot = i;
-            if (this.onBuildHotbarSlotChange) {
-              this.onBuildHotbarSlotChange(i, this.buildHotbarSlots[i] ?? null);
+            const kind = this.buildHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              // Toggle: re-clicking the active slot deselects it
+              const newActive = (this.buildHotbarActiveSlot === i) ? -1 : i;
+              this.buildHotbarActiveSlot = newActive;
+              this.onBuildHotbarSlotChange?.(i, newActive === -1 ? null : kind);
+            } else {
+              // Empty slot — open ship module picker above this slot
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._shipModulePicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
             }
             return true;
           }
@@ -1823,12 +1899,12 @@ export class UIManager {
    *  open, build mode is active, the hammer is equipped, or resources were recently gained. */
   private renderResourcePanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
     // Show if: land build menu open, build mode active, hammer equipped, or recently gained resources
+    const inv = this.getPlayerInventory?.() ?? null;
     let showResources = false;
-    if (this.landBuildMenuOpen || (this.buildModeState?.active)) {
+    if (this.landBuildMenuOpen || this.buildMenuOpen || this.buildMenuPending !== null || (this.buildModeState?.active)) {
       showResources = true;
     } else {
       // Check if hammer is equipped
-      const inv = this.getPlayerInventory?.() ?? null;
       const activeSlot = (inv as any)?.activeSlot ?? 0;
       const slots = inv?.slots ?? [];
       const activeItem = slots[activeSlot]?.item ?? 'none';
@@ -1836,9 +1912,16 @@ export class UIManager {
       // Flash visible after resource gain
       if (performance.now() < this._resourceFlashUntil) showResources = true;
     }
-    if (!showResources) return;
+    let panelAlpha = 1.0;
+    if (!showResources) {
+      if (this._resourceFadeOutStart === null) this._resourceFadeOutStart = performance.now();
+      const elapsed = performance.now() - this._resourceFadeOutStart;
+      panelAlpha = 1.0 - elapsed / UIManager.RESOURCE_FADE_MS;
+      if (panelAlpha <= 0) return;
+    } else {
+      this._resourceFadeOutStart = null;
+    }
 
-    const inv       = this.getPlayerInventory?.() ?? null;
     const invRes    = (inv as any)?.resources as { wood: number; fiber: number; metal: number; stone: number } | undefined;
     const shipRes   = this.getShipChestResources?.() ?? null;
     const RES_ITEMS = ['wood', 'fiber', 'stone', 'metal'] as const;
@@ -1856,6 +1939,7 @@ export class UIManager {
     const resY     = canvas.height - HOTBAR_H - 8 - resH - 6;
 
     ctx.save();
+    ctx.globalAlpha = panelAlpha;
     // Panel background
     ctx.fillStyle   = 'rgba(14,10,4,0.90)';
     ctx.strokeStyle = 'rgba(180,130,50,0.45)';
@@ -2736,6 +2820,82 @@ export class UIManager {
     ctx.restore();
   }
 
+  private _renderShipModulePicker(ctx: CanvasRenderingContext2D): void {
+    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const { anchorX, anchorY } = this._shipModulePicker;
+
+    const COLS = 3;
+    const CELL = 64, GAP = 6, PAD = 10, HEADER_H = 28;
+    const rows = Math.ceil(entries.length / COLS);
+    const W = COLS * CELL + (COLS - 1) * GAP + PAD * 2;
+    const H = HEADER_H + rows * CELL + (rows - 1) * GAP + PAD * 2;
+
+    let px = Math.round(anchorX - W / 2);
+    let py = anchorY - H - 6;
+    px = Math.max(4, Math.min(ctx.canvas.width - W - 4, px));
+    py = Math.max(4, py);
+
+    ctx.save();
+
+    ctx.fillStyle = 'rgba(14,8,4,0.96)';
+    ctx.strokeStyle = '#c87800';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, H, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.fillStyle = '#ffcc66';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Assign Module  [Esc]', px + W / 2, py + HEADER_H / 2);
+
+    this._shipModulePickerHits = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const cx = px + PAD + col * (CELL + GAP);
+      const cy = py + HEADER_H + PAD + row * (CELL + GAP);
+
+      const isHov = this.mouseX >= cx && this.mouseX <= cx + CELL &&
+                    this.mouseY >= cy && this.mouseY <= cy + CELL;
+      const isAssigned = this.buildHotbarSlots.includes(e.kind);
+
+      this._shipModulePickerHits.push({ kind: e.kind, x: cx, y: cy, w: CELL, h: CELL });
+
+      ctx.fillStyle = isHov ? 'rgba(200,120,20,0.45)' : (isAssigned ? 'rgba(80,45,5,0.6)' : 'rgba(25,15,5,0.8)');
+      ctx.strokeStyle = isHov ? '#ffcc44' : (isAssigned ? '#886620' : '#4a3010');
+      ctx.lineWidth = isHov ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(cx, cy, CELL, CELL, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      const SW = 28;
+      ctx.fillStyle = e.color;
+      ctx.fillRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+      ctx.strokeStyle = e.borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, cx + CELL / 2, cy + 8 + SW / 2);
+
+      ctx.font = '8px Georgia, serif';
+      ctx.fillStyle = isHov ? '#ffee88' : '#b8905a';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(e.label.substring(0, 9), cx + CELL / 2, cy + CELL - 3);
+    }
+
+    ctx.restore();
+  }
+
   private _renderDropPicker(ctx: CanvasRenderingContext2D): void {
     const { items, scrollY } = this._dropPicker;
     const cw = ctx.canvas.width;
@@ -3471,6 +3631,27 @@ class HUDElement implements UIElement {
     }
 
     ctx.restore();
+
+    // Tooltip — show name + costs after hovering for 500 ms
+    for (let i = 0; i < BUILD_SLOTS; i++) {
+      const kind = this.buildHotbarSlots[i];
+      const entry = kind ? UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind) : null;
+      if (!entry) continue;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+      if (this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
+          this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE &&
+          this._ttHit(`build-ship-${i}`)) {
+        const costs = ([
+          entry.cost.wood  > 0 ? `Wood:  ${entry.cost.wood}`  : null,
+          entry.cost.fiber > 0 ? `Fiber: ${entry.cost.fiber}` : null,
+          entry.cost.metal > 0 ? `Metal: ${entry.cost.metal}` : null,
+          entry.cost.stone > 0 ? `Stone: ${entry.cost.stone}` : null,
+        ] as Array<string | null>).filter((l): l is string => l !== null);
+        this._drawBuildSlotTooltip(ctx, canvas, sx, sy, SLOT_SIZE,
+          entry.label, entry.color, entry.borderColor, costs);
+      }
+    }
   }
 
   /** Renders the land structure build hotbar (replaces regular hotbar in land build mode). */
@@ -3560,6 +3741,23 @@ class HUDElement implements UIElement {
     }
 
     ctx.restore();
+
+    // Tooltip — show name + costs after hovering for 500 ms
+    for (let i = 0; i < N_SLOTS; i++) {
+      const kind = slots[i] ?? null;
+      const e = kind ? UIManager.LAND_BUILD_PANEL_ENTRIES.find(ent => ent.kind === kind) : null;
+      if (!e) continue;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+      if (this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
+          this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE &&
+          this._ttHit(`build-land-${i}`)) {
+        const costs = e.cost
+          .map(c => `${c.item.charAt(0).toUpperCase() + c.item.slice(1)}: ${c.qty}`)
+        this._drawBuildSlotTooltip(ctx, canvas, sx, sy, SLOT_SIZE,
+          e.label, e.color, e.borderColor, costs);
+      }
+    }
   }
 
   private renderHotbar(
@@ -3778,7 +3976,7 @@ class HUDElement implements UIElement {
     }
     const defs: BarDef[] = [
       { label: 'WT',   pct: Math.min(carryWeight / Math.max(carryCapacity, 1), 1),
-        highIsBad: true,  normal: '#664422', warn: '#cc8811', crit: '#cc2222', warnAt: 0.70, critAt: 0.90 },
+        highIsBad: true,  normal: '#664422', warn: '#cc8811', crit: '#cc2222', warnAt: 0.70, critAt: 0.85 },
       { label: 'FOOD', pct: Math.max(0, Math.min(hunger / 100, 1)),
         highIsBad: false, normal: '#3a8a3a', warn: '#cc8811', crit: '#cc2222', warnAt: 0.30, critAt: 0.15 },
       { label: 'H2O',  pct: Math.max(0, Math.min(thirst / 100, 1)),
@@ -4081,6 +4279,68 @@ class HUDElement implements UIElement {
     ctx.fillStyle = '#8ab4cc';
     ctx.font      = '11px Georgia, serif';
     ctx.fillText(weightTxt, tx + PAD + 4, cy);
+
+    ctx.restore();
+  }
+
+  /** Draw a tooltip popup for a build hotbar slot (ship or land build mode). */
+  private _drawBuildSlotTooltip(
+    ctx:         CanvasRenderingContext2D,
+    canvas:      HTMLCanvasElement,
+    sx:          number,
+    sy:          number,
+    slotSize:    number,
+    label:       string,
+    color:       string,
+    borderColor: string,
+    costLines:   string[],
+  ): void {
+    const PAD    = 10;
+    const LINE   = 15;
+    const W      = 190;
+    const totalH = PAD + 18 + (costLines.length > 0 ? 6 + costLines.length * LINE : 0) + PAD;
+
+    let tx = sx + slotSize / 2 - W / 2;
+    let ty = sy - totalH - 6;
+    tx = Math.max(4, Math.min(canvas.width - W - 4, tx));
+    if (ty < 4) ty = sy + slotSize + 6;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = borderColor;
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left colour accent bar
+    ctx.fillStyle = color;
+    this.roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+
+    // Structure name
+    ctx.fillStyle    = '#ffffff';
+    ctx.font         = 'bold 14px Georgia, serif';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(label, tx + PAD + 4, cy);
+    cy += 18;
+
+    // Resource costs
+    if (costLines.length > 0) {
+      cy += 6;
+      ctx.fillStyle = '#aaaaaa';
+      ctx.font      = '11px Georgia, serif';
+      for (const line of costLines) {
+        ctx.fillText(line, tx + PAD + 4, cy);
+        cy += LINE;
+      }
+    }
 
     ctx.restore();
   }
@@ -4507,7 +4767,7 @@ class HUDElement implements UIElement {
     const vBarH       = 56;
     const lBarX       = ix;
     const rBarX       = ix + vBarW + vBarGap;
-    const weightCrit  = weightRatio > 0.90;
+    const weightCrit  = weightRatio > 0.85;
     const weightWarn  = weightRatio > 0.70;
 
     // Backgrounds

@@ -50,7 +50,7 @@ import { AudioManager } from './audio/AudioManager.js';
 // Core Simulation Types
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
-import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS } from '../sim/Inventory.js';
+import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS, computeInventoryWeight } from '../sim/Inventory.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -195,6 +195,10 @@ export class ClientApplication {
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
+  /** Ship Plan Menu selection — only set by clicking a row in the left Plan Menu panel.
+   *  Kept separate from pendingGhostKind (hotbar) so the two are mutually exclusive,
+   *  mirroring how island uses pendingLandBuildKind vs buildSchematicKind. */
+  private shipPlanMenuKind: GhostModuleKind | null = null;
 
   // Land build mode — B key while off-ship opens land structure panel
   private landBuildMenuOpen = false;
@@ -1013,7 +1017,14 @@ export class ClientApplication {
                 const sin = Math.sin(-playerShip.rotation);
                 const localClick = Vec2.from(dx * cos - dy * sin, dx * sin + dy * cos);
                 if (PolygonUtils.pointInPolygon(localClick, playerShip.hull, 8)) {
-                  const repairable = playerShip.modules.filter(m => m.kind === 'plank' || m.kind === 'deck');
+                  const playerDeckLevel = this.renderSystem.playerDeckLevel;
+                  const repairable = playerShip.modules.filter(m => {
+                    if (m.kind === 'deck') {
+                      // Only include the deck the player is currently standing on
+                      return m.deckId === playerDeckLevel;
+                    }
+                    return m.kind === 'plank';
+                  });
                   const damaged = repairable.filter(m => {
                     const md = m.moduleData as any;
                     if (!md) return false;
@@ -1665,8 +1676,9 @@ export class ClientApplication {
           }
         }
         // Selecting a hotbar item deselects any build panel ghost kind
-        if (this.pendingGhostKind !== null) {
+        if (this.pendingGhostKind !== null || this.shipPlanMenuKind !== null) {
           this.pendingGhostKind = null;
+          this.shipPlanMenuKind = null;
           this.syncBuildModeState();
         }
         // Selecting a hotbar item also clears the land build panel kind (hotbar takes priority)
@@ -2060,6 +2072,7 @@ export class ClientApplication {
           }
         }
         this.syncBuildModeState();
+        this.checkBuildMode();
       };
 
       // Build rotation (R/Q key in build modes)
@@ -2080,9 +2093,10 @@ export class ClientApplication {
           this.removeNearestLandGhost(worldPos);
           return;
         }
-        if (this.pendingGhostKind !== null) {
+        if (this.pendingGhostKind !== null || this.shipPlanMenuKind !== null) {
           // Cancel the ghost currently attached to the cursor
           this.pendingGhostKind = null;
+          this.shipPlanMenuKind = null;
           this.syncBuildModeState();
           console.log('🏗️ [GHOST] Cancelled pending ghost');
         } else {
@@ -3306,6 +3320,9 @@ export class ClientApplication {
         // Exit free-placement mode — this is now a ghost-only action
         this.explicitBuildMode = false;
         this.pendingGhostKind = kind;
+        // Mutual exclusion: Plan Menu click clears the build hotbar selection
+        this.shipPlanMenuKind = kind;
+        this.uiManager.buildHotbarActiveSlot = -1;
         this.buildRotationDeg = 0;
         this.syncBuildModeState();
         console.log(`🏗️ [GHOST] Picking up ghost: ${kind} — click on ship to place`);
@@ -3352,8 +3369,11 @@ export class ClientApplication {
         }
         this.explicitBuildMode = false;
         this.pendingGhostKind = kind;
+        // Mutual exclusion: hotbar selection clears the Plan Menu selection
+        this.shipPlanMenuKind = null;
         this.buildRotationDeg = 0;
         this.syncBuildModeState();
+        this.checkBuildMode();
         console.log(`🏗️ [BUILD HOTBAR] Slot ${slot + 1} → ${kind}`);
       };
 
@@ -3552,7 +3572,13 @@ export class ClientApplication {
         if (player) {
           this.inputManager.setPlayerPosition(player.position);
           this.inputManager.setPlayerVelocity(player.velocity); // For stop detection
-          this.inputManager.setPlayerStamina(player.stamina ?? player.maxStamina ?? 100);
+          this.inputManager.setPlayerStamina(player.stamina ?? player.maxStamina ?? 100, player.maxStamina ?? 100);
+          // Mirror server's carry-weight gate for sprint (block at ≥ 85 % capacity).
+          {
+            const carryCap = 300 * (1 + ((player.statWeight ?? 0) as number) * 0.1);
+            const carryKg  = player.inventory ? computeInventoryWeight(player.inventory) : 0;
+            this.inputManager.setPlayerCarryRatio(carryCap > 0 ? carryKg / carryCap : 0);
+          }
           this.renderSystem.playerInteractInfo = {
             worldPos: player.position,
             localPos: player.localPosition ?? null,
@@ -4557,6 +4583,7 @@ export class ClientApplication {
     this.inputManager.buildMenuOpen = false;
     this.explicitBuildMode  = false;
     this.pendingGhostKind   = null;
+    this.shipPlanMenuKind   = null;
     this.buildRotationDeg   = 0;
     this.landBuildMenuOpen  = false;
     this.pendingLandBuildKind = null;
@@ -4596,6 +4623,13 @@ export class ClientApplication {
     const inGunportBuildMode = ((player?.carrierId ?? 0) !== 0 && activeItem === 'door') || pgk === 'gunport';
     // Chest build mode: resource_chest item equipped while on a ship, OR chest ghost selected
     const inChestBuildMode   = ((player?.carrierId ?? 0) !== 0 && activeItem === 'resource_chest') || pgk === 'chest';
+
+    // Auto-exit land build modes if the player is now on a ship (boarded mid-build)
+    if ((player?.carrierId ?? 0) !== 0 && this.landBuildMenuOpen) {
+      this.landBuildMenuOpen = false;
+      this.pendingLandBuildKind = null;
+      this.uiManager?.setLandBuildMenuState(false, null);
+    }
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     // Also activated when pendingLandBuildKind is set (via the land build panel)
@@ -4673,12 +4707,9 @@ export class ClientApplication {
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
 
     // Show build hotbar when: build menu is open or explicit build mode is active
-    // Hammer on ship → shows island-style GUI (land build hotbar) instead of ship build mode
-    const onShip = (player?.carrierId ?? 0) !== 0;
-    const hammerOnShip = activeItem === 'hammer' && onShip;
     if (this.uiManager) {
       this.uiManager.inShipBuildMode = this.buildMenuOpen || this.explicitBuildMode;
-      this.uiManager.inLandBuildMode = this.landBuildMenuOpen || this.islandBuildMode || hammerOnShip;
+      this.uiManager.inLandBuildMode = this.landBuildMenuOpen || this.islandBuildMode;
       // selectedLandKind drives the Build Schematic Hotbar active-slot highlight
       this.uiManager.selectedLandKind = this.buildSchematicKind;
     }
@@ -4714,8 +4745,8 @@ export class ClientApplication {
       } : null
     );
 
-    // Sync ghost placement state
-    this.uiManager?.setBuildMenuState(this.buildMenuOpen, this.ghostPlacements, this.pendingGhostKind);
+    // Sync ghost placement state — Plan Menu highlight uses shipPlanMenuKind (independent from hotbar)
+    this.uiManager?.setBuildMenuState(this.buildMenuOpen, this.ghostPlacements, this.shipPlanMenuKind);
     this.renderSystem?.setBuildMenuOpen(this.buildMenuOpen);
     this.renderSystem?.setGhostPlacements(this.ghostPlacements);
     this.renderSystem?.setPendingGhost(
@@ -4743,51 +4774,84 @@ export class ClientApplication {
     // ── Snap-based module kinds ───────────────────────────────────────────
     // These read the already-computed hover state from the render system
     // so the player sees the same highlighted slot they're clicking on.
+    // ── Snap-based kinds: direct placement matching island schematic protocol ──
+    // Resource check + optimistic consume at click time, then send immediately.
+    // No intermediate ghost plan — identical to island schematic click behaviour.
     if (kind === 'plank') {
       const sl = this.renderSystem.getHoveredPlankSlot();
       if (!sl) return;
-      const sid = sl.ship.id, sn = sl.sectionName, si = sl.segmentIndex;
-      this._addSnapGhost(kind, sid, 0, 0, 0, () => this.networkManager.sendPlacePlank(sid, sn, si));
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendPlacePlank(sl.ship.id, sl.sectionName, sl.segmentIndex);
+      console.log(`🏗️ [SHIP BUILD] Placed plank on ship ${sl.ship.id} — consumed resources`);
       return;
     }
     if (kind === 'deck') {
       const sl = this.renderSystem.getHoveredDeckSlot();
       if (!sl) return;
-      const sid = sl.ship.id, dl = sl.deckLevel;
-      this._addSnapGhost(kind, sid, 0, 0, 0, () => this.networkManager.sendPlaceDeck(dl));
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendPlaceDeck(sl.deckLevel);
+      console.log(`🏗️ [SHIP BUILD] Placed deck (level ${sl.deckLevel}) — consumed resources`);
       return;
     }
     if (kind === 'helm') {
       const sl = this.renderSystem.getHoveredHelmSlot();
       if (!sl) return;
-      const sid = sl.ship.id;
-      this._addSnapGhost(kind, sid, 0, 0, 0, () => this.networkManager.sendReplaceHelm(sid));
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendReplaceHelm(sl.ship.id);
+      console.log(`🏗️ [SHIP BUILD] Placed helm on ship ${sl.ship.id} — consumed resources`);
       return;
     }
     if (kind === 'ramp') {
       const sl = this.renderSystem.getHoveredRampSlot();
       if (!sl) return;
-      const sid = sl.ship.id, sni = sl.snapIndex, lx0 = sl.localPos.x, ly0 = sl.localPos.y;
+      if (!this._consumeShipBuildResources(kind)) return;
       const facing = this.renderSystem.getRampFacingRadians();
-      this._addSnapGhost(kind, sid, lx0, ly0, 0, () => this.networkManager.sendPlaceRamp(sid, sni, facing));
+      this.networkManager.sendPlaceRamp(sl.ship.id, sl.snapIndex, facing);
+      console.log(`🏗️ [SHIP BUILD] Placed ramp (snap ${sl.snapIndex}) — consumed resources`);
       return;
     }
     if (kind === 'hatch_cover') {
       const sl = this.renderSystem.getHoveredRampSlot();
       if (!sl) return;
-      const sid = sl.ship.id, sni = sl.snapIndex, lx0 = sl.localPos.x, ly0 = sl.localPos.y;
-      this._addSnapGhost(kind, sid, lx0, ly0, 0, () => this.networkManager.sendPlaceHatchCover(sid, sni));
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendPlaceHatchCover(sl.ship.id, sl.snapIndex);
+      console.log(`🏗️ [SHIP BUILD] Placed hatch cover (snap ${sl.snapIndex}) — consumed resources`);
       return;
     }
     if (kind === 'gunport') {
       const sl = this.renderSystem.getHoveredGunportSnap();
       if (!sl) return;
-      const sid = sl.ship.id, sni = sl.snapIndex, lx0 = sl.localPos.x, ly0 = sl.localPos.y;
-      this._addSnapGhost(kind, sid, lx0, ly0, 0, () => this.networkManager.sendPlaceGunport(sid, sni));
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendPlaceGunport(sl.ship.id, sl.snapIndex);
+      console.log(`🏗️ [SHIP BUILD] Placed gunport (snap ${sl.snapIndex}) — consumed resources`);
       return;
     }
 
     // ── Free-placement module kinds (cannon, mast, swivel, chest) ────────
+    // Cannon: check gunport snap first — snaps to existing unlinked gunport position
+    if (kind === 'cannon') {
+      const gpSnap = this.renderSystem.getHoveredGunportCannonSnap();
+      if (gpSnap) {
+        if (!this._consumeShipBuildResources('cannon')) return;
+        const gp = gpSnap.module;
+        const rot = gp.localPos.y < 0 ? 0 : Math.PI;
+        const cannonY = gp.localPos.y < 0 ? gp.localPos.y + 40 : gp.localPos.y - 40;
+        const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
+        const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
+        console.log(`🔳 [SHIP BUILD] Placed cannon at gunport snap=${snapIdx ?? 'none'} — consumed resources`);
+        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel);
+        return;
+      }
+      // Fixed-position slot ghosts (old helm-offset layout) — snap schematic to slot position
+      const cs = this.renderSystem.getHoveredCannonSlot();
+      if (cs) {
+        if (!this._consumeShipBuildResources('cannon')) return;
+        console.log(`🔳 [SHIP BUILD] Placed cannon at fixed slot ${cs.cannonIndex} (${cs.localX.toFixed(0)}, ${cs.localY.toFixed(0)}) — consumed resources`);
+        this.networkManager.sendPlaceCannonAt(cs.ship.id, cs.localX, cs.localY, cs.rot, undefined, 1);
+        return;
+      }
+    }
+
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     if (!ws) return;
 
@@ -4857,9 +4921,12 @@ export class ClientApplication {
     }
 
     // Geometry-based overlap check against existing ship modules (same logic as real placement)
+    const placeDeck = this.renderSystem.playerDeckLevel;
     const newFp = getModuleFootprint(this.pendingGhostKind as any);
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      if (kind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
+      if (mod.deckId !== 255 && mod.deckId !== placeDeck) continue; // different deck — no collision
       const existFp = getModuleFootprint(mod.kind);
       if (footprintsOverlap(newFp, localX, localY, ghostRotRad, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
         console.log(`❌ [GHOST] Ghost overlaps existing ${mod.kind}`);
@@ -4877,18 +4944,49 @@ export class ClientApplication {
       }
     }
 
-    const ghost: GhostPlacement = {
-      id: `ghost-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-      kind: this.pendingGhostKind,
-      shipId: nearestShip.id,
-      localPos: { x: localX, y: localY },
-      localRot: ghostRotRad,
-      resourceCost: STRUCTURE_COSTS[this.pendingGhostKind] ?? { wood: 0, fiber: 0, metal: 0, stone: 0 },
-      buildAction: this._makeBuildAction(this.pendingGhostKind, nearestShip.id, localX, localY, ghostRotRad),
-    };
-    this.ghostPlacements.push(ghost);
-    this.syncBuildModeState();
-    console.log(`📋 [PLAN] Created ${this.pendingGhostKind} plan at (${localX.toFixed(0)}, ${localY.toFixed(0)})`);
+    // Consume resources and place immediately
+    if (!this._consumeShipBuildResources(kind)) return;
+    this._makeBuildAction(kind, nearestShip.id, localX, localY, ghostRotRad)();
+    console.log(`🏗️ [SHIP BUILD] Placed ${kind} at (${localX.toFixed(0)}, ${localY.toFixed(0)}) — consumed resources`);
+  }
+
+  /**
+   * Check and optimistically consume raw resources for a ship module placement.
+   * Mirrors the island schematic resource-check pattern exactly.
+   * Returns true if resources were available and consumed, false (+ flashCancel) if not.
+   */
+  private _consumeShipBuildResources(kind: GhostModuleKind): boolean {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager.getAssignedPlayerId();
+    const player = ws?.players.find(p => p.id === playerId);
+    if (!player) return false;
+
+    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const res = (player.inventory as any).resources as Record<string, number> | undefined;
+    if (!res) return false;
+
+    const needWood  = cost.wood  - (res['wood']  ?? 0);
+    const needFiber = cost.fiber - (res['fiber'] ?? 0);
+    const needMetal = cost.metal - (res['metal'] ?? 0);
+    const needStone = cost.stone - (res['stone'] ?? 0);
+
+    if (needWood > 0 || needFiber > 0 || needMetal > 0 || needStone > 0) {
+      this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+      const need: string[] = [];
+      if (needWood  > 0) need.push(`${needWood}×wood`);
+      if (needFiber > 0) need.push(`${needFiber}×fiber`);
+      if (needMetal > 0) need.push(`${needMetal}×metal`);
+      if (needStone > 0) need.push(`${needStone}×stone`);
+      console.log(`❌ [SHIP BUILD] Need resources for ${kind}: ${need.join(', ')}`);
+      return false;
+    }
+
+    res['wood']  = Math.max(0, (res['wood']  ?? 0) - cost.wood);
+    res['fiber'] = Math.max(0, (res['fiber'] ?? 0) - cost.fiber);
+    res['metal'] = Math.max(0, (res['metal'] ?? 0) - cost.metal);
+    res['stone'] = Math.max(0, (res['stone'] ?? 0) - cost.stone);
+    return true;
   }
 
   /** Create a build plan ghost for a snap-based module kind. */
@@ -5080,6 +5178,7 @@ export class ClientApplication {
     const _placeDeck = this.renderSystem.playerDeckLevel;
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      if (newKind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
       if (mod.deckId !== 255 && mod.deckId !== _placeDeck) continue; // different deck — no collision
       const existingFp = getModuleFootprint(mod.kind);
       if (footprintsOverlap(newFp, localX, localY, rotationRad,
