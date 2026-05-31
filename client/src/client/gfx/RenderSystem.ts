@@ -356,8 +356,8 @@ export class RenderSystem {
   private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredRock: { wx: number; wy: number } | null = null;
-  /** Boulder node currently under cursor (world coords) — updated each frame in drawIsland. */
-  private _hoveredBoulder: { wx: number; wy: number } | null = null;
+  /** Boulder node currently under cursor (world coords + size) — updated each frame in drawIsland. */
+  private _hoveredBoulder: { wx: number; wy: number; size: number } | null = null;
   /** Boulders pending draw — populated by drawIsland, consumed after tree leaves in renderWorld. */
   private _pendingBoulders: Array<{
     sp: { x: number; y: number };
@@ -3184,13 +3184,15 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
   }
 
-  getHoveredBoulder(range: number = 50): { wx: number; wy: number } | null {
+  getHoveredBoulder(): { wx: number; wy: number; size: number } | null {
     if (!this._hoveredBoulder) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
+    const BOULDER_HARVEST_RANGE = 50 * 1.40625; // matches server BOULDER_HARVEST_RANGE
+    const effR = BOULDER_HARVEST_RANGE * Math.max(1.0, this._hoveredBoulder.size);
     const dx = this._hoveredBoulder.wx - player.position.x;
     const dy = this._hoveredBoulder.wy - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredBoulder : null;
+    return dx * dx + dy * dy <= effR * effR ? this._hoveredBoulder : null;
   }
 
   // ── Tombstone API ─────────────────────────────────────────────────────────
@@ -4870,7 +4872,7 @@ export class RenderSystem {
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE = 50; // base range (px) — matches server HARVEST_RANGE
-    const BOULDER_HARVEST_RANGE = HARVEST_RANGE * 1.25; // 25% larger reach for boulders — matches server BOULDER_HARVEST_RANGE
+    const BOULDER_HARVEST_RANGE = HARVEST_RANGE * 1.40625; // matches server BOULDER_HARVEST_RANGE; scales with node size
     // Effective range per node = HARVEST_RANGE * Math.max(1.0, size) — larger nodes extend reach
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
@@ -5198,7 +5200,7 @@ export class RenderSystem {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
           const effR = BOULDER_HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(pickaxeEquipped && localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
-          if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon };
+          if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon, size: res.size ?? 1.0 };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
         const leafAlpha = res.type === 'wood' && localPlayer

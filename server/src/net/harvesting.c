@@ -9,7 +9,7 @@
 
 /* Players must be within one full floor-tile (50px) to harvest a resource. */
 #define HARVEST_RANGE 50.0f
-#define BOULDER_HARVEST_RANGE (HARVEST_RANGE * 1.25f)  /* 25% larger reach for boulders */
+#define BOULDER_HARVEST_RANGE (HARVEST_RANGE * 1.40625f)  /* scales with node size in find_nearest_resource */
 #define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
 
 /* Respawn delays per resource type (milliseconds) */
