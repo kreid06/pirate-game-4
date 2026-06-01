@@ -195,6 +195,8 @@ export class ClientApplication {
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
+  /** Which resource pool to draw from when placing ship modules: 'ship' = ship chest, 'pack' = player pack. */
+  private _buildResourceSource: 'pack' | 'ship' = 'ship';
   /** Ship Plan Menu selection — only set by clicking a row in the left Plan Menu panel.
    *  Kept separate from pendingGhostKind (hotbar) so the two are mutually exclusive,
    *  mirroring how island uses pendingLandBuildKind vs buildSchematicKind. */
@@ -1945,7 +1947,7 @@ export class ClientApplication {
         const helmSlot = this.renderSystem.getHoveredHelmSlot();
         if (helmSlot) {
           console.log(`🔧 [BUILD] Replacing helm on ship ${helmSlot.ship.id}`);
-          this.networkManager.sendReplaceHelm(helmSlot.ship.id);
+          this.networkManager.sendReplaceHelm(helmSlot.ship.id, this._buildResourceSource);
           return;
         }
         // Deck placement — lower deck first, upper deck once lower is present
@@ -1953,7 +1955,7 @@ export class ClientApplication {
         if (deckSlot) {
           const lvlName = deckSlot.deckLevel === 0 ? 'lower' : 'upper';
           console.log(`🪵 [BUILD] Placing ${lvlName} deck on ship ${deckSlot.ship.id}`);
-          this.networkManager.sendPlaceDeck(deckSlot.deckLevel);
+          this.networkManager.sendPlaceDeck(deckSlot.deckLevel, this._buildResourceSource);
           return;
         }
         // Ramp placement — snaps to predefined snap points on the ship
@@ -1961,11 +1963,11 @@ export class ClientApplication {
         if (rampSlot) {
           if (this.renderSystem.isInHatchBuildMode()) {
             console.log(`🪟 [BUILD] Placing hatch cover at snap ${rampSlot.snapIndex} on ship ${rampSlot.ship.id}`);
-            this.networkManager.sendPlaceHatchCover(rampSlot.ship.id, rampSlot.snapIndex);
+            this.networkManager.sendPlaceHatchCover(rampSlot.ship.id, rampSlot.snapIndex, this._buildResourceSource);
           } else {
             const facing = this.renderSystem.getRampFacingRadians();
             console.log(`🪜 [BUILD] Placing ramp at snap ${rampSlot.snapIndex} (${rampSlot.localPos.x},${rampSlot.localPos.y}) facing ${facing.toFixed(2)}rad on ship ${rampSlot.ship.id}`);
-            this.networkManager.sendPlaceRamp(rampSlot.ship.id, rampSlot.snapIndex, facing);
+            this.networkManager.sendPlaceRamp(rampSlot.ship.id, rampSlot.snapIndex, facing, this._buildResourceSource);
           }
           return;
         }
@@ -1973,7 +1975,7 @@ export class ClientApplication {
         const gunportSnap = this.renderSystem.getHoveredGunportSnap();
         if (gunportSnap) {
           console.log(`🔳 [BUILD] Placing gunport at snap ${gunportSnap.snapIndex} on ship ${gunportSnap.ship.id}`);
-          this.networkManager.sendPlaceGunport(gunportSnap.ship.id, gunportSnap.snapIndex);
+          this.networkManager.sendPlaceGunport(gunportSnap.ship.id, gunportSnap.snapIndex, this._buildResourceSource);
           return;
         }
         // Chest placement — free position on ship deck, cursor world→local transform
@@ -1994,7 +1996,7 @@ export class ClientApplication {
               const lx2   =  dx2 * cosR2 - dy2 * sinR2;
               const ly2   =  dx2 * sinR2 + dy2 * cosR2;
               console.log(`📦 [BUILD] Placing chest at (${lx2.toFixed(0)}, ${ly2.toFixed(0)}) on ship ${nearestShip2.id}`);
-              this.networkManager.sendPlaceChestAt(nearestShip2.id, lx2, ly2, 0, this.renderSystem.playerDeckLevel);
+              this.networkManager.sendPlaceChestAt(nearestShip2.id, lx2, ly2, 0, this.renderSystem.playerDeckLevel, this._buildResourceSource);
               return;
             }
           }
@@ -2026,14 +2028,14 @@ export class ClientApplication {
           const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
           const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
           console.log(`🔳 [BUILD] Placing cannon at gunport ${gp.id} snap=${snapIdx ?? 'none'} pos (${gp.localPos.x.toFixed(0)}, ${cannonY.toFixed(0)}) rot=${(rot * 180 / Math.PI).toFixed(0)}°`);
-          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel);
+          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel, this._buildResourceSource);
           return;
         }
         // Plank placement build mode
         const slot = this.renderSystem.getHoveredPlankSlot();
         if (slot) {
           console.log(`🔨 [BUILD] Placing plank in slot ${slot.sectionName}[${slot.segmentIndex}] on ship ${slot.ship.id}`);
-          this.networkManager.sendPlacePlank(slot.ship.id, slot.sectionName, slot.segmentIndex);
+          this.networkManager.sendPlacePlank(slot.ship.id, slot.sectionName, slot.segmentIndex, this._buildResourceSource);
         }
       };
 
@@ -2053,9 +2055,11 @@ export class ClientApplication {
           const playerId = this.networkManager?.getAssignedPlayerId();
           const player = ws?.players.find(p => p.id === playerId);
           if (player?.carrierId) {
-            // On a ship — open ship ghost build panel
+            // On a ship — open ship ghost build panel; default resource source to 'ship'
             this.buildMenuOpen = true;
             this.inputManager.buildMenuOpen = true;
+            this._buildResourceSource = 'ship';
+            this.uiManager.buildResourceSource = 'ship';
             // If a buildable item is in the hotbar, also enter free-placement mode
             const activeSlot = player.inventory?.activeSlot ?? 0;
             const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
@@ -2084,6 +2088,17 @@ export class ClientApplication {
           this.buildRotationDeg = (this.buildRotationDeg + deltaDeg + 360) % 360;
           this.syncBuildModeState();
         }
+      };
+
+      // Right-click in build menu or island build mode: cancel ghost or remove nearest
+      this.inputManager.onToggleBuildResourceSource = () => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const pid = this.networkManager.getAssignedPlayerId();
+        const player = ws?.players.find(p => p.id === pid);
+        if (!player?.carrierId) return; // only meaningful while on a ship
+        this._buildResourceSource = this._buildResourceSource === 'ship' ? 'pack' : 'ship';
+        this.uiManager.buildResourceSource = this._buildResourceSource;
+        console.log(`🏗️ [BUILD] Resource source → ${this._buildResourceSource}`);
       };
 
       // Right-click in build menu or island build mode: cancel ghost or remove nearest
@@ -2627,39 +2642,96 @@ export class ClientApplication {
         return ws?.players.find(p => p.id === pid)?.inventory ?? null;
       };
 
-      // Supply ship chest resources for the land build resource panel.
-      // Returns the sum of all chest modules on the nearest ship to the player.
+      // Supply chest resources for the resource panel.
+      // • On a ship: shows ship chest modules only if at least one chest exists.
+      // • On land: shows nearby land chest (PlacedStructure type='chest') resources.
       this.uiManager.getShipChestResources = () => {
         const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
-        if (!ws || ws.ships.length === 0) return null;
+        if (!ws) return null;
         const pid    = this.networkManager.getAssignedPlayerId();
         const player = ws.players.find(p => p.id === pid);
 
-        // Use the ship the player is currently on; otherwise find the nearest ship
-        let target = ws.ships.find(s => player && s.id === player.carrierId);
-        if (!target && player) {
-          let minD = Infinity;
-          for (const ship of ws.ships) {
-            const dx = ship.position.x - player.position.x;
-            const dy = ship.position.y - player.position.y;
-            const d  = dx * dx + dy * dy;
-            if (d < minD) { minD = d; target = ship; }
+        // ── Case 1: player is on a ship ──────────────────────────────────
+        if (player?.carrierId) {
+          const ship = ws.ships.find(s => s.id === player.carrierId);
+          if (!ship) return null;
+          if (!ship.modules.some(m => m.kind === 'chest')) return null;
+          const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+          for (const mod of ship.modules) {
+            const data = mod.moduleData;
+            if (data?.kind === 'chest') {
+              totals.wood  += data.wood  ?? 0;
+              totals.fiber += data.fiber ?? 0;
+              totals.metal += data.metal ?? 0;
+              totals.stone += data.stone ?? 0;
+            }
           }
+          return totals;
         }
-        if (!target) return null;
 
-        // Aggregate all chest module resources
+        // ── Case 2: player is on land — aggregate nearby territory chests ─
+        if (player) {
+          const LAND_CHEST_RANGE_SQ = 600 * 600;
+          const structs = this.renderSystem.getPlacedStructures();
+          const totals  = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+          let found = false;
+          for (const s of structs) {
+            if (s.type !== 'chest' || !s.chestResources) continue;
+            const dx = s.x - player.position.x;
+            const dy = s.y - player.position.y;
+            if (dx * dx + dy * dy > LAND_CHEST_RANGE_SQ) continue;
+            found = true;
+            totals.wood  += s.chestResources.wood  ?? 0;
+            totals.fiber += s.chestResources.fiber ?? 0;
+            totals.metal += s.chestResources.metal ?? 0;
+            totals.stone += s.chestResources.stone ?? 0;
+          }
+          return found ? totals : null;
+        }
+
+        return null;
+      };
+
+      // Supply land-chest resources accessible from a nearby shipyard.
+      // Only applies when the player is on a ship within range of a land shipyard.
+      this.uiManager.getShipyardResources = () => {
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        if (!ws) return null;
+        const pid    = this.networkManager.getAssignedPlayerId();
+        const player = ws.players.find(p => p.id === pid);
+        if (!player?.carrierId) return null;
+        const ship = ws.ships.find(s => s.id === player.carrierId);
+        if (!ship) return null;
+
+        const YARD_RANGE_SQ = 500 * 500;
+        const structs = this.renderSystem.getPlacedStructures();
+
+        // Find shipyards within range of the ship
+        const nearYards = structs.filter(s => {
+          if (s.type !== 'shipyard') return false;
+          const dx = s.x - ship.position.x;
+          const dy = s.y - ship.position.y;
+          return dx * dx + dy * dy <= YARD_RANGE_SQ;
+        });
+        if (nearYards.length === 0) return null;
+
+        // Aggregate land chest resources near any of those shipyards
         const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
-        for (const mod of target.modules) {
-          const data = mod.moduleData;
-          if (data?.kind === 'chest') {
-            totals.wood  += data.wood  ?? 0;
-            totals.fiber += data.fiber ?? 0;
-            totals.metal += data.metal ?? 0;
-            totals.stone += data.stone ?? 0;
+        let found = false;
+        for (const yard of nearYards) {
+          for (const s of structs) {
+            if (s.type !== 'chest' || !s.chestResources) continue;
+            const dx = s.x - yard.x;
+            const dy = s.y - yard.y;
+            if (dx * dx + dy * dy > YARD_RANGE_SQ) continue;
+            found = true;
+            totals.wood  += s.chestResources.wood  ?? 0;
+            totals.fiber += s.chestResources.fiber ?? 0;
+            totals.metal += s.chestResources.metal ?? 0;
+            totals.stone += s.chestResources.stone ?? 0;
           }
         }
-        return totals;
+        return found ? totals : null;
       };
 
       // Inventory drag-and-drop swap
@@ -4782,24 +4854,24 @@ export class ClientApplication {
       const sl = this.renderSystem.getHoveredPlankSlot();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendPlacePlank(sl.ship.id, sl.sectionName, sl.segmentIndex);
-      console.log(`🏗️ [SHIP BUILD] Placed plank on ship ${sl.ship.id} — consumed resources`);
+      this.networkManager.sendPlacePlank(sl.ship.id, sl.sectionName, sl.segmentIndex, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed plank on ship ${sl.ship.id} — consumed resources (${this._buildResourceSource})`);
       return;
     }
     if (kind === 'deck') {
       const sl = this.renderSystem.getHoveredDeckSlot();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendPlaceDeck(sl.deckLevel);
-      console.log(`🏗️ [SHIP BUILD] Placed deck (level ${sl.deckLevel}) — consumed resources`);
+      this.networkManager.sendPlaceDeck(sl.deckLevel, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed deck (level ${sl.deckLevel}) — consumed resources (${this._buildResourceSource})`);
       return;
     }
     if (kind === 'helm') {
       const sl = this.renderSystem.getHoveredHelmSlot();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendReplaceHelm(sl.ship.id);
-      console.log(`🏗️ [SHIP BUILD] Placed helm on ship ${sl.ship.id} — consumed resources`);
+      this.networkManager.sendReplaceHelm(sl.ship.id, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed helm on ship ${sl.ship.id} — consumed resources (${this._buildResourceSource})`);
       return;
     }
     if (kind === 'ramp') {
@@ -4807,25 +4879,40 @@ export class ClientApplication {
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
       const facing = this.renderSystem.getRampFacingRadians();
-      this.networkManager.sendPlaceRamp(sl.ship.id, sl.snapIndex, facing);
-      console.log(`🏗️ [SHIP BUILD] Placed ramp (snap ${sl.snapIndex}) — consumed resources`);
+      this.networkManager.sendPlaceRamp(sl.ship.id, sl.snapIndex, facing, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed ramp (snap ${sl.snapIndex}) — consumed resources (${this._buildResourceSource})`);
       return;
     }
     if (kind === 'hatch_cover') {
       const sl = this.renderSystem.getHoveredRampSlot();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendPlaceHatchCover(sl.ship.id, sl.snapIndex);
-      console.log(`🏗️ [SHIP BUILD] Placed hatch cover (snap ${sl.snapIndex}) — consumed resources`);
+      this.networkManager.sendPlaceHatchCover(sl.ship.id, sl.snapIndex, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed hatch cover (snap ${sl.snapIndex}) — consumed resources (${this._buildResourceSource})`);
       return;
     }
     if (kind === 'gunport') {
       const sl = this.renderSystem.getHoveredGunportSnap();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendPlaceGunport(sl.ship.id, sl.snapIndex);
-      console.log(`🏗️ [SHIP BUILD] Placed gunport (snap ${sl.snapIndex}) — consumed resources`);
+      this.networkManager.sendPlaceGunport(sl.ship.id, sl.snapIndex, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed gunport (snap ${sl.snapIndex}) — consumed resources (${this._buildResourceSource})`);
       return;
+    }
+
+    // ── Snap-to-canonical-slot kinds (mast) ────────────────────────────
+    // Mast: check snap-point first — snaps to the 3 canonical mast positions if cursor
+    // is within snap radius. Falls through to free-placement ghost if not near a snap.
+    if (kind === 'mast') {
+      const ms = this.renderSystem.getHoveredMastSlot();
+      if (ms) {
+        if (!this._consumeShipBuildResources('mast')) return;
+        const snapX = RenderSystem.MAST_XS[ms.mastIndex];
+        console.log(`⛵ [SHIP BUILD] Placed mast at snap ${ms.mastIndex} (${snapX.toFixed(0)}, 0) — consumed resources`);
+        this.networkManager.sendPlaceMastAt(ms.ship.id, snapX, 0, this._buildResourceSource);
+        return;
+      }
+      // No canonical snap nearby — fall through to free-placement ghost below
     }
 
     // ── Free-placement module kinds (cannon, mast, swivel, chest) ────────
@@ -4839,16 +4926,16 @@ export class ClientApplication {
         const cannonY = gp.localPos.y < 0 ? gp.localPos.y + 40 : gp.localPos.y - 40;
         const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
         const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
-        console.log(`🔳 [SHIP BUILD] Placed cannon at gunport snap=${snapIdx ?? 'none'} — consumed resources`);
-        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel);
+        console.log(`🔳 [SHIP BUILD] Placed cannon at gunport snap=${snapIdx ?? 'none'} — consumed resources (${this._buildResourceSource})`);
+        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel, this._buildResourceSource);
         return;
       }
       // Fixed-position slot ghosts (old helm-offset layout) — snap schematic to slot position
       const cs = this.renderSystem.getHoveredCannonSlot();
       if (cs) {
         if (!this._consumeShipBuildResources('cannon')) return;
-        console.log(`🔳 [SHIP BUILD] Placed cannon at fixed slot ${cs.cannonIndex} (${cs.localX.toFixed(0)}, ${cs.localY.toFixed(0)}) — consumed resources`);
-        this.networkManager.sendPlaceCannonAt(cs.ship.id, cs.localX, cs.localY, cs.rot, undefined, 1);
+        console.log(`🔳 [SHIP BUILD] Placed cannon at fixed slot ${cs.cannonIndex} (${cs.localX.toFixed(0)}, ${cs.localY.toFixed(0)}) — consumed resources (${this._buildResourceSource})`);
+        this.networkManager.sendPlaceCannonAt(cs.ship.id, cs.localX, cs.localY, cs.rot, undefined, 1, this._buildResourceSource);
         return;
       }
     }
@@ -4948,7 +5035,7 @@ export class ClientApplication {
     // Consume resources and place immediately
     if (!this._consumeShipBuildResources(kind)) return;
     this._makeBuildAction(kind, nearestShip.id, localX, localY, ghostRotRad)();
-    console.log(`🏗️ [SHIP BUILD] Placed ${kind} at (${localX.toFixed(0)}, ${localY.toFixed(0)}) — consumed resources`);
+    console.log(`🏗️ [SHIP BUILD] Placed ${kind} at (${localX.toFixed(0)}, ${localY.toFixed(0)}) — consumed resources (${this._buildResourceSource})`);
   }
 
   /**
@@ -4964,6 +5051,49 @@ export class ClientApplication {
 
     const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
     const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+
+    if (this._buildResourceSource === 'ship' && player.carrierId) {
+      // ── Ship-chest source: aggregate resources across all chest modules ──
+      const ship = ws?.ships.find(s => s.id === player.carrierId);
+      if (!ship) return false;
+      const chestMods = ship.modules.filter(m => m.moduleData?.kind === 'chest');
+      const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+      for (const m of chestMods) {
+        const d = m.moduleData as any;
+        totals.wood  += d.wood  ?? 0;
+        totals.fiber += d.fiber ?? 0;
+        totals.metal += d.metal ?? 0;
+        totals.stone += d.stone ?? 0;
+      }
+      const needWood  = cost.wood  - totals.wood;
+      const needFiber = cost.fiber - totals.fiber;
+      const needMetal = cost.metal - totals.metal;
+      const needStone = cost.stone - totals.stone;
+      if (needWood > 0 || needFiber > 0 || needMetal > 0 || needStone > 0) {
+        this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        const need: string[] = [];
+        if (needWood  > 0) need.push(`${needWood}×wood`);
+        if (needFiber > 0) need.push(`${needFiber}×fiber`);
+        if (needMetal > 0) need.push(`${needMetal}×metal`);
+        if (needStone > 0) need.push(`${needStone}×stone`);
+        console.log(`❌ [SHIP BUILD] Ship chest needs for ${kind}: ${need.join(', ')}`);
+        return false;
+      }
+      // Optimistic client-side deduction from chest module data
+      let remWood = cost.wood, remFiber = cost.fiber, remMetal = cost.metal, remStone = cost.stone;
+      for (const m of chestMods) {
+        const d = m.moduleData as any;
+        const take = (n: number, have: number) => { const t = Math.min(n, have); return t; };
+        const tw = take(remWood,  d.wood  ?? 0); d.wood  = (d.wood  ?? 0) - tw; remWood  -= tw;
+        const tf = take(remFiber, d.fiber ?? 0); d.fiber = (d.fiber ?? 0) - tf; remFiber -= tf;
+        const tm = take(remMetal, d.metal ?? 0); d.metal = (d.metal ?? 0) - tm; remMetal -= tm;
+        const ts = take(remStone, d.stone ?? 0); d.stone = (d.stone ?? 0) - ts; remStone -= ts;
+        if (!remWood && !remFiber && !remMetal && !remStone) break;
+      }
+      return true;
+    }
+
+    // ── Pack source (default): player's personal resource pool ──
     const res = (player.inventory as any).resources as Record<string, number> | undefined;
     if (!res) return false;
 
@@ -4979,7 +5109,7 @@ export class ClientApplication {
       if (needFiber > 0) need.push(`${needFiber}×fiber`);
       if (needMetal > 0) need.push(`${needMetal}×metal`);
       if (needStone > 0) need.push(`${needStone}×stone`);
-      console.log(`❌ [SHIP BUILD] Need resources for ${kind}: ${need.join(', ')}`);
+      console.log(`❌ [SHIP BUILD] Pack needs for ${kind}: ${need.join(', ')}`);
       return false;
     }
 
@@ -5015,11 +5145,12 @@ export class ClientApplication {
   private _makeBuildAction(
     kind: GhostModuleKind, shipId: number, lx: number, ly: number, rot: number,
   ): () => void {
+    const src = this._buildResourceSource;
     switch (kind) {
-      case 'cannon': return () => this.networkManager.sendPlaceCannonAt(shipId, lx, ly, rot, undefined, this.renderSystem.playerDeckLevel);
-      case 'mast':   return () => this.networkManager.sendPlaceMastAt(shipId, lx, ly);
-      case 'swivel': return () => this.networkManager.sendPlaceSwivelAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel);
-      case 'chest':  return () => this.networkManager.sendPlaceChestAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel);
+      case 'cannon': return () => this.networkManager.sendPlaceCannonAt(shipId, lx, ly, rot, undefined, this.renderSystem.playerDeckLevel, src);
+      case 'mast':   return () => this.networkManager.sendPlaceMastAt(shipId, lx, ly, src);
+      case 'swivel': return () => this.networkManager.sendPlaceSwivelAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
+      case 'chest':  return () => this.networkManager.sendPlaceChestAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
       default:       return () => {};
     }
   }

@@ -178,11 +178,16 @@ export class ChestMenu {
   ): void {
     if (!this.visible) return;
 
-    // Build player resource counts from inventory
+    // Build player resource counts from the resource pool (wood/fiber/metal/stone
+    // are tracked in inventory.resources, not inventory.slots).
     this._playerRes = {};
     if (playerInventory) {
-      for (const slot of playerInventory.slots) {
-        if (slot.item) this._playerRes[slot.item] = (this._playerRes[slot.item] ?? 0) + slot.quantity;
+      const r = playerInventory.resources;
+      if (r) {
+        this._playerRes['wood']  = r.wood  ?? 0;
+        this._playerRes['fiber'] = r.fiber ?? 0;
+        this._playerRes['metal'] = r.metal ?? 0;
+        this._playerRes['stone'] = r.stone ?? 0;
       }
     }
 

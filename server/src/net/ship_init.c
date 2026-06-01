@@ -297,6 +297,7 @@ void init_brigantine_ship(int idx, float world_x, float world_y, uint8_t ship_se
         s->modules[s->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(0.0f));
         s->modules[s->module_count].local_rot   = Q16_FROM_FLOAT(0.0f);
         s->modules[s->module_count].state_bits  = MODULE_STATE_ACTIVE | MODULE_STATE_DEPLOYED;
+        s->modules[s->module_count].deck_id     = 0xFF; /* deck-independent — spans all decks */
         s->modules[s->module_count].data.mast.angle          = Q16_FROM_FLOAT(0.0f);
         s->modules[s->module_count].data.mast.openness       = 0;
         s->modules[s->module_count].data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);

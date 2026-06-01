@@ -4124,8 +4124,15 @@ export class RenderSystem {
       this.detectHoveredGunportCannonSnap(worldState);
     } else {
       this.hoveredCannonSlot = null;
-      // Gunport build mode also uses hoveredGunportCannonSnap — clear only when neither mode is active
-      if (!this.gunportBuildMode) this.hoveredGunportCannonSnap = null;
+      // Gunport cannon ghosts are visible in any build mode — always detect the snap hover
+      const anyBuildModeActive = this.buildMenuOpen || this.buildMode || this.mastBuildMode
+        || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode
+        || this.rampBuildMode || this.hatchBuildMode || this.gunportBuildMode;
+      if (anyBuildModeActive) {
+        this.detectHoveredGunportCannonSnap(worldState);
+      } else {
+        this.hoveredGunportCannonSnap = null;
+      }
     }
 
     // In mast build mode, detect which missing mast slot is under the cursor
@@ -4160,10 +4167,9 @@ export class RenderSystem {
     }
 
     // In gunport build mode, detect which gunport snap is under the cursor
-    // Also detect hovered cannon snap at existing gunport positions (preview)
     if (this.gunportBuildMode) {
       this.detectHoveredGunportSnap(worldState);
-      if (!this.cannonBuildMode) this.detectHoveredGunportCannonSnap(worldState);
+      // detectHoveredGunportCannonSnap is already called above for all build modes
     } else {
       this.hoveredGunportSnap = null;
     }
@@ -8980,15 +8986,21 @@ export class RenderSystem {
       }
     }
 
-    // In cannon build mode, overlay ghost cannons at destroyed slots (layer 4, after real cannons)
-    if (this.cannonBuildMode) {
-      for (const ship of worldState.ships) {
-        this.queueRenderItem(4, 'cannon-ghosts', () => this.drawMissingCannonGhosts(ship, camera), 1);
-      }
-    } else if (this.gunportBuildMode) {
-      // In gunport build mode, show only the gunport-linked cannon ghosts (preview of cannon snap positions)
-      for (const ship of worldState.ships) {
-        this.queueRenderItem(4, `cannon-ghosts-gp-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera, true), 1);
+    // Gunport cannon ghosts are visible in any build mode — a gunport without a cannon shows a permanent ghost.
+    // In cannon build mode the full set (fixed broadside slots + gunport slots) is rendered.
+    const anyBuildModeActive = this.buildMenuOpen || this.buildMode || this.cannonBuildMode
+      || this.mastBuildMode || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode
+      || this.rampBuildMode || this.hatchBuildMode || this.gunportBuildMode;
+    if (anyBuildModeActive) {
+      if (this.cannonBuildMode) {
+        for (const ship of worldState.ships) {
+          this.queueRenderItem(4, `cannon-ghosts-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera), 1);
+        }
+      } else {
+        // Show gunport-linked cannon ghosts only (non-removable while in build mode)
+        for (const ship of worldState.ships) {
+          this.queueRenderItem(4, `cannon-ghosts-gp-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera, true), 1);
+        }
       }
     }
 
@@ -10973,10 +10985,10 @@ export class RenderSystem {
       const localX = dx * cos - dy * sin;
       const localY = dx * sin + dy * cos;
 
+      // Gunport cannon ghosts only show on the bottom deck (deck 0)
+      if (this._playerDeckLevel !== 0) continue;
       for (const mod of ship.modules) {
         if (mod.kind !== 'gunport') continue;
-        // Only consider gunports on the current deck (255 = deck-independent, always shown)
-        if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue;
         // Skip if a cannon is already linked to this gunport's snap index
         const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
         const hasCannon = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 && ship.modules.some(
@@ -11067,11 +11079,10 @@ export class RenderSystem {
     }
 
     // ── Ghost cannons at gunport positions (no cannon installed yet) ──────
+    // Gunports are always on the bottom deck — only show their ghosts when player is on deck 0.
     const gpHalfWGhost = 11; // match visual gpHalfW
-    for (const mod of ship.modules) {
+    if (this._playerDeckLevel === 0) for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
-      // Only show gunport cannon ghosts for the current deck (255 = deck-independent)
-      if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue;
       // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
       // because the cannon is now far from the gunport hull edge when stowed/deployed).
       const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
@@ -11134,7 +11145,7 @@ export class RenderSystem {
   }
 
   // Mast layout: mast_xs[3] = {165, -35, -235}, all at y=0
-  private static readonly MAST_XS = [165, -35, -235];
+  static readonly MAST_XS = [165, -35, -235];
   // Helm position: x=-90, y=0
   private static readonly HELM_X = -90;
 

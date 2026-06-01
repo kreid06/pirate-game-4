@@ -190,6 +190,16 @@ export class UIManager {
   public getPlayerInventory: (() => { slots: { item: ItemKind; quantity: number }[] } | null) | null = null;
   /** Supplier for the connected ship's aggregated chest resources — used for land build resource panel. */
   public getShipChestResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
+  /** Supplier for land-chest resources accessible from a nearby shipyard — null when not near a shipyard. */
+  public getShipyardResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
+  /** Which resource pool is active for ship building: 'ship' = chest, 'pack' = player. Toggled with R. */
+  public buildResourceSource: 'pack' | 'ship' = 'ship';
+  /** Persistent column display order in the resource panel (left=lowest priority, right=highest). */
+  public columnOrder: string[] = ['PACK', 'CHEST', 'YARD'];
+  /** Active column header drag state (null when not dragging). */
+  private _resColDrag: { header: string; dragX: number } | null = null;
+  /** Cached column hit-test info from the last renderResourcePanel call. */
+  private _resPanelHit: { colStartX: number; hdrY: number; colW: number; hdrH: number; count: number; headers: string[] } | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
   private _cachedHelmActiveGroup: number = -1;
   private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
@@ -524,6 +534,7 @@ export class UIManager {
 
   /** Forward mouse-move to the world map or respawn screen for drag-pan. */
   handleWorldMapMouseMove(x: number, y: number): void {
+    if (this._resColDrag) this._resColDrag.dragX = x;
     if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseMove(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
     if (this.salvageMenu.visible) this.salvageMenu.handleMouseMove(x, y);
@@ -534,6 +545,30 @@ export class UIManager {
 
   /** Notify world map / respawn screen of mouse-up to end drag. */
   handleWorldMapMouseUp(x = 0, y = 0): void {
+    if (this._resColDrag) {
+      const rph = this._resPanelHit;
+      if (rph && rph.count > 1) {
+        const relX = x - rph.colStartX;
+        const rawCi = Math.round(relX / rph.colW - 0.5);
+        const targetCi = Math.max(0, Math.min(rph.count - 1, rawCi));
+        const srcCi = rph.headers.indexOf(this._resColDrag.header);
+        if (srcCi !== -1 && targetCi !== srcCi) {
+          // Reorder the visible headers
+          const visibleHeaders = [...rph.headers];
+          const newVisibleOrder = [...visibleHeaders];
+          newVisibleOrder.splice(srcCi, 1);
+          newVisibleOrder.splice(targetCi, 0, visibleHeaders[srcCi]);
+          // Rebuild columnOrder: replace positions of visible headers in-place
+          const newOrder = [...this.columnOrder];
+          let vi = 0;
+          for (let i = 0; i < newOrder.length; i++) {
+            if (visibleHeaders.includes(newOrder[i])) newOrder[i] = newVisibleOrder[vi++];
+          }
+          this.columnOrder = newOrder;
+        }
+      }
+      this._resColDrag = null;
+    }
     if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseUp(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseUp(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
@@ -1519,6 +1554,21 @@ export class UIManager {
     if (this._dropPicker.open) {
       return this.handleDropPickerClick(x, y);
     }
+    // Resource panel column header drag start
+    {
+      const rph = this._resPanelHit;
+      if (rph && rph.count > 1) {
+        const relX = x - rph.colStartX;
+        const relY = y - rph.hdrY;
+        if (relX >= 0 && relX < rph.count * rph.colW && Math.abs(relY) <= rph.hdrH / 2 + 3) {
+          const ci = Math.floor(relX / rph.colW);
+          if (ci >= 0 && ci < rph.count) {
+            this._resColDrag = { header: rph.headers[ci], dragX: x };
+            return true;
+          }
+        }
+      }
+    }
     // Land build hotbar slot click — selects (or deselects) the Build Schematic Hotbar slot
     if (this.inLandBuildMode) {
       const N_SLOTS = this.landHotbarSlots.length;
@@ -1904,12 +1954,10 @@ export class UIManager {
     if (this.landBuildMenuOpen || this.buildMenuOpen || this.buildMenuPending !== null || (this.buildModeState?.active)) {
       showResources = true;
     } else {
-      // Check if hammer is equipped
       const activeSlot = (inv as any)?.activeSlot ?? 0;
       const slots = inv?.slots ?? [];
       const activeItem = slots[activeSlot]?.item ?? 'none';
       if (activeItem === 'hammer') showResources = true;
-      // Flash visible after resource gain
       if (performance.now() < this._resourceFlashUntil) showResources = true;
     }
     let panelAlpha = 1.0;
@@ -1922,24 +1970,53 @@ export class UIManager {
       this._resourceFadeOutStart = null;
     }
 
-    const invRes    = (inv as any)?.resources as { wood: number; fiber: number; metal: number; stone: number } | undefined;
-    const shipRes   = this.getShipChestResources?.() ?? null;
-    const RES_ITEMS = ['wood', 'fiber', 'stone', 'metal'] as const;
+    const invRes   = (inv as any)?.resources as { wood: number; fiber: number; metal: number; stone: number } | undefined;
+    const chestRes = this.getShipChestResources?.() ?? null;
+    const yardRes  = this.getShipyardResources?.()  ?? null;
+
+    const RES_ITEMS  = ['wood', 'fiber', 'stone', 'metal'] as const;
     const RES_LABELS: Record<string, string> = { wood: 'Wood', fiber: 'Fiber', stone: 'Stone', metal: 'Metal' };
 
-    const RES_PAD  = 8;
-    const RES_ROW  = 16;
+    // Build active source columns (dynamic — only show present sources)
+    type ResCol = { header: string; color: string; get: (item: string) => number };
+    const allCols: ResCol[] = [
+      { header: 'PACK',  color: '#cc9944', get: item => invRes  ? ((invRes  as any)[item] ?? 0) : 0 },
+    ];
+    if (chestRes !== null) allCols.push({ header: 'CHEST', color: '#66aadd', get: item => (chestRes as any)[item] ?? 0 });
+    if (yardRes  !== null) allCols.push({ header: 'YARD',  color: '#66dd88', get: item => (yardRes  as any)[item] ?? 0 });
+    // Sort by columnOrder (left=lowest, right=highest priority)
+    const cols = [...allCols].sort((a, b) => {
+      const ai = this.columnOrder.indexOf(a.header);
+      const bi = this.columnOrder.indexOf(b.header);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+
+    // Build cost map
+    const costMap = new Map<string, number>();
+    if (this.selectedLandKind) {
+      const ent = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === this.selectedLandKind);
+      if (ent) for (const c of ent.cost) costMap.set(c.item, c.qty);
+    }
+    const hasCost = costMap.size > 0;
+
+    // Panel dimensions — width grows with the number of columns
+    const PAD      = 8;
+    const ROW_H    = 16;
     const HDR_H    = 14;
     const TITLE_H  = 16;
     const SEP      = 2;
-    const RES_W    = 200;
-    const resH     = TITLE_H + HDR_H + SEP + RES_ITEMS.length * RES_ROW + RES_PAD;
+    const LABEL_W  = 68;
+    const COL_W    = 42;
+    const COST_W   = 44;
     const HOTBAR_H = 76;
+    const RES_W    = PAD + LABEL_W + (hasCost ? COST_W : 0) + cols.length * COL_W + PAD;
+    const resH     = TITLE_H + HDR_H + SEP + RES_ITEMS.length * ROW_H + PAD;
     const resX     = 8;
     const resY     = canvas.height - HOTBAR_H - 8 - resH - 6;
 
     ctx.save();
     ctx.globalAlpha = panelAlpha;
+
     // Panel background
     ctx.fillStyle   = 'rgba(14,10,4,0.90)';
     ctx.strokeStyle = 'rgba(180,130,50,0.45)';
@@ -1949,40 +2026,79 @@ export class UIManager {
     ctx.fill();
     ctx.stroke();
 
-    // Build cost map for the currently selected schematic
-    const _costMap = new Map<string, number>();
-    if (this.selectedLandKind) {
-      const _selEnt = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === this.selectedLandKind);
-      if (_selEnt) for (const c of _selEnt.cost) _costMap.set(c.item, c.qty);
-    }
-    const hasCost = _costMap.size > 0;
-
-    const labelX  = resX + RES_PAD;
-    const costRX  = hasCost ? resX + RES_W - 102 : resX + RES_W - 56;
-    const packRX  = resX + RES_W - 56;
-    const chestRX = resX + RES_W - 10;
-
     // Title
     ctx.font         = 'bold 10px Georgia, serif';
     ctx.fillStyle    = '#ffcc66';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
-    ctx.fillText('RESOURCES', labelX, resY + TITLE_H / 2);
+    ctx.fillText('RESOURCES', resX + PAD, resY + TITLE_H / 2);
+    // [R] toggle hint — only show when ship build mode is active and CHEST column is present
+    if ((this.buildMenuOpen || this.buildModeState?.active) && chestRes !== null) {
+      ctx.font      = '8px monospace';
+      ctx.fillStyle = 'rgba(200,180,120,0.6)';
+      ctx.textAlign = 'right';
+      ctx.fillText(`[R] ${this.buildResourceSource === 'ship' ? 'CHEST' : 'PACK'}`, resX + RES_W - PAD, resY + TITLE_H / 2);
+    }
 
-    // Column headers
-    const hdrY = resY + TITLE_H + HDR_H / 2;
+    // Column headers — highlight active resource source column
+    const hdrY       = resY + TITLE_H + HDR_H / 2;
+    const colStartX  = resX + PAD + LABEL_W + (hasCost ? COST_W : 0);
+
+    // Cache hit-test info for drag handling
+    this._resPanelHit = {
+      colStartX, hdrY, colW: COL_W, hdrH: HDR_H,
+      count: cols.length, headers: cols.map(c => c.header),
+    };
+
+    // Determine which column index is "active" for building
+    const activeColHeader = this.buildResourceSource === 'ship' ? 'CHEST' : 'PACK';
+    const activeColIdx = cols.findIndex(c => c.header === activeColHeader);
+
     ctx.font      = 'bold 9px Georgia, serif';
     ctx.textAlign = 'center';
     if (hasCost) {
       ctx.fillStyle = '#ff6666';
-      ctx.fillText('COST', costRX - 10, hdrY);
+      ctx.fillText('COST', resX + PAD + LABEL_W + COST_W / 2, hdrY);
     }
-    ctx.fillStyle = '#cc9944';
-    ctx.fillText('PACK', packRX - 16, hdrY);
-    ctx.fillStyle = shipRes ? '#66aadd' : '#445566';
-    ctx.fillText('CHEST', chestRX - 16, hdrY);
+    for (let ci = 0; ci < cols.length; ci++) {
+      const colCX = colStartX + ci * COL_W + COL_W / 2;
+      if (ci === activeColIdx) {
+        // Draw highlight background spanning header + data rows
+        ctx.fillStyle = `rgba(${cols[ci].color.slice(1,3) === 'ff' ? '255,200,40' : '60,140,220'},0.14)`;
+        ctx.beginPath();
+        ctx.roundRect(colStartX + ci * COL_W, resY + TITLE_H + 2, COL_W - 1, resH - TITLE_H - 4, 3);
+        ctx.fill();
+        // Bright border along top
+        ctx.strokeStyle = cols[ci].color;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(colStartX + ci * COL_W + 2, resY + TITLE_H + 2);
+        ctx.lineTo(colStartX + ci * COL_W + COL_W - 3, resY + TITLE_H + 2);
+        ctx.stroke();
+      }
+      // Dim columns that are not the dragged one when a drag is active
+      const isDragging = this._resColDrag !== null;
+      const isDraggedCol = isDragging && this._resColDrag!.header === cols[ci].header;
+      ctx.globalAlpha = panelAlpha * (isDragging && !isDraggedCol ? 0.45 : 1.0);
+      ctx.fillStyle = ci === activeColIdx ? '#ffffff' : cols[ci].color;
+      ctx.fillText(cols[ci].header, colCX, hdrY);
+      ctx.globalAlpha = panelAlpha;
+    }
+    // Drag indicator: vertical line at current drag position
+    if (this._resColDrag) {
+      const dx = Math.max(colStartX, Math.min(colStartX + cols.length * COL_W, this._resColDrag.dragX));
+      const dragColor = cols.find(c => c.header === this._resColDrag!.header)?.color ?? '#ffffff';
+      ctx.strokeStyle = dragColor;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(dx, resY + TITLE_H + 2);
+      ctx.lineTo(dx, resY + resH - 4);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
 
-    // Separator line
+    // Separator
     const sepY = resY + TITLE_H + HDR_H + SEP;
     ctx.strokeStyle = 'rgba(180,130,50,0.30)';
     ctx.lineWidth   = 1;
@@ -1993,49 +2109,50 @@ export class UIManager {
 
     // Data rows
     for (let i = 0; i < RES_ITEMS.length; i++) {
-      const item      = RES_ITEMS[i];
-      const invCount  = invRes ? (invRes[item] ?? 0) : 0;
-      const shipCount = shipRes ? (shipRes[item] ?? 0) : 0;
-      const rowY      = sepY + i * RES_ROW + RES_ROW / 2 + 2;
+      const item = RES_ITEMS[i];
+      const rowY = sepY + i * ROW_H + ROW_H / 2 + 2;
 
-      // Row flash highlight (green = up, red = down)
+      // Row flash highlight
       const flash = this._resourceRowFlash.get(item);
       if (flash && performance.now() < flash.until) {
-        const t = 1 - (flash.until - performance.now()) / 1200;
-        const alpha = 0.45 * (1 - t * t); // fade out
+        const t     = 1 - (flash.until - performance.now()) / 1200;
+        const alpha = 0.45 * (1 - t * t);
         ctx.fillStyle = flash.dir === 'up' ? `rgba(60,200,80,${alpha.toFixed(2)})` : `rgba(220,60,40,${alpha.toFixed(2)})`;
-        ctx.fillRect(resX + 2, rowY - RES_ROW / 2, RES_W - 4, RES_ROW - 1);
+        ctx.fillRect(resX + 2, rowY - ROW_H / 2, RES_W - 4, ROW_H - 1);
       } else if (flash && performance.now() >= flash.until) {
         this._resourceRowFlash.delete(item);
       }
 
+      // Label
       ctx.font         = '11px Georgia, serif';
       ctx.fillStyle    = '#c0b898';
       ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(RES_LABELS[item], labelX, rowY);
+      ctx.fillText(RES_LABELS[item], resX + PAD, rowY);
 
+      // Cost column
       if (hasCost) {
-        const costQty = _costMap.get(item);
+        const costQty = costMap.get(item);
         ctx.font      = 'bold 11px Georgia, serif';
         ctx.textAlign = 'right';
         if (costQty !== undefined) {
           ctx.fillStyle = '#ff4444';
-          ctx.fillText(`-${costQty}`, costRX, rowY);
+          ctx.fillText(`-${costQty}`, resX + PAD + LABEL_W + COST_W - 2, rowY);
         } else {
           ctx.fillStyle = 'rgba(100,60,60,0.4)';
-          ctx.fillText('—', costRX, rowY);
+          ctx.fillText('—', resX + PAD + LABEL_W + COST_W - 2, rowY);
         }
       }
 
+      // Source columns
       ctx.font      = 'bold 11px Georgia, serif';
-      ctx.fillStyle = invCount > 0 ? '#ffee88' : '#554433';
       ctx.textAlign = 'right';
-      ctx.fillText(String(invCount), packRX, rowY);
-
-      ctx.fillStyle = shipCount > 0 ? '#88ccff' : (shipRes !== null ? '#334455' : '#443333');
-      ctx.textAlign = 'right';
-      ctx.fillText(shipRes !== null ? String(shipCount) : '—', chestRX, rowY);
+      for (let ci = 0; ci < cols.length; ci++) {
+        const val = cols[ci].get(item);
+        const isActive = ci === activeColIdx;
+        ctx.fillStyle = val > 0 ? (isActive ? '#ffffff' : cols[ci].color) : (isActive ? 'rgba(180,160,140,0.5)' : 'rgba(80,60,40,0.5)');
+        ctx.fillText(String(val), colStartX + ci * COL_W + COL_W - 2, rowY);
+      }
     }
     ctx.restore();
   }

@@ -155,6 +155,8 @@ export class InputManager {
   public onRepairSail: (() => void) | null = null;
   /** Called when R is pressed in ramp build mode to cycle the ramp facing by 90°. */
   public onCycleRampFacing: (() => void) | null = null;
+  /** Called when R is pressed in ship build mode (non-ramp) to toggle resource source (pack ↔ ship). */
+  public onToggleBuildResourceSource: (() => void) | null = null;
   /** Called when R is pressed while mounted at a cannon that is next to a gunport. */
   public onToggleGunportAtCannon: (() => void) | null = null;
   /** Set to true by ClientApplication when ramp build mode is active. */
@@ -1287,9 +1289,13 @@ export class InputManager {
         break;
       case 'KeyR':
         // In ramp build mode: cycle the ramp facing by 90°.
+        // In ship build mode (non-ramp): toggle build resource source (pack ↔ ship).
         // Mounted at cannon: toggle gunport at that position.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if (this.inRampBuildMode && this.onCycleRampFacing) {
+        if (!this.inRampBuildMode && (this.explicitBuildMode || this.buildMenuOpen) && this.onToggleBuildResourceSource) {
+          this.onToggleBuildResourceSource();
+          event.preventDefault();
+        } else if (this.inRampBuildMode && this.onCycleRampFacing) {
           this.onCycleRampFacing();
           event.preventDefault();
         } else if (this.mountKind === 'cannon' && this.onToggleGunportAtCannon) {

@@ -1986,6 +1986,27 @@ void check_projectile_static_collisions(struct Sim* sim) {
             removed = true;
         }
 
+        /* Pass 6: land chests (STRUCT_CHEST) — AABB 36×26 px (half 18×13). */
+        #define STRUCT_CHEST_HALF_W  18.0f
+        #define STRUCT_CHEST_HALF_H  13.0f
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_CHEST) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            if (!(dx >= -STRUCT_CHEST_HALF_W && dx <= STRUCT_CHEST_HALF_W &&
+                  dy >= -STRUCT_CHEST_HALF_H && dy <= STRUCT_CHEST_HALF_H)) continue;
+            /* Hit land chest */
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+        #undef STRUCT_CHEST_HALF_W
+        #undef STRUCT_CHEST_HALF_H
+
         /* ── Test vs. island trees (spatial grid lookup) ────────────────── */
         if (!removed) {
             for (int ii = 0; ii < ISLAND_COUNT && !removed; ii++) {
