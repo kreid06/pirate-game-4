@@ -779,6 +779,13 @@ void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, 
                     float dmg_mult = ship_level_damage_mult(&sim_ship->level_stats);
                     proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * dmg_mult);
                 }
+                /* Ghost ship NPC level damage scaling (levels 1-60, 1x-5x)
+                 * level  1 = 1.0x, level 60 = 5.0x
+                 * formula: 1 + (level-1) * 4/59 */
+                if (ship->ship_type == SHIP_TYPE_GHOST && ship->npc_level > 1) {
+                    float ghost_dmg = 1.0f + (ship->npc_level - 1) * 4.0f / 59.0f;
+                    proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * ghost_dmg);
+                }
             }
         }
         

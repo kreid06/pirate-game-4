@@ -121,6 +121,10 @@ typedef struct SimpleShip {
 
     /* Display name — set by the owning player; broadcast to all clients */
     char ship_name[32];
+
+    /* NPC difficulty level (1–60). Only used for SHIP_TYPE_GHOST ships.
+     * Scales hull HP (1×–10×) and cannon damage (1×–5×). 0 = not set (treated as 1). */
+    uint8_t npc_level;
 } SimpleShip;
 
 // NPC behavior types
@@ -685,7 +689,7 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id, uint
  * @param y  World Y position in client pixels
  * @return Entity ID of the new ghost ship, or 0 on failure
  */
-uint32_t websocket_server_create_ghost_ship(float x, float y);
+uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level);
 
 /**
  * Clean up WebSocket server and close all connections

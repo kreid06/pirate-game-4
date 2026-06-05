@@ -47,6 +47,9 @@ export interface Ship {
   // Ship type (SHIP_TYPE_* constants); used for spectral/ghost rendering
   shipType: number;
 
+  // NPC difficulty level (1–60) for ghost ships; 0 or undefined for player ships
+  npcLevel?: number;
+
   // Display name set by the crew (empty string = unnamed)
   shipName?: string;
 

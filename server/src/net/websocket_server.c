@@ -1769,7 +1769,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             }
 
             char ship_entry[16384];
-            float hull_health_pct = (ship->company_id == COMPANY_GHOST)
+            float hull_health_pct = (simple_ship && simple_ship->ship_type == SHIP_TYPE_GHOST)
                 ? (float)ship->hull_health
                 : Q16_TO_FLOAT(ship->hull_health);
             int offset = snprintf(ship_entry, sizeof(ship_entry),
@@ -1777,6 +1777,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
                     "\"rudder_angle\":%.3f,"
                     "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
+                    "\"npcLevel\":%u,"
                     "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                     ship->id, simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF),
                     simple_ship ? simple_ship->ship_name : "",
@@ -1785,6 +1786,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     hull_health_pct,
                     simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
                     simple_ship ? simple_ship->ship_type  : SHIP_TYPE_BRIGANTINE,
+                    (unsigned)(simple_ship ? simple_ship->npc_level : 0),
                     simple_ship ? simple_ship->cannon_ammo : 0,
                     (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
 
@@ -6287,7 +6289,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 memset(&ng, 0, sizeof(ShipModule));
                                                 ng.id          = new_id;
                                                 ng.type_id     = MODULE_TYPE_GUNPORT;
-                                                ng.deck_id     = 1; /* upper-deck hull (gunport row) */
+                                                ng.deck_id     = 0; /* lower-deck hull (gun deck) */
                                                 ng.local_pos.x = Q16_FROM_FLOAT(local_x);
                                                 ng.local_pos.y = Q16_FROM_FLOAT(local_y);
                                                 ng.local_rot   = 0;
@@ -6940,7 +6942,9 @@ int websocket_server_update(struct Sim* sim) {
                                                                                ? (uint8_t)cannon_snap_idx : 0xFF;
                                             nc.data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
                                             nc.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
-                                            nc.deck_id = req_deck_id;
+                                            /* Gunport-linked cannons are always on the lower gun deck (0).
+                                             * Free-placed cannons use the player's current deck level. */
+                                            nc.deck_id = (nc.data.cannon.gunport_snap_idx != 0xFF) ? 0 : req_deck_id;
 
                                             // If bound to a gunport, snap initial y-position to
                                             // deployed or stowed based on current gunport state.
@@ -9232,12 +9236,29 @@ int websocket_server_update(struct Sim* sim) {
                                 bool ss_ghost = false;
                                 bool ss_valid = true;
                                 const char *ss_type_name = "Brigantine";
+                                uint8_t ss_ghost_level = 1;
                                 if (cmd_arg1[0] == '\0'
                                     || strcmp(cmd_arg1, "brigantine") == 0) {
                                     ss_type_name = "Brigantine";
                                 } else if (strcmp(cmd_arg1, "ghost") == 0) {
                                     ss_ghost = true;
                                     ss_type_name = "Ghost Ship";
+                                    /* Parse optional level argument: /SpawnShip ghost [1-60] */
+                                    char cmd_arg2[16] = "";
+                                    {
+                                        const char *p = cmd_body;
+                                        while (*p && *p != ' ') p++;  /* skip cmd name */
+                                        while (*p == ' ') p++;
+                                        while (*p && *p != ' ') p++;  /* skip "ghost" */
+                                        while (*p == ' ') p++;
+                                        int ai = 0;
+                                        while (*p && *p != ' ' && ai < 15) cmd_arg2[ai++] = *p++;
+                                        cmd_arg2[ai] = '\0';
+                                    }
+                                    if (cmd_arg2[0] != '\0') {
+                                        int lv = atoi(cmd_arg2);
+                                        if (lv >= 1 && lv <= 60) ss_ghost_level = (uint8_t)lv;
+                                    }
                                 } else if (strcmp(cmd_arg1, "sloop") == 0) {
                                     ss_type_name = "Sloop";
                                 } else if (strcmp(cmd_arg1, "cutter") == 0) {
@@ -9264,7 +9285,7 @@ int websocket_server_update(struct Sim* sim) {
                                     uint32_t ss_id = 0;
 
                                     if (ss_ghost) {
-                                        ss_id = websocket_server_create_ghost_ship(ss_x, ss_y);
+                                        ss_id = websocket_server_create_ghost_ship(ss_x, ss_y, ss_ghost_level);
                                     } else {
                                         uint8_t ss_company = ss_issuer
                                             ? ss_issuer->company_id : COMPANY_SOLO;
@@ -9278,8 +9299,8 @@ int websocket_server_update(struct Sim* sim) {
                                             "\"success\":false,"
                                             "\"text\":\"Failed to spawn ship — check server logs.\"}");
                                     } else {
-                                        log_info("🚢 Player %u spawned %s (id %u) at (%.0f, %.0f) via /SpawnShip",
-                                                 client->player_id, ss_type_name, ss_id, ss_x, ss_y);
+                                        log_info("🚢 Player %u spawned %s (id %u) level %u at (%.0f, %.0f) via /SpawnShip",
+                                                 client->player_id, ss_type_name, ss_id, (unsigned)ss_ghost_level, ss_x, ss_y);
                                         snprintf(response, sizeof(response),
                                             "{\"type\":\"command_response\","
                                             "\"success\":true,"

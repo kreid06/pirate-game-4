@@ -445,8 +445,9 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
          * Heal 100/s while alive; do nothing once already at 0 (dead). */
         if (ship->company_id == 99) {
             if (ship->hull_health > 0) {
+                int32_t max_hp = ship->ghost_max_hull_hp > 0 ? ship->ghost_max_hull_hp : 60000;
                 int32_t healed = ship->hull_health + (int32_t)(100.0f * dt_secs);
-                ship->hull_health = (healed > 60000) ? 60000 : healed;
+                ship->hull_health = (healed > max_hp) ? max_hp : healed;
             }
             /* Skip the normal plank-drain logic entirely for ghost ships. */
         } else if (missing == 0 && planks_leaking == 0) {

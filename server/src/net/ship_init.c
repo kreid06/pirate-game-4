@@ -456,15 +456,18 @@ static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
  * Phantom Brigs deal hull-only damage — interior module breaches are filtered
  * out in the hit-event processing loop.
  * ========================================================================= */
-uint32_t websocket_server_create_ghost_ship(float x, float y) {
+uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
+    if (level < 1)  level = 1;
+    if (level > 60) level = 60;
     uint16_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST, 0xFF);
     if (ship_id == 0) return 0;
 
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return ship_id;
 
-    /* Tag as ghost */
+    /* Tag as ghost and store level */
     ship->ship_type = SHIP_TYPE_GHOST;
+    ship->npc_level = level;
 
     /* Ghost ships have no physical planks — hull damage is tracked directly via
      * hull_health in simulation.c (7 HP per cannonball hit, heals 1 HP/s).
@@ -492,8 +495,13 @@ uint32_t websocket_server_create_ghost_ship(float x, float y) {
                 sim_ship->module_count = sw;
                 /* initial_plank_count = 0 so the drain tick never fires */
                 sim_ship->initial_plank_count = 0;
-                /* Ghost hull HP stored as raw int32, not Q16. */
-                sim_ship->hull_health = 60000;
+                /* Ghost hull HP scaled by level:
+                 * level  1 = 60 000 HP (1×), level 60 = 600 000 HP (10×)
+                 * formula: 60000 * (1 + (level-1) * 9/59) */
+                float hp_mult = 1.0f + (level - 1) * 9.0f / 59.0f;
+                int32_t scaled_hp = (int32_t)(60000.0f * hp_mult);
+                sim_ship->ghost_max_hull_hp = scaled_hp;
+                sim_ship->hull_health = scaled_hp;
                 break;
             }
         }

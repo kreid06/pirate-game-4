@@ -2344,6 +2344,7 @@ export class NetworkManager {
               companyId: ship.company ?? 0,
               shipType: ship.shipType ?? 3,
               shipName: ship.name ?? '',
+              npcLevel: ship.npcLevel != null ? (ship.npcLevel as number) : undefined,
               levelStats: ship.levelStats ? {
                 levels: [
                   ship.levelStats.weight     ?? 1,

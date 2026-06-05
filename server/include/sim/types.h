@@ -103,6 +103,10 @@ struct Ship {
     uint8_t company_id;
     uint8_t has_crew;
 
+    /* Ghost ship level-scaled max HP (raw int32, NOT Q16).
+     * 0 for normal ships. Set by websocket_server_create_ghost_ship(). */
+    int32_t ghost_max_hull_hp;
+
     /* Ship progression — levelled attributes and XP pool. */
     ShipLevelStats level_stats;
 };

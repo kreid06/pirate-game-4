@@ -785,10 +785,12 @@ int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t c
     return 0;
 }
 
-int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y) {
+int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y, uint8_t level) {
     if (!resp) return -1;
+    if (level < 1)  level = 1;
+    if (level > 60) level = 60;
 
-    uint32_t new_id = websocket_server_create_ghost_ship(x, y);
+    uint32_t new_id = websocket_server_create_ghost_ship(x, y, level);
 
     int len;
     if (new_id == 0) {
@@ -800,8 +802,8 @@ int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y) {
         resp->status_code = 200;
         resp->content_type = "application/json";
         len = snprintf(json_buffer, sizeof(json_buffer),
-            "{\"success\":true,\"shipId\":%u,\"x\":%.1f,\"y\":%.1f,\"name\":\"Phantom Brig\"}",
-            new_id, x, y);
+            "{\"success\":true,\"shipId\":%u,\"x\":%.1f,\"y\":%.1f,\"name\":\"Phantom Brig\",\"level\":%u}",
+            new_id, x, y, (unsigned)level);
     }
 
     if (len < 0 || len >= (int)sizeof(json_buffer)) return -1;

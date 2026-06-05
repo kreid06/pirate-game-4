@@ -1409,14 +1409,17 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_create_ship(&resp, x, y, company);
                     } else if (strcmp(post_start, "/api/admin/phantom-brig") == 0) {
                         float x = 400.0f, y = 400.0f;
+                        uint8_t level = 1;
                         if (body) {
                             char *p;
                             p = strstr(body, "\"x\"");
                             if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
                             p = strstr(body, "\"y\"");
                             if (p) { p = strchr(p, ':'); if (p) y = (float)atof(p + 1); }
+                            p = strstr(body, "\"level\"");
+                            if (p) { p = strchr(p, ':'); if (p) { int lv = atoi(p + 1); if (lv >= 1 && lv <= 60) level = (uint8_t)lv; } }
                         }
-                        admin_api_create_phantom_brig(&resp, x, y);
+                        admin_api_create_phantom_brig(&resp, x, y, level);
                     } else if (strcmp(post_start, "/api/admin/player/company") == 0) {
                         uint32_t player_id = 0;
                         uint8_t company = 0;

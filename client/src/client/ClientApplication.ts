@@ -2028,7 +2028,7 @@ export class ClientApplication {
           const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
           const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
           console.log(`🔳 [BUILD] Placing cannon at gunport ${gp.id} snap=${snapIdx ?? 'none'} pos (${gp.localPos.x.toFixed(0)}, ${cannonY.toFixed(0)}) rot=${(rot * 180 / Math.PI).toFixed(0)}°`);
-          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel, this._buildResourceSource);
+          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, 0 /* gunport cannons are always lower deck */, this._buildResourceSource);
           return;
         }
         // Plank placement build mode
@@ -4927,7 +4927,7 @@ export class ClientApplication {
         const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
         const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
         console.log(`🔳 [SHIP BUILD] Placed cannon at gunport snap=${snapIdx ?? 'none'} — consumed resources (${this._buildResourceSource})`);
-        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, this.renderSystem.playerDeckLevel, this._buildResourceSource);
+        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, 0 /* gunport cannons are always lower deck */, this._buildResourceSource);
         return;
       }
       // Fixed-position slot ghosts (old helm-offset layout) — snap schematic to slot position

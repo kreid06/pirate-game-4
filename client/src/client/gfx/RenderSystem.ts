@@ -22,6 +22,19 @@ import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
 
+/**
+ * Returns the spectral glow colour for a ghost ship at the given NPC level (1–60).
+ * Level 1 = cyan (#00eeff), Level 60 = red (#ff2800).
+ * Linear RGB interpolation through teal/green at mid levels.
+ */
+function ghostSpectralColor(level: number, alpha?: number): string {
+  const t = Math.max(0, Math.min(1, ((level ?? 1) - 1) / 59));
+  const r = Math.round(t * 255);
+  const g = Math.round(238 * (1 - t) + 40 * t);
+  const b = Math.round(255 * (1 - t));
+  return alpha != null ? `rgba(${r},${g},${b},${alpha.toFixed(3)})` : `rgb(${r},${g},${b})`;
+}
+
 /** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
 const NPC_TASK_COLORS: Record<string, string> = {
   Sails:   '#5aafff',
@@ -3929,7 +3942,10 @@ export class RenderSystem {
     phase3Alpha: number;
   } {
     const isGhostShipForHP = ship.shipType === SHIP_TYPE_GHOST;
-    const maxHullHP = isGhostShipForHP ? GHOST_MAX_HULL_HP : 100;
+    const ghostNpcLevel = isGhostShipForHP && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+    const maxHullHP = isGhostShipForHP
+      ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLevel - 1) * 9 / 59))
+      : 100;
     // Once the sink animation has started, lock hullPct at 0 so the fade can't reverse
     const rawHullPct = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
     const hullPct = this.sinkTimestamps.has(ship.id) ? 0 : rawHullPct;
@@ -9770,7 +9786,7 @@ export class RenderSystem {
     if (isGhost) {
       this.ctx.fillStyle   = '#0f0f1a';
       this.ctx.strokeStyle = '#0a0a16';
-      this.ctx.shadowColor  = '#00eeff';
+      this.ctx.shadowColor  = ghostSpectralColor(ship.npcLevel ?? 1);
       this.ctx.shadowBlur   = 12 / cameraState.zoom;
     }
 
@@ -9880,12 +9896,14 @@ export class RenderSystem {
         this.ctx.restore();
       }
 
-      // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
+      // Ghost ships: add a second thin edge stroke for the spectral glow outline (level-tinted)
       if (isGhost) {
-        const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+        const ghostNpcLvl2 = ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+        const ghostLvlMaxHP2 = Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl2 - 1) * 9 / 59));
+        const healthMult = Math.max(0.2, ship.hullHealth / ghostLvlMaxHP2);
         const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
         this.ctx.shadowBlur   = 0;
-        this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
+        this.ctx.strokeStyle  = ghostSpectralColor(ghostNpcLvl2, 0.55 * sinkMult * healthMult);
         this.ctx.lineWidth    = 1.5 / cameraState.zoom;
         this.ctx.beginPath();
         this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
@@ -9896,14 +9914,17 @@ export class RenderSystem {
 
       // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
       // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
+      const ghostNpcLvl3 = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+      const ghostLvlMaxHP3 = isGhost ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl3 - 1) * 9 / 59)) : GHOST_MAX_HULL_HP;
+      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / ghostLvlMaxHP3) - 0.25) / 0.75 : 0;
       if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
         if (isGhost) {
-          // Ghost dissolve: cyan/teal mist, starts from 75% HP
+          // Ghost dissolve: level-tinted mist, starts from 75% HP
           const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
+          const ghostMistClr = ghostSpectralColor(ship.npcLevel ?? 1);
           this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
-          this.ctx.fillStyle = '#00eeff';
-          this.ctx.shadowColor = '#00eeff';
+          this.ctx.fillStyle = ghostMistClr;
+          this.ctx.shadowColor = ghostMistClr;
           this.ctx.shadowBlur  = 16 / cameraState.zoom;
         } else {
           this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
@@ -10121,7 +10142,7 @@ export class RenderSystem {
         : this.darkenByDamage(plankStrokeBase, healthRatio);
 
       if (isGhostShip) {
-        this.ctx.shadowColor = '#00eeff';
+        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1);
         this.ctx.shadowBlur  = 3;
       }
       this.ctx.fillStyle = fillColor;
@@ -12242,16 +12263,17 @@ export class RenderSystem {
       const lineWidth = 1 / cameraState.zoom;
 
       if (isPhantomBrig) {
-        // ── Phantom Brig spectral cannon ────────────────────────────────────
+        // ── Phantom Brig spectral cannon (level-tinted) ────────────────────
         const t = performance.now() / 1000;
         const pulse = 0.55 + 0.45 * Math.sin(t * 2.2 + x * 0.05 + y * 0.05);
         const glowAlpha = 0.5 + 0.5 * pulse;
+        const cannonGlowClr = ghostSpectralColor(ship.npcLevel ?? 1);
 
-        // Void-dark base with cyan glow
-        this.ctx.shadowColor = `rgba(0,220,190,${glowAlpha * 0.9})`;
+        // Void-dark base with level-tinted glow
+        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha * 0.9);
         this.ctx.shadowBlur = 10 / cameraState.zoom;
         this.ctx.fillStyle = '#060f0d';
-        this.ctx.strokeStyle = `rgba(0,200,180,${glowAlpha})`;
+        this.ctx.strokeStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
         this.ctx.lineWidth = lineWidth * 1.5;
         this.ctx.fillRect(-11, -7.5, 22, 15);
         this.ctx.strokeRect(-11, -7.5, 22, 15);
@@ -12259,10 +12281,10 @@ export class RenderSystem {
         // Spectral barrel
         this.ctx.save();
         this.ctx.rotate(turretAngle);
-        this.ctx.shadowColor = `rgba(0,240,200,${glowAlpha})`;
+        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
         this.ctx.shadowBlur = 8 / cameraState.zoom;
         this.ctx.fillStyle = `rgba(0,30,25,${0.85 + 0.15 * pulse})`;
-        this.ctx.strokeStyle = `rgba(0,210,185,${glowAlpha})`;
+        this.ctx.strokeStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
         this.ctx.lineWidth = lineWidth * 1.5;
         this.ctx.beginPath();
         this.ctx.moveTo(-6, 0);
@@ -12275,9 +12297,10 @@ export class RenderSystem {
         // Muzzle glow ring
         this.ctx.beginPath();
         this.ctx.arc(0, -42, 5, 0, Math.PI * 2);
-        this.ctx.fillStyle = `rgba(0,220,190,${glowAlpha * 0.6})`;
+        this.ctx.fillStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha * 0.6);
         this.ctx.shadowBlur = 12 / cameraState.zoom;
         this.ctx.fill();
+        void cannonGlowClr; // suppress unused-var lint
         this.ctx.restore();
 
         this.ctx.shadowColor = 'transparent';
@@ -15269,6 +15292,21 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(ship.position);
     const cs        = camera.getState();
     const t         = performance.now() / 1000;
+    const lvl       = ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+    // Lerp factor 0→1 from level 1→60
+    const lt        = Math.max(0, Math.min(1, (lvl - 1) / 59));
+    // Inner mist: cyan (180,240,255) → pale red (255,140,100)
+    const mi_r = Math.round(180 + lt * 75);
+    const mi_g = Math.round(240 - lt * 100);
+    const mi_b = Math.round(255 - lt * 155);
+    // Mid mist: cyan (100,200,240) → orange-red (220,60,40)
+    const mm_r = Math.round(100 + lt * 120);
+    const mm_g = Math.round(200 - lt * 140);
+    const mm_b = Math.round(240 - lt * 200);
+    // Wake: cyan (120,220,255) → red-orange (255,80,40)
+    const wk_r = Math.round(120 + lt * 135);
+    const wk_g = Math.round(220 - lt * 140);
+    const wk_b = Math.round(255 - lt * 215);
 
     ctx.save();
     ctx.globalAlpha = phase1Alpha;
@@ -15294,9 +15332,9 @@ export class RenderSystem {
       const alpha = 0.08 + 0.08 * Math.sin(t * 0.9 + i * 0.8);
 
       const grd = ctx.createRadialGradient(mp.x, mp.y + drift, 2, mp.x, mp.y + drift, mp.r);
-      grd.addColorStop(0,   `rgba(180,240,255,${alpha.toFixed(3)})`);
-      grd.addColorStop(0.4, `rgba(100,200,240,${(alpha * 0.55).toFixed(3)})`);
-      grd.addColorStop(1,   'rgba(0,150,200,0)');
+      grd.addColorStop(0,   `rgba(${mi_r},${mi_g},${mi_b},${alpha.toFixed(3)})`);
+      grd.addColorStop(0.4, `rgba(${mm_r},${mm_g},${mm_b},${(alpha * 0.55).toFixed(3)})`);
+      grd.addColorStop(1,   'rgba(0,0,0,0)');
 
       ctx.fillStyle = grd;
       ctx.beginPath();
@@ -15304,15 +15342,15 @@ export class RenderSystem {
       ctx.fill();
     }
 
-    // Trailing mist wake — cyan wisps stretching behind the stern
+    // Trailing mist wake — level-tinted wisps stretching behind the stern
     for (let i = 0; i < 4; i++) {
       const wx    = -350 - i * 60;
       const wdrift = Math.sin(t * 0.6 + i * 2.0) * 12;
       const alpha  = Math.max(0, 0.12 - i * 0.025) * (0.5 + 0.5 * Math.sin(t * 0.5 + i));
 
       const wgrd = ctx.createRadialGradient(wx, wdrift, 0, wx, wdrift, 30 + i * 10);
-      wgrd.addColorStop(0,   `rgba(120,220,255,${alpha.toFixed(3)})`);
-      wgrd.addColorStop(1,   'rgba(0,120,180,0)');
+      wgrd.addColorStop(0,   `rgba(${wk_r},${wk_g},${wk_b},${alpha.toFixed(3)})`);
+      wgrd.addColorStop(1,   'rgba(0,0,0,0)');
 
       ctx.fillStyle = wgrd;
       ctx.beginPath();
@@ -16334,9 +16372,9 @@ export class RenderSystem {
     const now       = performance.now();
 
     // Determine if this projectile was fired from a ghost ship
-    const firedFromGhost = worldState
-      ? (worldState.ships.find(s => s.id === cannonball.firedFrom)?.shipType === SHIP_TYPE_GHOST)
-      : false;
+    const firingShip    = worldState ? worldState.ships.find(s => s.id === cannonball.firedFrom) : null;
+    const firedFromGhost = firingShip?.shipType === SHIP_TYPE_GHOST;
+    const ghostProjLevel = firedFromGhost ? (firingShip?.npcLevel ?? 1) : 1;
 
     // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
     if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
@@ -16353,9 +16391,9 @@ export class RenderSystem {
           const alpha  = ease * (isBarShot ? 0.32 : 0.72);
           const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * zoom);
           const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
-          // Ghost: spectral green-cyan trail; normal: light grey smoke
+          // Ghost: spectral level-tinted trail; normal: light grey smoke
           this.ctx.globalAlpha = alpha;
-          this.ctx.fillStyle   = firedFromGhost ? '#00ff88' : '#c8c8c8';
+          this.ctx.fillStyle   = firedFromGhost ? ghostSpectralColor(ghostProjLevel) : '#c8c8c8';
           this.ctx.beginPath();
           this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
           this.ctx.fill();
@@ -16364,7 +16402,7 @@ export class RenderSystem {
             const coreAlpha  = (0.35 - age) / 0.35 * 0.55;
             const coreRadius = radius * 0.45;
             this.ctx.globalAlpha = coreAlpha;
-            this.ctx.fillStyle   = firedFromGhost ? '#00ddaa' : '#3a3a3a';
+            this.ctx.fillStyle   = firedFromGhost ? ghostSpectralColor(ghostProjLevel, 0.85) : '#3a3a3a';
             this.ctx.beginPath();
             this.ctx.arc(sp.x, sp.y, coreRadius, 0, Math.PI * 2);
             this.ctx.fill();
@@ -16571,21 +16609,21 @@ export class RenderSystem {
       // ── Cannonball (default) ───────────────────────────────────────────────
       const scaledRadius = cannonball.radius * zoom;
       if (firedFromGhost) {
-        // Ghost projectile: glowing green-cyan ball
+        // Ghost projectile: glowing level-tinted spectral ball
         const t = performance.now() / 1000;
         const flicker = 0.85 + 0.15 * Math.sin(t * 12 + cannonball.id * 2.3);
         const r = Math.max(3, scaledRadius * 1.4);
         // Outer glow
         const grd = this.ctx.createRadialGradient(screenPos.x, screenPos.y, 0, screenPos.x, screenPos.y, r * 2.5);
-        grd.addColorStop(0,   `rgba(0,255,160,${(0.65 * flicker).toFixed(3)})`);
-        grd.addColorStop(0.4, `rgba(0,200,120,${(0.35 * flicker).toFixed(3)})`);
-        grd.addColorStop(1,   'rgba(0,100,80,0)');
+        grd.addColorStop(0,   ghostSpectralColor(ghostProjLevel, 0.65 * flicker));
+        grd.addColorStop(0.4, ghostSpectralColor(ghostProjLevel, 0.35 * flicker));
+        grd.addColorStop(1,   'rgba(0,0,0,0)');
         this.ctx.fillStyle = grd;
         this.ctx.beginPath();
         this.ctx.arc(screenPos.x, screenPos.y, r * 2.5, 0, Math.PI * 2);
         this.ctx.fill();
         // Ball core
-        this.ctx.fillStyle = `rgba(0,255,180,${flicker.toFixed(3)})`;
+        this.ctx.fillStyle = ghostSpectralColor(ghostProjLevel, flicker);
         this.ctx.beginPath();
         this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
         this.ctx.fill();
@@ -17490,8 +17528,10 @@ export class RenderSystem {
     const companyName = COMPANY_NAMES[ship.companyId]
       ?? this._cachedCompanies.find(c => c.id === ship.companyId)?.name
       ?? `#${ship.companyId}`;
-    const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
-      ? 'Phantom Brig'
+    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    const ghostLevel = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : (isGhost ? 1 : 0);
+    const shipTitle   = isGhost
+      ? `Phantom Brig  Lv.${ghostLevel}`
       : ship.shipName
         ? ship.shipName
         : `${companyName} Brigantine`;
@@ -17503,11 +17543,14 @@ export class RenderSystem {
     const deckMaxHp    = dmdTip?.maxHealth ?? 10000;
     const deckTargetHp = dmdTip?.targetHealth ?? deckHp;
 
-    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
-    const maxHullHP = isGhost ? GHOST_MAX_HULL_HP : 100;
+    // Ghost HP scales with level: 60000 × (1 + (level-1) × 9/59)
+    const ghostMaxHullHP = isGhost
+      ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostLevel - 1) * 9 / 59))
+      : GHOST_MAX_HULL_HP;
+    const maxHullHP = isGhost ? ghostMaxHullHP : 100;
     const hullPct  = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
     const hullText = isGhost
-      ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
+      ? `Hull: ${ship.hullHealth.toFixed(0)} / ${ghostMaxHullHP.toLocaleString()}`
       : `Hull: ${ship.hullHealth.toFixed(0)}%`;
     const deckText = deckModTip
       ? `Deck: ${Math.round(deckHp)} / ${Math.round(deckTargetHp)} / ${Math.round(deckMaxHp)}`
