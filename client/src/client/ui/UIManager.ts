@@ -495,8 +495,13 @@ export class UIManager {
   }
 
   /** Set the callback that fires when the player confirms a respawn location. */
-  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number) => void): void {
+  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number, bedRespawn?: boolean) => void): void {
     this.respawnScreen.onRespawnConfirmed = cb;
+  }
+
+  /** Store a bed respawn point so it appears as an option the next time the player dies. */
+  setBedRespawnPoint(bedId?: number, x?: number, y?: number, shipId?: number): void {
+    this.respawnScreen.setBedRespawn(bedId, x, y, shipId);
   }
 
   /** Store island definitions so the respawn screen minimap can draw them. */

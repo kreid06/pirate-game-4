@@ -51,10 +51,11 @@ export type ItemKind =
   | 'cloth_pants'
   | 'cloth_shoes'
   | 'cloth_gloves'
-  | 'resource_chest';
+  | 'resource_chest'
+  | 'bed';
 
 // ── Category groups ─────────────────────────────────────────────────────────
-export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield' | 'resource';
+export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield' | 'resource' | 'utility';
 
 // ── Per-item metadata ───────────────────────────────────────────────────────
 export interface ItemDef {
@@ -116,6 +117,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   cloth_shoes:   { kind: 'cloth_shoes',   name: 'Cloth Shoes',   category: 'armor',    maxStack: 1,  color: '#8f7c50', borderColor: '#5c5030', symbol: 'Cx', description: 'Light cloth boots. +8 armour. Reduces incoming damage.',        weight: 0.5 },
   cloth_gloves:  { kind: 'cloth_gloves',  name: 'Cloth Gloves',  category: 'armor',    maxStack: 1,  color: '#9a8855', borderColor: '#635830', symbol: 'Cg', description: 'Light cloth gloves. +7 armour. Reduces incoming damage.',      weight: 0.3 },
   resource_chest: { kind: 'resource_chest', name: 'Resource Chest', category: 'building', maxStack: 3,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u229f', description: 'A wooden chest for storing resources. Supplies ship auto-repair and land structure upkeep.', weight: 0 },
+  bed:           { kind: 'bed',           name: 'Bed',           category: 'utility',  maxStack: 3,  color: '#6a3a8f', borderColor: '#3d1e5e', symbol: '\uD83D\uDECF', description: 'Place on an island floor to set a respawn point. Use on a ship to set ship respawn. 60 s cooldown.', weight: 12 },
 };
 
 /**
@@ -163,6 +165,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   33: 'cloth_shoes',
   34: 'cloth_gloves',
   38: 'resource_chest',
+  39: 'bed',
 };
 
 /**

@@ -292,6 +292,7 @@ typedef enum {
     ITEM_FLAG_FORT     = 35,  /* Flag fort — claims radius around it (40 wood + 40 stone) */
     ITEM_COMPANY_FORTRESS = 36, /* Company fortress — claims whole island, 15-min build (100w+100s+20m) */
     ITEM_RAMP          = 37,  /* Wooden ramp — connects lower and upper deck levels */
+    ITEM_BED           = 39,  /* Bed — sets a respawn point on an island or ship (60 s cooldown) */
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
     ITEM_CLOTH_SHIRT   = 31,  /* torso slot — 20 armour */
@@ -433,6 +434,7 @@ typedef enum {
     STRUCT_CLAIM_FLAG   = 10, /* territory claiming flag — placed in enemy radius, timer-based */
     STRUCT_COMPANY_FORTRESS = 11, /* whole-island claim — 15-min build, 100w+100s+20m */
     STRUCT_CHEST        = 12, /* storage chest — placed on a floor tile, costs 12 wood */
+    STRUCT_BED          = 13, /* bed — placed on a floor tile, sets player respawn point */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.
@@ -644,6 +646,16 @@ typedef struct WebSocketPlayer {
      * server collision filtering: on lower deck, the player passes through
      * upper-deck modules (cannons, helm) but always collides with masts. */
     uint8_t deck_level;
+
+    /* ── Bed respawn point ───────────────────────────────────────────────────
+     * A player can sleep in a STRUCT_BED (island) or use a bed item on a ship
+     * to set a custom respawn location.  Only one of these is active at a time:
+     * respawn_bed_id > 0 → island bed (cleared when structure is destroyed)
+     * respawn_ship_id > 0 → ship bed (cleared when ship is destroyed)
+     * bed_last_use_ms tracks the 60-second cooldown between uses. */
+    uint16_t respawn_bed_id;    /* PlacedStructure.id of active island bed (0 = none) */
+    uint16_t respawn_ship_id;   /* ship_id of active ship bed (0 = none) */
+    uint32_t bed_last_use_ms;   /* wall-clock ms of last bed sleep (cooldown gate) */
 } WebSocketPlayer;
 
 struct WebSocketStats {

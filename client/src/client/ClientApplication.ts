@@ -277,7 +277,7 @@ export class ClientApplication {
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | 'chest' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | 'chest' | 'bed' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -1365,6 +1365,20 @@ export class ClientApplication {
             if (hovered?.type === 'workbench' || hovered?.type === 'shipyard') {
               console.log(`⚒ [INTERACT] Sending structure_interact for ${hovered.type} ${hovered.id}`);
               this.networkManager.sendStructureInteract(hovered.id);
+              return;
+            }
+            // Bed interaction on island: E on a placed bed sets the respawn point
+            if (hovered?.type === 'bed') {
+              this.networkManager.sendStructureInteract(hovered.id);
+              return;
+            }
+          }
+          // Ship bed: use a bed item while aboard a ship to set ship respawn
+          if (player && player.carrierId !== 0) {
+            const inv = player.inventory;
+            const activeItem = inv?.slots?.[inv.activeSlot ?? 0]?.item;
+            if (activeItem === 'bed') {
+              this.networkManager.sendUseBedOnShip();
               return;
             }
           }
@@ -2616,7 +2630,7 @@ export class ClientApplication {
       this.uiManager.syncPlayerLevelUpCallback();
 
       // Wire respawn confirmation: flash white, snap camera, send network request immediately
-      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
+      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY, bedRespawn) => {
         // 1. Hold screen at full white
         this.uiManager.triggerWhiteFlash();
         this.uiManager.closeRespawnScreen();
@@ -2627,7 +2641,7 @@ export class ClientApplication {
         }
 
         // 3. Send network request immediately
-        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId);
+        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId, bedRespawn);
       });
 
       // Hotbar left-click slot selection
@@ -3185,6 +3199,19 @@ export class ClientApplication {
       };
       this.networkManager.onDoorLockToggled = (id, locked, open) => {
         this.renderSystem.updateStructureDoorLocked(id, locked, open);
+      };
+
+      // Bed respawn: store the respawn point so the respawn screen shows it as an option
+      this.networkManager.onBedUsed = (bedId, x, y, shipId) => {
+        this.uiManager.setBedRespawnPoint(bedId, x, y, shipId);
+        const msg = shipId
+          ? '🛏 Bed set on ship — you will respawn here on death'
+          : `🛏 Respawn point set (${Math.round(x ?? 0)}, ${Math.round(y ?? 0)})`;
+        this.chatBox.addMessage('global', '[System]', msg);
+      };
+      this.networkManager.onBedCooldown = (remainingMs) => {
+        const secs = Math.ceil(remainingMs / 1000);
+        this.chatBox.addMessage('global', '[System]', `🛏 Bed cooldown: ${secs}s remaining`);
       };
       this.networkManager.onCraftingOpen = (structureId, structureType) => {
         if (structureType === 'shipyard') {

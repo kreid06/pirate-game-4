@@ -117,6 +117,7 @@ export enum MessageType {
   PLAYER_LEVEL_UP = 'player_level_up',
   COMMAND = 'command',
   RESPAWN_REQUEST = 'respawn_request',
+  USE_BED_ON_SHIP = 'use_bed_on_ship',
   RENAME_SHIP = 'rename_ship',
 
   PING = 'ping',
@@ -810,6 +811,13 @@ export class NetworkManager {
   public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
   /** Fired when a door's lock state is changed. Also includes updated open state. */
   public onDoorLockToggled: ((id: number, locked: boolean, open: boolean) => void) | null = null;
+
+  /** Fired when the server confirms a bed interaction (island bed or ship bed).
+   *  bedId > 0 for island beds; shipId > 0 for ship beds. */
+  public onBedUsed: ((bedId?: number, x?: number, y?: number, shipId?: number) => void) | null = null;
+  /** Fired when the server rejects a bed use due to cooldown.
+   *  remainingMs is the time left in ms before the bed can be used again. */
+  public onBedCooldown: ((remainingMs: number) => void) | null = null;
 
   /** Fired when the server responds to a player command. */
   public onCommandResponse: ((text: string, success: boolean) => void) | null = null;
@@ -1553,7 +1561,7 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest', x: number, y: number, rotationDeg = 0, underConstruction = false): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed', x: number, y: number, rotationDeg = 0, underConstruction = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: PlaceStructureMessage = { type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg };
     if (underConstruction) msg.under_construction = true;
@@ -1931,15 +1939,24 @@ export class NetworkManager {
   }
 
   /** Send a respawn request to the server.
-   *  Pass shipId to spawn aboard a friendly ship, or worldX/worldY to spawn at a world position. */
-  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number, islandId?: number): void {
+   *  Pass shipId to spawn aboard a friendly ship, worldX/worldY to spawn at a world position,
+   *  or bedRespawn=true to spawn at the player's stored bed location. */
+  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number, islandId?: number, bedRespawn?: boolean): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: Record<string, unknown> = { type: MessageType.RESPAWN_REQUEST };
-    if (shipId !== undefined) msg.shipId = shipId;
-    if (worldX !== undefined) msg.worldX = worldX;
-    if (worldY !== undefined) msg.worldY = worldY;
+    if (bedRespawn) { msg.bedRespawn = true; }
+    else if (shipId !== undefined) msg.shipId = shipId;
+    else if (worldX !== undefined) msg.worldX = worldX;
+    else if (worldY !== undefined) msg.worldY = worldY;
     if (islandId !== undefined) msg.islandId = islandId;
     this.socket.send(JSON.stringify(msg));
+  }
+
+  /** Use a bed item while on a ship to set the ship as the respawn point.
+   *  The server consumes 1 bed item and sets respawn_ship_id. */
+  sendUseBedOnShip(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.USE_BED_ON_SHIP }));
   }
 
   sendRenameShip(shipId: number, name: string): void {
@@ -2936,6 +2953,7 @@ export class NetworkManager {
                    : s.structure_type === 'claim_flag'   ? 'claim_flag'
                    : s.structure_type === 'company_fortress' ? 'company_fortress'
                    : s.structure_type === 'chest'        ? 'chest'
+                   : s.structure_type === 'bed'          ? 'bed'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2996,6 +3014,7 @@ export class NetworkManager {
                    : message.structure_type === 'claim_flag'   ? 'claim_flag'
                    : message.structure_type === 'company_fortress' ? 'company_fortress'
                    : message.structure_type === 'chest'        ? 'chest'
+                   : message.structure_type === 'bed'          ? 'bed'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -3172,6 +3191,19 @@ export class NetworkManager {
 
       case 'door_lock_toggled':
         this.onDoorLockToggled?.(message.id ?? 0, message.locked === true, message.open === true);
+        break;
+
+      case 'bed_used':
+        this.onBedUsed?.(
+          message.bed_id  as number | undefined,
+          message.x       as number | undefined,
+          message.y       as number | undefined,
+          message.ship_id as number | undefined,
+        );
+        break;
+
+      case 'bed_cooldown':
+        this.onBedCooldown?.(message.remaining_ms as number ?? 0);
         break;
 
       case 'structure_demolished':

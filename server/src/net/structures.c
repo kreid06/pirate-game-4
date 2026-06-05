@@ -360,6 +360,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "chest") == 0) {
         stype_enum    = STRUCT_CHEST;
         required_item = ITEM_NONE;  /* built from raw resources via schematic */
+    } else if (strcmp(stype, "bed") == 0) {
+        stype_enum    = STRUCT_BED;
+        required_item = ITEM_BED;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -386,7 +389,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     /* ── Schematic resource cost table ────────────────────────────────────
      * Matches client LAND_BUILD_PANEL_ENTRIES costs.  craft_count_item /
      * craft_consume route ITEM_WOOD/FIBER/METAL/STONE to the res_* pool. */
-    static const struct { int wood, fiber, metal, stone; } SCHEMATIC_COST[13] = {
+    static const struct { int wood, fiber, metal, stone; } SCHEMATIC_COST[14] = {
         [STRUCT_WOODEN_FLOOR]     = {  5, 0,  0,  0 },
         [STRUCT_WORKBENCH]        = { 15, 0,  0,  0 },
         [STRUCT_WALL]             = {  8, 0,  0,  0 },
@@ -400,8 +403,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         [STRUCT_CLAIM_FLAG]       = {  0, 0,  0,  0 },
         [STRUCT_COMPANY_FORTRESS] = {  0, 0,  0,  0 },
         [STRUCT_CHEST]            = { 12, 0,  0,  0 },
+        [STRUCT_BED]              = {  8, 4,  0,  0 },
     };
-    if (req_schematic && (int)stype_enum < 13) {
+    if (req_schematic && (int)stype_enum < 14) {
         int nw = SCHEMATIC_COST[stype_enum].wood;
         int nf = SCHEMATIC_COST[stype_enum].fiber;
         int nm = SCHEMATIC_COST[stype_enum].metal;
@@ -865,6 +869,51 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
+    /* Bed: centre point must fall inside a same-company floor tile (50x50 px).
+       Only one bed per floor tile is allowed. */
+    if (stype_enum == STRUCT_BED) {
+        bool has_floor     = false;
+        bool wrong_company = false;
+        bool bed_on_tile   = false;
+        const float HALF_TILE = 25.0f;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            float c   = cosf(-rad), s = sinf(-rad);
+            float ddx = px - placed_structures[si].x;
+            float ddy = py - placed_structures[si].y;
+            float lx  = ddx * c - ddy * s;
+            float ly  = ddx * s + ddy * c;
+            if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_floor = true;
+                break;
+            }
+        }
+        /* Also ensure no bed already exists at approximately this position */
+        for (uint32_t si = 0; si < placed_structure_count && !bed_on_tile; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_BED) continue;
+            float ddx = placed_structures[si].x - px;
+            float ddy = placed_structures[si].y - py;
+            if (ddx*ddx + ddy*ddy < 30.0f * 30.0f) bed_on_tile = true;
+        }
+        if (bed_on_tile) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+            goto ps_send;
+        }
+        if (!has_floor) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
     /* Cannon: centre point must fall inside the rotated floor tile (50x50 px)
        AND that floor tile must belong to the same company as the placing player. */
     if (stype_enum == STRUCT_CANNON) {
@@ -1134,7 +1183,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             player->inventory.slots[found_slot].item = ITEM_NONE;
     }
     /* Consume resources from pool for schematic placements */
-    if (req_schematic && (int)stype_enum < 13) {
+    if (req_schematic && (int)stype_enum < 14) {
         int nw = SCHEMATIC_COST[stype_enum].wood;
         int nf = SCHEMATIC_COST[stype_enum].fiber;
         int nm = SCHEMATIC_COST[stype_enum].metal;
@@ -1164,6 +1213,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         case STRUCT_DOOR:         init_hp =  8000;  break;
         case STRUCT_WORKBENCH:    init_hp =  6000;  break;
         case STRUCT_CHEST:        init_hp =  4000;  break;
+        case STRUCT_BED:          init_hp =  3000;  break;
         case STRUCT_SHIPYARD:     init_hp = 150000; break;
         default:                  init_hp =    100; break;
     }
@@ -1188,7 +1238,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].rotation   =
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
          stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
-         stype_enum == STRUCT_CANNON) ? place_rotation : 0.0f;
+         stype_enum == STRUCT_CANNON || stype_enum == STRUCT_BED) ? place_rotation : 0.0f;
     /* Cannon: initialise aim angle to match the placement rotation so first fire goes the right way.
        The barrel points "up" in local space (−y), which corresponds to rotRad − π/2 in world space. */
     if (stype_enum == STRUCT_CANNON) {
@@ -1531,7 +1581,6 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_CHEST) {
-            /* Company check */
             if (placed_structures[i].company_id != 0 &&
                 player->company_id != 0 &&
                 placed_structures[i].company_id != player->company_id) {
@@ -1634,6 +1683,39 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
                      placed_structures[i].cannon_reload_ms,
                      _mount_x, _mount_y,
                      placed_structures[i].rotation * (float)M_PI / 180.0f);
+            goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_BED) {
+            /* Company check: player must own this bed (same company or solo placer) */
+            if (placed_structures[i].company_id != 0 &&
+                player->company_id != 0 &&
+                placed_structures[i].company_id != player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"wrong_company\"}");
+                goto si_send;
+            }
+            /* Cooldown check: 60 seconds between bed uses */
+            uint32_t now_bed = get_time_ms();
+            if (player->bed_last_use_ms != 0 &&
+                now_bed - player->bed_last_use_ms < 60000u) {
+                uint32_t remaining = 60000u - (now_bed - player->bed_last_use_ms);
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"bed_cooldown\",\"remaining_ms\":%u}",
+                         remaining);
+                goto si_send;
+            }
+            /* Set island respawn point and clear any ship respawn */
+            player->respawn_bed_id  = (uint16_t)placed_structures[i].id;
+            player->respawn_ship_id = 0;
+            player->bed_last_use_ms = now_bed;
+            log_info("🛏️  Player %u set respawn at island bed %u (%.1f,%.1f)",
+                     player->player_id, placed_structures[i].id,
+                     placed_structures[i].x, placed_structures[i].y);
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_used\",\"bed_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                     placed_structures[i].id,
+                     placed_structures[i].x,
+                     placed_structures[i].y);
             goto si_send;
         }
         snprintf(response, sizeof(response),

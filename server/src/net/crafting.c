@@ -153,6 +153,7 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
         { "craft_stone_pickaxe", ITEM_PICKAXE,       1, { {ITEM_WOOD,   3}, {ITEM_STONE,   4},{0,0} }, 2, true  },
         { "craft_flag_fort",     ITEM_FLAG_FORT,     1, { {ITEM_WOOD,  40}, {ITEM_STONE,  40},{0,0} }, 2, true  },
         { "craft_company_fortress", ITEM_COMPANY_FORTRESS, 1, { {ITEM_WOOD,100},{ITEM_STONE,100},{ITEM_METAL,20} }, 3, true  },
+        { "craft_bed",           ITEM_BED,           1, { {ITEM_WOOD,   8}, {ITEM_FIBER,  4}, {0,0} }, 2, false },
     };
     const int num_recipes = (int)(sizeof(recipes) / sizeof(recipes[0]));
 

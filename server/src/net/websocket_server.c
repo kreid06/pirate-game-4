@@ -1109,6 +1109,8 @@ static const float ITEM_WEIGHT_KG[64] = {
     [34] = 0.3f,  // ITEM_CLOTH_GLOVES
     [35] = 30.0f, // ITEM_FLAG_FORT
     [36] = 200.0f,// ITEM_COMPANY_FORTRESS
+    [38] = 12.0f, // ITEM_RESOURCE_CHEST (client-only)
+    [39] = 12.0f, // ITEM_BED
 };
 
 /** Body mass assumed for every player aboard (kg). */
@@ -4442,6 +4444,56 @@ int websocket_server_update(struct Sim* sim) {
                                 handled = true;
                             }
 
+                        } else if (strcmp(msg_type, "use_bed_on_ship") == 0) {
+                            // Place/use a bed item while aboard a ship — sets the player's ship
+                            // respawn point to their current ship.  Consumes 1 ITEM_BED.
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    char bed_resp[192];
+                                    uint32_t now_ship_bed = get_time_ms();
+                                    // Cooldown check
+                                    if (player->bed_last_use_ms != 0 &&
+                                        now_ship_bed - player->bed_last_use_ms < 60000u) {
+                                        uint32_t rem = 60000u - (now_ship_bed - player->bed_last_use_ms);
+                                        snprintf(bed_resp, sizeof(bed_resp),
+                                                 "{\"type\":\"bed_cooldown\",\"remaining_ms\":%u}", rem);
+                                    } else if (player->parent_ship_id == 0) {
+                                        snprintf(bed_resp, sizeof(bed_resp),
+                                                 "{\"type\":\"bed_fail\",\"reason\":\"not_on_ship\"}");
+                                    } else {
+                                        // Check inventory for ITEM_BED
+                                        int bed_slot = -1;
+                                        for (int _bs = 0; _bs < INVENTORY_SLOTS; _bs++) {
+                                            if (player->inventory.slots[_bs].item == ITEM_BED &&
+                                                player->inventory.slots[_bs].quantity > 0) {
+                                                bed_slot = _bs; break;
+                                            }
+                                        }
+                                        if (bed_slot < 0) {
+                                            snprintf(bed_resp, sizeof(bed_resp),
+                                                     "{\"type\":\"bed_fail\",\"reason\":\"no_bed_item\"}");
+                                        } else {
+                                            // Consume 1 bed item
+                                            player->inventory.slots[bed_slot].quantity--;
+                                            if (player->inventory.slots[bed_slot].quantity == 0)
+                                                player->inventory.slots[bed_slot].item = ITEM_NONE;
+                                            // Set ship respawn, clear island respawn
+                                            player->respawn_ship_id = (uint16_t)player->parent_ship_id;
+                                            player->respawn_bed_id  = 0;
+                                            player->bed_last_use_ms = now_ship_bed;
+                                            log_info("🛏️  Player %u set ship bed respawn on ship %u",
+                                                     player->player_id, player->respawn_ship_id);
+                                            snprintf(bed_resp, sizeof(bed_resp),
+                                                     "{\"type\":\"bed_used\",\"ship_id\":%u}",
+                                                     player->respawn_ship_id);
+                                        }
+                                    }
+                                    ws_send_text(client->fd, bed_resp);
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "land_chest_transfer") == 0) {
                             // Land chest deposit / withdraw
                             if (client->player_id != 0) {
@@ -4657,6 +4709,66 @@ int websocket_server_update(struct Sim* sim) {
                                     // Restore full health
                                     player->health = player->max_health;
 
+                                    // ── Bed respawn: client requests to use stored bed/ship spawn ──
+                                    bool bed_respawn = (strstr(payload, "\"bedRespawn\":true") != NULL);
+                                    if (bed_respawn) {
+                                        // Ship bed takes priority over island bed
+                                        if (player->respawn_ship_id != 0) {
+                                            SimpleShip* bs = NULL;
+                                            for (int si = 0; si < MAX_SIMPLE_SHIPS; si++) {
+                                                if (ships[si].ship_id == player->respawn_ship_id) {
+                                                    bs = &ships[si]; break;
+                                                }
+                                            }
+                                            if (bs) {
+                                                board_player_on_ship(player, bs, 0.0f, 0.0f);
+                                                log_info("🛏️  Player %u respawned at ship bed (ship %u)",
+                                                         player->player_id, player->respawn_ship_id);
+                                            } else {
+                                                // Ship gone — clear and fall through
+                                                player->respawn_ship_id = 0;
+                                                bed_respawn = false;
+                                            }
+                                        } else if (player->respawn_bed_id != 0) {
+                                            // Find the island bed structure
+                                            bool bed_found = false;
+                                            for (uint32_t _bi = 0; _bi < placed_structure_count; _bi++) {
+                                                if (!placed_structures[_bi].active) continue;
+                                                if (placed_structures[_bi].id != player->respawn_bed_id) continue;
+                                                if (placed_structures[_bi].type != STRUCT_BED) continue;
+                                                player->x = placed_structures[_bi].x;
+                                                player->y = placed_structures[_bi].y;
+                                                player->parent_ship_id = 0;
+                                                player->movement_state = PLAYER_STATE_WALKING;
+                                                if (global_sim && player->sim_entity_id != 0) {
+                                                    struct Player* sp = sim_get_player(global_sim, player->sim_entity_id);
+                                                    if (sp) {
+                                                        sp->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->x));
+                                                        sp->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->y));
+                                                        sp->velocity.x = 0; sp->velocity.y = 0;
+                                                    }
+                                                }
+                                                log_info("🛏️  Player %u respawned at island bed %u (%.1f,%.1f)",
+                                                         player->player_id, player->respawn_bed_id,
+                                                         player->x, player->y);
+                                                bed_found = true;
+                                                break;
+                                            }
+                                            if (!bed_found) {
+                                                // Bed destroyed — clear and fall through
+                                                player->respawn_bed_id = 0;
+                                                bed_respawn = false;
+                                            }
+                                        } else {
+                                            // No bed stored — fall through to normal respawn
+                                            bed_respawn = false;
+                                        }
+                                    }
+
+                                    if (bed_respawn) {
+                                        // Broadcast teleport and save — handled below
+                                    } else {
+
                                     // Parse optional shipId
                                     uint32_t ship_id = 0;
                                     const char* p_sid = strstr(payload, "\"shipId\":");
@@ -4779,6 +4891,8 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                         log_info("⚔️  Player %u respawned at world (%.1f, %.1f)", player->player_id, spawn_x, spawn_y);
                                     }
+
+                                    } // end if (!bed_respawn)
 
                                     // Broadcast a teleport event so clients update this player's position
                                     char tp_msg[256];
