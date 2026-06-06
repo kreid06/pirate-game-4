@@ -11442,6 +11442,7 @@ export class RenderSystem {
     if (!this.mouseWorldPos) return;
 
     for (const ship of worldState.ships) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue; // ghost ships have no deck
       const decks = ship.modules.filter(m => m.kind === 'deck');
       const hasLower = decks.some(m => m.deckId === 0);
       const hasUpper = decks.some(m => m.deckId === 1);
@@ -11476,6 +11477,7 @@ export class RenderSystem {
    */
   private drawMissingDeckGhost(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (ship.shipType === SHIP_TYPE_GHOST) return; // ghost ships have no deck to place
 
     const decks    = ship.modules.filter(m => m.kind === 'deck');
     const hasLower = decks.some(m => m.deckId === 0);
@@ -16200,7 +16202,7 @@ export class RenderSystem {
     const isGhostShipLabel = ship.shipType === SHIP_TYPE_GHOST;
     const ghostLvl = isGhostShipLabel ? (ship.npcLevel ?? 1) : 0;
 
-    const name = isGhostShipLabel ? `Ghost - Lv.${ghostLvl}` : ship.shipName;
+    const name = isGhostShipLabel ? `Ghost Ship - Level ${ghostLvl}` : ship.shipName;
     const level = isGhostShipLabel ? undefined : ship.levelStats?.shipLevel;
     if (!name && level === undefined) return;
 
@@ -17727,7 +17729,7 @@ export class RenderSystem {
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
     const ghostLevel = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : (isGhost ? 1 : 0);
     const shipTitle   = isGhost
-      ? `Phantom Brig  Lv.${ghostLevel}`
+      ? `Ghost Ship - Level ${ghostLevel}`
       : ship.shipName
         ? ship.shipName
         : `${companyName} Brigantine`;

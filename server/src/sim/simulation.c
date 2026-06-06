@@ -1190,9 +1190,6 @@ entity_id sim_create_ship(struct Sim* sim, Vec2Q16 position, q16_t rotation,
         0
     );
 
-    log_info("⚓ Created brigantine ship %u (seq=%u) with BROADSIDE loadout: %u modules",
-             id, ship_seq, ship->module_count);
-    
     sim->ship_count++;
     
     log_debug("Created ship %u at (%.2f, %.2f)", id, 
@@ -1850,7 +1847,7 @@ static void handle_ship_collisions(struct Sim* sim) {
                 }
             }
 
-            log_info("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, warm: %s, dw1: %.4f, dw2: %.4f)",
+            log_debug("⚓ Ship hull collision: %u <-> %u (overlap: %.2f, contacts: %d, warm: %s, dw1: %.4f, dw2: %.4f)",
                      ship1->id, ship2->id, Q16_TO_FLOAT(overlap_depth), n_contacts,
                      ce ? "yes" : "no", dw1, dw2);
         }

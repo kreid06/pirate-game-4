@@ -672,7 +672,7 @@ export class ClientApplication {
         if (sinkingShip) {
           const dynCompanies = ws?.companies ?? [];
           const shipDisplayName = (s: Ship) =>
-            s.shipType === 99 ? `Ghost - Lv.${s.npcLevel ?? 1}` : (s.shipName || 'Brigantine');
+            s.shipType === 99 ? `Ghost Ship - Level ${s.npcLevel ?? 1}` : (s.shipName || 'Brigantine');
           const sinkLabel  = shipDisplayName(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
           if (isOwnShip) {
@@ -684,7 +684,7 @@ export class ClientApplication {
             this.renderSystem.showAnnouncement(msg, 'ship_sink', 4.0);
           } else {
             const myShip  = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer!.carrierId) : null;
-            const myLabel = myShip ? shipDisplayName(myShip) : 'Our ship';
+            const myLabel = myShip ? `Your ${shipDisplayName(myShip)}` : 'Your ship';
             this.renderSystem.showAnnouncement(`${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
           }
         }
@@ -2978,7 +2978,7 @@ export class ClientApplication {
                 if (d < bestDist) { bestDist = d; killerShip = s; }
               }
             }
-            const killerName = killerShip ? (killerShip.shipType === 99 ? `Ghost - Lv.${killerShip.npcLevel ?? 1}` : (killerShip.shipName || 'Brigantine')) : null;
+            const killerName = killerShip ? (killerShip.shipType === 99 ? `Ghost Ship - Level ${killerShip.npcLevel ?? 1}` : (killerShip.shipName || 'Brigantine')) : null;
             if (killerName) {
               let targetName: string;
               if (entityType === 'player') {
@@ -3325,6 +3325,18 @@ export class ClientApplication {
       this.shipyardMenu.onAction = (action, module) => {
         if (this.shipyardMenu.structureId == null) return;
         this.networkManager.sendShipyardAction(this.shipyardMenu.structureId, action, module);
+      };
+
+      this.networkManager.onShipyardActionFail = (reason) => {
+        const MSGS: Record<string, string> = {
+          ship_limit:       'World ship limit reached — too many ships active',
+          missing_materials:'Not enough materials',
+          already_building: 'Shipyard already building a ship',
+          no_ship:          'No ship under construction',
+          use_build_mode:   'Use build mode (B) to add modules',
+        };
+        const msg = MSGS[reason] ?? `Shipyard failed (${reason})`;
+        this.renderSystem.showAnnouncement(`⚓ ${msg}`, 'warning', 3.5);
       };
 
       this.craftingMenu.onCraft = (recipeId) => {

@@ -804,6 +804,8 @@ export class NetworkManager {
   public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
+  /** Fired when a shipyard action is rejected (e.g. ship_limit, missing_materials). */
+  public onShipyardActionFail: ((reason: string) => void) | null = null;
   /** Fired when the server sends land chest state (after E-key interact or after a transfer). */
   public onLandChestState: ((structureId: number, resources: { wood: number; fiber: number; metal: number; stone: number }, playerResources?: { wood: number; fiber: number; metal: number; stone: number }, readOnly?: boolean) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
@@ -3319,7 +3321,7 @@ export class NetworkManager {
       }
 
       case 'shipyard_action_fail':
-        // Surface failure reason as a general announcement if needed (handled in ClientApplication)
+        this.onShipyardActionFail?.(message.reason ?? 'unknown');
         break;
 
       case 'FLAME_CONE_FIRE': // legacy — ignore

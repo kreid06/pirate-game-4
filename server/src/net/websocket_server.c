@@ -7445,9 +7445,11 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                         }
                                         if (!sim_ship || !simple_mast) {
+                                            log_warn("\u274c [MAST] Player %u: ship %u not found", client->player_id, target_ship_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP ||
                                                    simple_mast->module_count >= MAX_MODULES_PER_SHIP) {
+                                            log_warn("\u274c [MAST] Player %u: ship %u is full", client->player_id, target_ship_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                         } else {
                                             float local_x = 0.0f, local_y = 0.0f;
@@ -7458,6 +7460,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                             // Server-side placement overlap check (masts are deck-independent: 255)
                                             if (modules_overlap_at(simple_mast, MODULE_TYPE_MAST, local_x, local_y, 255)) {
+                                                log_warn("\u274c [MAST] Player %u: overlap at (%.1f,%.1f) on ship %u", client->player_id, local_x, local_y, target_ship_id);
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"placement_overlap\"}");
                                             } else {
 
@@ -7540,9 +7543,11 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                         }
                                         if (!sw_sim || !sw_simple) {
+                                            log_warn("\u274c [SWIVEL] Player %u: ship %u not found", client->player_id, target_ship_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else if (sw_sim->module_count >= MAX_MODULES_PER_SHIP ||
                                                    sw_simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                            log_warn("\u274c [SWIVEL] Player %u: ship %u is full", client->player_id, target_ship_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                         } else {
                                             float local_x = 0.0f, local_y = 0.0f, rotation = 0.0f;
@@ -7570,6 +7575,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                             // Server-side placement overlap check
                                             if (modules_overlap_at(sw_simple, MODULE_TYPE_SWIVEL, local_x, local_y, req_deck_id)) {
+                                                log_warn("\u274c [SWIVEL] Player %u: overlap at (%.1f,%.1f) deck=%u on ship %u", client->player_id, local_x, local_y, (unsigned)req_deck_id, target_ship_id);
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"placement_overlap\"}");
                                             } else {
 
@@ -7650,6 +7656,7 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                         }
                                         if (!sim_ship || !simple) {
+                                            log_warn("\u274c [CANNON] Player %u: ship not found for snap-place", client->player_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else {
                                             uint8_t seq = simple->ship_seq;
@@ -7667,6 +7674,7 @@ int websocket_server_update(struct Sim* sim) {
                                             if (missing_idx < 0) {
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_cannons\"}");
                                             } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                log_warn("\u274c [CANNON] Player %u: ship %u is full (snap-place)", client->player_id, sim_ship->id);
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                             } else {
                                                 static const float cannon_xs[3] = { -35.0f, 65.0f, -135.0f };
@@ -7737,6 +7745,7 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                         }
                                         if (!sim_ship || !simple) {
+                                            log_warn("\u274c [MAST] Player %u: ship not found for snap-place", client->player_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else {
                                             uint8_t seq = simple->ship_seq;
@@ -7768,6 +7777,7 @@ int websocket_server_update(struct Sim* sim) {
                                             if (missing_idx < 0) {
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_missing_masts\"}");
                                             } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP) {
+                                                log_warn("❌ [MAST] Player %u: ship %u is full (snap-place)", client->player_id, sim_ship->id);
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                             } else {
                                                 static const float mast_xs[3] = { 165.0f, -35.0f, -235.0f };
@@ -9211,6 +9221,7 @@ int websocket_server_update(struct Sim* sim) {
                              *   /TpToPlayer <targetPlayer> <destinationPlayer>
                              *   /SpawnEntity <crewmember> [neutral|pirates|navy]
                              *   /SpawnShip [brigantine|ghost|sloop|cutter]
+                             *   /KillAllGhosts
                              */
                             char cmd_str[256] = "";
                             char *p_cmd = strstr(payload, "\"command\":");
@@ -10181,6 +10192,38 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                 }
 
+                            } else if (strcmp(cmd_name, "killallghosts") == 0) {
+                                /* /KillAllGhosts
+                                 * Forces every active ghost ship into the sinking state,
+                                 * which despawns them after SHIP_SINK_DURATION_MS (8 s) and
+                                 * lets the auto-spawner repopulate the world immediately. */
+                                int kg_count = 0;
+                                uint32_t now_ms = get_time_ms();
+                                for (int _gs = 0; _gs < ship_count; _gs++) {
+                                    SimpleShip* kg_ship = &ships[_gs];
+                                    if (!kg_ship->active) continue;
+                                    if (kg_ship->ship_type != SHIP_TYPE_GHOST) continue;
+                                    if (kg_ship->is_sinking) continue;
+                                    kg_ship->is_sinking    = true;
+                                    kg_ship->sink_start_ms = now_ms;
+                                    /* Halt the ship */
+                                    struct Ship* _ss = find_sim_ship(kg_ship->ship_id);
+                                    if (_ss) { _ss->velocity.x = 0; _ss->velocity.y = 0; _ss->angular_velocity = 0; }
+                                    /* Notify clients so they start the dissolve animation */
+                                    char _kg_msg[128];
+                                    snprintf(_kg_msg, sizeof(_kg_msg),
+                                        "{\"type\":\"SHIP_SINKING\",\"shipId\":%u,\"x\":%.1f,\"y\":%.1f}",
+                                        kg_ship->ship_id, kg_ship->x, kg_ship->y);
+                                    websocket_server_broadcast(_kg_msg);
+                                    kg_count++;
+                                }
+                                log_info("👻 /KillAllGhosts: sank %d ghost ship(s) — spawner will repopulate shortly",
+                                         kg_count);
+                                snprintf(response, sizeof(response),
+                                    "{\"type\":\"command_response\",\"success\":true,"
+                                    "\"text\":\"Sank %d ghost ship(s). Spawner will repopulate shortly.\"}",
+                                    kg_count);
+
                             } else {
                                 snprintf(response, sizeof(response),
                                     "{\"type\":\"command_response\","
@@ -11048,8 +11091,6 @@ uint16_t websocket_server_create_npc(uint16_t ship_id, module_id_t module_id, Np
     ShipModule* mod = find_module_on_ship(ship, module_id);
     if (mod) mod->state_bits |= MODULE_STATE_OCCUPIED;
 
-    log_info("🤖 NPC %u created: role=%d ship=%u module=%u",
-             npc->npc_id, (int)role, ship_id, module_id);
     return npc->npc_id;
 }
 
@@ -11612,6 +11653,23 @@ void websocket_server_tick(float dt) {
                             }
                         }
                     }
+                    /* Belt-and-suspenders: purge from sim ship too (handles multi-hit same tick). */
+                    {
+                        struct Ship* _psim = NULL;
+                        for (uint32_t _si = 0; _si < global_sim->ship_count; _si++) {
+                            if (global_sim->ships[_si].id == ev->ship_id) { _psim = &global_sim->ships[_si]; break; }
+                        }
+                        if (_psim) {
+                            for (uint8_t _sm = 0; _sm < _psim->module_count; _sm++) {
+                                if (_psim->modules[_sm].id == ev->module_id) {
+                                    memmove(&_psim->modules[_sm], &_psim->modules[_sm + 1],
+                                            (_psim->module_count - _sm - 1) * sizeof(ShipModule));
+                                    _psim->module_count--;
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     snprintf(msg, sizeof(msg),
                         "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
@@ -11987,11 +12045,22 @@ void websocket_server_tick(float dt) {
         for (int _us = 0; _us < ship_count; _us++) {
             SimpleShip* _ship = &ships[_us];
             if (!_ship->active) continue;
+
+            /* Check whether any WorldNpc rigger is stationed at a mast on this ship.
+             * When true, only WorldNpc-manned masts follow desired state — unmanned
+             * masts are frozen so that one NPC only controls one sail. */
+            bool _any_world_rigger = false;
+            for (uint8_t _cm = 0; _cm < _ship->module_count && !_any_world_rigger; _cm++) {
+                if (_ship->modules[_cm].type_id == MODULE_TYPE_MAST)
+                    _any_world_rigger = is_mast_manned((uint16_t)_ship->ship_id,
+                                                       _ship->modules[_cm].id);
+            }
+
             for (uint8_t _um = 0; _um < _ship->module_count; _um++) {
                 ShipModule* _mod = &_ship->modules[_um];
                 if (_mod->type_id != MODULE_TYPE_MAST) continue;
 
-                /* Check whether any active rigger NPC covers this mast. */
+                /* Check whether any active NpcAgent rigger covers this mast. */
                 bool _has_rigger = false;
                 for (int _na = 0; _na < npc_count; _na++) {
                     NpcAgent* _npc = &npc_agents[_na];
@@ -12003,9 +12072,20 @@ void websocket_server_tick(float dt) {
                         break;
                     }
                 }
-                if (_has_rigger) continue; /* rigger will handle it this tick */
+                if (_has_rigger) continue; /* NpcAgent handles it via tick_npc_agents */
 
-                /* No rigger — apply desired state directly. */
+                if (_any_world_rigger) {
+                    /* Ship has WorldNpc crew: only the manned mast follows desired state;
+                     * every other mast on this ship stays frozen. */
+                    if (!is_mast_manned((uint16_t)_ship->ship_id, _mod->id)) continue;
+                    /* Falls through: this mast is actively manned by a WorldNpc rigger. */
+                } else {
+                    /* No rigger of any kind on this mast — sail stays frozen.
+                     * Sails only respond when a rigger (WorldNpc or NpcAgent) is present. */
+                    continue;
+                }
+
+                /* WorldNpc rigger is actively manning this mast — apply desired state. */
                 uint8_t _openness = _ship->desired_sail_openness;
                 _mod->data.mast.openness = _openness;
                 if (_openness > 0)
@@ -13084,13 +13164,35 @@ void websocket_server_tick(float dt) {
         if (global_sim && global_sim->ship_count > 0) {
             for (uint32_t s = 0; s < global_sim->ship_count; s++) {
                 struct Ship* ship = &global_sim->ships[s];
+                /* Ghost ships bypass sail physics; their masts are visual-only
+                 * with fixed 100% openness — skip the gradual adjust. */
+                if (ship->company_id == COMPANY_GHOST) continue;
                 uint8_t desired = ship->desired_sail_openness;
-                
-                // For each mast on the ship, gradually adjust to desired openness
-                // — only masts that have a rigger physically stationed there respond.
+
+                /* Determine whether this ship has at least one NPC-manned mast.
+                 * If so, only manned masts respond to player sail control —
+                 * unmanned masts stay put.  When no mast is manned all masts
+                 * respond gradually so the ship can sail without crew. */
+                bool any_mast_manned = false;
                 for (uint8_t m = 0; m < ship->module_count; m++) {
                     if (ship->modules[m].type_id == MODULE_TYPE_MAST &&
-                        is_mast_manned(ship->id, ship->modules[m].id)) {
+                        is_mast_manned((uint16_t)ship->id, ship->modules[m].id)) {
+                        any_mast_manned = true;
+                        break;
+                    }
+                }
+
+                // For each mast on the ship, gradually adjust to desired openness.
+                // NPC riggers (via tick_npc_agents) give an instant response;
+                // unmanned masts are adjusted here at the same gradual rate
+                // only when no NPC is manning any mast on this ship.
+                for (uint8_t m = 0; m < ship->module_count; m++) {
+                    if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
+                        /* Skip unmanned masts when another mast is manned */
+                        if (any_mast_manned &&
+                            !is_mast_manned((uint16_t)ship->id, ship->modules[m].id))
+                            continue;
+
                         uint8_t current = ship->modules[m].data.mast.openness;
                         
                         if (current != desired) {
@@ -13485,6 +13587,20 @@ void websocket_server_tick(float dt) {
                                     break;
                                 }
                             }
+                            /* Also purge from sim ship so GAME_STATE stops broadcasting the dead module */
+                            {
+                                struct Ship* _fdss = find_sim_ship(fship->ship_id);
+                                if (_fdss) {
+                                    for (uint8_t rm2 = 0; rm2 < _fdss->module_count; rm2++) {
+                                        if (_fdss->modules[rm2].id == mod_id_saved) {
+                                            memmove(&_fdss->modules[rm2], &_fdss->modules[rm2 + 1],
+                                                    (_fdss->module_count - rm2 - 1) * sizeof(ShipModule));
+                                            _fdss->module_count--;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             snprintf(dmsg, sizeof(dmsg),
                                 "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
                                 "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
@@ -13591,11 +13707,16 @@ void websocket_server_tick(float dt) {
     }
 
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====
-    static uint32_t last_movement_log = 0;
     if (global_sim && global_sim->ship_count > 0) {
         for (uint32_t s = 0; s < global_sim->ship_count; s++) {
             struct Ship* ship = &global_sim->ships[s];
-            
+
+            /* Ghost ships have no masts and bypass sail physics entirely.
+             * tick_ghost_ships() sets their velocity directly each tick.
+             * Running the sail/wind code on them would zero their velocity
+             * (target_speed = 0 with no masts) every tick, fighting the AI. */
+            if (ship->company_id == COMPANY_GHOST) continue;
+
             // Calculate average sail openness, fiber efficiency, and wind alignment
             // across all masts.
             float total_openness = 0.0f;
@@ -13672,21 +13793,10 @@ void websocket_server_tick(float dt) {
             // Get current ship speed (magnitude of velocity)
             float vx = Q16_TO_FLOAT(ship->velocity.x);
             float vy = Q16_TO_FLOAT(ship->velocity.y);
-            float current_speed = sqrtf(vx * vx + vy * vy);
             
             // Apply forward force in ship's facing direction (ship_rot computed above)
             float target_vx = cosf(ship_rot) * target_speed;
             float target_vy = sinf(ship_rot) * target_speed;
-            
-            // Debug logging every 2 seconds
-            if (current_time - last_movement_log > 2000 && avg_sail_openness > 0) {
-                log_info("⛵ Ship %u: masts=%d openness=%.1f%% fib=%.2f align=%.2f wind=%.2f mass_ratio=%.2f→spd=%.2f cur=%.2f pos=(%.1f,%.1f)",
-                         ship->id, mast_count, avg_sail_openness, avg_wind_efficiency,
-                         avg_sail_align, global_sim->wind_power, mass_ratio, target_speed, current_speed,
-                         SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x)),
-                         SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y)));
-                last_movement_log = current_time;
-            }
             
             // Smoothly accelerate toward target velocity
             // Using exponential smoothing: vel += (target - vel) * blend_factor
@@ -13715,9 +13825,6 @@ void websocket_server_tick(float dt) {
 
             ship->velocity.x = Q16_FROM_FLOAT(vx);
             ship->velocity.y = Q16_FROM_FLOAT(vy);
-            
-            // Recalculate current speed after velocity update (for turning calculation)
-            current_speed = sqrtf(vx * vx + vy * vy);
             
             // ===== APPLY RUDDER-BASED TURNING =====
             // Accumulate torque into net_torque; sim_step divides by moment_inertia

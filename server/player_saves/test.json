@@ -1,10 +1,10 @@
 {
   "name": "test",
   "player_id": 1000,
-  "x": 12846.187,
-  "y": 27918.117,
-  "parent_ship_id": 5,
-  "local_x": -100.000,
+  "x": 82384.320,
+  "y": 66949.281,
+  "parent_ship_id": 0,
+  "local_x": 0.000,
   "local_y": 0.000,
   "deck_level": 1,
   "health": 200,
@@ -23,9 +23,9 @@
   "feet": 0,
   "hands": 0,
   "shield": 0,
-  "res_wood": 252,
-  "res_fiber": 90,
-  "res_metal": 32,
-  "res_stone": 203,
-  "slots": [{"item":15,"qty":1},{"item":25,"qty":1},{"item":6,"qty":1},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0}]
+  "res_wood": 199,
+  "res_fiber": 115,
+  "res_metal": 226,
+  "res_stone": 261,
+  "slots": [{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0}]
 }

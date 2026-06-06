@@ -827,7 +827,7 @@ void tick_world_npcs(float dt) {
             }
 
             if (!still_working) {
-                log_info("✅ NPC %u (%s) finished with module %u",
+                log_debug("✅ NPC %u (%s) finished with module %u",
                          npc->id, npc->name, npc->assigned_weapon_id);
                 /* Award XP for completing a repair */
                 npc_apply_xp(npc, 25);
@@ -890,7 +890,7 @@ void tick_world_npcs(float dt) {
                 npc->assigned_weapon_id = MID(_idle_seq, MODULE_OFFSET_PLANK(missing_idx));
                 npc->state              = WORLD_NPC_STATE_MOVING;
                 occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
-                log_info("🔨 NPC %u (%s) → walking to place missing plank %u",
+                log_debug("🔨 NPC %u (%s) → walking to place missing plank %u",
                          npc->id, npc->name, npc->assigned_weapon_id);
                 continue;
             }

@@ -283,8 +283,20 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
     if (!resp || !sim) return -1;
 
     int offset = 0;
+
+    // Count ghost ships for dashboard
+    uint32_t ghost_count = 0;
+    for (uint32_t i = 0; i < sim->ship_count; i++) {
+        if (sim->ships[i].id != 0 && sim->ships[i].company_id == COMPANY_GHOST) ghost_count++;
+    }
+    // Fetch simple ships for npc_level lookup
+    SimpleShip* ws_ships = NULL;
+    int ws_ship_count = 0;
+    websocket_server_get_ships(&ws_ships, &ws_ship_count);
+
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
-        "{\n  \"world\": {\n    \"width\": 1000,\n    \"height\": 1000\n  },\n");
+        "{\n  \"world\": {\n    \"width\": 1000,\n    \"height\": 1000\n  },\n  \"ghost_count\": %u,\n",
+        ghost_count);
 
     // Ships
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
@@ -300,6 +312,12 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         float rotation = (float)ship->rotation / 65536.0f;
         float vel_x = SERVER_TO_CLIENT((float)ship->velocity.x / 65536.0f);
         float vel_y = SERVER_TO_CLIENT((float)ship->velocity.y / 65536.0f);
+
+        // Look up npc_level from websocket simple ships
+        uint8_t npc_level = 0;
+        for (int ws = 0; ws_ships && ws < ws_ship_count; ws++) {
+            if (ws_ships[ws].ship_id == ship->id) { npc_level = ws_ships[ws].npc_level; break; }
+        }
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "    {\n"
@@ -310,8 +328,11 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             "      \"rotation\": %.2f,\n"
             "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
             "      \"health\": %u,\n"
+            "      \"company_id\": %u,\n"
+            "      \"npc_level\": %u,\n"
             "      \"hull\": [",
-            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health)
+            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health),
+            ship->company_id, npc_level
         );
         
         // Add hull vertices (scale back to client coordinates)

@@ -110,7 +110,7 @@ int world_save(const char *path) {
     /* Count active entities for metadata */
     int active_ships = 0;
     for (int i = 0; i < ship_count; i++)
-        if (ships[i].active) active_ships++;
+        if (ships[i].active && ships[i].company_id != COMPANY_GHOST) active_ships++;
     int active_npcs = 0;
     for (int i = 0; i < world_npc_count; i++)
         if (world_npcs[i].active) active_npcs++;
@@ -133,6 +133,9 @@ int world_save(const char *path) {
     for (int i = 0; i < ship_count; i++) {
         const SimpleShip *s = &ships[i];
         if (!s->active) continue;
+        /* Ghost ships are procedurally spawned each session — skip them in the
+         * save so they don't accumulate across restarts and fill the ship limit. */
+        if (s->company_id == COMPANY_GHOST) continue;
 
         if (!first_ship) fprintf(f, ",");
         first_ship = false;
@@ -150,6 +153,13 @@ int world_save(const char *path) {
                     break;
                 }
             }
+        }
+        /* Save hull_health percentage (Q16-encoded on the sim ship, 0–100). */
+        float hull_health_save = 100.0f;
+        if (sim_save) {
+            hull_health_save = Q16_TO_FLOAT(sim_save->hull_health);
+            if (hull_health_save < 0.0f)   hull_health_save = 0.0f;
+            if (hull_health_save > 100.0f) hull_health_save = 100.0f;
         }
 
         fprintf(f,
@@ -171,6 +181,7 @@ int world_save(const char *path) {
             "      \"infinite_ammo\": %s,\n"
             "      \"is_sinking\": %s,\n"
             "      \"is_scaffolded\": %s,\n"
+            "      \"hull_health\": %.2f,\n"
             "      \"modules\": [",
             (unsigned)s->ship_id,
             (unsigned)s->ship_seq,
@@ -188,12 +199,36 @@ int world_save(const char *path) {
             (unsigned)s->cannon_ammo,
             s->infinite_ammo  ? "true" : "false",
             s->is_sinking     ? "true" : "false",
-            is_scaffolded     ? "true" : "false"
+            is_scaffolded     ? "true" : "false",
+            (double)hull_health_save
         );
 
+        /* Track seen IDs to deduplicate and skip dead entries */
+        uint16_t seen_ids[MAX_MODULES_PER_SHIP];
+        uint8_t  seen_count = 0;
+        bool first_mod = true;
         for (uint8_t m = 0; m < s->module_count; m++) {
             const ShipModule *mod = &s->modules[m];
-            if (m > 0) fprintf(f, ",");
+            /* Skip dead modules: health==0 for types that normally have HP.
+             * Gunports, ladders, seats are structural and legitimately have max_health==0. */
+            bool has_hp = (mod->type_id == MODULE_TYPE_PLANK   ||
+                           mod->type_id == MODULE_TYPE_CANNON   ||
+                           mod->type_id == MODULE_TYPE_MAST     ||
+                           mod->type_id == MODULE_TYPE_HELM     ||
+                           mod->type_id == MODULE_TYPE_STEERING_WHEEL ||
+                           mod->type_id == MODULE_TYPE_SWIVEL   ||
+                           mod->type_id == MODULE_TYPE_DECK);
+            if (has_hp && mod->max_health <= 0) continue; /* dead/phantom slot */
+            if (has_hp && mod->health <= 0 && !is_scaffolded) continue; /* destroyed-but-not-purged module */
+            /* Skip duplicate IDs */
+            bool already_seen = false;
+            for (uint8_t si = 0; si < seen_count; si++) {
+                if (seen_ids[si] == mod->id) { already_seen = true; break; }
+            }
+            if (already_seen) continue;
+            if (seen_count < MAX_MODULES_PER_SHIP) seen_ids[seen_count++] = mod->id;
+            if (!first_mod) fprintf(f, ",");
+            first_mod = false;
             /* gp_snap: gunport.snap_idx or cannon.gunport_snap_idx; 0xFF = not linked */
             unsigned save_gp_snap =
                 (mod->type_id == MODULE_TYPE_CANNON) ? (unsigned)mod->data.cannon.gunport_snap_idx :
@@ -580,6 +615,7 @@ int world_load(const char *path) {
                 float sail_angle = 0;
                 unsigned sail_openness = 0, ammo = 0;
                 bool infinite_ammo = false, is_sinking = false, is_scaffolded = false;
+                float hull_health_pct = 100.0f;
 
                 char ship_name[32] = {0};
                 ws_json_uint(obj,  "id",            &id);
@@ -599,6 +635,7 @@ int world_load(const char *path) {
                 ws_json_bool(obj,  "infinite_ammo", &infinite_ammo);
                 ws_json_bool(obj,  "is_sinking",    &is_sinking);
                 ws_json_bool(obj,  "is_scaffolded", &is_scaffolded);
+                ws_json_float(obj, "hull_health",   &hull_health_pct);
 
                 /* Recreate ship through the normal creation path */
                 if (ship_count < MAX_SIMPLE_SHIPS) {
@@ -647,6 +684,15 @@ int world_load(const char *path) {
                                 /* Restore scaffolded flag — prevents plank-drain sinking */
                                 if (is_scaffolded)
                                     global_sim->ships[si].flags |= SHIP_FLAG_SCAFFOLDED;
+                                else
+                                    /* Finished ships always have 10 planks as their full complement.
+                                     * Without this, the skeleton-create path leaves initial_plank_count=0
+                                     * and missing=0 forever — ships never sink after a reload. */
+                                    global_sim->ships[si].initial_plank_count = 10;
+                                /* Restore hull_health so a damaged ship doesn't reset to 100% on restart. */
+                                if (hull_health_pct < 0.0f)   hull_health_pct = 0.0f;
+                                if (hull_health_pct > 100.0f) hull_health_pct = 100.0f;
+                                global_sim->ships[si].hull_health = Q16_FROM_FLOAT(hull_health_pct);
                                 break;
                             }
                         }
@@ -692,6 +738,16 @@ int world_load(const char *path) {
                                         (q16_t)(int32_t)(mly * 65536.0f)
                                     };
                                     q16_t rot = (q16_t)(int32_t)(mlr * 65536.0f);
+                                    /* Skip dead modules on load (same rule as save) */
+                                    bool ld_has_hp = ((ModuleTypeId)mtype == MODULE_TYPE_PLANK   ||
+                                                      (ModuleTypeId)mtype == MODULE_TYPE_CANNON   ||
+                                                      (ModuleTypeId)mtype == MODULE_TYPE_MAST     ||
+                                                      (ModuleTypeId)mtype == MODULE_TYPE_HELM     ||
+                                                      (ModuleTypeId)mtype == MODULE_TYPE_STEERING_WHEEL ||
+                                                      (ModuleTypeId)mtype == MODULE_TYPE_SWIVEL   ||
+                                                      (ModuleTypeId)mtype == MODULE_TYPE_DECK);
+                                    if (ld_has_hp && mmax == 0) { free(mobj); mi++; continue; }
+                                    if (ld_has_hp && mhealth == 0 && !is_scaffolded) { free(mobj); mi++; continue; } /* stale dead module from old save */
                                     ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
                                     new_mod.health        = (int32_t)mhealth;
                                     new_mod.max_health    = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);

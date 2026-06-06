@@ -158,12 +158,12 @@ typedef struct NpcAgent {
     uint8_t  desired_openness;   // 0-100 sail openness to maintain
 } NpcAgent;
 
-#define MAX_NPC_AGENTS 64
+#define MAX_NPC_AGENTS 512
 
 // ── World NPCs ───────────────────────────────────────────────────────────────
 // Visible, interactable character entities in the world (separate from NpcAgent AI controllers).
 // All crews are sailors for now; a company/alliance system will sort friend from foe later.
-#define MAX_WORLD_NPCS 64
+#define MAX_WORLD_NPCS 512
 
 // NPC movement/AI state machine
 typedef enum {

@@ -148,9 +148,6 @@ void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
         update_npc_cannon_sector(ship, ship->active_aim_angle);
     }
 
-    log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
-             player->player_id, group_index, mode, group->weapon_count, group->target_ship_id);
-
     /* Defer the broadcast: mark the sender's client slot as dirty so that all
      * group-config messages in one frame collapse into a single broadcast at
      * the end of this connection's message processing.  This prevents a burst
@@ -449,24 +446,6 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             }
         }
         if (!cannon_has_occupant) {
-            /* Find NPC state for diagnostics */
-            int npc_state = -1; uint32_t npc_assigned = 0;
-            for (int ni = 0; ni < world_npc_count; ni++) {
-                WorldNpc* wnpc = &world_npcs[ni];
-                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
-                    wnpc->ship_id == ship->ship_id &&
-                    wnpc->assigned_weapon_id == cannon->id) {
-                    npc_state = wnpc->state;
-                    npc_assigned = wnpc->id;
-                    break;
-                }
-            }
-            int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[WG_CID(player->company_id)][gg] == grp) { grp_idx = gg; break; } } }
-            log_info("🔫 P2 c%u g%d: SKIP no_occupant (sim_occ=%d npc_id=%u npc_state=%d in_active=%d)",
-                     cannon->id, grp_idx,
-                     (cannon->state_bits & MODULE_STATE_OCCUPIED) ? 1 : 0,
-                     npc_assigned, npc_state, in_active_pass2 ? 1 : 0);
             continue;
         }
 
@@ -547,7 +526,6 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             npos += snprintf(nbuf + npos, (size_t)(256 - npos), " c%u:g%d:%s",
                              dm_mod->id, gi, needed ? "NEED" : "----");
         }
-        log_info("📊 Ship %u NEEDED map:%s", ship->ship_id, nbuf);
     }
 
     /* ── Swivel pass: NEEDED + aim-propagation (mirrors cannon logic above) ─────
