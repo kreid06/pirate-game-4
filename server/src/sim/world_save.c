@@ -254,12 +254,12 @@ int world_save(const char *path) {
         for (uint8_t co = 0; co < MAX_COMPANIES; co++) {
             for (uint8_t g = 0; g < MAX_WEAPON_GROUPS; g++) {
                 const WeaponGroup *wg = &s->weapon_groups[co][g];
-                if (wg->weapon_count == 0) continue;
+                if (wg->weapon_count == 0 && wg->name[0] == '\0') continue;
                 if (!first_wg) fprintf(f, ",");
                 first_wg = false;
-                fprintf(f, "\n        {\"co\":%u,\"idx\":%u,\"mode\":%u,\"target\":%u,\"gpopen\":%u,\"wids\":[",
+                fprintf(f, "\n        {\"co\":%u,\"idx\":%u,\"mode\":%u,\"target\":%u,\"gpopen\":%u,\"name\":\"%s\",\"wids\":[",
                         (unsigned)co, (unsigned)g, (unsigned)wg->mode,
-                        (unsigned)wg->target_ship_id, (unsigned)wg->gunports_open);
+                        (unsigned)wg->target_ship_id, (unsigned)wg->gunports_open, wg->name);
                 for (uint8_t wi = 0; wi < wg->weapon_count && wi < MAX_WEAPONS_PER_GROUP; wi++) {
                     if (wi > 0) fprintf(f, ",");
                     fprintf(f, "%u", (unsigned)wg->weapon_ids[wi]);
@@ -602,8 +602,10 @@ int world_load(const char *path) {
 
                 /* Recreate ship through the normal creation path */
                 if (ship_count < MAX_SIMPLE_SHIPS) {
-                    /* Scaffolded ships are bare skeletons; finished ships get all modules */
-                    uint8_t mods_placed = is_scaffolded ? 0 : 0xFF;
+                    /* Always load ships bare — all modules are restored from the saved list below.
+                     * Using mods_placed=0 prevents default modules (cannons, masts, etc.) from
+                     * re-appearing when they were intentionally removed before the last save. */
+                    uint8_t mods_placed = 0;
                     uint32_t new_id = websocket_server_create_ship(
                         x, y, (uint8_t)company, mods_placed);
                     /* Record old→new mapping so NPC ship_ids can be patched */
@@ -654,9 +656,10 @@ int world_load(const char *path) {
                         if (marr && s) {
                             char *mobj;
                             uint8_t mi = 0;
-                            if (is_scaffolded) {
-                                /* Scaffolded ship: no default modules were created.
-                                 * Add each saved module directly using the new ship_seq. */
+                            /* All ships (scaffolded or finished) are loaded bare — add every
+                             * saved module directly. This guarantees the module list exactly
+                             * matches the save file and prevents removed modules from respawning. */
+                            {
                                 struct Ship *sim_ship = NULL;
                                 if (global_sim) {
                                     for (uint32_t si = 0; si < global_sim->ship_count; si++) {
@@ -716,135 +719,6 @@ int world_load(const char *path) {
                                     free(mobj);
                                     mi++;
                                 }
-                            } else {
-                                /* Finished ship: modules were created by websocket_server_create_ship;
-                                 * match saved modules by type + position to restore health.
-                                 * Dynamically-placed modules (ramps) have no default slot — add them. */
-                                /* Cache sim-ship pointer once for matched-module sim-layer updates */
-                                struct Ship *sim_fin = NULL;
-                                if (global_sim) {
-                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-                                        if ((uint32_t)global_sim->ships[si].id == new_id) {
-                                            sim_fin = &global_sim->ships[si]; break;
-                                        }
-                                    }
-                                }
-                                while ((mobj = next_json_object(&marr)) != NULL) {
-                                    unsigned mtype = 0, mhealth = 0, mmax = 0, msaved_id = 0, mtarget = 0;
-                                    unsigned mgp_snap = 0xFF, mgp_open = 0, mdeck = 0xFF;
-                                    float mlx = 0, mly = 0, mlr = 0;
-                                    ws_json_uint(mobj,  "id",            &msaved_id);
-                                    ws_json_uint(mobj,  "type",          &mtype);
-                                    ws_json_float(mobj, "lx",            &mlx);
-                                    ws_json_float(mobj, "ly",            &mly);
-                                    ws_json_float(mobj, "lr",            &mlr);
-                                    ws_json_uint(mobj,  "health",        &mhealth);
-                                    ws_json_uint(mobj,  "max_health",    &mmax);
-                                    ws_json_uint(mobj,  "target_health", &mtarget);
-                                    ws_json_uint(mobj,  "gp_snap",       &mgp_snap);
-                                    ws_json_uint(mobj,  "gp_open",       &mgp_open);
-                                    ws_json_uint(mobj,  "deck",          &mdeck);
-
-                                    bool matched = false;
-                                    /* Match module by type + approximate position.
-                                     * DECK modules are a special case: both lower (deck_id=0) and
-                                     * upper (deck_id=1) share the same local_pos (0,0), so we must
-                                     * also match on deck_id to avoid the upper deck overwriting the
-                                     * lower deck and never being added as a separate module. */
-                                    for (uint8_t k = 0; k < s->module_count; k++) {
-                                        ShipModule *m = &s->modules[k];
-                                        if ((unsigned)m->type_id != mtype) continue;
-                                        /* Deck disambiguation: same position, different deck_id → no match */
-                                        if (mtype == (unsigned)MODULE_TYPE_DECK && m->deck_id != (uint8_t)mdeck) continue;
-                                        float dx = (float)m->local_pos.x / 65536.0f - mlx;
-                                        float dy = (float)m->local_pos.y / 65536.0f - mly;
-                                        if (dx * dx + dy * dy > 0.01f) continue;
-                                        m->health        = (int32_t)mhealth;
-                                        m->local_rot     = (q16_t)(int32_t)(mlr * 65536.0f);
-                                        if (mmax > 0) m->max_health = (int32_t)mmax;
-                                        m->target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)m->max_health);
-                                        /* Restore gunport / cannon / chest data */
-                                        if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
-                                            m->data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
-                                        else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
-                                            m->data.gunport.snap_idx = (uint8_t)mgp_snap;
-                                            m->data.gunport.is_open  = (uint8_t)(mgp_open & 1);
-                                        } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
-                                            unsigned cw=0,cf=0,cm=0,cs=0;
-                                            ws_json_uint(mobj,"cw",&cw); ws_json_uint(mobj,"cf",&cf);
-                                            ws_json_uint(mobj,"cm",&cm); ws_json_uint(mobj,"cs",&cs);
-                                            m->data.chest.wood=cw; m->data.chest.fiber=cf;
-                                            m->data.chest.metal=cm; m->data.chest.stone=cs;
-                                        }
-                                        m->deck_id = (uint8_t)mdeck;
-                                        /* Mirror health + chest data into sim layer for the same module (by ID) */
-                                        if (sim_fin) {
-                                            for (uint8_t si = 0; si < sim_fin->module_count; si++) {
-                                                if (sim_fin->modules[si].id == m->id) {
-                                                    sim_fin->modules[si].health        = m->health;
-                                                    sim_fin->modules[si].max_health    = m->max_health;
-                                                    sim_fin->modules[si].target_health = m->target_health;
-                                                    if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST)
-                                                        sim_fin->modules[si].data.chest = m->data.chest;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        matched = true;
-                                        break;
-                                    }
-
-                                    /* Dynamically-placed modules (e.g. ramps, gunports) have no
-                                     * default slot — add them to both SimpleShip and sim layers.
-                                     * mmax == 0 catches indestructible modules (gunports) which
-                                     * are intentionally stored with health=0 / max_health=0. */
-                                    if (!matched && (mhealth > 0 || mmax == 0)) {
-                                        Vec2Q16 pos = {
-                                            (q16_t)(int32_t)(mlx * 65536.0f),
-                                            (q16_t)(int32_t)(mly * 65536.0f)
-                                        };
-                                        q16_t rot = (q16_t)(int32_t)(mlr * 65536.0f);
-                                        /* Derive a safe ID: use offset from saved id + new seq */
-                                        uint8_t offset = msaved_id ? (uint8_t)(msaved_id & 0xFF) : 0xFF;
-                                        uint16_t new_mid = (uint16_t)((s->ship_seq << 8) | offset);
-                                        /* Avoid ID collision with already-created modules */
-                                        bool id_used = false;
-                                        for (uint8_t k = 0; k < s->module_count; k++) {
-                                            if (s->modules[k].id == new_mid) { id_used = true; break; }
-                                        }
-                                        if (id_used) {
-                                            uint16_t max_id = 0;
-                                            for (uint8_t k = 0; k < s->module_count; k++)
-                                                if (s->modules[k].id > max_id) max_id = s->modules[k].id;
-                                            new_mid = max_id + 1;
-                                        }
-                                        ShipModule new_mod = module_create(new_mid, (ModuleTypeId)mtype, pos, rot);
-                                        new_mod.health        = (int32_t)mhealth;
-                                        new_mod.max_health    = (int32_t)(mmax > 0 ? mmax : (unsigned)new_mod.max_health);
-                                        new_mod.target_health = (int32_t)(mtarget > 0 ? mtarget : (unsigned)new_mod.max_health);
-                                        /* Restore gunport / cannon / chest data for dynamically-placed modules */
-                                        if ((ModuleTypeId)mtype == MODULE_TYPE_CANNON)
-                                            new_mod.data.cannon.gunport_snap_idx = (uint8_t)mgp_snap;
-                                        else if ((ModuleTypeId)mtype == MODULE_TYPE_GUNPORT) {
-                                            new_mod.data.gunport.snap_idx = (uint8_t)mgp_snap;
-                                            new_mod.data.gunport.is_open  = (uint8_t)(mgp_open & 1);
-                                        } else if ((ModuleTypeId)mtype == MODULE_TYPE_CHEST) {
-                                            unsigned cw=0,cf=0,cm=0,cs=0;
-                                            ws_json_uint(mobj,"cw",&cw); ws_json_uint(mobj,"cf",&cf);
-                                            ws_json_uint(mobj,"cm",&cm); ws_json_uint(mobj,"cs",&cs);
-                                            new_mod.data.chest.wood=cw; new_mod.data.chest.fiber=cf;
-                                            new_mod.data.chest.metal=cm; new_mod.data.chest.stone=cs;
-                                        }
-                                        new_mod.deck_id = (uint8_t)mdeck;
-                                        if (s->module_count < MAX_MODULES_PER_SHIP)
-                                            s->modules[s->module_count++] = new_mod;
-                                        /* Mirror into sim layer (use cached sim_fin pointer) */
-                                        if (sim_fin && sim_fin->module_count < MAX_MODULES_PER_SHIP)
-                                            sim_fin->modules[sim_fin->module_count++] = new_mod;
-                                    }
-                                    free(mobj);
-                                    mi++;
-                                }
                             }
                         }
                     /* Restore ship level stats into the sim layer */
@@ -890,6 +764,11 @@ int world_load(const char *path) {
                                     wg->target_ship_id = (uint16_t)gtarget;
                                     wg->gunports_open  = (uint8_t)(ggpopen & 1);
                                     wg->weapon_count   = 0;
+                                    /* Restore custom group name if present */
+                                    char wg_name[24] = {0};
+                                    ws_json_str(wgobj, "name", wg_name, sizeof(wg_name));
+                                    if (wg_name[0] != '\0')
+                                        snprintf(wg->name, sizeof(wg->name), "%s", wg_name);
                                     /* Parse wids array and remap: upper byte was old ship_seq */
                                     const char *wids = strstr(wgobj, "\"wids\":[");
                                     if (wids) {

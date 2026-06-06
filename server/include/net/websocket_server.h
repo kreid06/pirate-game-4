@@ -51,6 +51,7 @@ typedef struct {
     uint8_t         mode;             /* WeaponGroupMode enum value */
     uint16_t        target_ship_id;
     uint8_t         gunports_open;    /* 0=closed (default), 1=open — group gunport state */
+    char            name[24];         /* Player-assigned group label (NUL-terminated) */
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
 

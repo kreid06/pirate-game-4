@@ -145,6 +145,8 @@ export class RenderSystem {
   public combatMode: boolean = false;
 
   // Build mode state
+  /** Set by ClientApplication each frame: false when the hovered ghost slot can't be afforded. */
+  public ghostCanAfford: boolean = true;
   private buildMode: boolean = false;
   /** Whether cannon replacement build mode is active (cannon item held). */
   private cannonBuildMode: boolean = false;
@@ -1702,7 +1704,7 @@ export class RenderSystem {
     this.ctx.restore();
 
     // Interact hint: "[E] – Interact" when in range, "Not in Range" when too far
-    {
+    if (!this._anyBuildActive) {
       const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
       const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
 
@@ -2230,6 +2232,42 @@ export class RenderSystem {
     this.swordCooldownMs  = cooldownMs;
   }
   
+  /** Draw a "Not enough resources" badge above the cursor when a ghost slot is hovered but unaffordable. */
+  private drawBuildAffordabilityBadge(camera: Camera): void {
+    if (this.ghostCanAfford || !this._anyBuildActive || !this.mouseWorldPos) return;
+    const hasHover = this.hoveredPlankSlot !== null || this.hoveredDeckSlot !== null
+      || this.hoveredHelmSlot !== null || this.hoveredRampSlot !== null
+      || this.hoveredCannonSlot !== null || this.hoveredMastSlot !== null;
+    if (!hasHover) return;
+    const sp = camera.worldToScreen(this.mouseWorldPos);
+    const label = 'Not enough resources';
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const tw = ctx.measureText(label).width;
+    const bx = sp.x, by = sp.y - 52;
+    ctx.fillStyle = 'rgba(30, 8, 8, 0.82)';
+    ctx.strokeStyle = 'rgba(220, 60, 40, 0.90)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx - tw / 2 - 8, by - 11, tw + 16, 22, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ff7060';
+    ctx.fillText(label, bx, by);
+    ctx.restore();
+  }
+
+  /** True whenever any ship or land build mode is active (used to suppress interact prompts). */
+  private get _anyBuildActive(): boolean {
+    return this.buildMenuOpen || this.buildMode || this.cannonBuildMode || this.mastBuildMode
+      || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode
+      || this.rampBuildMode || this.hatchBuildMode || this.gunportBuildMode
+      || this.landBuildModeActive;
+  }
+
   /**
    * Enable or disable plank build mode
    */
@@ -3345,7 +3383,7 @@ export class RenderSystem {
       ctx.fillText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
 
       /* Interact hint */
-      if (isNear) {
+      if (isNear && !this._anyBuildActive) {
         ctx.font = `${Math.round(9 * sz)}px Georgia, serif`;
         ctx.fillStyle = '#ffffff';
         ctx.fillText('[E] Collect', 0, 14 * sz);
@@ -3493,7 +3531,7 @@ export class RenderSystem {
       }
 
       /* Interact hint */
-      if (isNear) {
+      if (isNear && !this._anyBuildActive) {
         const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
         const fsz = Math.round(9 * sz);
         ctx.font = `${fsz}px Georgia, serif`;
@@ -4140,15 +4178,7 @@ export class RenderSystem {
       this.detectHoveredGunportCannonSnap(worldState);
     } else {
       this.hoveredCannonSlot = null;
-      // Gunport cannon ghosts are visible in any build mode — always detect the snap hover
-      const anyBuildModeActive = this.buildMenuOpen || this.buildMode || this.mastBuildMode
-        || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode
-        || this.rampBuildMode || this.hatchBuildMode || this.gunportBuildMode;
-      if (anyBuildModeActive) {
-        this.detectHoveredGunportCannonSnap(worldState);
-      } else {
-        this.hoveredGunportCannonSnap = null;
-      }
+      this.hoveredGunportCannonSnap = null;
     }
 
     // In mast build mode, detect which missing mast slot is under the cursor
@@ -4302,6 +4332,8 @@ export class RenderSystem {
     this.drawMoveToArrowLine(worldState, camera);
     // Module hover glow (always-on, independent of move-to mode)
     this.drawModuleHoverHighlight(camera);
+    // Insufficient-resource badge above cursor in build mode
+    this.drawBuildAffordabilityBadge(camera);
     // Hammer repair overlays — damaged module icons when hammer is equipped
     if (this.hammerEquipped) this.drawHammerRepairOverlays(worldState, camera);
     // Ship hull hover glow (always-on, normal hover)
@@ -7126,7 +7158,7 @@ export class RenderSystem {
       ctx.fillText(ownerText, ssp.x, tipY - lineH);
 
       // Interact hint (shifted up one more line)
-      if (inRange) {
+      if (inRange && !this._anyBuildActive) {
         ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
         const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
@@ -8986,21 +9018,11 @@ export class RenderSystem {
       }
     }
 
-    // Gunport cannon ghosts are visible in any build mode — a gunport without a cannon shows a permanent ghost.
-    // In cannon build mode the full set (fixed broadside slots + gunport slots) is rendered.
-    const anyBuildModeActive = this.buildMenuOpen || this.buildMode || this.cannonBuildMode
-      || this.mastBuildMode || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode
-      || this.rampBuildMode || this.hatchBuildMode || this.gunportBuildMode;
-    if (anyBuildModeActive) {
-      if (this.cannonBuildMode) {
-        for (const ship of worldState.ships) {
-          this.queueRenderItem(4, `cannon-ghosts-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera), 1);
-        }
-      } else {
-        // Show gunport-linked cannon ghosts only (non-removable while in build mode)
-        for (const ship of worldState.ships) {
-          this.queueRenderItem(4, `cannon-ghosts-gp-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera, true), 1);
-        }
+    // Gunport cannon ghosts and fixed broadside slot ghosts — only shown in cannon build mode.
+    if (this.cannonBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `cannon-ghosts-gp-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera, true), 1);
+        this.queueRenderItem(4, `cannon-ghosts-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera), 1);
       }
     }
 
@@ -10287,9 +10309,10 @@ export class RenderSystem {
         this.hoveredPlankSlot?.sectionName === seg.sectionName &&
         this.hoveredPlankSlot?.segmentIndex === seg.index;
 
-      const fillColor  = isHovered ? 'rgba(0, 230, 80, 0.70)' : 'rgba(0, 180, 60, 0.35)';
-      const strokeColor = isHovered ? '#00ff55' : '#00cc44';
-      const lineWidth  = isHovered ? 2.5 : 1.5;
+      const _canAfford = !isHovered || this.ghostCanAfford;
+      const fillColor   = isHovered ? (_canAfford ? 'rgba(0, 230, 80, 0.70)' : 'rgba(230, 60, 40, 0.70)') : 'rgba(0, 180, 60, 0.35)';
+      const strokeColor = isHovered ? (_canAfford ? '#00ff55' : '#ff3333') : '#00cc44';
+      const lineWidth   = isHovered ? 2.5 : 1.5;
 
       this.ctx.fillStyle   = fillColor;
       this.ctx.strokeStyle = strokeColor;
@@ -10990,8 +11013,11 @@ export class RenderSystem {
       const localX = dx * cos - dy * sin;
       const localY = dx * sin + dy * cos;
 
-      // Gunport cannon ghosts only show on the bottom deck (deck 0)
-      if (this._playerDeckLevel !== 0) continue;
+      // Gunport cannon ghosts are on the lower deck (deck 0).
+      // Show when player is on deck 0 OR when the ship has no upper deck (single-deck ships
+      // keep _playerDeckLevel=1 because the deck-level update only runs when an upper deck exists).
+      const _shipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+      if (this._playerDeckLevel !== 0 && _shipHasUpperDeck) continue;
       for (const mod of ship.modules) {
         if (mod.kind !== 'gunport') continue;
         // Skip if a cannon is already linked to this gunport's snap index
@@ -11005,7 +11031,7 @@ export class RenderSystem {
         const stowedY = mod.localPos.y + (mod.localPos.y < 0 ? 40 : -40);
         const ddx = localX - mod.localPos.x;
         const ddy = localY - stowedY;
-        if (Math.abs(ddx) <= 14 && Math.abs(ddy) <= 14) {
+        if (Math.abs(ddx) <= 20 && Math.abs(ddy) <= 20) {
           this.hoveredGunportCannonSnap = { ship, module: mod };
           return;
         }
@@ -11052,13 +11078,14 @@ export class RenderSystem {
       this.ctx.translate(cx, cy);
       this.ctx.rotate(rot);
 
+      const _cannonCanAfford = !isHovered || this.ghostCanAfford;
       // Ghost cannon base rect — unified green palette
-      this.ctx.strokeStyle = isHovered ? '#66ee99' : 'rgba(80,210,130,0.65)';
-      this.ctx.fillStyle   = isHovered ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
+      this.ctx.strokeStyle = isHovered ? (_cannonCanAfford ? '#66ee99' : '#ff4444') : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHovered ? (_cannonCanAfford ? 'rgba(40,160,80,0.45)' : 'rgba(200,40,40,0.45)') : 'rgba(40,130,70,0.20)';
       this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
       this.ctx.setLineDash(isHovered ? [] : [4, 3]);
       this.ctx.beginPath();
-      this.ctx.rect(-15, -10, 30, 20);
+      this.ctx.rect(-11, -7.5, 22, 15); // base (matches actual cannon 22×15)
       this.ctx.fill();
       this.ctx.stroke();
       this.ctx.setLineDash([]);
@@ -11068,7 +11095,7 @@ export class RenderSystem {
       this.ctx.fillStyle   = 'transparent';
       this.ctx.lineWidth   = lw;
       this.ctx.beginPath();
-      this.ctx.rect(-8, -40, 16, 40);
+      this.ctx.rect(-8, -40, 16, 40); // barrel (matches actual cannon 16×40)
       this.ctx.stroke();
 
       // Hovered: bright highlight circle
@@ -11084,9 +11111,11 @@ export class RenderSystem {
     }
 
     // ── Ghost cannons at gunport positions (no cannon installed yet) ──────
-    // Gunports are always on the bottom deck — only show their ghosts when player is on deck 0.
+    // Show when player is on deck 0, OR when the ship has no upper deck (single-deck ships
+    // have _playerDeckLevel=1 since the level detector only activates with an upper deck).
     const gpHalfWGhost = 11; // match visual gpHalfW
-    if (this._playerDeckLevel === 0) for (const mod of ship.modules) {
+    const _gpShipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    if (this._playerDeckLevel === 0 || !_gpShipHasUpperDeck) for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
       // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
       // because the cannon is now far from the gunport hull edge when stowed/deployed).
@@ -11107,9 +11136,10 @@ export class RenderSystem {
       this.ctx.translate(mod.localPos.x, ghostStowedY);
       this.ctx.rotate(rot);
 
+      const _gpCanAfford = !isHoveredGp || this.ghostCanAfford;
       // Base rect
-      this.ctx.strokeStyle = isHoveredGp ? '#66ee99' : 'rgba(80,210,130,0.65)';
-      this.ctx.fillStyle   = isHoveredGp ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
+      this.ctx.strokeStyle = isHoveredGp ? (_gpCanAfford ? '#66ee99' : '#ff4444') : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHoveredGp ? (_gpCanAfford ? 'rgba(40,160,80,0.45)' : 'rgba(200,40,40,0.45)') : 'rgba(40,130,70,0.20)';
       this.ctx.lineWidth   = isHoveredGp ? lw * 2 : lw;
       this.ctx.setLineDash(isHoveredGp ? [] : [4, 3]);
       this.ctx.beginPath();
@@ -11290,11 +11320,12 @@ export class RenderSystem {
       const isHovered = this.hoveredMastSlot?.ship === ship &&
                         this.hoveredMastSlot?.mastIndex === i;
 
+      const _mastCanAfford = !isHovered || this.ghostCanAfford;
       // Ghost mast circle — unified green palette (matches plan ghost markers)
       this.ctx.beginPath();
       this.ctx.arc(mx, 0, 14, 0, Math.PI * 2);
-      this.ctx.fillStyle   = isHovered ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
-      this.ctx.strokeStyle = isHovered ? '#66ee99' : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHovered ? (_mastCanAfford ? 'rgba(40,160,80,0.45)' : 'rgba(200,40,40,0.45)') : 'rgba(40,130,70,0.20)';
+      this.ctx.strokeStyle = isHovered ? (_mastCanAfford ? '#66ee99' : '#ff4444') : 'rgba(80,210,130,0.65)';
       this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
       this.ctx.setLineDash(isHovered ? [] : [4, 3]);
       this.ctx.fill();
@@ -11435,14 +11466,15 @@ export class RenderSystem {
       const isUpper   = deckLevel === 1;
 
       // Color palette: lower=wood-brown, upper=amber-gold
+      const _deckCanAfford = !isHovered || this.ghostCanAfford;
       const fillBase    = isUpper ? 'rgba(180,150,40,0.14)' : 'rgba(140,80,30,0.12)';
-      const fillHover   = isUpper ? 'rgba(200,165,45,0.32)' : 'rgba(180,110,40,0.30)';
+      const fillHover   = _deckCanAfford ? (isUpper ? 'rgba(200,165,45,0.32)' : 'rgba(180,110,40,0.30)') : 'rgba(200,40,40,0.32)';
       const strokeBase  = isUpper ? 'rgba(210,175,55,0.65)' : 'rgba(200,120,50,0.55)';
-      const strokeHover = isUpper ? '#ddcc33'                : '#dd8833';
+      const strokeHover = _deckCanAfford ? (isUpper ? '#ddcc33' : '#dd8833') : '#cc2222';
       const plankBase   = isUpper ? 'rgba(200,170,60,0.28)' : 'rgba(180,110,50,0.25)';
-      const plankHover  = isUpper ? 'rgba(210,185,80,0.50)' : 'rgba(220,150,80,0.45)';
-      const ringCol     = isUpper ? '#ffee77'                : '#ffbb66';
-      const labelCol    = isHovered ? '#ffffff'
+      const plankHover  = _deckCanAfford ? (isUpper ? 'rgba(210,185,80,0.50)' : 'rgba(220,150,80,0.45)') : 'rgba(220,60,60,0.50)';
+      const ringCol     = _deckCanAfford ? (isUpper ? '#ffee77' : '#ffbb66') : '#ff4444';
+      const labelCol    = isHovered ? (_deckCanAfford ? '#ffffff' : '#ffaaaa')
                                     : (isUpper ? 'rgba(220,200,100,0.70)' : 'rgba(200,150,80,0.65)');
 
       // Rounded-rect path
@@ -18236,9 +18268,11 @@ export class RenderSystem {
     cy += LINE + 8;
 
     // Interact hint
-    ctx.font      = '11px Georgia, serif';
-    ctx.fillStyle = interactLabel === '[E] Interact' ? '#aaaaaa' : '#ff6644';
-    ctx.fillText(interactLabel, tx + PAD + 4, cy);
+    if (!this._anyBuildActive) {
+      ctx.font      = '11px Georgia, serif';
+      ctx.fillStyle = interactLabel === '[E] Interact' ? '#aaaaaa' : '#ff6644';
+      ctx.fillText(interactLabel, tx + PAD + 4, cy);
+    }
 
     ctx.restore();
 
@@ -18288,10 +18322,12 @@ export class RenderSystem {
           this.ctx.strokeStyle = blueprintStroke;
           this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([4, 2]);
-          this.ctx.fillRect(-15, -10, 30, 20);
-          this.ctx.strokeRect(-15, -10, 30, 20);
-          this.ctx.fillRect(-8, -36, 16, 28);
-          this.ctx.strokeRect(-8, -36, 16, 28);
+          // Base (matches actual cannon 22×15)
+          this.ctx.fillRect(-11, -7.5, 22, 15);
+          this.ctx.strokeRect(-11, -7.5, 22, 15);
+          // Barrel (matches actual cannon 16×40)
+          this.ctx.fillRect(-8, -40, 16, 40);
+          this.ctx.strokeRect(-8, -40, 16, 40);
           this.ctx.setLineDash([]);
           break;
         }
@@ -18467,6 +18503,10 @@ export class RenderSystem {
     if (!this.pendingGhostState || !this.mouseWorldPos) return;
     const { kind, rotDeg } = this.pendingGhostState;
 
+    // Hide the following cursor ghost when the cannon is already snapping to a gunport —
+    // the slot ghost itself acts as the placement indicator.
+    if (kind === 'cannon' && this.hoveredGunportCannonSnap) return;
+
     // Find nearest ship
     let nearestShip: Ship | null = null;
     let nearestDist = Infinity;
@@ -18567,16 +18607,20 @@ export class RenderSystem {
     this.ctx.rotate(shipRot - camRot + rotRad);
 
     const planBlocked = invalidReason === 'Remove plan first!';
-    const okColor   = valid ? '#44ff88' : planBlocked ? '#ffaa44' : '#ff5555';
-    const fillColor = valid ? 'rgba(30,120,60,0.45)' : planBlocked ? 'rgba(160,90,20,0.45)' : 'rgba(120,30,30,0.45)';
+    // Factor in resource affordability: valid but unaffordable → red tint
+    const canAfford = !valid ? true : this.ghostCanAfford; // only apply afford-check when placement is otherwise valid
+    const okColor   = valid ? (canAfford ? '#44ff88' : '#ff4444') : planBlocked ? '#ffaa44' : '#ff5555';
+    const fillColor = valid ? (canAfford ? 'rgba(30,120,60,0.45)' : 'rgba(180,30,30,0.45)') : planBlocked ? 'rgba(160,90,20,0.45)' : 'rgba(120,30,30,0.45)';
 
     switch (kind) {
       case 'cannon': {
         this.ctx.fillStyle = fillColor;
         this.ctx.strokeStyle = okColor;
         this.ctx.lineWidth = 1.5;
-        this.ctx.fillRect(-15, -10, 30, 20);  this.ctx.strokeRect(-15, -10, 30, 20);
-        this.ctx.fillRect(-8, -38, 16, 30);   this.ctx.strokeRect(-8, -38, 16, 30);
+        // Base (matches actual cannon 22×15)
+        this.ctx.fillRect(-11, -7.5, 22, 15);  this.ctx.strokeRect(-11, -7.5, 22, 15);
+        // Barrel (matches actual cannon 16×40, pointing −y)
+        this.ctx.fillRect(-8, -40, 16, 40);    this.ctx.strokeRect(-8, -40, 16, 40);
         break;
       }
       case 'mast': {

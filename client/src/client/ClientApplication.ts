@@ -37,6 +37,7 @@ import { ChestMenu } from './ui/ChestMenu.js';
 import { LandChestMenu } from './ui/LandChestMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
+import { GroupRenameDialog } from './ui/GroupRenameDialog.js';
 import { ConfirmDialog }    from './ui/ConfirmDialog.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { CommandConsole } from './ui/CommandConsole.js';
@@ -216,7 +217,7 @@ export class ClientApplication {
 
   // Weapon control groups — 10 user-defined groups (0–9), persistent per session
   private controlGroups: Map<number, WeaponGroupState> = new Map(
-    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1, gunportsOpen: false }])
+    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1, gunportsOpen: false, name: ['Port','Starboard','Stern','Bow','','','','','',''][i] }])
   );
   /**
    * Ship ID received from the server's player_boarded or module_interact_success message.
@@ -304,6 +305,8 @@ export class ClientApplication {
   private shipyardMenu = new ShipyardMenu();
   /** Custom rename dialog — replaces window.prompt() for ship naming. */
   private renameDialog!: ShipRenameDialog;
+  /** Custom rename dialog for weapon groups. */
+  private groupRenameDialog!: GroupRenameDialog;
   /** Generic confirm dialog — replaces window.confirm() calls. */
   private confirmDialog = new ConfirmDialog();
   /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
@@ -447,6 +450,19 @@ export class ClientApplication {
       this.renameDialog = new ShipRenameDialog(this.canvas);
       this.renameDialog.onConfirm = (shipId, name) => {
         this.networkManager.sendRenameShip(shipId, name);
+      };
+
+      // Group rename dialog
+      this.groupRenameDialog = new GroupRenameDialog(this.canvas);
+      this.groupRenameDialog.onConfirm = (groupIndex, name) => {
+        const myShipId = (() => {
+          const ws = this.authoritativeWorldState;
+          const pid = this.networkManager.getAssignedPlayerId();
+          return ws?.players.find(p => p.id === pid)?.carrierId ?? 0;
+        })();
+        if (myShipId) this.networkManager.sendRenameWeaponGroup(myShipId, groupIndex, name);
+        const grp = this.controlGroups.get(groupIndex);
+        if (grp) grp.name = name;
       };
 
       // Initialize WebGL2 world renderer (dual-canvas setup)
@@ -856,6 +872,7 @@ export class ClientApplication {
             cannonIds: g.cannonIds,
             targetId: g.targetShipId,
             gunportsOpen: g.gunportsOpen ?? false,
+            name: g.name ?? '',
           });
         }
 
@@ -1221,8 +1238,8 @@ export class ClientApplication {
             }
           }
 
-          // Exit build/plan mode on any interaction attempt
-          this.exitAllBuildModes();
+          // While in any build mode, block all normal interactions
+          if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) return;
 
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
@@ -2031,6 +2048,7 @@ export class ClientApplication {
         // Cannon snap to gunport position
         const gpSnap = this.renderSystem.getHoveredGunportCannonSnap();
         if (gpSnap) {
+          if (!this._consumeShipBuildResources('cannon')) return;
           const gp = gpSnap.module;
           const rot = gp.localPos.y < 0 ? 0 : Math.PI;
           // Offset cannon 40px toward ship centre (inward from hull at y=±90 → cannon at y=±50)
@@ -2052,6 +2070,9 @@ export class ClientApplication {
         }
       };
 
+      // Permanent gunport cannon ghosts are always clickable — fire onBuildPlace even outside build mode.
+      this.inputManager.checkGunportSnap = () => this.renderSystem.getHoveredGunportCannonSnap() !== null;
+
       // Build menu toggle (B key) — opens/closes the left-panel build menu.
       // Works anytime the player is on a ship deck.
       // If a cannon or sail item is active in the hotbar, also enters free-placement mode.
@@ -2068,11 +2089,12 @@ export class ClientApplication {
           const playerId = this.networkManager?.getAssignedPlayerId();
           const player = ws?.players.find(p => p.id === playerId);
           if (player?.carrierId) {
-            // On a ship — open ship ghost build panel; default resource source to 'ship'
+            // On a ship — open ship ghost build panel; default resource source to 'auto'
             this.buildMenuOpen = true;
             this.inputManager.buildMenuOpen = true;
             this._buildResourceSource = 'auto';
             this.uiManager.buildResourceSource = 'auto';
+            this.uiManager.buildHotbarActiveSlot = -1;
             // If a buildable item is in the hotbar, also enter free-placement mode
             const activeSlot = player.inventory?.activeSlot ?? 0;
             const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
@@ -2183,6 +2205,7 @@ export class ClientApplication {
       this.inputManager.onUIClick = (x, y) => {
         // Rename dialog is topmost — check first
         if (this.confirmDialog.handleClick(x, y)) return true;
+        if (this.groupRenameDialog?.handleClick(x, y)) return true;
         if (this.renameDialog?.handleClick(x, y)) return true;
         if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         const _wsClick = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
@@ -2583,6 +2606,12 @@ export class ClientApplication {
 
       this.uiManager.setShipRenameRequestCallback((shipId, currentName) => {
         this.renameDialog.open(shipId, currentName);
+      });
+
+      // Wire weapon-group rename rows in the ship settings panel
+      this.uiManager.setGroupRenameCallback((shipId, groupIndex, currentName) => {
+        const grp = this.controlGroups.get(groupIndex);
+        this.groupRenameDialog.open(groupIndex, grp?.name ?? currentName, grp?.name || `G${groupIndex + 1}`);
       });
 
       // Wire deck demolish buttons in the ship menu — confirm before sending to server
@@ -3922,6 +3951,28 @@ export class ClientApplication {
       this.renderSystem.combatMode = this.combatMode;
       if (this.explicitBuildMode) this.syncBuildModeState();
 
+      // Update ghost affordability every frame so slot tints update immediately.
+      // Covers both build-panel (pendingGhostKind) and hotbar-driven (activeItem) modes.
+      {
+        const _localP = localPlayer;
+        const _activeSlot = _localP?.inventory?.activeSlot ?? 0;
+        const _activeItem = _localP?.inventory?.slots[_activeSlot]?.item ?? 'none';
+        const _ITEM_TO_KIND: Partial<Record<string, GhostModuleKind>> = {
+          plank: 'plank', cannon: 'cannon', sail: 'mast', swivel: 'swivel',
+          helm_kit: 'helm', deck: 'deck', ramp: 'ramp',
+          wood_ceiling: 'hatch_cover', door: 'gunport', resource_chest: 'chest',
+        };
+        const _hoveredGpSnap = this.renderSystem.getHoveredGunportCannonSnap() !== null;
+        const _effectiveKind: GhostModuleKind | null =
+          this.pendingGhostKind ?? (_ITEM_TO_KIND[_activeItem] ?? (_hoveredGpSnap ? 'cannon' : null));
+        const _inAnyShipBuild = (this.buildMenuOpen || this.explicitBuildMode
+          || this.inputManager.buildMode || _hoveredGpSnap) && (_localP?.carrierId ?? 0) !== 0;
+        this.renderSystem.ghostCanAfford =
+          (_inAnyShipBuild && _effectiveKind)
+            ? this._canAffordShipBuild(_effectiveKind)
+            : true;
+      }
+
       // Sync tombstones into the render system on every frame
       this.renderSystem.updateTombstones(worldToRender.tombstones ?? []);
 
@@ -4065,6 +4116,13 @@ export class ClientApplication {
         );
       }
       // Rename dialog — topmost overlay
+      if (this.groupRenameDialog?.visible) {
+        this.groupRenameDialog.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
       if (this.renameDialog?.visible) {
         this.renameDialog.render(
           this.renderSystem.getContext(),
@@ -5077,6 +5135,35 @@ export class ClientApplication {
    * Mirrors the island schematic resource-check pattern exactly.
    * Returns true if resources were available and consumed, false (+ flashCancel) if not.
    */
+  /** Read-only affordability check — same logic as _consumeShipBuildResources but no deduction. */
+  private _canAffordShipBuild(kind: GhostModuleKind): boolean {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager.getAssignedPlayerId();
+    const player = ws?.players.find(p => p.id === playerId);
+    if (!player) return false;
+    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    if (!cost.wood && !cost.fiber && !cost.metal && !cost.stone) return true;
+
+    if (this._buildResourceSource === 'ship' && player.carrierId) {
+      const ship = ws?.ships.find(s => s.id === player.carrierId);
+      if (!ship) return false;
+      const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+      for (const m of ship.modules.filter(mod => mod.moduleData?.kind === 'chest')) {
+        const d = m.moduleData as any;
+        totals.wood  += d.wood  ?? 0; totals.fiber += d.fiber ?? 0;
+        totals.metal += d.metal ?? 0; totals.stone += d.stone ?? 0;
+      }
+      return totals.wood >= cost.wood && totals.fiber >= cost.fiber
+          && totals.metal >= cost.metal && totals.stone >= cost.stone;
+    }
+    // Pack / auto: check player resource pool
+    const res = (player.inventory as any).resources as Record<string, number> | undefined;
+    if (!res) return false;
+    return (res['wood']  ?? 0) >= cost.wood  && (res['fiber'] ?? 0) >= cost.fiber
+        && (res['metal'] ?? 0) >= cost.metal && (res['stone'] ?? 0) >= cost.stone;
+  }
+
   private _consumeShipBuildResources(kind: GhostModuleKind): boolean {
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     const playerId = this.networkManager.getAssignedPlayerId();
@@ -5748,6 +5835,8 @@ export class ClientApplication {
             e.preventDefault();
             break;
           }
+          // Block all interactions while in any build mode
+          if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) break;
           if (e.repeat) {
             // Hold-E: check if we should open the item picker
             if (this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {

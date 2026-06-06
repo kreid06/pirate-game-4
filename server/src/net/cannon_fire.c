@@ -511,14 +511,9 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
         while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
 
-        // Three zones:
-        //  ≤ ±30°           — track normally
-        //  ±30° to ±45°     — clamp to arc limit so cannon stays at its lateral edge
-        //  > ±45°           — reset to neutral (cursor is clearly pointing away)
-        const float CANNON_AIM_RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
-        if (fabsf(desired_offset) > CANNON_AIM_RANGE + CANNON_AIM_RESET_MARGIN) {
-            desired_offset = 0.0f; // Past grace zone — return to neutral
-        } else if (fabsf(desired_offset) > CANNON_AIM_RANGE) {
+        // Clamp to arc limit — cursor past lateral edge stays at the edge,
+        // never recenters to neutral.
+        if (fabsf(desired_offset) > CANNON_AIM_RANGE) {
             desired_offset = (desired_offset > 0.0f) ? CANNON_AIM_RANGE : -CANNON_AIM_RANGE;
         }
 
@@ -907,7 +902,8 @@ void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id) {
                 "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
-            "],\"targetShipId\":%u,\"gunportsOpen\":%u}", grp->target_ship_id, grp->gunports_open);
+            "],\"targetShipId\":%u,\"gunportsOpen\":%u,\"name\":\"%s\"}",
+            grp->target_ship_id, grp->gunports_open, grp->name);
     }
     if (pos < (int)sizeof(message) - 2)
         pos += snprintf(message + pos, sizeof(message) - pos, "]}");
@@ -954,7 +950,8 @@ void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShi
                 "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
-            "],\"targetShipId\":%u,\"gunportsOpen\":%u}", grp->target_ship_id, grp->gunports_open);
+            "],\"targetShipId\":%u,\"gunportsOpen\":%u,\"name\":\"%s\"}",
+            grp->target_ship_id, grp->gunports_open, grp->name);
     }
     if (pos < (int)sizeof(message) - 2)
         pos += snprintf(message + pos, sizeof(message) - pos, "]}");
@@ -2235,15 +2232,10 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         while (offset >  (float)M_PI) offset -= 2.0f * (float)M_PI;
         while (offset < -(float)M_PI) offset += 2.0f * (float)M_PI;
 
-        /* Three zones — same as ship cannon:
-         *   |offset| ≤ 30°          → track normally
-         *   30° < |offset| ≤ 45°   → clamp to ±30° edge
-         *   |offset| > 45°         → reset barrel to facing direction */
+        /* Clamp to arc limit — cursor past lateral edge stays at the edge,
+         * never recenters to facing direction. */
         const float AIM_RANGE  = 30.0f * ((float)M_PI / 180.0f);
-        const float RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
-        if (fabsf(offset) > AIM_RANGE + RESET_MARGIN) {
-            offset = 0.0f;
-        } else if (fabsf(offset) > AIM_RANGE) {
+        if (fabsf(offset) > AIM_RANGE) {
             offset = (offset > 0.0f) ? AIM_RANGE : -AIM_RANGE;
         }
 

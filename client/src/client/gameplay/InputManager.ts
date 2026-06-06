@@ -142,6 +142,8 @@ export class InputManager {
   // Build mode — set when a buildable item (e.g. plank) is in the active hotbar slot
   public buildMode: boolean = false;
   public onBuildPlace: ((worldPos: Vec2) => void) | null = null;
+  /** Returns true when a permanent gunport cannon snap is hovered — allows click-to-place even outside build mode. */
+  public checkGunportSnap: (() => boolean) | null = null;
 
   // Explicit build mode (toggled with B key — independent of hotbar items)
   public explicitBuildMode: boolean = false;
@@ -815,16 +817,13 @@ export class InputManager {
     let aimAngle: number;
     if (isIslandCannon) {
       aimAngle = aimAngleWorld;
-      // Apply ±30° arc limit around the cannon's facing direction (same as ship cannons)
-      const AIM_RANGE   = 30 * Math.PI / 180;
-      const RESET_RANGE = 45 * Math.PI / 180;
-      let offset = aimAngle - this.islandCannonFacingAngle;
-      // Normalize offset to [-π, π]
+      // Clamp to arc limit — cursor past lateral edge stays at the edge,
+      // never recenters to facing direction.
+      const AIM_RANGE = 30 * Math.PI / 180;
       const TWO_PI2 = 2 * Math.PI;
+      let offset = aimAngle - this.islandCannonFacingAngle;
       offset -= TWO_PI2 * Math.floor((offset + Math.PI) / TWO_PI2);
-      if (Math.abs(offset) > RESET_RANGE) {
-        offset = 0;
-      } else if (Math.abs(offset) > AIM_RANGE) {
+      if (Math.abs(offset) > AIM_RANGE) {
         offset = offset > 0 ? AIM_RANGE : -AIM_RANGE;
       }
       aimAngle = this.islandCannonFacingAngle + offset;
@@ -1417,7 +1416,7 @@ export class InputManager {
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.mountKind === 'helm') {
           const digit = parseInt(event.code.replace('Digit', ''));
-          const groupIdx = digit; // Key 1→G1, Key 2→G2, …, Key 9→G9
+          const groupIdx = digit - 1; // Key 1→G0 (Port), Key 2→G1, …, Key 9→G8
           if (this.isCtrlHeld()) {
             // Ctrl+Digit: assign hovered cannon to this group without changing selection
             if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
@@ -1447,7 +1446,7 @@ export class InputManager {
         break;
       case 'Digit0':
         if (this.mountKind === 'helm') {
-          const groupIdx = 0; // Key 0→G0
+          const groupIdx = 9; // Key 0→G9 (rightmost slot)
           if (this.isCtrlHeld()) {
             // Ctrl+0: assign hovered cannon to group 9 without changing selection
             if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
@@ -1574,9 +1573,10 @@ export class InputManager {
       }
 
       this.inputState.leftMouseDown = true;
-      
-      if (this.buildMode) {
-        // Build mode: left click places a building item (e.g. plank) at cursor
+
+      if (this.buildMode || (this.checkGunportSnap && this.checkGunportSnap())) {
+        // Build mode: left click places a building item (e.g. plank) at cursor.
+        // Also fires when a permanent gunport cannon snap is hovered (even without build mode).
         if (this.onBuildPlace) {
           this.onBuildPlace(this.inputState.mouseWorldPosition);
         }

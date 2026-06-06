@@ -399,7 +399,7 @@ interface PlacePlankMessage extends NetworkMessage {
   shipId: number;
   sectionName: string;
   segmentIndex: number;
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface PlaceCannonMessage extends NetworkMessage {
@@ -430,21 +430,21 @@ interface PlaceMastAtMessage extends NetworkMessage {
   shipId: number;
   localX: number;
   localY: number;
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface ReplaceHelmMessage extends NetworkMessage {
   type: MessageType.REPLACE_HELM;
   timestamp: number;
   shipId: number;
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface PlaceDeckMessage extends NetworkMessage {
   type: MessageType.PLACE_DECK;
   timestamp: number;
   deck_level?: number;
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface PlaceRampMessage extends NetworkMessage {
@@ -453,7 +453,7 @@ interface PlaceRampMessage extends NetworkMessage {
   shipId: number;
   snapIndex: number;
   rotation: number;  // ramp facing in radians (0, π/2, π, 3π/2)
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface PlaceHatchCoverMessage extends NetworkMessage {
@@ -461,7 +461,7 @@ interface PlaceHatchCoverMessage extends NetworkMessage {
   timestamp: number;
   shipId: number;
   snapIndex: number;
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface PlaceGunportMessage extends NetworkMessage {
@@ -469,7 +469,7 @@ interface PlaceGunportMessage extends NetworkMessage {
   timestamp: number;
   shipId: number;
   snapIndex: number; // 0-11 (0-5 = starboard, 6-11 = port)
-  resource_source?: 'pack' | 'ship';
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface ToggleGunportMessage extends NetworkMessage {
@@ -712,7 +712,7 @@ export class NetworkManager {
   public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
-  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number, gunportsOpen: boolean}[]) => void) | null = null;
+  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number, gunportsOpen: boolean, name: string}[]) => void) | null = null;
   /** Fired when the server confirms a gunport was toggled (open or closed). mass is the updated ship mass in kg (if provided). */
   public onGunportState: ((shipId: number, gunportId: number, isOpen: boolean, mass?: number) => void) | null = null;
   /** Fired when the server blocks a cannon fire attempt because its gunport is closed. */
@@ -1388,6 +1388,12 @@ export class NetworkManager {
     console.log(`🔳 Group gunport toggle → groups=[${groupIndices.join(',')}]`);
   }
 
+  /** Rename a weapon group on the given ship. Max 23 chars. */
+  sendRenameWeaponGroup(shipId: number, groupIndex: number, name: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'rename_weapon_group', shipId, groupIndex, name: name.slice(0, 23), timestamp: Date.now() }));
+  }
+
   /**
    * Force-reload the player's manned cannon, discarding the current round.
    * Tells the server to reset the reload timer so the cannon reloads immediately
@@ -1474,7 +1480,7 @@ export class NetworkManager {
    * Request the server to place a plank in a missing hull slot.
    * Server picks the first destroyed plank (100-109) and restores it, consuming 1 ITEM_PLANK.
    */
-  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex, resource_source: resourceSource });
   }
@@ -1653,7 +1659,7 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_CANNON from the player's inventory.
    */
-  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
     if (snapIndex !== undefined && snapIndex >= 0 && snapIndex <= 11) msg.snapIndex = snapIndex;
@@ -1676,7 +1682,7 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates.
    * Consumes 1 ITEM_SAIL from the player's inventory.
    */
-  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY, resource_source: resourceSource });
   }
@@ -1686,7 +1692,7 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_SWIVEL from the player's inventory.
    */
-  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
     if (deckId !== undefined) msg.deckId = deckId;
@@ -1697,7 +1703,7 @@ export class NetworkManager {
    * Request the server to place a resource chest at a free position on the player's ship or on land.
    * Consumes 1 ITEM_RESOURCE_CHEST from the player's inventory.
    */
-  sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CHEST_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
     if (shipId !== null) msg.shipId = shipId;
@@ -1732,7 +1738,7 @@ export class NetworkManager {
    * Request the server to replace the helm if it was destroyed.
    * Consumes 1 ITEM_HELM from the player's inventory.
    */
-  sendReplaceHelm(shipId: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendReplaceHelm(shipId: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId, resource_source: resourceSource });
   }
@@ -1741,7 +1747,7 @@ export class NetworkManager {
    * Request the server to place a missing deck module on the player's ship.
    * Consumes 1 ITEM_DECK from the player's inventory.
    */
-  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now(), deck_level: deckLevel, resource_source: resourceSource });
   }
@@ -1750,7 +1756,7 @@ export class NetworkManager {
    * Request the server to place a ramp at the given snap-point index on the player's ship.
    * Consumes 1 ITEM_RAMP from the player's inventory.
    */
-  sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_RAMP, timestamp: Date.now(), shipId, snapIndex, rotation, resource_source: resourceSource });
   }
@@ -1760,7 +1766,7 @@ export class NetworkManager {
    * Consumes 1 ITEM_WOOD_CEILING from the player's inventory.
    * Mutually exclusive with a ramp at the same snap point.
    */
-  sendPlaceHatchCover(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceHatchCover(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_HATCH_COVER, timestamp: Date.now(), shipId, snapIndex, resource_source: resourceSource });
   }
@@ -1769,7 +1775,7 @@ export class NetworkManager {
    * Request the server to place a gunport door at the given snap-point index (0-11) on the player's ship.
    * Consumes 1 ITEM_DOOR from the player's inventory.
    */
-  sendPlaceGunport(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' = 'pack'): void {
+  sendPlaceGunport(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_GUNPORT, timestamp: Date.now(), shipId, snapIndex, resource_source: resourceSource });
   }
@@ -2674,6 +2680,7 @@ export class NetworkManager {
           cannonIds: Array.isArray(g.cannonIds) ? g.cannonIds.map((id: any) => Number(id)) : [],
           targetShipId: g.targetShipId ?? 0,
           gunportsOpen: !!g.gunportsOpen,
+          name: typeof g.name === 'string' ? g.name : '',
         })) : [];
         this.onCannonGroupState?.(gsShipId, gsGroups);
         break;

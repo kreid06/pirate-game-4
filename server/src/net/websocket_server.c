@@ -792,23 +792,30 @@ static float module_placement_radius(ModuleTypeId type) {
 }
 
 /**
- * Returns true if placing a new module of (new_type) at ship-local client-pixel
- * position (new_x, new_y) on deck (new_deck) would overlap any existing module
- * on the ship.
+ * Returns the ID of the first existing module that would overlap a new module of
+ * (new_type) placed at ship-local client-pixel position (new_x, new_y) on deck
+ * (new_deck), or 0 if placement is clear.
+ *
+ * snap_idx: for cannon placements at a gunport snap point (0–11), only another
+ *   cannon occupying the SAME snap slot counts as a collision.  Radius-based
+ *   cannon-vs-cannon checks are suppressed so that cannons at adjacent gunports
+ *   do not block each other.  Pass -1 for all non-snap placements.
  *
  * Deck filtering rules:
- *   - Plank / deck modules are always skipped.
+ *   - Plank / deck modules are always skipped (placement radius == 0).
  *   - Cannon vs gunport: coexist — gunports are transparent to cannon placement.
  *   - Masts are deck-independent: they collide against and with every deck level.
  *   - All other modules only collide with modules on the same deck or deck_id==255.
  */
-static bool modules_overlap_at(const SimpleShip* ship,
-                                ModuleTypeId new_type, float new_x, float new_y,
-                                uint8_t new_deck) {
+static uint16_t modules_overlap_id_at(const SimpleShip* ship,
+                                       ModuleTypeId new_type, float new_x, float new_y,
+                                       uint8_t new_deck, int snap_idx) {
     float r_new = module_placement_radius(new_type);
-    if (r_new <= 0.0f) return false;
+    if (r_new <= 0.0f) return 0;
 
     bool new_is_mast = (new_type == MODULE_TYPE_MAST);
+    /* Snap-mode: cannon placed at a gunport slot — only block same-slot duplicates */
+    bool snap_mode = (new_type == MODULE_TYPE_CANNON && snap_idx >= 0 && snap_idx <= 11);
 
     for (uint8_t m = 0; m < ship->module_count; m++) {
         const ShipModule* mod = &ship->modules[m];
@@ -820,8 +827,15 @@ static bool modules_overlap_at(const SimpleShip* ship,
         if (new_type == MODULE_TYPE_CANNON && mod->type_id == MODULE_TYPE_GUNPORT) continue;
         if (new_type == MODULE_TYPE_GUNPORT && mod->type_id == MODULE_TYPE_CANNON) continue;
 
-        /* Deck filter — masts span all decks; everything else is deck-specific.
-         * Skip only when BOTH modules are deck-bound to different decks. */
+        /* Snap-mode: only flag a collision if an existing cannon already holds this snap slot */
+        if (snap_mode && mod->type_id == MODULE_TYPE_CANNON) {
+            if (mod->data.cannon.gunport_snap_idx != (uint8_t)snap_idx) continue;
+            return mod->id; /* same snap slot occupied */
+        }
+        /* Snap-mode: skip all non-cannon modules (position is pre-validated by gunport snap) */
+        if (snap_mode) continue;
+
+        /* Deck filter — masts span all decks; everything else is deck-specific. */
         bool ex_is_mast = (mod->type_id == MODULE_TYPE_MAST);
         if (!new_is_mast && !ex_is_mast) {
             uint8_t ex_deck = mod->deck_id;
@@ -833,9 +847,16 @@ static bool modules_overlap_at(const SimpleShip* ship,
         float dx = new_x - ex;
         float dy = new_y - ey;
         float min_dist = r_new + r_ex;
-        if (dx * dx + dy * dy < min_dist * min_dist) return true;
+        if (dx * dx + dy * dy < min_dist * min_dist) return mod->id;
     }
-    return false;
+    return 0;
+}
+
+/* Thin bool wrapper kept for mast / swivel / chest callers that don't need the ID. */
+static bool modules_overlap_at(const SimpleShip* ship,
+                                ModuleTypeId new_type, float new_x, float new_y,
+                                uint8_t new_deck) {
+    return modules_overlap_id_at(ship, new_type, new_x, new_y, new_deck, -1) != 0;
 }
 
 // ── Dock physics (shipyard CCD solver) ──────────────────────────────────────
@@ -5810,6 +5831,51 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "rename_weapon_group") == 0) {
+                            /* Rename a weapon group.
+                             * Payload: {"type":"rename_weapon_group","shipId":N,"groupIndex":G,"name":"..."}
+                             * Max 23 chars; name is sanitized (printable ASCII only). */
+                            WebSocketPlayer *rwg_player = find_player(client->player_id);
+                            if (!rwg_player) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"player_not_found\"}");
+                            } else {
+                                unsigned rwg_ship_id = 0;
+                                int      rwg_group   = -1;
+                                char     rwg_name[24] = {0};
+                                const char *rwg_sid = strstr(payload, "\"shipId\":");
+                                const char *rwg_gi  = strstr(payload, "\"groupIndex\":");
+                                const char *rwg_nm  = strstr(payload, "\"name\":\"");
+                                if (rwg_sid) rwg_ship_id = (unsigned)strtoul(rwg_sid + 9, NULL, 10);
+                                if (rwg_gi)  rwg_group   = (int)strtol(rwg_gi + 13, NULL, 10);
+                                if (rwg_nm) {
+                                    rwg_nm += 8; /* skip past "name":" */
+                                    int ni = 0;
+                                    while (*rwg_nm && *rwg_nm != '"' && ni < 23) {
+                                        char ch = *rwg_nm++;
+                                        if (ch >= 0x20 && ch < 0x7F) rwg_name[ni++] = ch;
+                                    }
+                                    rwg_name[ni] = '\0';
+                                }
+                                SimpleShip *rwg_ship = find_ship((uint16_t)rwg_ship_id);
+                                if (!rwg_ship || rwg_group < 0 || rwg_group >= MAX_WEAPON_GROUPS) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_group\"}");
+                                } else {
+                                    uint8_t co = rwg_player->company_id;
+                                    if (co < MAX_COMPANIES) {
+                                        snprintf(rwg_ship->weapon_groups[co][rwg_group].name,
+                                                 sizeof(rwg_ship->weapon_groups[co][rwg_group].name),
+                                                 "%s", rwg_name);
+                                        broadcast_cannon_group_state(rwg_ship, co);
+                                        log_info("✏️  Group %d on ship %u renamed to \"%s\" by player %u",
+                                                 rwg_group, rwg_ship_id, rwg_name, client->player_id);
+                                        strcpy(response, "{\"type\":\"message_ack\",\"status\":\"group_renamed\"}");
+                                    } else {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"invalid_company\"}");
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "ping") == 0) {
                             // JSON ping message
                             snprintf(response, sizeof(response),
@@ -7154,9 +7220,11 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                         }
                                         if (!sim_ship || !simple) {
+                                            log_warn("❌ [CANNON] Player %u: ship %u not found", client->player_id, target_ship_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
                                         } else if (sim_ship->module_count >= MAX_MODULES_PER_SHIP ||
                                                    simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                            log_warn("❌ [CANNON] Player %u: ship %u is full", client->player_id, target_ship_id);
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
                                         } else {
                                             // Parse local position and rotation (client px → server units)
@@ -7175,7 +7243,27 @@ int websocket_server_update(struct Sim* sim) {
                                             if (pdk) { unsigned dk = 0; sscanf(pdk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : player->deck_level; }
 
                                             // Server-side placement overlap check
-                                            if (modules_overlap_at(simple, MODULE_TYPE_CANNON, local_x, local_y, req_deck_id)) {
+                                            uint16_t overlap_id = modules_overlap_id_at(simple, MODULE_TYPE_CANNON,
+                                                                                         local_x, local_y, req_deck_id,
+                                                                                         cannon_snap_idx);
+                                            if (overlap_id) {
+                                                /* Find the colliding module's type for a helpful log */
+                                                const char *otype = "unknown";
+                                                for (uint8_t m = 0; m < simple->module_count; m++) {
+                                                    if (simple->modules[m].id == overlap_id) {
+                                                        switch (simple->modules[m].type_id) {
+                                                            case MODULE_TYPE_CANNON:  otype = "cannon";  break;
+                                                            case MODULE_TYPE_GUNPORT: otype = "gunport"; break;
+                                                            case MODULE_TYPE_MAST:    otype = "mast";    break;
+                                                            case MODULE_TYPE_PLANK:   otype = "plank";   break;
+                                                            default: otype = "module"; break;
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                                log_warn("❌ [CANNON] Player %u: overlap at (%.1f,%.1f) deck=%u on ship %u — blocked by %s id=%u",
+                                                         client->player_id, local_x, local_y, (unsigned)req_deck_id,
+                                                         target_ship_id, otype, (unsigned)overlap_id);
                                                 strcpy(response, "{\"type\":\"error\",\"message\":\"placement_overlap\"}");
                                             } else {
 
@@ -7229,6 +7317,45 @@ int websocket_server_update(struct Sim* sim) {
                                             // Add to SimpleShip (network broadcast + NPC visibility)
                                             simple->modules[simple->module_count++] = nc;
                                             recalc_ship_mass(simple);
+
+                                            /* Auto-assign to weapon group based on fire sector.
+                                             * Sector is derived from the cannon's local_rot:
+                                             *   315°–45°  → port      → group 0
+                                             *    45°–135° → bow       → group 3
+                                             *   135°–225° → starboard → group 1
+                                             *   225°–315° → stern     → group 2
+                                             */
+                                            {
+                                                float rot_deg = Q16_TO_FLOAT(nc.local_rot) * (180.0f / (float)M_PI);
+                                                while (rot_deg <    0.0f) rot_deg += 360.0f;
+                                                while (rot_deg >= 360.0f) rot_deg -= 360.0f;
+                                                int auto_group;
+                                                const char *sector_name;
+                                                if      (rot_deg >= 45.0f  && rot_deg < 135.0f) { auto_group = 3; sector_name = "bow";       }
+                                                else if (rot_deg >= 135.0f && rot_deg < 225.0f) { auto_group = 1; sector_name = "starboard"; }
+                                                else if (rot_deg >= 225.0f && rot_deg < 315.0f) { auto_group = 2; sector_name = "stern";     }
+                                                else                                             { auto_group = 0; sector_name = "port";      }
+                                                uint8_t co = player->company_id;
+                                                if (co < MAX_COMPANIES) {
+                                                    /* Remove from any existing group first */
+                                                    for (int _g = 0; _g < MAX_WEAPON_GROUPS; _g++) {
+                                                        WeaponGroup *_wg = &simple->weapon_groups[co][_g];
+                                                        for (int _c = 0; _c < _wg->weapon_count; _c++) {
+                                                            if (_wg->weapon_ids[_c] == nc.id) {
+                                                                _wg->weapon_ids[_c] = _wg->weapon_ids[_wg->weapon_count - 1];
+                                                                _wg->weapon_count--;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+                                                    WeaponGroup *tgt = &simple->weapon_groups[co][auto_group];
+                                                    if (tgt->weapon_count < MAX_WEAPONS_PER_GROUP) {
+                                                        tgt->weapon_ids[tgt->weapon_count++] = nc.id;
+                                                        log_info("🎯 Cannon %u → group %d (%s) company %u ship %u",
+                                                                 nc.id, auto_group, sector_name, (unsigned)co, simple->ship_id);
+                                                    }
+                                                }
+                                            }
 
                                             // Consume resources
                                             if (_ship_only)       res_consume_ship(_res_ship, MODULE_TYPE_CANNON);
@@ -9224,6 +9351,12 @@ int websocket_server_update(struct Sim* sim) {
                                     float sx = issuer ? issuer->x : 0.0f;
                                     float sy = issuer ? issuer->y : 0.0f;
 
+                                    /* If the issuer is aboard a ship, inherit ship context */
+                                    uint16_t spawn_ship_id  = issuer ? issuer->parent_ship_id : 0;
+                                    uint8_t  spawn_deck_lvl = issuer ? issuer->deck_level     : 1;
+                                    SimpleShip *spawn_ship  = spawn_ship_id
+                                                              ? find_ship(spawn_ship_id) : NULL;
+
                                     /* Trim trailing inactive slots then reuse or append */
                                     while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
                                         world_npc_count--;
@@ -9245,7 +9378,7 @@ int websocket_server_update(struct Sim* sim) {
                                     npc->id              = next_world_npc_id++;
                                     npc->active          = true;
                                     npc->role            = NPC_ROLE_NONE;
-                                    npc->ship_id         = 0;
+                                    npc->ship_id         = spawn_ship_id;
                                     npc->company_id      = spawn_company;
                                     /* For solo spawns, bind to the issuing player */
                                     npc->owner_player_id = (spawn_company == COMPANY_SOLO && issuer)
@@ -9253,31 +9386,54 @@ int websocket_server_update(struct Sim* sim) {
                                     npc->move_speed      = 80.0f;
                                     npc->interact_radius = 40.0f;
                                     npc->state           = WORLD_NPC_STATE_IDLE;
-                                    npc->x               = sx + 30.0f;
-                                    npc->y               = sy;
-                                    /* For ship_id==0 NPCs, tick_world_npcs syncs x/y FROM local_x/y,
-                                     * so they must match or the NPC will snap to (0,0) next tick. */
-                                    npc->local_x         = npc->x;
-                                    npc->local_y         = npc->y;
-                                    npc->target_local_x  = npc->x;
-                                    npc->target_local_y  = npc->y;
-                                    npc->npc_level       = 1;
-                                    npc->max_health      = 100;
-                                    npc->health          = 100;
-                                    npc->deck_level      = 1;  /* NPCs default to upper deck */
+                                    npc->deck_level      = spawn_deck_lvl;
+
+                                    if (spawn_ship) {
+                                        /* Aboard a ship — position in ship-local coordinates */
+                                        float lx, ly;
+                                        ship_world_to_local(spawn_ship, sx, sy, &lx, &ly);
+                                        npc->local_x        = lx;
+                                        npc->local_y        = ly;
+                                        npc->idle_local_x   = lx;
+                                        npc->idle_local_y   = ly;
+                                        npc->target_local_x = lx;
+                                        npc->target_local_y = ly;
+                                        /* Derive world pos from local so tick_world_npcs is consistent */
+                                        ship_local_to_world(spawn_ship, lx, ly, &npc->x, &npc->y);
+                                    } else {
+                                        /* On foot — use world coordinates directly */
+                                        npc->x               = sx + 30.0f;
+                                        npc->y               = sy;
+                                        npc->local_x         = npc->x;
+                                        npc->local_y         = npc->y;
+                                        npc->idle_local_x    = npc->x;
+                                        npc->idle_local_y    = npc->y;
+                                        npc->target_local_x  = npc->x;
+                                        npc->target_local_y  = npc->y;
+                                    }
                                     strncpy(npc->name,     "Crewmember",         sizeof(npc->name)     - 1);
                                     strncpy(npc->dialogue, "Aye aye, Captain!",  sizeof(npc->dialogue) - 1);
+                                    npc->npc_level  = 1;
+                                    npc->max_health = 100;
+                                    npc->health     = 100;
                                     g_npcs_dirty = true;
 
                                     const char *company_names[] = {"Unclaimed","Solo","Pirates","Navy"};
                                     const char *cname = (spawn_company < 4) ? company_names[spawn_company] : "Unknown";
-                                    log_info("👤 Spawned crewmember (id %u, company %s) at (%.0f,%.0f) by player %u",
-                                             npc->id, cname, npc->x, npc->y, client->player_id);
+                                    if (spawn_ship) {
+                                        log_info("👤 Spawned crewmember (id %u, company %s) on ship %u deck %u local=(%.0f,%.0f) by player %u",
+                                                 npc->id, cname, spawn_ship_id, (unsigned)spawn_deck_lvl,
+                                                 npc->local_x, npc->local_y, client->player_id);
+                                    } else {
+                                        log_info("👤 Spawned crewmember (id %u, company %s) at world (%.0f,%.0f) by player %u",
+                                                 npc->id, cname, npc->x, npc->y, client->player_id);
+                                    }
                                     snprintf(response, sizeof(response),
                                         "{\"type\":\"command_response\","
                                         "\"success\":true,"
-                                        "\"text\":\"Spawned crewmember (id %u) [%s] at your location.\"}",
-                                        npc->id, cname);
+                                        "\"text\":\"Spawned crewmember (id %u) [%s]%s.\"}",
+                                        npc->id, cname,
+                                        spawn_ship ? " aboard ship" : " at your location");
                                 }
                                 spawn_npc_done:;
 

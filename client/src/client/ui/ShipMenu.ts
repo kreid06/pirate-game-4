@@ -33,6 +33,7 @@ import {
   SHIP_ATTR_CAPS,
   SHIP_LEVEL_TOTAL_POINT_CAP,
   SHIP_LEVEL_XP_BASE,
+  WeaponGroupState,
 } from '../../sim/Types.js';
 import { computeInventoryWeight } from '../../sim/Inventory.js';
 
@@ -103,10 +104,17 @@ export class ShipMenu {
   /** Called when the player clicks Rename in settings — opens the rename dialog. */
   public onRenameRequest?: (shipId: number, currentName: string) => void;
 
+  /** Called when the player clicks a weapon group name row — prompt to rename. */
+  public onGroupRename?: (shipId: number, groupIndex: number, currentName: string) => void;
+
+  /** Current weapon group state (set each frame by UIManager before render). */
+  public controlGroups: Map<number, WeaponGroupState> = new Map();
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
   private _deckDemolishAreas: Array<{ moduleId: number; deckLevel: number; x: number; y: number; w: number; h: number }> = [];
+  private _groupRenameAreas:  Array<{ groupIndex: number; x: number; y: number; w: number; h: number }> = [];
   private _panelX = 0;
   private _panelY = 0;
   private _currentShipId = 0;
@@ -151,6 +159,14 @@ export class ShipMenu {
         if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
           this._settingsOpen = false;
           this.onRenameRequest?.(this._currentShipId, this._currentShipName);
+          return true;
+        }
+      }
+      // Weapon group rename rows
+      for (const area of this._groupRenameAreas) {
+        if (x >= area.x && x <= area.x + area.w && y >= area.y && y <= area.y + area.h) {
+          const grp = this.controlGroups.get(area.groupIndex);
+          this.onGroupRename?.(this._currentShipId, area.groupIndex, grp?.name ?? '');
           return true;
         }
       }
@@ -347,13 +363,15 @@ export class ShipMenu {
     shipCompany:  number,
     myCompany:    number,
   ): void {
-    const OW = 320;
-    const OH = 220;
+    const OW = 360;
+    const GRP_ROW_H = 26;
+    const GRP_COUNT = 10;
+    const OH = 38 + 8 + 38 + 12 + 38 + 12 + 20 + GRP_COUNT * GRP_ROW_H + 14;
     const ox = px + Math.round((PANEL_W - OW) / 2);
     const oy = py + Math.round((PANEL_H - OH) / 2);
 
     // Backdrop
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
     ctx.fillRect(px, py, PANEL_W, PANEL_H);
 
     // Panel
@@ -368,85 +386,117 @@ export class ShipMenu {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;
-    ctx.fillText('⚙  SHIP SETTINGS', ox + 14, oy + 22);
+    ctx.fillText('⚙  SHIP SETTINGS', ox + 14, oy + 19);
 
     // Divider
-    ctx.strokeStyle = BORDER;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(ox, oy + 38);
-    ctx.lineTo(ox + OW, oy + 38);
-    ctx.stroke();
+    const div = (y: number) => {
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ox + 8, y); ctx.lineTo(ox + OW - 8, y); ctx.stroke();
+    };
+    div(oy + 38);
 
     const isUnclaimed = shipCompany === COMPANY_UNCLAIMED;
     const isOwnShip   = !isUnclaimed && shipCompany === myCompany;
 
-    // Info text
-    ctx.font = '12px Georgia, serif';
-    ctx.fillStyle = TEXT_DIM;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    if (isUnclaimed) {
-      ctx.fillText('This ship has no owner.', ox + 14, oy + 48);
-      ctx.fillText('Claim it to bring it under your flag.', ox + 14, oy + 64);
-    } else if (isOwnShip) {
-      ctx.fillText('Remove faction ownership from this ship.', ox + 14, oy + 48);
-      ctx.fillText('NPCs aboard keep their current company.', ox + 14, oy + 64);
-    } else {
-      ctx.fillText('You do not own this ship.', ox + 14, oy + 48);
-    }
-
     const btnW = OW - 28;
     const btnH = 30;
     const btnX = ox + 14;
-    const claimBtnY  = oy + OH - btnH - 14;
-    const renameBtnY = claimBtnY - btnH - 8;
-
-    // Reset hit areas
     this._renameBtnArea  = null;
     this._unclaimBtnArea = null;
     this._claimBtnArea   = null;
+    this._groupRenameAreas = [];
 
-    // RENAME SHIP button (always shown)
+    let cy = oy + 46;
+
+    // ── RENAME SHIP button ──────────────────────────────────────────────────
     const currentName = this._currentShipName || '(unnamed)';
     ctx.fillStyle = 'rgba(100,140,255,0.15)';
-    ctx.fillRect(btnX, renameBtnY, btnW, btnH);
-    ctx.strokeStyle = '#6699ff';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(btnX, renameBtnY, btnW, btnH);
+    ctx.fillRect(btnX, cy, btnW, btnH);
+    ctx.strokeStyle = '#6699ff'; ctx.lineWidth = 1;
+    ctx.strokeRect(btnX, cy, btnW, btnH);
     ctx.font = 'bold 13px Georgia, serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#aabbff';
-    ctx.fillText(`✏  RENAME SHIP  (${currentName})`, btnX + btnW / 2, renameBtnY + btnH / 2);
-    this._renameBtnArea = { x: btnX, y: renameBtnY, w: btnW, h: btnH };
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#aabbff';
+    ctx.fillText(`✏  RENAME SHIP  (${currentName})`, btnX + btnW / 2, cy + btnH / 2);
+    this._renameBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
+    cy += btnH + 10;
 
+    div(cy); cy += 10;
+
+    // ── CLAIM / UNCLAIM button ──────────────────────────────────────────────
     if (isUnclaimed) {
-      // CLAIM SHIP button (green)
       ctx.fillStyle = 'rgba(68,204,102,0.15)';
-      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
-      ctx.strokeStyle = '#44cc66';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
+      ctx.fillRect(btnX, cy, btnW, btnH);
+      ctx.strokeStyle = '#44cc66'; ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, cy, btnW, btnH);
       ctx.font = 'bold 13px Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#88ffaa';
-      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
-      this._claimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#88ffaa';
+      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, cy + btnH / 2);
+      this._claimBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
     } else if (isOwnShip) {
-      // UNCLAIM SHIP button (red)
       ctx.fillStyle = 'rgba(255,85,68,0.15)';
-      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
-      ctx.strokeStyle = '#ff5544';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
+      ctx.fillRect(btnX, cy, btnW, btnH);
+      ctx.strokeStyle = '#ff5544'; ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, cy, btnW, btnH);
       ctx.font = 'bold 13px Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ff8877';
-      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
-      this._unclaimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ff8877';
+      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, cy + btnH / 2);
+      this._unclaimBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
+    } else {
+      ctx.font = '12px Georgia, serif';
+      ctx.fillStyle = TEXT_DIM; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('You do not own this ship.', btnX + btnW / 2, cy + btnH / 2);
+    }
+    cy += btnH + 10;
+
+    div(cy); cy += 10;
+
+    // ── WEAPON GROUPS ───────────────────────────────────────────────────────
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText('WEAPON GROUPS  (click to rename)', btnX, cy + 8);
+    cy += 20;
+
+    for (let g = 0; g < GRP_COUNT; g++) {
+      const grp = this.controlGroups.get(g);
+      const gName    = grp?.name ?? '';
+      const gCannons = grp?.cannonIds.length ?? 0;
+      const isStripe = g % 2 === 0;
+
+      ctx.fillStyle = isStripe ? 'rgba(255,255,255,0.04)' : 'transparent';
+      ctx.fillRect(btnX, cy, btnW, GRP_ROW_H);
+
+      // Edit pencil hint on right edge
+      const pencilW = 18;
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(150,180,255,0.4)';
+      ctx.fillText('✏', btnX + btnW - 4, cy + GRP_ROW_H / 2);
+
+      // Cannon count
+      const countStr = `${gCannons}×🔫`;
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = gCannons > 0 ? '#c0b890' : '#556';
+      const countW = ctx.measureText(countStr).width + 6;
+      ctx.fillText(countStr, btnX + btnW - pencilW - 4, cy + GRP_ROW_H / 2);
+
+      // Group name — primary label, font scaled to fit available width
+      const displayName = gName.length > 0 ? gName : '(unnamed)';
+      const nameAreaW   = btnW - countW - pencilW - 12;
+      let fontSize = 13;
+      ctx.font = `${gName.length > 0 ? '' : 'italic '}${fontSize}px Georgia, serif`;
+      while (fontSize > 8 && ctx.measureText(displayName).width > nameAreaW) {
+        fontSize--;
+        ctx.font = `${gName.length > 0 ? '' : 'italic '}${fontSize}px Georgia, serif`;
+      }
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = gName.length > 0 ? '#e8e0cc' : '#556';
+      ctx.fillText(displayName, btnX + 6, cy + GRP_ROW_H / 2);
+
+      this._groupRenameAreas.push({ groupIndex: g, x: btnX, y: cy, w: btnW - pencilW - 2, h: GRP_ROW_H });
+      cy += GRP_ROW_H;
     }
   }
 

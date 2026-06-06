@@ -737,7 +737,7 @@ export class UIManager {
     for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       if (x >= sx && x <= sx + SLOT_SIZE) {
-        const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
+        const groupIdx = i; // slot 0→G0 (Port), slot 1→G1 (Starboard), …, slot 9→G9
         const state = this._cachedControlGroups.get(groupIdx);
         if (!state) return false;
         const CYCLE: WeaponGroupMode[] = ['aiming', 'freefire', 'haltfire', 'targetfire'];
@@ -817,6 +817,7 @@ export class UIManager {
       this.playerMenu.shipHotbarSlots = _hudEl.buildHotbarSlots as (string | null)[];
     }
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
+    this.shipMenu.controlGroups = context.controlGroups ?? new Map();
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
@@ -1376,6 +1377,11 @@ export class UIManager {
    *  Receives the shipId and current name so a dialog can pre-fill the field. */
   setShipRenameRequestCallback(cb: (shipId: number, currentName: string) => void): void {
     this.shipMenu.onRenameRequest = cb;
+  }
+
+  /** Set callback for weapon group rename rows in the ship settings panel. */
+  setGroupRenameCallback(cb: (shipId: number, groupIndex: number, currentName: string) => void): void {
+    this.shipMenu.onGroupRename = cb;
   }
 
   /** Set callback for deck demolish buttons in the ship status menu. */
@@ -3942,7 +3948,7 @@ class HUDElement implements UIElement {
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy   = startY + PADDING;
-      const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
+      const groupIdx = i; // slot 0→G0 (Port), slot 1→G1 (Starboard), …, slot 9→G9
       const isActive = weaponMode
         ? weaponMode.activeGroups.has(groupIdx)
         : (i === activeSlot && activeSlot < 10);
@@ -3966,12 +3972,20 @@ class HUDElement implements UIElement {
         const modeLbl  = MODE_LABELS[mode] ?? mode;
         const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
 
-        // Group number label (top-centre)
-        ctx.font         = 'bold 11px Georgia, serif';
+        // Group label (top-centre): use name if set, else "G{n}"
+        const _gName = state?.name ?? '';
+        const _gLabel = _gName.length > 0 ? _gName : `G${groupIdx}`;
+        // Scale font to fit slot width
+        let _gFontSize = 11;
+        ctx.font = `bold ${_gFontSize}px Georgia, serif`;
+        while (_gFontSize > 7 && ctx.measureText(_gLabel).width > SLOT_SIZE - 4) {
+          _gFontSize--;
+          ctx.font = `bold ${_gFontSize}px Georgia, serif`;
+        }
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isActive ? '#ffd700' : 'rgba(160,160,180,0.75)';
-        ctx.fillText(`G${groupIdx}`, sx + SLOT_SIZE / 2, sy + 3);
+        ctx.fillText(_gLabel, sx + SLOT_SIZE / 2, sy + 3);
 
         // Cannon count (large, centre)
         if (count > 0) {

@@ -155,17 +155,25 @@ void tick_sinking_ships(void) {
  * configures them.  Called once after all modules have been added to the ship.
  */
 void ship_init_default_weapon_groups(SimpleShip* ship) {
+    /* Default names for the first 4 groups — match the auto-assign sectors */
+    static const char* DEFAULT_GROUP_NAMES[MAX_WEAPON_GROUPS] = {
+        "Port", "Starboard", "Stern", "Bow", "", "", "", "", "", ""
+    };
+
     /* Reset all groups to HALTFIRE with no cannons */
-    /* Reset all company slots to HALTFIRE with no cannons */
     for (int co = 0; co < MAX_COMPANIES; co++) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
-            ship->weapon_groups[co][g].mode         = (uint8_t)WEAPON_GROUP_MODE_HALTFIRE;
-            ship->weapon_groups[co][g].weapon_count = 0;
-            ship->weapon_groups[co][g].target_ship_id = 0;
+            ship->weapon_groups[co][g].mode            = (uint8_t)WEAPON_GROUP_MODE_HALTFIRE;
+            ship->weapon_groups[co][g].weapon_count    = 0;
+            ship->weapon_groups[co][g].target_ship_id  = 0;
+            strncpy(ship->weapon_groups[co][g].name,
+                    DEFAULT_GROUP_NAMES[g],
+                    sizeof(ship->weapon_groups[co][g].name) - 1);
+            ship->weapon_groups[co][g].name[sizeof(ship->weapon_groups[co][g].name) - 1] = '\0';
         }
     }
 
-    /* Partition cannons: port (local_y > 0) → group 1, starboard → group 2.
+    /* Partition cannons: port (local_y > 0) → group 0 (Port), starboard → group 1 (Starboard).
      * Apply to ALL company slots so that any company boarding the ship starts
      * with a sensible default layout. */
     for (int co = 0; co < MAX_COMPANIES; co++) {
@@ -174,7 +182,7 @@ void ship_init_default_weapon_groups(SimpleShip* ship) {
             if (mod->type_id != MODULE_TYPE_CANNON) continue;
 
             float local_y = Q16_TO_FLOAT(mod->local_pos.y);
-            int   target_group = (local_y > 0.0f) ? 1 : 2;
+            int   target_group = (local_y > 0.0f) ? 0 : 1;
             WeaponGroup* grp = &ship->weapon_groups[co][target_group];
             if (grp->weapon_count < MAX_WEAPONS_PER_GROUP) {
                 grp->weapon_ids[grp->weapon_count++] = mod->id;
@@ -182,10 +190,10 @@ void ship_init_default_weapon_groups(SimpleShip* ship) {
         }
     }
 
-    log_info("🔫 Ship %u: default groups — port=%d cannons (grp1), starboard=%d cannons (grp2) [all %d company slots]",
+    log_info("🔫 Ship %u: default groups — port=%d cannons (grp0), starboard=%d cannons (grp1) [all %d company slots]",
              ship->ship_id,
+             ship->weapon_groups[0][0].weapon_count,
              ship->weapon_groups[0][1].weapon_count,
-             ship->weapon_groups[0][2].weapon_count,
              MAX_COMPANIES);
 }
 

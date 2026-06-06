@@ -547,4 +547,6 @@ export interface WeaponGroupState {
   targetId: number;
   /** Whether this group's gunports are in the open state (toggled with R at helm). */
   gunportsOpen: boolean;
+  /** Player-assigned label for this group (e.g. "Port", "Starboard"). */
+  name: string;
 }
