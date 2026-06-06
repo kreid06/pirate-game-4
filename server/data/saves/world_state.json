@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1780701717,
+    "timestamp": 1780712597,
     "ship_count": 14,
     "npc_count": 51,
     "structure_count": 34
@@ -180,7 +180,7 @@
       "company": 99,
       "x": 6683.403,
       "y": 78694.047,
-      "rot": 4.229980,
+      "rot": 5.915054,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000031,
@@ -236,7 +236,7 @@
       "company": 99,
       "x": 81611.422,
       "y": 23215.855,
-      "rot": 4.587753,
+      "rot": 6.272827,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -460,7 +460,7 @@
       "company": 99,
       "x": 32704.287,
       "y": 16017.749,
-      "rot": 4.742416,
+      "rot": 0.144302,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -516,7 +516,7 @@
       "company": 99,
       "x": 3767.999,
       "y": 34571.766,
-      "rot": 2.778412,
+      "rot": 4.463470,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -663,6 +663,10 @@
         {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3073,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3094,"type":7,"lx":0.0000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":65000,"target_health":65000,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3086,"type":6,"lx":11.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
         {"id":3087,"type":6,"lx":-3.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
@@ -694,7 +698,7 @@
       "company": 99,
       "x": 9647.646,
       "y": 9800.546,
-      "rot": 4.055771,
+      "rot": 5.740814,
       "vx": 0.000,
       "vy": 0.000,
       "av": -0.000351,
@@ -743,7 +747,7 @@
       "level_stats": {"xp":0,"w":1,"r":1,"d":1,"c":1,"s":1}
     },
     {
-      "id": 17,
+      "id": 16,
       "seq": 14,
       "name": "",
       "type": 3,
@@ -761,7 +765,24 @@
       "is_sinking": false,
       "is_scaffolded": true,
       "modules": [
-        {"id":3585,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0}
+        {"id":3585,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3585,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3585,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3585,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3585,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3605,"type":6,"lx":11.5000,"ly":9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3604,"type":6,"lx":-3.5000,"ly":9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3603,"type":6,"lx":-18.5000,"ly":9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3602,"type":6,"lx":-28.1250,"ly":4.5000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3601,"type":6,"lx":-28.1250,"ly":-4.5000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3600,"type":6,"lx":-18.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3598,"type":6,"lx":11.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3597,"type":6,"lx":24.6250,"ly":-4.5000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3596,"type":6,"lx":24.6250,"ly":4.5000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3606,"type":7,"lx":0.0000,"ly":0.0000,"lr":0.000000,"health":65000,"max_health":65000,"target_health":65000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":3607,"type":7,"lx":0.0000,"ly":0.0000,"lr":0.000000,"health":65000,"max_health":65000,"target_health":65000,"gp_snap":255,"gp_open":0,"deck":1},
+        {"id":3608,"type":9,"lx":22.0000,"ly":0.0000,"lr":3.141571,"health":8000,"max_health":8000,"target_health":8000,"gp_snap":255,"gp_open":0,"deck":255},
+        {"id":3599,"type":6,"lx":-3.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0}
       ],
       "weapon_groups": [
       ],
@@ -2673,7 +2694,7 @@
       "construction_phase": 1,
       "construction_company": 3,
       "modules_placed": 0,
-      "scaffolded_ship_id": 17
+      "scaffolded_ship_id": 16
     }
   ],
   "island_resources": [
@@ -9629,7 +9650,7 @@
         {"idx":855,"health":100,"alive":true,"respawn_at":0},
         {"idx":856,"health":100,"alive":true,"respawn_at":0},
         {"idx":857,"health":100,"alive":true,"respawn_at":0},
-        {"idx":858,"health":0,"alive":false,"respawn_at":892596},
+        {"idx":858,"health":100,"alive":true,"respawn_at":0},
         {"idx":859,"health":100,"alive":true,"respawn_at":0},
         {"idx":860,"health":100,"alive":true,"respawn_at":0},
         {"idx":861,"health":100,"alive":true,"respawn_at":0},

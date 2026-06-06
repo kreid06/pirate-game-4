@@ -153,14 +153,18 @@ export class InputManager {
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
   public onRepairSail: (() => void) | null = null;
-  /** Called when R is pressed in ramp build mode to cycle the ramp facing by 90°. */
-  public onCycleRampFacing: (() => void) | null = null;
-  /** Called when R is pressed in ship build mode (non-ramp) to toggle resource source (pack ↔ ship). */
+  /** Called when E/Q is pressed in ramp or hatch build mode to cycle the facing by 90°. dir=+1 (E) or -1 (Q). */
+  public onCycleRampFacing: ((dir: 1 | -1) => void) | null = null;
+  /** Called when R is pressed in ship build mode to toggle resource source (pack ↔ ship). */
   public onToggleBuildResourceSource: (() => void) | null = null;
+  /** Called on every R press (any context) — used to pop up the resource panel. */
+  public onShowResourcePanel: (() => void) | null = null;
   /** Called when R is pressed while mounted at a cannon that is next to a gunport. */
   public onToggleGunportAtCannon: (() => void) | null = null;
   /** Set to true by ClientApplication when ramp build mode is active. */
   public inRampBuildMode: boolean = false;
+  /** Set to true by ClientApplication when hatch cover build mode is active. */
+  public inHatchBuildMode: boolean = false;
 
   // Build menu (B key — open panel + ghost placement system)
   /** True while the build menu panel is open. Affects right-click and other input. */
@@ -1288,15 +1292,13 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In ramp build mode: cycle the ramp facing by 90°.
-        // In ship build mode (non-ramp): toggle build resource source (pack ↔ ship).
+        // Always pop up the resource panel on R
+        this.onShowResourcePanel?.();
+        // In ship build mode: toggle build resource source (pack ↔ ship).
         // Mounted at cannon: toggle gunport at that position.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if (!this.inRampBuildMode && (this.explicitBuildMode || this.buildMenuOpen) && this.onToggleBuildResourceSource) {
+        if ((this.explicitBuildMode || this.buildMenuOpen) && this.onToggleBuildResourceSource) {
           this.onToggleBuildResourceSource();
-          event.preventDefault();
-        } else if (this.inRampBuildMode && this.onCycleRampFacing) {
-          this.onCycleRampFacing();
           event.preventDefault();
         } else if (this.mountKind === 'cannon' && this.onToggleGunportAtCannon) {
           this.onToggleGunportAtCannon();
@@ -1385,17 +1387,26 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyQ':
-        // In build mode or island build mode: rotate ghost left; otherwise no-op
-        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+        // Ramp/hatch build mode: rotate 90° counter-clockwise; otherwise free-rotate -15°
+        if ((this.inRampBuildMode || this.inHatchBuildMode) && this.onCycleRampFacing) {
+          this.onCycleRampFacing(-1);
+          event.preventDefault();
+        } else if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
           this.onBuildRotate(-15);
           event.preventDefault();
         }
         break;
       case 'KeyE':
-        // In build mode or island build mode: rotate ghost right; otherwise let interact mapping fire normally
-        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
-          this.onBuildRotate(15);
+        // Ramp/hatch build mode: rotate 90° clockwise; otherwise free-rotate +15°
+        if ((this.inRampBuildMode || this.inHatchBuildMode) && this.onCycleRampFacing) {
+          this.onCycleRampFacing(1);
           // Suppress interact so the same keypress doesn't also trigger an interaction
+          for (const m of this.actionMappings) {
+            if (m.action === 'interact' || m.action === 'ship_interact') m.pressed = false;
+          }
+          event.preventDefault();
+        } else if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+          this.onBuildRotate(15);
           for (const m of this.actionMappings) {
             if (m.action === 'interact' || m.action === 'ship_interact') m.pressed = false;
           }

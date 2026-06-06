@@ -196,7 +196,7 @@ export class ClientApplication {
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
   /** Which resource pool to draw from when placing ship modules: 'ship' = ship chest, 'pack' = player pack. */
-  private _buildResourceSource: 'pack' | 'ship' = 'ship';
+  private _buildResourceSource: 'pack' | 'ship' | 'auto' = 'auto';
   /** Ship Plan Menu selection — only set by clicking a row in the left Plan Menu panel.
    *  Kept separate from pendingGhostKind (hotbar) so the two are mutually exclusive,
    *  mirroring how island uses pendingLandBuildKind vs buildSchematicKind. */
@@ -1245,11 +1245,10 @@ export class ClientApplication {
             }
           }
 
-          // Demolish mode: on own ship, hovering a non-plank module → hold [E] to demolish
+          // Demolish mode: on own ship, hovering a non-deck module → hold [E] to demolish
           if (player && player.carrierId !== 0) {
             const hoveredDemolish = this.renderSystem.getHoveredModule();
-            if (hoveredDemolish && hoveredDemolish.module.kind !== 'plank' &&
-                hoveredDemolish.module.kind !== 'deck' &&
+            if (hoveredDemolish && hoveredDemolish.module.kind !== 'deck' &&
                 hoveredDemolish.ship.id === player.carrierId) {
               const modLx = hoveredDemolish.module.localPos.x;
               const modLy = hoveredDemolish.module.localPos.y;
@@ -1582,8 +1581,8 @@ export class ClientApplication {
         }
       };
 
-      this.inputManager.onCycleRampFacing = () => {
-        this.renderSystem.cycleRampFacing();
+      this.inputManager.onCycleRampFacing = (dir: 1 | -1) => {
+        this.renderSystem.cycleRampFacing(dir);
       };
 
       // R key while mounted at a cannon: toggle the gunport at that cannon's position
@@ -2072,8 +2071,8 @@ export class ClientApplication {
             // On a ship — open ship ghost build panel; default resource source to 'ship'
             this.buildMenuOpen = true;
             this.inputManager.buildMenuOpen = true;
-            this._buildResourceSource = 'ship';
-            this.uiManager.buildResourceSource = 'ship';
+            this._buildResourceSource = 'auto';
+            this.uiManager.buildResourceSource = 'auto';
             // If a buildable item is in the hotbar, also enter free-placement mode
             const activeSlot = player.inventory?.activeSlot ?? 0;
             const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
@@ -2104,13 +2103,18 @@ export class ClientApplication {
         }
       };
 
+      this.inputManager.onShowResourcePanel = () => {
+        this.uiManager.flashResourcePanel();
+      };
+
       // Right-click in build menu or island build mode: cancel ghost or remove nearest
       this.inputManager.onToggleBuildResourceSource = () => {
         const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
         const pid = this.networkManager.getAssignedPlayerId();
         const player = ws?.players.find(p => p.id === pid);
         if (!player?.carrierId) return; // only meaningful while on a ship
-        this._buildResourceSource = this._buildResourceSource === 'ship' ? 'pack' : 'ship';
+        this._buildResourceSource = this._buildResourceSource === 'auto' ? 'ship'
+                                    : this._buildResourceSource === 'ship' ? 'pack' : 'auto';
         this.uiManager.buildResourceSource = this._buildResourceSource;
         console.log(`🏗️ [BUILD] Resource source → ${this._buildResourceSource}`);
       };
@@ -4801,7 +4805,10 @@ export class ClientApplication {
     this.renderSystem.setHatchBuildMode(!this.explicitBuildMode && inHatchBuildMode);
     this.renderSystem.setGunportBuildMode(!this.explicitBuildMode && inGunportBuildMode);
     this.renderSystem.setChestBuildMode(!this.explicitBuildMode && inChestBuildMode);
-    if (this.inputManager) this.inputManager.inRampBuildMode = !this.explicitBuildMode && inRampBuildMode;
+    if (this.inputManager) {
+      this.inputManager.inRampBuildMode  = !this.explicitBuildMode && inRampBuildMode;
+      this.inputManager.inHatchBuildMode = !this.explicitBuildMode && inHatchBuildMode;
+    }
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
       || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || inGunportBuildMode || inChestBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');

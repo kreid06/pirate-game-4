@@ -2523,10 +2523,66 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
 
         ShipModule* mod = &ship->modules[mod_idx];
 
-        /* Planks use the placement/repair system — not demolishable here */
+        /* Planks: demolish by removing from both ships and broadcasting PLANK_HIT
+         * (same wire format as a cannonball kill so the client reuses that path). */
         if (mod->type_id == MODULE_TYPE_PLANK) {
+            /* Range check */
+            const float DEMOLISH_RANGE_PX = 120.0f;
+            float mod_lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+            float mod_ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+            float dx = player->local_x - mod_lx;
+            float dy = player->local_y - mod_ly;
+            if (dx * dx + dy * dy > DEMOLISH_RANGE_PX * DEMOLISH_RANGE_PX) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
+                goto dm_send;
+            }
+
+            /* Capture health before memmove invalidates the pointer */
+            q16_t plank_health = mod->health;
+            q16_t plank_max_hp = mod->max_health;
+
+            /* Remove from SimpleShip */
+            memmove(&ship->modules[mod_idx],
+                    &ship->modules[mod_idx + 1],
+                    ((size_t)ship->module_count - (size_t)mod_idx - 1) * sizeof(ShipModule));
+            ship->module_count--;
+
+            /* Remove from global_sim counterpart */
+            if (global_sim) {
+                for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                    if (global_sim->ships[si].id != (entity_id)ship_id) continue;
+                    struct Ship* sim_ship = &global_sim->ships[si];
+                    for (int mi = 0; mi < (int)sim_ship->module_count; mi++) {
+                        if (sim_ship->modules[mi].id != (uint16_t)module_id) continue;
+                        memmove(&sim_ship->modules[mi],
+                                &sim_ship->modules[mi + 1],
+                                ((size_t)sim_ship->module_count - (size_t)mi - 1) * sizeof(ShipModule));
+                        sim_ship->module_count--;
+                        break;
+                    }
+                    break;
+                }
+            }
+
+            /* Broadcast as PLANK_HIT (destroyed) — clients already handle this */
+            char plank_bcast[160];
+            snprintf(plank_bcast, sizeof(plank_bcast),
+                     "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                     "\"damage\":9999,\"x\":%.1f,\"y\":%.1f}",
+                     ship_id, module_id,
+                     SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x)) + ship->x,
+                     SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y)) + ship->y);
+            websocket_server_broadcast(plank_bcast);
+
+            /* Refund half the plank cost scaled by remaining health */
+            res_refund_module_demolish(player, MODULE_TYPE_PLANK, plank_health, plank_max_hp);
+
+            log_info("🪓 Player %u demolished plank %u on ship %u",
+                     player->player_id, module_id, ship_id);
+
             snprintf(response, sizeof(response),
-                     "{\"type\":\"demolish_fail\",\"reason\":\"cant_demolish_planks\"}");
+                     "{\"type\":\"message_ack\",\"status\":\"plank_demolished\"}");
             goto dm_send;
         }
 
@@ -2555,9 +2611,11 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
         }
 
-        /* Capture type and deck before the memmove invalidates the pointer */
+        /* Capture type, deck, and health before the memmove invalidates the pointer */
         ModuleTypeId demolished_type   = mod->type_id;
         uint8_t      demolished_deck   = mod->deck_id;
+        q16_t        demolished_health = mod->health;
+        q16_t        demolished_max_hp = mod->max_health;
 
         log_info("🪓 Player %u demolished module %u (type %u) on ship %u",
                  player->player_id, module_id, (unsigned)demolished_type, ship_id);
@@ -2593,6 +2651,9 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
                      ship_id, module_id);
             websocket_server_broadcast(bcast);
         }
+
+        /* Refund half the module cost scaled by remaining health */
+        res_refund_module_demolish(player, demolished_type, demolished_health, demolished_max_hp);
 
         /* ── Cascade: if a deck was demolished, remove all modules on that deck ── */
         if (demolished_type == MODULE_TYPE_DECK) {
@@ -2632,9 +2693,15 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
                         websocket_server_broadcast(cbcast);
                     }
 
+                    /* Refund half the cost scaled by remaining health for cascaded module */
+                    q16_t casc_health = ship->modules[m].health;
+                    q16_t casc_max_hp = ship->modules[m].max_health;
+
                     memmove(&ship->modules[m], &ship->modules[m + 1],
                             ((size_t)ship->module_count - m - 1) * sizeof(ShipModule));
                     ship->module_count--;
+
+                    res_refund_module_demolish(player, t, casc_health, casc_max_hp);
                     /* do NOT increment m — we've shifted the array */
                 }
             }

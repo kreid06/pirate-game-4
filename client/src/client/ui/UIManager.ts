@@ -193,7 +193,7 @@ export class UIManager {
   /** Supplier for land-chest resources accessible from a nearby shipyard — null when not near a shipyard. */
   public getShipyardResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
   /** Which resource pool is active for ship building: 'ship' = chest, 'pack' = player. Toggled with R. */
-  public buildResourceSource: 'pack' | 'ship' = 'ship';
+  public buildResourceSource: 'pack' | 'ship' | 'auto' = 'auto';
   /** Persistent column display order in the resource panel (left=lowest priority, right=highest). */
   public columnOrder: string[] = ['PACK', 'CHEST', 'YARD'];
   /** Active column header drag state (null when not dragging). */
@@ -263,6 +263,11 @@ export class UIManager {
     { kind: 'hatch_cover', label: 'Hatch Cover',     symbol: '⊞', color: '#8b832b', borderColor: '#5a5520', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
   ];
+
+  /** Plan Menu entries — same as BUILD_PANEL_ENTRIES but without plank/deck (placed via schematics). */
+  static readonly PLAN_PANEL_ENTRIES = UIManager.BUILD_PANEL_ENTRIES.filter(
+    e => e.kind !== 'plank' && e.kind !== 'deck'
+  );
 
   private static readonly BUILD_PANEL_W = 192;
   private static readonly BUILD_PANEL_ENTRY_H = 54;
@@ -361,9 +366,13 @@ export class UIManager {
   /** Per-resource row flash state: maps resource key → { until, direction } */
   private _resourceRowFlash = new Map<string, { until: number; dir: 'up' | 'down' }>();
 
+  /** Timestamp of last resource-source toggle (for the pop animation on the active column). */
+  private _resourceSourceToggledAt = 0;
+
   /** Flash the resource panel visible for ~3 seconds (call when resources are gained). */
   flashResourcePanel(): void {
     this._resourceFlashUntil = performance.now() + 3000;
+    this._resourceSourceToggledAt = performance.now();
   }
 
   /** Flash a specific resource row green (up) or red (down) for 1.2 seconds. */
@@ -1742,7 +1751,7 @@ export class UIManager {
     const W = UIManager.BUILD_PANEL_W;
     const ENTRY_H = UIManager.BUILD_PANEL_ENTRY_H;
     const HEADER_H = UIManager.BUILD_PANEL_HEADER_H;
-    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const entries = UIManager.PLAN_PANEL_ENTRIES;
     const totalH = HEADER_H + entries.length * ENTRY_H + 8;
     const panelY = (this.canvas.height - totalH) / 2;
 
@@ -2042,7 +2051,9 @@ export class UIManager {
       ctx.font      = '8px monospace';
       ctx.fillStyle = 'rgba(200,180,120,0.6)';
       ctx.textAlign = 'right';
-      ctx.fillText(`[R] ${this.buildResourceSource === 'ship' ? 'CHEST' : 'PACK'}`, resX + RES_W - PAD, resY + TITLE_H / 2);
+      const _rHint = this.buildResourceSource === 'ship' ? 'CHEST'
+                   : this.buildResourceSource === 'pack' ? 'PACK' : 'AUTO';
+      ctx.fillText(`[R] ${_rHint}`, resX + RES_W - PAD, resY + TITLE_H / 2);
     }
 
     // Column headers — highlight active resource source column
@@ -2056,7 +2067,8 @@ export class UIManager {
     };
 
     // Determine which column index is "active" for building
-    const activeColHeader = this.buildResourceSource === 'ship' ? 'CHEST' : 'PACK';
+    const activeColHeader = this.buildResourceSource === 'ship' ? 'CHEST'
+                           : this.buildResourceSource === 'pack' ? 'PACK' : null;
     const activeColIdx = cols.findIndex(c => c.header === activeColHeader);
 
     ctx.font      = 'bold 9px Georgia, serif';
@@ -2068,14 +2080,18 @@ export class UIManager {
     for (let ci = 0; ci < cols.length; ci++) {
       const colCX = colStartX + ci * COL_W + COL_W / 2;
       if (ci === activeColIdx) {
+        // Pulse alpha — fades from 0.55 → 0.14 over 400 ms after source toggle
+        const toggleAge = performance.now() - this._resourceSourceToggledAt;
+        const PULSE_MS = 400;
+        const pulseExtra = toggleAge < PULSE_MS ? 0.55 * (1 - toggleAge / PULSE_MS) : 0;
         // Draw highlight background spanning header + data rows
-        ctx.fillStyle = `rgba(${cols[ci].color.slice(1,3) === 'ff' ? '255,200,40' : '60,140,220'},0.14)`;
+        ctx.fillStyle = `rgba(${cols[ci].color.slice(1,3) === 'ff' ? '255,200,40' : '60,140,220'},${(0.14 + pulseExtra).toFixed(2)})`;
         ctx.beginPath();
         ctx.roundRect(colStartX + ci * COL_W, resY + TITLE_H + 2, COL_W - 1, resH - TITLE_H - 4, 3);
         ctx.fill();
         // Bright border along top
         ctx.strokeStyle = cols[ci].color;
-        ctx.lineWidth = 1.5;
+        ctx.lineWidth = 1.5 + (toggleAge < PULSE_MS ? 1.5 * (1 - toggleAge / PULSE_MS) : 0);
         ctx.beginPath();
         ctx.moveTo(colStartX + ci * COL_W + 2, resY + TITLE_H + 2);
         ctx.lineTo(colStartX + ci * COL_W + COL_W - 3, resY + TITLE_H + 2);
@@ -2420,7 +2436,7 @@ export class UIManager {
     const EH     = UIManager.BUILD_PANEL_ENTRY_H;
     const HH     = UIManager.BUILD_PANEL_HEADER_H;
     const PAD    = 10;
-    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const entries = UIManager.PLAN_PANEL_ENTRIES;
     const totalH = HH + entries.length * EH + 8;
     const px     = 0;
     const py     = Math.round((canvas.height - totalH) / 2);

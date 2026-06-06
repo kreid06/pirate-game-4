@@ -2388,9 +2388,9 @@ export class RenderSystem {
     return this.rampBuildMode;
   }
 
-  /** Advance the ramp facing by 90° (cycles 0→1→2→3→0). Call on R key in ramp build mode. */
-  cycleRampFacing(): void {
-    this.rampFacing = (this.rampFacing + 1) % 4;
+  /** Advance the ramp facing by 90°. dir=+1 (E key, clockwise) or -1 (Q key, counter-clockwise). */
+  cycleRampFacing(dir: 1 | -1 = 1): void {
+    this.rampFacing = ((this.rampFacing + dir) % 4 + 4) % 4;
   }
 
   /** Returns the current ramp rotation in radians (0, π/2, π, or 3π/2). */
@@ -7383,36 +7383,7 @@ export class RenderSystem {
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad);
 
-      if (isSchematic) {
-        // Schematic (under construction): always draw at full opacity, skip vis-poly transparency
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(-half, -half, sz, sz);
-        ctx.clip();
-        drawCeilContent(1);
-        ctx.restore();
-        // Ghost overlay + progress bar + repair icon when hammer equipped
-        if (this.hammerEquipped) {
-          ctx.globalAlpha = 1;
-          ctx.fillStyle = 'rgba(120,200,255,0.22)';
-          ctx.fillRect(-half, -half, sz, sz);
-          const buildFrac = Math.max(0, Math.min(1, targetHp > 0 ? s.hp / targetHp : 0));
-          const barW = sz * 0.7;
-          const barH = Math.max(2, 4 * zoom);
-          const barX = -barW / 2;
-          const barY = -half - barH - 2;
-          ctx.strokeStyle = '#b0e0ff';
-          ctx.lineWidth = 1;
-          ctx.strokeRect(barX, barY, barW, barH);
-          ctx.fillStyle = '#55ddff';
-          ctx.fillRect(barX, barY, barW * buildFrac, barH);
-          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-          ctx.fillStyle = '#b0e0ff';
-          ctx.fillText('\u2692', 0, barY - 2);
-        }
-      } else if (visPolyValid) {
+      if (visPolyValid) {
         const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
         const vp = new Float32Array(visPolyPts.length);
         for (let i = 0; i < visPolyPts.length; i += 2) {
@@ -7445,16 +7416,6 @@ export class RenderSystem {
         ctx.clip();
         drawCeilContent(MIN_CEIL_ALPHA);
         ctx.restore();
-
-        // Repair icon for non-schematic damaged ceilings when hammer equipped
-        if (this.hammerEquipped && dmgDarken > 0.01) {
-          ctx.globalAlpha = 1;
-          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
-          ctx.fillText('\u2692', 0, 0);
-        }
       } else {
         ctx.save();
         ctx.beginPath();
@@ -7462,16 +7423,39 @@ export class RenderSystem {
         ctx.clip();
         drawCeilContent(1);
         ctx.restore();
+      }
 
-        // Repair icon for non-schematic damaged ceilings when hammer equipped
-        if (this.hammerEquipped && dmgDarken > 0.01) {
-          ctx.globalAlpha = 1;
+      // Schematic (under construction / repairing) overlay — drawn on top of
+      // the vis-poly result so transparency still works while building.
+      if (isSchematic) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(120,200,255,0.18)';
+        ctx.fillRect(-half, -half, sz, sz);
+        if (this.hammerEquipped) {
+          const buildFrac = Math.max(0, Math.min(1, targetHp > 0 ? s.hp / targetHp : 0));
+          const barW = sz * 0.7;
+          const barH = Math.max(2, 4 * zoom);
+          const barX = -barW / 2;
+          const barY = -half - barH - 2;
+          ctx.strokeStyle = '#b0e0ff';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+          ctx.fillStyle = '#55ddff';
+          ctx.fillRect(barX, barY, barW * buildFrac, barH);
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
-          ctx.fillText('\u2692', 0, 0);
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', 0, barY - 2);
         }
+      } else if (this.hammerEquipped && dmgDarken > 0.01) {
+        // Repair icon for damaged ceilings when hammer equipped
+        ctx.globalAlpha = 1;
+        ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+        ctx.fillText('\u2692', 0, 0);
       }
 
       ctx.globalAlpha = 1;
