@@ -482,22 +482,24 @@ uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
      * Strip all plank modules from both SimpleShip and sim ship so the plank
      * drain logic never runs and the hit path goes through the ghost entry point. */
     {
-        /* Strip planks from SimpleShip */
+        /* Strip planks and decks from SimpleShip */
         int write = 0;
         for (int m = 0; m < ship->module_count; m++) {
-            if (ship->modules[m].type_id != MODULE_TYPE_PLANK)
+            if (ship->modules[m].type_id != MODULE_TYPE_PLANK
+                && ship->modules[m].type_id != MODULE_TYPE_DECK)
                 ship->modules[write++] = ship->modules[m];
         }
         ship->module_count = write;
 
-        /* Strip planks from sim ship */
+        /* Strip planks and decks from sim ship */
         if (global_sim) {
             for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                 if (global_sim->ships[si].id != ship_id) continue;
                 struct Ship* sim_ship = &global_sim->ships[si];
                 uint8_t sw = 0;
                 for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
-                    if (sim_ship->modules[sm].type_id != MODULE_TYPE_PLANK)
+                    if (sim_ship->modules[sm].type_id != MODULE_TYPE_PLANK
+                        && sim_ship->modules[sm].type_id != MODULE_TYPE_DECK)
                         sim_ship->modules[sw++] = sim_ship->modules[sm];
                 }
                 sim_ship->module_count = sw;
@@ -510,6 +512,9 @@ uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
                 int32_t scaled_hp = (int32_t)(60000.0f * hp_mult);
                 sim_ship->ghost_max_hull_hp = scaled_hp;
                 sim_ship->hull_health = scaled_hp;
+                /* Mark sim ship as ghost company so the hull-drain/heal and
+                 * damage code paths use ghost-specific logic (company_id == 99). */
+                sim_ship->company_id = COMPANY_GHOST;
                 break;
             }
         }
@@ -659,6 +664,18 @@ uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
 #define GHOST_TURN_RATE         2.0f   /* rad/s — very agile, feels supernatural */
 /* Slow spin rate added every tick while wandering — makes the brig spiral/spiral */
 #define GHOST_SPIN_RATE         1.0f   /* rad/s — roughly 1 full rotation per 6 s */
+
+/* ── Ghost ship auto-spawner / AI culling ──────────────────────────────────── */
+/* Max simultaneous ghost ships in the world */
+#define GHOST_MAX_POPULATION       100
+/* Minimum distance from any island edge (client px) for a valid spawn point */
+#define GHOST_MIN_ISLAND_DIST      2500.0f
+/* AI skipped if no player is within this distance (render dist ~5000 + 500 tolerance) */
+#define GHOST_AI_PLAYER_RANGE      5500.0f
+/* Spawner fires at most once per this interval (seconds) */
+#define GHOST_SPAWN_INTERVAL_S     5.0f
+/* Attempts per spawner firing before giving up */
+#define GHOST_SPAWN_MAX_ATTEMPTS   30
 /* Per-ghost wander timer array indexed by ship slot.  Initialised to 0.
  * Value = seconds remaining until next heading change.  When it hits 0 we
  * pick a new heading and reset. */
@@ -666,6 +683,11 @@ static float ghost_wander_timer[MAX_SIMPLE_SHIPS] = {0};
 static float ghost_desired_heading[MAX_SIMPLE_SHIPS] = {0};
 /* Oscillating sweeping aim phase (radians, accumulates over time) */
 static float ghost_aim_phase[MAX_SIMPLE_SHIPS] = {0};
+/* Forced aggro target (ship_id) set by damage events or pack-alert; 0 = none */
+static uint32_t ghost_forced_target[MAX_SIMPLE_SHIPS] = {0};
+
+/* Radius within which an alerted ghost propagates its target to idle fleet-mates */
+#define GHOST_PACK_ALERT_RADIUS  3000.0f
 
 void tick_ghost_ships(float dt) {
     for (int s = 0; s < ship_count; s++) {
@@ -674,22 +696,93 @@ void tick_ghost_ships(float dt) {
         if (ship->ship_type != SHIP_TYPE_GHOST) continue;
         if (ship->is_sinking) continue;
 
-        /* ── 1. Find nearest enemy (COMPANY_PIRATES or any non-NAVY ship) ── */
+        /* ── AI culling: skip processing when no player is within render range ──
+         * Render distance is approximately 5000 client px; we add 500 px tolerance
+         * so ghosts begin reacting slightly before they enter the player's view. */
+        {
+            const float AI_RANGE2 = GHOST_AI_PLAYER_RANGE * GHOST_AI_PLAYER_RANGE;
+            bool player_nearby = false;
+            for (int pi = 0; pi < WS_MAX_CLIENTS && !player_nearby; pi++) {
+                if (!players[pi].active) continue;
+                float px, py;
+                if (players[pi].parent_ship_id != 0) {
+                    /* Player is aboard a ship — use the ship's world position.
+                     * Fall back to player's own coords if ship lookup fails
+                     * (stale parent_ship_id after a sink event). */
+                    SimpleShip* ps = find_ship(players[pi].parent_ship_id);
+                    if (ps) { px = ps->x; py = ps->y; }
+                    else    { px = players[pi].x; py = players[pi].y; }
+                } else {
+                    px = players[pi].x; py = players[pi].y;
+                }
+                float dx = px - ship->x, dy = py - ship->y;
+                if (dx * dx + dy * dy <= AI_RANGE2) player_nearby = true;
+            }
+            if (!player_nearby) {
+                /* No player in range — freeze the ghost in place by zeroing velocity
+                 * so it doesn't drift from momentum when culled. */
+                ship->velocity_x = 0.0f;
+                ship->velocity_y = 0.0f;
+                struct Ship* _gs = find_sim_ship(ship->ship_id);
+                if (_gs) { _gs->velocity.x = 0; _gs->velocity.y = 0; }
+                continue;
+            }
+        }
+
+        /* ── 1. Resolve target (forced aggro takes priority over range scan) ── */
         SimpleShip* target = NULL;
-        float best_dist2   = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
 
-        for (int t = 0; t < ship_count; t++) {
-            if (t == s) continue;
-            SimpleShip* cand = &ships[t];
-            if (!cand->active || cand->is_sinking) continue;
-            if (is_allied(ship->company_id, cand->company_id)) continue; /* skip friendly */
+        /* Forced target: set by damage events or pack-alert.  Pursue regardless
+         * of normal attack range; clear once the target is gone. */
+        if (ghost_forced_target[s] != 0) {
+            SimpleShip* ft = find_ship(ghost_forced_target[s]);
+            if (ft && ft->active && !ft->is_sinking && !is_allied(ship->company_id, ft->company_id)) {
+                target = ft;
+            } else {
+                ghost_forced_target[s] = 0; /* target gone — fall through to range scan */
+            }
+        }
 
-            float dx = cand->x - ship->x;
-            float dy = cand->y - ship->y;
-            float d2 = dx * dx + dy * dy;
-            if (d2 < best_dist2) {
-                best_dist2 = d2;
-                target     = cand;
+        /* Normal attack-range scan (only if no forced target) */
+        if (!target) {
+            float best_dist2 = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+            for (int t = 0; t < ship_count; t++) {
+                if (t == s) continue;
+                SimpleShip* cand = &ships[t];
+                if (!cand->active || cand->is_sinking) continue;
+                if (is_allied(ship->company_id, cand->company_id)) continue;
+                float dx = cand->x - ship->x;
+                float dy = cand->y - ship->y;
+                float d2 = dx * dx + dy * dy;
+                if (d2 < best_dist2) { best_dist2 = d2; target = cand; }
+            }
+        }
+
+        /* ── Pack aggro: if this ghost has a target, alert nearby idle ghosts ── */
+        if (target) {
+            const float PACK_R2 = GHOST_PACK_ALERT_RADIUS * GHOST_PACK_ALERT_RADIUS;
+            for (int t = 0; t < ship_count; t++) {
+                if (t == s) continue;
+                SimpleShip* ally = &ships[t];
+                if (!ally->active || ally->is_sinking) continue;
+                if (ally->ship_type != SHIP_TYPE_GHOST) continue;
+                if (ghost_forced_target[t] != 0) continue; /* already has forced target */
+                /* Check if ally already has a natural target in range */
+                bool ally_has_target = false;
+                float ar2 = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+                for (int u = 0; u < ship_count && !ally_has_target; u++) {
+                    if (u == t) continue;
+                    SimpleShip* c = &ships[u];
+                    if (!c->active || c->is_sinking) continue;
+                    if (is_allied(ally->company_id, c->company_id)) continue;
+                    float dx2 = c->x - ally->x, dy2 = c->y - ally->y;
+                    if (dx2*dx2 + dy2*dy2 < ar2) ally_has_target = true;
+                }
+                if (ally_has_target) continue;
+                /* Alert if within pack radius */
+                float adx = ally->x - ship->x, ady = ally->y - ship->y;
+                if (adx*adx + ady*ady <= PACK_R2)
+                    ghost_forced_target[t] = target->ship_id;
             }
         }
 
@@ -846,6 +939,132 @@ void tick_wrecks(void) {
             log_info("🪵 Wreck %u expired and was removed", (unsigned)w->id);
         }
     }
+}
+
+/* ── Damage aggro notification ───────────────────────────────────────────────
+ * Called from the hit-event loop in websocket_server.c whenever a ghost ship
+ * takes hull damage.  Forces the ghost to pursue the attacker even if outside
+ * normal GHOST_ATTACK_RANGE. */
+void ghost_notify_damaged(uint32_t victim_ship_id, uint32_t attacker_ship_id) {
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active && ships[s].ship_id == victim_ship_id &&
+            ships[s].ship_type == SHIP_TYPE_GHOST) {
+            ghost_forced_target[s] = attacker_ship_id;
+            return;
+        }
+    }
+}
+
+/* ── Ghost ship auto-spawner ─────────────────────────────────────────────────
+ * Maintains up to GHOST_MAX_POPULATION ghost ships at random positions that
+ * are at least GHOST_MIN_ISLAND_DIST client-px from every island edge.
+ * Ghost ships respawn automatically because this function replenishes the
+ * pool whenever the live count falls below the target.
+ * Called each server tick; internally rate-limited to GHOST_SPAWN_INTERVAL_S.
+ */
+void tick_ghost_ship_spawner(float dt) {
+    static float spawn_timer = 0.0f;
+    static uint32_t spawn_rng = 0xdeadbeef;
+
+    spawn_timer -= dt;
+    if (spawn_timer > 0.0f) return;
+    spawn_timer = GHOST_SPAWN_INTERVAL_S;
+
+    /* Count active ghost ships (exclude sinking ones — they're already dying) */
+    int ghost_count = 0;
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active && !ships[s].is_sinking &&
+            ships[s].ship_type == SHIP_TYPE_GHOST)
+            ghost_count++;
+    }
+    if (ghost_count >= GHOST_MAX_POPULATION) return;
+
+    /* Try to find a valid open-water spawn point far from all islands */
+    for (int attempt = 0; attempt < GHOST_SPAWN_MAX_ATTEMPTS; attempt++) {
+        /* LCG random — gives deterministic but varied spread */
+        spawn_rng = spawn_rng * 1664525u + 1013904223u;
+        float rx = (float)(spawn_rng & 0xFFFFu) / 65535.0f * MAP_WIDTH;
+        spawn_rng = spawn_rng * 1664525u + 1013904223u;
+        float ry = (float)(spawn_rng & 0xFFFFu) / 65535.0f * MAP_HEIGHT;
+
+        /* Reject if too close to any island edge */
+        bool too_close = false;
+        for (int ii = 0; ii < ISLAND_COUNT && !too_close; ii++) {
+            const IslandDef* isl = &ISLAND_PRESETS[ii];
+            float dx = rx - isl->x;
+            float dy = ry - isl->y;
+            float dist = sqrtf(dx * dx + dy * dy);
+            float island_edge = isl->beach_radius_px + isl->beach_max_bump;
+            if (dist < island_edge + GHOST_MIN_ISLAND_DIST)
+                too_close = true;
+        }
+        if (too_close) continue;
+
+        /* Reject if too close to the world border (keep 1000 px margin) */
+        if (rx < 1000.0f || rx > MAP_WIDTH  - 1000.0f) continue;
+        if (ry < 1000.0f || ry > MAP_HEIGHT - 1000.0f) continue;
+
+        /* Reject if too close to any active non-ghost ship (player ships) */
+        #define GHOST_MIN_PLAYER_DIST 2000.0f
+        bool near_player = false;
+        for (int ps = 0; ps < ship_count && !near_player; ps++) {
+            if (!ships[ps].active || ships[ps].ship_type == SHIP_TYPE_GHOST) continue;
+            float pdx = rx - ships[ps].x;
+            float pdy = ry - ships[ps].y;
+            if (pdx * pdx + pdy * pdy < GHOST_MIN_PLAYER_DIST * GHOST_MIN_PLAYER_DIST)
+                near_player = true;
+        }
+        if (near_player) continue;
+
+        /* Pick a random level 1–60 and fleet size 3–5 */
+        spawn_rng = spawn_rng * 1664525u + 1013904223u;
+        uint8_t level = (uint8_t)(1 + (spawn_rng % 60));
+
+        spawn_rng = spawn_rng * 1664525u + 1013904223u;
+        int fleet_size = (int)(3 + (spawn_rng % 3)); /* 3, 4, or 5 */
+
+        /* Cap fleet to remaining population slots */
+        int remaining = GHOST_MAX_POPULATION - ghost_count;
+        if (fleet_size > remaining) fleet_size = remaining;
+        if (fleet_size <= 0) return;
+
+        /* Spawn the fleet evenly distributed in a ring around the anchor point.
+         * Each ship gets a base angle of (i * 360/fleet_size) degrees plus a small
+         * random jitter (±15°) so the formation feels organic but never overlaps.
+         * A random overall rotation is applied to the whole formation each spawn. */
+        spawn_rng = spawn_rng * 1664525u + 1013904223u;
+        float fleet_base_angle = ((float)(spawn_rng & 0xFFFFu) / 65535.0f) * 2.0f * 3.14159265f;
+
+        int spawned = 0;
+        for (int fi = 0; fi < fleet_size; fi++) {
+            /* Even angular slice for this ship + ±15° jitter */
+            float base_angle = fleet_base_angle + (float)fi * (2.0f * 3.14159265f / (float)fleet_size);
+            spawn_rng = spawn_rng * 1664525u + 1013904223u;
+            float jitter = (((float)(spawn_rng & 0xFFFFu) / 65535.0f) - 0.5f) * 0.524f; /* ±15° */
+            float angle  = base_angle + jitter;
+            spawn_rng = spawn_rng * 1664525u + 1013904223u;
+            float radius = 300.0f + ((float)(spawn_rng & 0xFFFFu) / 65535.0f) * 300.0f;
+            float sx = rx + cosf(angle) * radius;
+            float sy = ry + sinf(angle) * radius;
+
+            /* Border clamp */
+            if (sx < 1000.0f) sx = 1000.0f;
+            if (sx > MAP_WIDTH  - 1000.0f) sx = MAP_WIDTH  - 1000.0f;
+            if (sy < 1000.0f) sy = 1000.0f;
+            if (sy > MAP_HEIGHT - 1000.0f) sy = MAP_HEIGHT - 1000.0f;
+
+            uint32_t new_id = websocket_server_create_ghost_ship(sx, sy, level);
+            if (new_id != 0) {
+                spawned++;
+                log_info("👻 [FLEET] Ghost L%u spawned at (%.0f,%.0f) id=%u [%d/%d fleet %d/%d]",
+                         (unsigned)level, sx, sy, new_id,
+                         ghost_count + spawned, GHOST_MAX_POPULATION,
+                         spawned, fleet_size);
+            }
+        }
+        return; /* one fleet per interval */
+    }
+    /* All attempts exhausted — world may be too crowded with islands, retry next interval */
 }
 
 /* ── Ship Claiming Flag tick ────────────────────────────────────────────────

@@ -17,6 +17,7 @@ export type ModuleKind =
   | 'hatch_cover'    // Hatch cover - seals a snap-point hole, blocks falling through
   | 'gunport'        // Gunport - openable hull hole for lower-deck cannons
   | 'chest'          // Resource chest - stores raw resources for auto-repair and land supply
+  | 'bed'            // Bed - sets ship respawn point for crewmates
   | 'custom';        // User-defined module types
 
 /**
@@ -37,6 +38,7 @@ export enum ModuleTypeId {
   HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
   GUNPORT = 11,      // Gunport — openable hull hole for lower-deck cannons
   CHEST = 13,        // Resource chest — stores raw resources for auto-repair and land supply
+  BED = 14,          // Bed — sets ship respawn point for crewmates
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -59,6 +61,7 @@ export const MODULE_TYPE_MAP = {
       case 'hatch_cover': return ModuleTypeId.HATCH_COVER;
       case 'gunport': return ModuleTypeId.GUNPORT;
       case 'chest': return ModuleTypeId.CHEST;
+      case 'bed': return ModuleTypeId.BED;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -77,6 +80,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.HATCH_COVER: return 'hatch_cover';
       case ModuleTypeId.GUNPORT: return 'gunport';
       case ModuleTypeId.CHEST: return 'chest';
+      case ModuleTypeId.BED: return 'bed';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }
@@ -126,6 +130,7 @@ export type ModuleData =
   | SwivelModuleData
   | GunportModuleData
   | ChestModuleData
+  | BedModuleData
   | CustomModuleData;
 
 /**
@@ -276,6 +281,13 @@ export interface CustomModuleData {
   kind: 'custom';
   customType: string;          // User-defined type identifier
   properties: Record<string, any>; // Flexible property bag
+}
+
+/**
+ * Bed module data — no persistent state; ship ownership covers permissions.
+ */
+export interface BedModuleData {
+  kind: 'bed';
 }
 
 /**

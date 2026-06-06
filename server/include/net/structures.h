@@ -22,6 +22,14 @@ void handle_salvage_module(WebSocketPlayer* player, struct WebSocketClient* clie
 void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y);
 
 /**
+ * Post-load sanity check: verifies every ship with SHIP_FLAG_SCAFFOLDED has a
+ * matching active shipyard, and every shipyard's scaffolded_ship_id points to a
+ * real ship. Clears stale flags/ids so bugged ships take damage normally.
+ * Call once after world_load().
+ */
+void shipyard_scaffolding_sanity_sweep(void);
+
+/**
  * Apply damage to a placed structure. Subtracts dmg from hp (clamped to 0),
  * broadcasts structure_hp_changed on partial damage, and calls
  * destroy_placed_structure on death. Returns true if the structure was destroyed.

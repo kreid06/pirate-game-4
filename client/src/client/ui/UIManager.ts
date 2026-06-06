@@ -6,7 +6,7 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem, IslandResource } from '../../sim/Types.js';
+import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem, IslandResource, SHIP_TYPE_GHOST } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
@@ -262,6 +262,7 @@ export class UIManager {
     { kind: 'gunport',     label: 'Gunport',         symbol: '▪', color: '#4a3828', borderColor: '#2a1808', cost: { wood: 6,  fiber: 0,  metal: 2, stone: 0 } },
     { kind: 'hatch_cover', label: 'Hatch Cover',     symbol: '⊞', color: '#8b832b', borderColor: '#5a5520', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'bed',         label: 'Bed',             symbol: '🛏', color: '#4a3060', borderColor: '#2a1840', cost: { wood: 10, fiber: 5,  metal: 0, stone: 0 } },
   ];
 
   /** Plan Menu entries — same as BUILD_PANEL_ENTRIES but without plank/deck (placed via schematics). */
@@ -2627,7 +2628,7 @@ export class UIManager {
   /** Restore hotbar selections from localStorage, validating each entry. */
   private _loadHotbars(): void {
     const validLand = new Set(UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind));
-    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','chest']);
+    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','chest','bed']);
     try {
       const landRaw = localStorage.getItem('pirate_mmo_land_hotbar');
       if (landRaw) {
@@ -5268,7 +5269,7 @@ class DebugOverlayElement implements UIElement {
       `Player Velocity: ${player.velocity.x.toFixed(2)}, ${player.velocity.y.toFixed(2)}`,
       `Camera Position: ${cameraState.position.x.toFixed(1)}, ${cameraState.position.y.toFixed(1)}`,
       `Camera Zoom: ${cameraState.zoom.toFixed(2)}x`,
-      `Ships: ${context.worldState.ships.length}`,
+      `Ships: ${context.worldState.ships.length} (👻 ${context.worldState.ships.filter(s => s.shipType === SHIP_TYPE_GHOST).length} ghost)`,
       `Cannonballs: ${context.worldState.cannonballs.length}`,
       '',
       '=== CONTROLS ===',

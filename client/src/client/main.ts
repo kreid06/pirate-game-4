@@ -43,7 +43,113 @@ export async function main(): Promise<void> {
     // Initial resize and set up listener
     resizeCanvas();
     window.addEventListener('resize', resizeCanvas);
-    
+
+    // ── Global input suppression ──────────────────────────────────────────
+    // Block browser shortcuts that interfere with gameplay.
+    // Never suppresses while the user is typing in a real input/textarea.
+    const isTyping = (): boolean =>
+      document.activeElement instanceof HTMLInputElement ||
+      document.activeElement instanceof HTMLTextAreaElement;
+
+    window.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (isTyping()) return;
+
+      const ctrl  = e.ctrlKey || e.metaKey;
+      const alt   = e.altKey;
+      const shift = e.shiftKey;
+      const key   = e.key;
+      const code  = e.code;
+
+      // ── Ctrl combos ───────────────────────────────────────────────────
+      if (ctrl) {
+        switch (key) {
+          // Page / navigation / UI chrome — always block
+          case 'r': case 'R':   // reload
+          case 'p': case 'P':   // print
+          case 's': case 'S':   // save page
+          case 'f': case 'F':   // find in page
+          case 'd': case 'D':   // bookmark
+          case 'g': case 'G':   // find next
+          case 'u': case 'U':   // view source
+          case 'l': case 'L':   // address bar (some browsers)
+          // Zoom (conflicts with scroll-wheel zoom we implement ourselves)
+          case '=': case '+': case '-': case '0':
+            e.preventDefault();
+            break;
+          // DevTools — block to avoid accidental opening mid-game
+          case 'i': case 'I':
+          case 'j': case 'J':
+          case 'c': case 'C':
+            if (shift) e.preventDefault();
+            break;
+          // Undo / redo — block outside inputs so they don't bubble to browser
+          case 'z': case 'Z':
+          case 'y': case 'Y':
+            e.preventDefault();
+            break;
+          // Select-all — block so it doesn't highlight page content
+          case 'a': case 'A':
+            e.preventDefault();
+            break;
+        }
+      }
+
+      // ── Alt combos ───────────────────────────────────────────────────
+      if (alt && !ctrl) {
+        switch (code) {
+          case 'ArrowLeft':   // browser Back
+          case 'ArrowRight':  // browser Forward
+            e.preventDefault();
+            break;
+        }
+      }
+
+      // ── Function keys ────────────────────────────────────────────────
+      if (/^F\d+$/.test(key)) {
+        // Allow F11 only if the game itself wants to use it; for now block all.
+        // Remove individual entries here to re-enable specific keys.
+        switch (key) {
+          case 'F1':  // help
+          case 'F2':
+          case 'F3':  // find
+          case 'F4':
+          case 'F5':  // reload
+          case 'F7':  // caret browsing
+          case 'F8': case 'F9': case 'F10':
+          case 'F11': // fullscreen (let the browser handle unless you implement your own)
+          case 'F12': // devtools
+            e.preventDefault();
+            break;
+        }
+      }
+
+      // ── Navigation keys that scroll the page ─────────────────────────
+      // Block only when canvas has pointer focus (pointer is locked or was last clicked on canvas)
+      if (document.pointerLockElement === canvas || document.activeElement === canvas || document.activeElement === document.body) {
+        switch (code) {
+          case 'Space':
+          case 'ArrowUp': case 'ArrowDown':
+          case 'ArrowLeft': case 'ArrowRight':
+          case 'PageUp': case 'PageDown':
+          case 'Home': case 'End':
+            e.preventDefault();
+            break;
+        }
+      }
+
+      // ── Backspace — block page-back navigation ────────────────────────
+      if (code === 'Backspace') e.preventDefault();
+    }, { capture: true }); // capture phase so it runs before game handlers
+
+    // Block right-click context menu on the canvas
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    // Block Ctrl+scroll-wheel page zoom
+    window.addEventListener('wheel', (e: WheelEvent) => {
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
+    }, { passive: false });
+    // ── End global input suppression ──────────────────────────────────────
+
     // Load client configuration (could come from server or local storage)
     const config: ClientConfig = {
       ...DEFAULT_CLIENT_CONFIG,

@@ -672,7 +672,7 @@ export class ClientApplication {
         if (sinkingShip) {
           const dynCompanies = ws?.companies ?? [];
           const shipDisplayName = (s: Ship) =>
-            s.shipName || 'Brigantine';
+            s.shipType === 99 ? `Ghost - Lv.${s.npcLevel ?? 1}` : (s.shipName || 'Brigantine');
           const sinkLabel  = shipDisplayName(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
           if (isOwnShip) {
@@ -2031,6 +2031,29 @@ export class ClientApplication {
             }
           }
         }
+        // Bed placement — free position on ship deck
+        if (this.renderSystem.isInBedBuildMode()) {
+          const ws2 = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          if (ws2 && worldPos) {
+            let nearestShip2 = null as (typeof ws2.ships[0]) | null;
+            let nearestDist2 = Infinity;
+            for (const s of ws2.ships) {
+              const d = Math.hypot(worldPos.x - s.position.x, worldPos.y - s.position.y);
+              if (d < nearestDist2) { nearestDist2 = d; nearestShip2 = s; }
+            }
+            if (nearestShip2 && nearestDist2 < 300) {
+              const dx2 = worldPos.x - nearestShip2.position.x;
+              const dy2 = worldPos.y - nearestShip2.position.y;
+              const cosR2 = Math.cos(-nearestShip2.rotation);
+              const sinR2 = Math.sin(-nearestShip2.rotation);
+              const lx2   =  dx2 * cosR2 - dy2 * sinR2;
+              const ly2   =  dx2 * sinR2 + dy2 * cosR2;
+              console.log(`🛏️ [BUILD] Placing bed at (${lx2.toFixed(0)}, ${ly2.toFixed(0)}) on ship ${nearestShip2.id}`);
+              this.networkManager.sendPlaceBedAt(nearestShip2.id, lx2, ly2, this.buildRotationDeg * Math.PI / 180, this.renderSystem.playerDeckLevel, this._buildResourceSource);
+              return;
+            }
+          }
+        }
         // Mast placement build mode
         const mastSlot = this.renderSystem.getHoveredMastSlot();
         if (mastSlot) {
@@ -2955,7 +2978,7 @@ export class ClientApplication {
                 if (d < bestDist) { bestDist = d; killerShip = s; }
               }
             }
-            const killerName = killerShip ? (killerShip.shipName || 'Brigantine') : null;
+            const killerName = killerShip ? (killerShip.shipType === 99 ? `Ghost - Lv.${killerShip.npcLevel ?? 1}` : (killerShip.shipName || 'Brigantine')) : null;
             if (killerName) {
               let targetName: string;
               if (entityType === 'player') {
@@ -3222,9 +3245,11 @@ export class ClientApplication {
           in_water:          'Cannot place in water',
           world_full:        'World structure limit reached',
           missing_item:      'Missing required item',
+          missing_resources: 'Not enough resources',
         };
         const msg = REASONS[reason] ?? `Placement failed (${reason})`;
-        this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, 'info', 2.0);
+        const kind = (reason === 'missing_resources' || reason === 'missing_item') ? 'warning' : 'info';
+        this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, kind, 2.0);
         this.renderSystem.setBlockerStructure(blockerId ?? null, 2000);
       };
       this.networkManager.onDoorToggled = (id, open) => {
@@ -4785,6 +4810,8 @@ export class ClientApplication {
     const inGunportBuildMode = ((player?.carrierId ?? 0) !== 0 && activeItem === 'door') || pgk === 'gunport';
     // Chest build mode: resource_chest item equipped while on a ship, OR chest ghost selected
     const inChestBuildMode   = ((player?.carrierId ?? 0) !== 0 && activeItem === 'resource_chest') || pgk === 'chest';
+    // Bed build mode: bed ghost selected from ship build menu
+    const inBedBuildMode     = pgk === 'bed';
 
     // Auto-exit land build modes if the player is now on a ship (boarded mid-build)
     if ((player?.carrierId ?? 0) !== 0 && this.landBuildMenuOpen) {
@@ -4863,12 +4890,13 @@ export class ClientApplication {
     this.renderSystem.setHatchBuildMode(!this.explicitBuildMode && inHatchBuildMode);
     this.renderSystem.setGunportBuildMode(!this.explicitBuildMode && inGunportBuildMode);
     this.renderSystem.setChestBuildMode(!this.explicitBuildMode && inChestBuildMode);
+    this.renderSystem.setBedBuildMode(!this.explicitBuildMode && inBedBuildMode);
     if (this.inputManager) {
       this.inputManager.inRampBuildMode  = !this.explicitBuildMode && inRampBuildMode;
       this.inputManager.inHatchBuildMode = !this.explicitBuildMode && inHatchBuildMode;
     }
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || inGunportBuildMode || inChestBuildMode || this.islandBuildMode
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || inGunportBuildMode || inChestBuildMode || inBedBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
 
     // Show build hotbar when: build menu is open or explicit build mode is active
@@ -5272,6 +5300,7 @@ export class ClientApplication {
       case 'mast':   return () => this.networkManager.sendPlaceMastAt(shipId, lx, ly, src);
       case 'swivel': return () => this.networkManager.sendPlaceSwivelAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
       case 'chest':  return () => this.networkManager.sendPlaceChestAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
+      case 'bed':    return () => this.networkManager.sendPlaceBedAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
       default:       return () => {};
     }
   }

@@ -185,6 +185,8 @@ export class RenderSystem {
   private gunportBuildMode: boolean = false;
   /** Whether resource chest placement build mode is active (resource_chest item held). */
   private chestBuildMode: boolean = false;
+  /** Whether bed placement build mode is active (bed ghost selected). */
+  private bedBuildMode: boolean = false;
   /** The gunport snap index currently hovered in gunport build mode. */
   private hoveredGunportSnap: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** The ramp snap point slot currently under the cursor in ramp build mode. */
@@ -2419,6 +2421,16 @@ export class RenderSystem {
   /** Whether resource chest build mode is currently active */
   isInChestBuildMode(): boolean {
     return this.chestBuildMode;
+  }
+
+  /** Activate or deactivate bed placement build mode. */
+  setBedBuildMode(active: boolean): void {
+    this.bedBuildMode = active;
+  }
+
+  /** Whether bed build mode is currently active */
+  isInBedBuildMode(): boolean {
+    return this.bedBuildMode;
   }
 
   /** Whether ramp build mode is currently active */
@@ -9068,6 +9080,13 @@ export class RenderSystem {
       }
     }
 
+    // In bed build mode, overlay a ghost bed at the cursor position on each ship (layer 4)
+    if (this.bedBuildMode && this.mouseWorldPos) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `bed-ghost-${ship.id}`, () => this.drawBedGhostOnShip(ship, camera), 0);
+      }
+    }
+
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
@@ -9076,12 +9095,14 @@ export class RenderSystem {
       this.queueRenderItem(1, `cannons-lower-${ship.id}`,  () => this.drawShipCannons(ship, camera, 0), 3);
       this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
       this.queueRenderItem(1, `chests-lower-${ship.id}`,   () => this.drawShipChests(ship, camera, 0), 3);
+      this.queueRenderItem(1, `beds-lower-${ship.id}`,     () => this.drawShipBeds(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
       this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
       this.queueRenderItem(4, `swivel-guns-upper-${ship.id}`, _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
       this.queueRenderItem(4, `cannon-aim-guides-${ship.id}`, _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
       this.queueRenderItem(4, `swivel-aim-guides-${ship.id}`, _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
       this.queueRenderItem(4, `chests-upper-${ship.id}`, _da(() => this.drawShipChests(ship, camera, 1)));
+      this.queueRenderItem(4, `beds-upper-${ship.id}`, _da(() => this.drawShipBeds(ship, camera, 1)));
       this.queueRenderItem(4, `rudder-${ship.id}`, _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         // Always render at full opacity so active groups remain visible from the steering wheel.
@@ -9281,9 +9302,13 @@ export class RenderSystem {
       }
     }
 
-    // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
+    // Queue ship ammo labels and name labels (layer 9 - HUD overlay above all ship elements)
     for (const ship of renderShips) {
       this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
+      // Name label: show for ghost ships (level badge) and named player ships, but not own ship
+      if (ship.id !== _localCarrierId && (ship.shipType === SHIP_TYPE_GHOST || ship.shipName)) {
+        this.queueRenderItem(9, `ship-name-${ship.id}`, () => this.drawShipNameLabel(ship, camera));
+      }
       if (ship.claimFlag) {
         this.queueRenderItem(9, `ship-flag-${ship.id}`, () => this.drawShipClaimFlag(ship, camera));
       }
@@ -9786,14 +9811,26 @@ export class RenderSystem {
 
     // Ghost ship: dark spectral hull with cyan edge glow
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    // Aggro: ghost has a non-ghost, non-sinking ship within attack range
+    const GHOST_ATTACK_RANGE_PX = 2400;
+    const isGhostAggro = isGhost && (this._cachedWorldShips ?? []).some(s =>
+      s.id !== ship.id && s.shipType !== SHIP_TYPE_GHOST && s.hullHealth > 0 &&
+      (s.position.x - ship.position.x) ** 2 + (s.position.y - ship.position.y) ** 2
+        < GHOST_ATTACK_RANGE_PX * GHOST_ATTACK_RANGE_PX
+    );
+    // Pulse timer: 0-1 oscillation for the aggro glow
+    const aggroPulse = isGhostAggro ? 0.65 + 0.35 * Math.sin(performance.now() / 220) : 1;
     // Enemy ship: different non-zero company to the local player
     const isEnemyShip = !isGhost && this._localCompanyId !== 0
       && ship.companyId !== 0 && ship.companyId !== this._localCompanyId;
     if (isGhost) {
-      this.ctx.fillStyle   = '#0f0f1a';
+      this.ctx.fillStyle   = isGhostAggro ? '#1a0000' : '#0f0f1a';
       this.ctx.strokeStyle = '#0a0a16';
-      this.ctx.shadowColor  = ghostSpectralColor(ship.npcLevel ?? 1);
-      this.ctx.shadowBlur   = 12 / cameraState.zoom;
+      const glowColor = isGhostAggro
+        ? `rgba(255,30,0,${(0.7 * aggroPulse).toFixed(3)})`
+        : ghostSpectralColor(ship.npcLevel ?? 1);
+      this.ctx.shadowColor  = glowColor;
+      this.ctx.shadowBlur   = (isGhostAggro ? 18 : 12) / cameraState.zoom;
     }
 
     this.ctx.lineWidth = 2 / cameraState.zoom;
@@ -9909,8 +9946,10 @@ export class RenderSystem {
         const healthMult = Math.max(0.2, ship.hullHealth / ghostLvlMaxHP2);
         const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
         this.ctx.shadowBlur   = 0;
-        this.ctx.strokeStyle  = ghostSpectralColor(ghostNpcLvl2, 0.55 * sinkMult * healthMult);
-        this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+        this.ctx.strokeStyle  = isGhostAggro
+          ? `rgba(255,40,0,${(0.75 * aggroPulse * sinkMult * healthMult).toFixed(3)})`
+          : ghostSpectralColor(ghostNpcLvl2, 0.55 * sinkMult * healthMult);
+        this.ctx.lineWidth    = (isGhostAggro ? 2.0 : 1.5) / cameraState.zoom;
         this.ctx.beginPath();
         this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
         for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
@@ -10612,6 +10651,9 @@ export class RenderSystem {
 
     // Scaffolded ships under construction — suppress plank status icons
     if (this._scaffoldedShips.has(ship.id)) return;
+
+    // Ghost ships have no planks or decks — skip all status icons
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
 
     // Only show for own company or neutral ships — hide from enemies
     const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
@@ -14516,9 +14558,15 @@ export class RenderSystem {
     if (localPlayer.mountedModuleId != null) {
       const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
       if (mountedMod?.kind === 'cannon') {
-        // Mounted directly on a cannon — show just that one at full opacity (unless reloading)
+        // Mounted directly on a cannon — show just that one at full opacity (unless reloading
+        // or the cannon's gunport plank exists and is closed).
         const isReloading = ((mountedMod.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16;
-        if (!isReloading) cannonsToShow = [{ module: mountedMod, alpha: 1 }];
+        if (!isReloading) {
+          const gp = this.findGunportForCannon(mountedMod, ship);
+          const gpData = gp?.moduleData as import('../../sim/modules').GunportModuleData | undefined;
+          const gunportBlocked = gp !== null && gpData != null && !gpData.isOpen;
+          if (!gunportBlocked) cannonsToShow = [{ module: mountedMod, alpha: 1 }];
+        }
       } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
         // On the helm — show trajectory guides based on each cannon's angular rotation limit.
         // Matches the server formula: desired_offset = aim - localRot + π/2
@@ -14547,6 +14595,16 @@ export class RenderSystem {
           if (m.kind !== 'cannon' && m.kind !== 'swivel') continue;
           // Only show trajectory for weapons in an active weapon group
           if (!activeCannonIds.has(m.id)) continue;
+          // Gunport check: if this cannon is linked to a gunport plank that exists
+          // and is closed, hide the trajectory (mirrors server fire-block logic).
+          // If the plank is destroyed (findGunportForCannon returns null) we allow it.
+          if (m.kind === 'cannon') {
+            const gp = this.findGunportForCannon(m, ship);
+            if (gp !== null) {
+              const gpData = gp.moduleData as import('../../sim/modules').GunportModuleData | undefined;
+              if (gpData && !gpData.isOpen) continue;
+            }
+          }
           // Angular offset from cannon's natural axis (server convention)
           let offset = aim - (m.localRot || 0) + Math.PI / 2;
           // Normalize to [-π, π]
@@ -14993,6 +15051,63 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
+  /** Draw all bed modules on a ship. */
+  private drawShipBeds(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    const beds = ship.modules.filter(m => m.kind === 'bed' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      m.deckId === 1 || m.deckId === 255
+    ));
+    if (beds.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const bed of beds) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === bed.id;
+      this.ctx.save();
+      this.ctx.translate(bed.localPos.x, bed.localPos.y);
+      this.ctx.rotate(bed.localRot);
+      // Bed frame
+      this.ctx.fillStyle   = isHovered ? '#6a3090' : '#3d1f60';
+      this.ctx.strokeStyle = '#aa77dd';
+      this.ctx.lineWidth   = lw * 1.5;
+      this.ctx.beginPath();
+      this.ctx.roundRect(-22, -12, 44, 24, 3);
+      this.ctx.fill();
+      this.ctx.stroke();
+      // Pillow
+      this.ctx.fillStyle = '#c8a0e8';
+      this.ctx.beginPath();
+      this.ctx.roundRect(-20, -10, 14, 20, 2);
+      this.ctx.fill();
+      // Blanket
+      this.ctx.fillStyle = '#7755aa';
+      this.ctx.beginPath();
+      this.ctx.rect(-3, -10, 24, 20);
+      this.ctx.fill();
+      // Hover hint
+      if (isHovered) {
+        this.ctx.fillStyle = '#cc99ff';
+        this.ctx.font = `bold ${9 / zoom}px Georgia, serif`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('[E] Set Respawn', 0, -15);
+      }
+      this.ctx.restore();
+    }
+    this.ctx.restore();
+  }
+
   /**
    * Draw a ghost chest following the player's cursor when in chest build mode.
    * The ghost is placed in the ship-local coordinate frame of the nearest ship.
@@ -15049,6 +15164,58 @@ export class RenderSystem {
     this.ctx.textBaseline = 'bottom';
     this.ctx.fillText('[Click] Place Chest', 0, -18);
 
+    this.ctx.restore();
+  }
+
+  /** Draw a ghost bed following the cursor when in bed build mode. */
+  private drawBedGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this.ctx.globalAlpha *= alpha;
+
+    // Bed frame
+    this.ctx.fillStyle   = 'rgba(70,45,100,0.7)';
+    this.ctx.strokeStyle = '#aa88dd';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.setLineDash([3 / zoom, 2 / zoom]);
+    this.ctx.beginPath();
+    this.ctx.roundRect(-22, -12, 44, 24, 3);
+    this.ctx.fill();
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+    // Pillow
+    this.ctx.fillStyle = 'rgba(190,160,220,0.6)';
+    this.ctx.beginPath();
+    this.ctx.roundRect(-20, -10, 14, 20, 2);
+    this.ctx.fill();
+    // Label
+    this.ctx.fillStyle = '#cc99ff';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Bed', 0, -16);
     this.ctx.restore();
   }
 
@@ -16030,8 +16197,11 @@ export class RenderSystem {
   private drawShipNameLabel(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
-    const name = ship.shipName;
-    const level = ship.levelStats?.shipLevel;
+    const isGhostShipLabel = ship.shipType === SHIP_TYPE_GHOST;
+    const ghostLvl = isGhostShipLabel ? (ship.npcLevel ?? 1) : 0;
+
+    const name = isGhostShipLabel ? `Ghost - Lv.${ghostLvl}` : ship.shipName;
+    const level = isGhostShipLabel ? undefined : ship.levelStats?.shipLevel;
     if (!name && level === undefined) return;
 
     const screenPos = camera.worldToScreen(ship.position);
@@ -16070,7 +16240,7 @@ export class RenderSystem {
 
     if (nameLine) {
       this.ctx.font = `bold ${fontSize}px Georgia, serif`;
-      this.ctx.fillStyle = '#f0e0b0';
+      this.ctx.fillStyle = isGhostShipLabel ? ghostSpectralColor(ghostLvl, 0.95) : '#f0e0b0';
       this.ctx.fillText(nameLine, screenPos.x, curY);
       curY += lineH;
     }
@@ -16891,13 +17061,23 @@ export class RenderSystem {
 
     } else if (this.hoveredShip) {
       const ship = this.hoveredShip;
-      title = `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
-      accentColor = '#ff8844';
+      const _isGhostDbg = ship.shipType === SHIP_TYPE_GHOST;
+      const _ghostLvlDbg = _isGhostDbg ? (ship.npcLevel ?? 1) : 0;
+      title = _isGhostDbg
+        ? `👻 GHOST · Lv.${_ghostLvlDbg} #${ship.id}`
+        : `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
+      accentColor = _isGhostDbg ? '#00eeff' : '#ff8844';
       const spd = Math.hypot(ship.velocity.x, ship.velocity.y);
       rows.push({ label: 'ID',       value: `${ship.id}  ${spd.toFixed(1)} px/s` });
       rows.push({ label: 'Company',  value: coName(ship.companyId), color: coColor(ship.companyId) });
-      const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
-      rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });
+      if (_isGhostDbg) {
+        const _ghostMaxHp = Math.round(60000 * (1 + (_ghostLvlDbg - 1) * 9 / 59));
+        const _hullPct = Math.max(0, Math.min(1, ship.hullHealth / _ghostMaxHp));
+        rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(0)} / ${_ghostMaxHp.toLocaleString()}`, bar: _hullPct, barColor: hpColor(_hullPct) });
+      } else {
+        const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
+        rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });
+      }
       rows.push({ label: 'Rotation', value: fmtRad(ship.rotation) });
       rows.push({ label: 'AngVel',   value: `${ship.angularVelocity.toFixed(3)} r/s` });
       rows.push({ label: 'Velocity', value: `(${ship.velocity.x.toFixed(1)}, ${ship.velocity.y.toFixed(1)})` });
@@ -17552,8 +17732,8 @@ export class RenderSystem {
         ? ship.shipName
         : `${companyName} Brigantine`;
 
-    // Deck module health for the tooltip bar
-    const deckModTip = ship.modules.find(m => m.kind === 'deck');
+    // Deck module health for the tooltip bar — not shown for ghost ships (they have no deck)
+    const deckModTip = !isGhost ? ship.modules.find(m => m.kind === 'deck') : undefined;
     const dmdTip = deckModTip?.moduleData as any;
     const deckHp       = dmdTip?.health    ?? 0;
     const deckMaxHp    = dmdTip?.maxHealth ?? 10000;
@@ -17584,10 +17764,14 @@ export class RenderSystem {
     this.ctx.textAlign    = 'left';
     this.ctx.textBaseline = 'top';
 
-    const lines    = [shipTitle, `Company: ${companyName}`, hullText, deckText];
+    // Ghost ships only show title + company + hull; non-ghost ships also show deck
+    const lines    = isGhost
+      ? [shipTitle, `Company: ${companyName}`, hullText]
+      : [shipTitle, `Company: ${companyName}`, hullText, deckText];
     const barRowH  = barH + 6;
+    const numBars  = isGhost ? 1 : 2; // hull bar only for ghosts, hull + deck for others
     let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
-    let boxH = lines.length * lineH + barRowH * 2 + padding * 2; // hull bar + deck bar
+    let boxH = lines.length * lineH + barRowH * numBars + padding * 2;
 
     let tx = screenPos.x + 15;
     let ty = screenPos.y + 15;
@@ -17596,7 +17780,7 @@ export class RenderSystem {
 
     // Background
     this.ctx.fillStyle   = 'rgba(12,16,28,0.95)';
-    this.ctx.strokeStyle = '#cc6633';
+    this.ctx.strokeStyle = isGhost ? ghostSpectralColor(ghostLevel, 0.8) : '#cc6633';
     this.ctx.lineWidth   = 1.5;
     this.ctx.beginPath();
     (this.ctx as any).roundRect(tx, ty, boxW, boxH, 4);
@@ -17605,8 +17789,8 @@ export class RenderSystem {
 
     let cy = ty + padding;
 
-    // Ship title (gold)
-    this.ctx.fillStyle = '#ffe066';
+    // Ship title
+    this.ctx.fillStyle = isGhost ? ghostSpectralColor(ghostLevel, 0.95) : '#ffe066';
     this.ctx.font = '14px Georgia, serif';
     this.ctx.fillText(shipTitle, tx + padding, cy);  cy += lineH;
 
@@ -17624,7 +17808,9 @@ export class RenderSystem {
     // Hull bar
     this.ctx.fillStyle = '#333';
     this.ctx.fillRect(bx, cy, bw, barH);
-    const hullColor = hullPct > 0.6 ? '#44cc66' : hullPct > 0.3 ? '#ffaa44' : '#ff5544';
+    const hullColor = isGhost
+      ? ghostSpectralColor(ghostLevel, 0.6 + 0.4 * hullPct)
+      : (hullPct > 0.6 ? '#44cc66' : hullPct > 0.3 ? '#ffaa44' : '#ff5544');
     this.ctx.fillStyle = hullColor;
     this.ctx.fillRect(bx, cy, Math.round(bw * hullPct), barH);
     this.ctx.strokeStyle = '#556';
@@ -17632,34 +17818,37 @@ export class RenderSystem {
     this.ctx.strokeRect(bx, cy, bw, barH);
     cy += barH + 6;
 
-    // Deck HP label  (format: current / target / max)
-    this.ctx.fillStyle = '#ccc';
-    this.ctx.font = '12px Georgia, serif';
-    this.ctx.fillText(deckText, bx, cy);  cy += lineH;
-    // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
-    this.ctx.fillStyle = '#333';
-    this.ctx.fillRect(bx, cy, bw, barH);
-    // Target HP marker (dimmer fill up to target ceiling)
-    if (deckTargetPct < 1) {
-      this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
-      this.ctx.fillRect(bx, cy, Math.round(bw * deckTargetPct), barH);
+    // Deck section — only for non-ghost ships
+    if (!isGhost) {
+      // Deck HP label  (format: current / target / max)
+      this.ctx.fillStyle = '#ccc';
+      this.ctx.font = '12px Georgia, serif';
+      this.ctx.fillText(deckText, bx, cy);  cy += lineH;
+      // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
+      this.ctx.fillStyle = '#333';
+      this.ctx.fillRect(bx, cy, bw, barH);
+      // Target HP marker (dimmer fill up to target ceiling)
+      if (deckTargetPct < 1) {
+        this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
+        this.ctx.fillRect(bx, cy, Math.round(bw * deckTargetPct), barH);
+      }
+      const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
+      this.ctx.fillStyle = deckColor;
+      this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
+      // Target HP tick mark
+      if (deckTargetPct < 1) {
+        const tx2 = bx + Math.round(bw * deckTargetPct);
+        this.ctx.strokeStyle = '#c8a03c';
+        this.ctx.lineWidth = 1.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(tx2, cy - 1);
+        this.ctx.lineTo(tx2, cy + barH + 1);
+        this.ctx.stroke();
+      }
+      this.ctx.strokeStyle = '#556';
+      this.ctx.lineWidth = 0.8;
+      this.ctx.strokeRect(bx, cy, bw, barH);
     }
-    const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
-    this.ctx.fillStyle = deckColor;
-    this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
-    // Target HP tick mark
-    if (deckTargetPct < 1) {
-      const tx2 = bx + Math.round(bw * deckTargetPct);
-      this.ctx.strokeStyle = '#c8a03c';
-      this.ctx.lineWidth = 1.5;
-      this.ctx.beginPath();
-      this.ctx.moveTo(tx2, cy - 1);
-      this.ctx.lineTo(tx2, cy + barH + 1);
-      this.ctx.stroke();
-    }
-    this.ctx.strokeStyle = '#556';
-    this.ctx.lineWidth = 0.8;
-    this.ctx.strokeRect(bx, cy, bw, barH);
   }
 
   /**

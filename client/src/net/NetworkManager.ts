@@ -104,6 +104,7 @@ export enum MessageType {
   PLAYER_SET_DECK = 'player_set_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
   PLACE_CHEST_AT = 'place_chest_at',
+  PLACE_BED_AT = 'place_bed_at',
   CHEST_TRANSFER = 'chest_transfer',
   LAND_CHEST_TRANSFER = 'land_chest_transfer',
   LAND_CHEST_DROP = 'land_chest_drop',
@@ -1706,6 +1707,14 @@ export class NetworkManager {
   sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CHEST_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
+    if (shipId !== null) msg.shipId = shipId;
+    if (deckId !== undefined) msg.deckId = deckId;
+    this.sendMessage(msg);
+  }
+
+  sendPlaceBedAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: any = { type: MessageType.PLACE_BED_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
     if (shipId !== null) msg.shipId = shipId;
     if (deckId !== undefined) msg.deckId = deckId;
     this.sendMessage(msg);

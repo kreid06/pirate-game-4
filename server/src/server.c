@@ -10,6 +10,7 @@
 #include "core/rng.h"
 #include "sim/world_save.h"
 #include "net/claim.h"
+#include "net/structures.h"
 
 volatile int g_server_shutdown_requested = 0;
 volatile int g_server_restart_requested  = 0;
@@ -143,6 +144,10 @@ int server_init(struct ServerContext** out_ctx) {
             /* Scrub stale dominator ids that don't resolve to active loaded
              * structures (older save files, half-completed captures, etc.). */
             claim_dominators_sanity_sweep();
+            /* Verify ship↔shipyard scaffolding links are consistent.
+             * Clears SHIP_FLAG_SCAFFOLDED from orphaned ships so they take
+             * normal water/hull damage instead of being indefinitely immune. */
+            shipyard_scaffolding_sanity_sweep();
         } else {
             log_info("💾 No save file found at '%s' — starting fresh world",
                      WORLD_SAVE_DEFAULT_PATH);

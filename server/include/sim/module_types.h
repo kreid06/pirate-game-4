@@ -31,6 +31,7 @@ typedef enum {
     MODULE_TYPE_GUNPORT      = 11,  // Gunport — openable hole in hull plank for lower-deck cannons
     MODULE_TYPE_WORKBENCH    = 12,  // Workbench — required on ship to build any ship module
     MODULE_TYPE_CHEST        = 13,  // Storage chest — on-ship loot/storage container
+    MODULE_TYPE_BED          = 14,  // Bed — sets ship respawn point for crewmates
     MODULE_TYPE_CUSTOM       = 255  // User-defined
 } ModuleTypeId;
 
@@ -144,6 +145,13 @@ typedef struct {
 } ChestModuleData;
 
 /**
+ * Bed-specific module data — no persistent state needed beyond position/deck.
+ */
+typedef struct {
+    uint8_t _pad[8];
+} BedModuleData;
+
+/**
  * Generic ship module structure
  */
 typedef struct {
@@ -166,6 +174,7 @@ typedef struct {
         SwivelModuleData  swivel;
         GunportModuleData gunport;
         ChestModuleData   chest;
+        BedModuleData     bed;
     } data;
 
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0

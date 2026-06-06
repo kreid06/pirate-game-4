@@ -12,7 +12,7 @@
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 #define WS_MAX_CLIENTS    100
-#define MAX_SIMPLE_SHIPS  50
+#define MAX_SIMPLE_SHIPS  200
 
 /* Ship sinking animation duration */
 #define SHIP_SINK_DURATION_MS  8000

@@ -28,6 +28,7 @@
 #include <openssl/hmac.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/select.h>
 #include <pthread.h>
 
 // Include shared ship definitions from protocol folder
@@ -148,7 +149,7 @@ int dynamic_company_count = 0;
 uint32_t next_dynamic_company_id = COMPANY_DYNAMIC_BASE;
 
 // Global ship data (simple ships for testing)
-#define MAX_SIMPLE_SHIPS 50
+#define MAX_SIMPLE_SHIPS 200
 SimpleShip ships[MAX_SIMPLE_SHIPS] = {0};
 int ship_count = 0;
 /* 8-bit ship sequence counter — top byte of all module IDs (see module_ids.h).
@@ -224,7 +225,7 @@ typedef struct {
 } SharedBlobSnapshot;
 
 typedef struct {
-    char ships_json[131072];
+    char ships_json[1048576]; /* 1 MB — fits MAX_SHIPS (150) × ~5 KB each */
     int  ships_len;
     float    aoi_ship_px[MAX_SHIPS];
     float    aoi_ship_py[MAX_SHIPS];
@@ -373,6 +374,7 @@ static const struct { uint16_t wood, fiber, metal, stone; } MODULE_RES_COST[] = 
     [MODULE_TYPE_GUNPORT]    = { 6,  0, 2, 0 },
     [MODULE_TYPE_WORKBENCH]  = { 12, 0, 0, 0 },
     [MODULE_TYPE_CHEST]      = { 12, 0, 0, 0 },
+    [MODULE_TYPE_BED]        = { 10, 5, 0, 0 },
 };
 
 /** Returns true if the player has enough resources for `type`. */
@@ -787,6 +789,7 @@ static float module_placement_radius(ModuleTypeId type) {
         case MODULE_TYPE_CHEST:          return 20.0f;
         case MODULE_TYPE_WORKBENCH:      return 22.0f;
         case MODULE_TYPE_RAMP:           return 20.0f;
+        case MODULE_TYPE_BED:            return 22.0f;
         default:                         return 0.0f;   /* plank/deck/seat/ladder/hatch — passable */
     }
 }
@@ -3267,7 +3270,19 @@ static ssize_t send_all(int fd, const char *buf, size_t len) {
     size_t sent = 0;
     while (sent < len) {
         ssize_t n = send(fd, buf + sent, len - sent, 0);
-        if (n <= 0) return (ssize_t)sent;
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                /* Non-blocking socket buffer full — wait up to 500 ms for writability */
+                fd_set wfds;
+                FD_ZERO(&wfds);
+                FD_SET(fd, &wfds);
+                struct timeval tv = { 0, 500000 };
+                int r = select(fd + 1, NULL, &wfds, NULL, &tv);
+                if (r > 0) continue;
+            }
+            return (ssize_t)sent;
+        }
+        if (n == 0) return (ssize_t)sent;
         sent += (size_t)n;
     }
     return (ssize_t)sent;
@@ -3829,16 +3844,19 @@ int websocket_server_update(struct Sim* sim) {
                             if (handled && client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
-                                    static char game_state_frame[131072];
-                                    static char game_state_response[98304];
+                                    /* Buffers sized for MAX_SHIPS (150) × ~5 KB per ship.
+                                     * Static to avoid large stack frames; safe because only
+                                     * one client handshake is processed per event-loop tick. */
+                                    static char game_state_frame[1310720];    /* 1.25 MB WS frame  */
+                                    static char game_state_response[1245184]; /* 1.19 MB JSON blob */
                                     
-                                    // Build ships array for initial state (increased buffer for modules)
-                                    static char ships_str[65536];
+                                    // Build ships array for initial state
+                                    static char ships_str[1048576]; /* 1 MB — fits 150 ships   */
                                     int ships_offset = 0;
                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "[");
                                     
                                     bool first_ship = true;
-                                    for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 512; s++) {
+                                    for (int s = 0; s < ship_count && ships_offset < (int)sizeof(ships_str) - 8192; s++) {
                                         if (ships[s].active) {
                                             ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset,
                                                     "%s{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"company\":%u,\"shipType\":%u,\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
@@ -3942,8 +3960,8 @@ int websocket_server_update(struct Sim* sim) {
                                     }
                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "]");
                                     
-                                    log_info("📊 Initial game state: ships_str size=%d, buffer=%zu", 
-                                             ships_offset, sizeof(ships_str));
+                                    log_info("📊 Initial game state: ships_str size=%d/%zu, response_buf=%zu",
+                                             ships_offset, sizeof(ships_str), sizeof(game_state_response));
                                     
                                     snprintf(game_state_response, sizeof(game_state_response),
                                             "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":%s,\"players\":[{\"id\":%u,\"name\":\"%s\","
@@ -3973,7 +3991,7 @@ int websocket_server_update(struct Sim* sim) {
                                     // Then send game state
                                     size_t game_state_frame_len = websocket_create_frame(WS_OPCODE_TEXT, game_state_response, strlen(game_state_response), game_state_frame, sizeof(game_state_frame));
                                     if (game_state_frame_len > 0 && game_state_frame_len < sizeof(game_state_frame)) {
-                                        send(client->fd, game_state_frame, game_state_frame_len, 0);
+                                        send_all(client->fd, game_state_frame, game_state_frame_len);
                                         // Sent initial game state
                                     }
 
@@ -4093,7 +4111,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send current placed structures
                                     {
-                                        static char hs_structs_buf[16384];
+                                        static char hs_structs_buf[131072];
                                         int hs_sp = 0;
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp,
                                                           "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -4229,12 +4247,12 @@ int websocket_server_update(struct Sim* sim) {
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
-                                        char hs_sf[16640];
+                                        char hs_sf[131086];
                                         size_t hs_sflen = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_structs_buf, (size_t)hs_sp,
                                             hs_sf, sizeof(hs_sf));
                                         if (hs_sflen > 0 && hs_sflen < sizeof(hs_sf))
-                                            send(client->fd, hs_sf, hs_sflen, 0);
+                                            send_all(client->fd, hs_sf, hs_sflen);
                                         log_info("📦 Sent STRUCTURES (%u) to JSON-handshake player %u",
                                                  placed_structure_count, client->player_id);
                                     }
@@ -6748,12 +6766,25 @@ int websocket_server_update(struct Sim* sim) {
                                                       ? player->company_id : 0;
                                         uint32_t gidxs[MAX_WEAPON_GROUPS];
                                         int gcnt = parse_json_uint32_array(payload, "groups", gidxs, MAX_WEAPON_GROUPS);
+                                        /* Determine unified target state:
+                                         * - If ANY requested group has closed gunports → open ALL.
+                                         * - Only when ALL are already open → close ALL.
+                                         * This prevents mixed toggle states across groups. */
+                                        uint8_t any_closed = 0;
                                         for (int gi = 0; gi < gcnt; gi++) {
                                             uint32_t gidx = gidxs[gi];
                                             if (gidx >= MAX_WEAPON_GROUPS) continue;
                                             WeaponGroup* grp = &ship->weapon_groups[cid][gidx];
                                             if (grp->weapon_count == 0) continue;
-                                            grp->gunports_open ^= 1;
+                                            if (!grp->gunports_open) { any_closed = 1; break; }
+                                        }
+                                        uint8_t target_open = any_closed ? 1 : 0;
+                                        for (int gi = 0; gi < gcnt; gi++) {
+                                            uint32_t gidx = gidxs[gi];
+                                            if (gidx >= MAX_WEAPON_GROUPS) continue;
+                                            WeaponGroup* grp = &ship->weapon_groups[cid][gidx];
+                                            if (grp->weapon_count == 0) continue;
+                                            grp->gunports_open = target_open;
                                             apply_group_gunport_state(ship, grp);
                                             /* Broadcast individual gunport_state for each cannon in the
                                              * group so all clients trigger the slide animation. */
@@ -8019,6 +8050,96 @@ int websocket_server_update(struct Sim* sim) {
                                             new_id);
                                     }
                                 }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_bed_at") == 0) {
+                            // PLACE BED: add a bed module at the given local position on a ship.
+                            // Payload: {"type":"place_bed_at","shipId":N,"localX":F,"localY":F,"rotation":F,"deckId":N}
+                            // Costs MODULE_RES_COST[MODULE_TYPE_BED] resources (10 wood, 5 fiber).
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else {
+                                    bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
+                                    bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
+                                    bool _res_ok = _ship_only ? res_can_afford_ship(_res_ship, MODULE_TYPE_BED)
+                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_BED)
+                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_BED);
+                                    if (!_res_ok) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        uint16_t target_ship_id = player->parent_ship_id;
+                                        float local_x = 0.0f, local_y = 0.0f, local_rot = 0.0f;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        const char* p_lx  = strstr(payload, "\"localX\":");
+                                        const char* p_ly  = strstr(payload, "\"localY\":");
+                                        const char* p_lr  = strstr(payload, "\"rotation\":");
+                                        const char* p_dk  = strstr(payload, "\"deckId\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                        if (p_lx)  sscanf(p_lx + 9, "%f", &local_x);
+                                        if (p_ly)  sscanf(p_ly + 9, "%f", &local_y);
+                                        if (p_lr)  sscanf(p_lr + 11, "%f", &local_rot);
+                                        uint8_t req_deck_id = player->deck_level;
+                                        if (p_dk) { unsigned dk = 0; sscanf(p_dk + 9, "%u", &dk); req_deck_id = (dk <= 1) ? (uint8_t)dk : player->deck_level; }
+
+                                        struct Ship* bd_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                bd_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        SimpleShip* bd_simple = find_ship(target_ship_id);
+                                        if (!bd_sim || !bd_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (bd_sim->module_count >= MAX_MODULES_PER_SHIP ||
+                                                   bd_simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                        } else if (modules_overlap_at(bd_simple, MODULE_TYPE_BED, local_x, local_y, req_deck_id)) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"placement_overlap\"}");
+                                        } else {
+                                            uint16_t max_id = 0;
+                                            for (uint8_t m = 0; m < bd_sim->module_count; m++)
+                                                if (bd_sim->modules[m].id > max_id) max_id = bd_sim->modules[m].id;
+                                            for (uint8_t m = 0; m < bd_simple->module_count; m++)
+                                                if (bd_simple->modules[m].id > max_id) max_id = bd_simple->modules[m].id;
+                                            uint16_t new_id = max_id + 1;
+
+                                            ShipModule nbd;
+                                            memset(&nbd, 0, sizeof(ShipModule));
+                                            nbd.id          = new_id;
+                                            nbd.type_id     = MODULE_TYPE_BED;
+                                            nbd.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                            nbd.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                            nbd.local_rot   = Q16_FROM_FLOAT(local_rot);
+                                            nbd.state_bits  = MODULE_STATE_ACTIVE;
+                                            nbd.health      = 3000;
+                                            nbd.max_health  = 3000;
+                                            nbd.deck_id     = req_deck_id;
+
+                                            bd_sim->modules[bd_sim->module_count++]       = nbd;
+                                            bd_simple->modules[bd_simple->module_count++] = nbd;
+
+                                            if (_ship_only)       res_consume_ship(_res_ship, MODULE_TYPE_BED);
+                                            else if (_pack_only)  res_consume(player, MODULE_TYPE_BED);
+                                            else                  res_consume_combined(player, _res_ship, MODULE_TYPE_BED);
+
+                                            recalc_ship_mass(bd_simple);
+                                            log_info("🛏️  Player %u placed bed %u at (%.1f,%.1f) rot=%.2f deck=%u on ship %u",
+                                                     player->player_id, new_id, local_x, local_y,
+                                                     local_rot, req_deck_id, bd_sim->id);
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"message_ack\",\"status\":\"bed_placed\",\"bed_id\":%u}",
+                                                new_id);
+                                        }
+                                    }
                                 }
                             }
                             handled = true;
@@ -10332,7 +10453,7 @@ int websocket_server_update(struct Sim* sim) {
                         } else if (strncmp(payload, "GET_STRUCTURES", 14) == 0) {
                             /* Re-send the full placed-structures list to this client. */
                             {
-                                static char gs_buf[16384];
+                                static char gs_buf[131072];
                                 int gp = 0;
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp,
                                                "{\"type\":\"STRUCTURES\",\"structures\":[");
@@ -10466,11 +10587,11 @@ int websocket_server_update(struct Sim* sim) {
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
-                                char gf[16640];
+                                char gf[131086];
                                 size_t gflen = websocket_create_frame(
                                     WS_OPCODE_TEXT, gs_buf, (size_t)gp, gf, sizeof(gf));
                                 if (gflen > 0 && gflen < sizeof(gf))
-                                    send(client->fd, gf, gflen, 0);
+                                    send_all(client->fd, gf, gflen);
                                 log_info("📦 Sent STRUCTURES (%u) on GET_STRUCTURES to player %u",
                                          placed_structure_count, client->player_id);
                             }
@@ -10676,11 +10797,13 @@ int websocket_server_update(struct Sim* sim) {
          *  2. Filter NPCs[]  by AOI (use ship position for on-ship NPCs).
          *  3. Use delta compression: only send changed fields, not full objects.
          */
-        static char per_ship_json_pool[WS_MAX_CLIENTS][131072];
-        static char per_gs_pool[WS_MAX_CLIENTS][131072];
+#define PER_SHIP_BUF 262144  /* 256 KB per-client ship-JSON slice */
+#define PER_GS_BUF   524288  /* 512 KB per-client full GAME_STATE  */
+        static char per_ship_json_pool[WS_MAX_CLIENTS][PER_SHIP_BUF];
+        static char per_gs_pool[WS_MAX_CLIENTS][PER_GS_BUF];
         static int  per_gs_len[WS_MAX_CLIENTS];
         static int  send_client_idx[WS_MAX_CLIENTS];
-        static char per_frame[131086];
+        static char per_frame[PER_GS_BUF + 14];
         uint64_t _send_loop_t0_us = get_time_us();
         uint64_t _send_build_t0_us = get_time_us();
 
@@ -10709,14 +10832,14 @@ int websocket_server_update(struct Sim* sim) {
             const float _view_r2 = _view_r * _view_r;
 
             char* per_ship_json = per_ship_json_pool[_send_count];
-            int _soff = snprintf(per_ship_json, 131072, "[");
+            int _soff = snprintf(per_ship_json, PER_SHIP_BUF, "[");
             bool _sfirst = true;
             for (int _si = 0; _si < aoi_ship_count; _si++) {
                 float _dx = shared_blob_cache.aoi_ship_px[_si] - _cx, _dy = shared_blob_cache.aoi_ship_py[_si] - _cy;
                 if (_dx * _dx + _dy * _dy > _view_r2) continue;
-                if (!_sfirst && _soff < 131072 - 1)
+                if (!_sfirst && _soff < PER_SHIP_BUF - 1)
                     per_ship_json[_soff++] = ',';
-                int _room = 131072 - _soff - 2;
+                int _room = PER_SHIP_BUF - _soff - 2;
                 if (shared_blob_cache.aoi_ship_len[_si] > 0 && shared_blob_cache.aoi_ship_len[_si] <= _room) {
                     memcpy(per_ship_json + _soff,
                            ships_json + shared_blob_cache.aoi_ship_start[_si],
@@ -10725,18 +10848,18 @@ int websocket_server_update(struct Sim* sim) {
                 }
                 _sfirst = false;
             }
-            if (_soff < 131072 - 1) per_ship_json[_soff++] = ']';
+            if (_soff < PER_SHIP_BUF - 1) per_ship_json[_soff++] = ']';
             per_ship_json[_soff] = '\0';
 
             char* per_gs = per_gs_pool[_send_count];
             int _goff = 0;
-            _goff += snprintf(per_gs + _goff, 131072 - _goff,
+            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff,
                               "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
                               current_time / 33, current_time);
-#define _MC1(buf, len) do { if (_goff + (len) < 131072 - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
+#define _MC1(buf, len) do { if (_goff + (len) < PER_GS_BUF - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
             _MC1(per_ship_json, _soff);
             /* Players: AOI-filtered per-client (skip players outside view radius). */
-            if (_goff + 12 < 131072) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
+            if (_goff + 12 < PER_GS_BUF) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
             {
                 bool _ppf = true;
                 for (int _p = 0; _p < WS_MAX_CLIENTS; _p++) {
@@ -10744,19 +10867,19 @@ int websocket_server_update(struct Sim* sim) {
                     float _pdx = shared_blob_cache.player_world_x[_p] - _cx;
                     float _pdy = shared_blob_cache.player_world_y[_p] - _cy;
                     if (_pdx*_pdx + _pdy*_pdy > _view_r2) continue;
-                    if (!_ppf && _goff < 131072 - 1) per_gs[_goff++] = ',';
+                    if (!_ppf && _goff < PER_GS_BUF - 1) per_gs[_goff++] = ',';
                     int _plen = shared_blob_cache.player_entry_len[_p];
-                    if (_plen > 0 && _goff + _plen < 131072 - 2) {
+                    if (_plen > 0 && _goff + _plen < PER_GS_BUF - 2) {
                         memcpy(per_gs + _goff, shared_blob_cache.player_entry[_p], (size_t)_plen);
                         _goff += _plen; _ppf = false;
                     }
                 }
-                if (_goff < 131072 - 1) per_gs[_goff++] = ']';
+                if (_goff < PER_GS_BUF - 1) per_gs[_goff++] = ']';
             }
-            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"projectiles\":");
+            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"projectiles\":");
             _MC1(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
             /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
-            if (_goff + 9 < 131072) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
+            if (_goff + 9 < PER_GS_BUF) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
             {
                 bool _npf = true;
                 int _ncount = shared_blob_cache.npc_entry_count;
@@ -10767,28 +10890,28 @@ int websocket_server_update(struct Sim* sim) {
                     float _ndx = shared_blob_cache.npc_world_x[_n] - _cx;
                     float _ndy = shared_blob_cache.npc_world_y[_n] - _cy;
                     if (_ndx*_ndx + _ndy*_ndy > _view_r2) continue;
-                    if (!_npf && _goff < 131072 - 1) per_gs[_goff++] = ',';
+                    if (!_npf && _goff < PER_GS_BUF - 1) per_gs[_goff++] = ',';
                     int _nlen = shared_blob_cache.npc_entry_len[_n];
-                    if (_nlen > 0 && _goff + _nlen < 131072 - 2) {
+                    if (_nlen > 0 && _goff + _nlen < PER_GS_BUF - 2) {
                         memcpy(per_gs + _goff, shared_blob_cache.npc_entry[_n], (size_t)_nlen);
                         _goff += _nlen; _npf = false;
                     }
                 }
-                if (_goff < 131072 - 1) per_gs[_goff++] = ']';
+                if (_goff < PER_GS_BUF - 1) per_gs[_goff++] = ']';
             }
-            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"tombstones\":");
+            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"tombstones\":");
             _MC1(shared_blob_cache.tmb_json, shared_blob_cache.tmb_len);
-            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"droppedItems\":");
+            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"droppedItems\":");
             _MC1(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
-            _goff += snprintf(per_gs + _goff, 131072 - _goff, ",\"companies\":");
+            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"companies\":");
             _MC1(shared_blob_cache.co_json, shared_blob_cache.co_len);
 #undef _MC1
             /* World wind — included every tick so late-joining clients get it immediately. */
-            _goff += snprintf(per_gs + _goff, 131072 - _goff,
+            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff,
                               ",\"windAngle\":%.4f,\"windStrength\":%.3f",
                               g_wind_angle,
                               global_sim ? global_sim->wind_power : 0.5f);
-            if (_goff < 131072 - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
+            if (_goff < PER_GS_BUF - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
             per_gs_len[_send_count] = _goff;
 
             send_client_idx[_send_count] = _ci;
@@ -11530,6 +11653,14 @@ void websocket_server_tick(float dt) {
                         send(client->fd, frame, frame_len, 0);
                 }
             }
+
+            /* Damage aggro: ghost ship hit → force it to pursue the attacker */
+            if (ev->shooter_ship_id != 0 && ev->shooter_ship_id != ev->ship_id
+                && ev->damage_dealt > 0) {
+                SimpleShip* victim = find_ship(ev->ship_id);
+                if (victim && victim->ship_type == SHIP_TYPE_GHOST)
+                    ghost_notify_damaged(ev->ship_id, ev->shooter_ship_id);
+            }
         }
         global_sim->hit_event_count = 0;
     }
@@ -11930,6 +12061,9 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);
+
+    // ===== GHOST SHIP SPAWNER (maintains population up to 50, respawns on death) =====
+    tick_ghost_ship_spawner(dt);
 
     // ===== TICK RESOURCE RESPAWNS =====
     tick_resource_respawn();

@@ -494,7 +494,7 @@ export const PhysicsConfig = {
  * Module kinds that can be ghost-placed as planning markers.
  * Subset of ModuleKind — only buildable module types.
  */
-export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'chest';
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'chest' | 'bed';
 
 /**
  * A client-local "ghost" placement — a translucent planning marker showing

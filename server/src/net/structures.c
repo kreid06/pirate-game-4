@@ -2195,6 +2195,25 @@ void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y) {
         claim_on_fort_destroyed(structure_id);  /* same handler — drops IslandClaim if one exists */
     }
 
+    /* ── Shipyard destroyed: release any scaffolded ship ──────────────── */
+    if (dtype == STRUCT_SHIPYARD) {
+        /* Find the shipyard in the (still-in-array) slot — already marked inactive
+         * but idx is still valid before the compact pass at the end. */
+        uint32_t rel_id = placed_structures[idx].scaffolded_ship_id;
+        if (rel_id != 0 && global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id == rel_id) {
+                    global_sim->ships[si].flags &= (uint16_t)~SHIP_FLAG_SCAFFOLDED;
+                    global_sim->ships[si].initial_plank_count = 10;
+                    log_info("⚓ Shipyard %u destroyed — released scaffolded ship %u",
+                             structure_id, rel_id);
+                    break;
+                }
+            }
+        }
+        placed_structures[idx].scaffolded_ship_id = 0;
+    }
+
     /* ── Chest ruin: spawn resource wreck so items can be salvaged ─────── */
     if (dtype == STRUCT_CHEST &&
         (chest_ruin_wood + chest_ruin_fiber + chest_ruin_metal + chest_ruin_stone) > 0 &&
@@ -2357,6 +2376,75 @@ void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y) {
             placed_structures[write++] = placed_structures[read];
     }
     placed_structure_count = write;
+}
+
+/*
+ * shipyard_scaffolding_sanity_sweep — called once after world_load().
+ *
+ * Two-pass integrity check:
+ *   Pass 1 – every ship with SHIP_FLAG_SCAFFOLDED must have a matching active
+ *             STRUCT_SHIPYARD whose scaffolded_ship_id equals the ship id.
+ *             Stale flag → clear SHIP_FLAG_SCAFFOLDED + reset initial_plank_count.
+ *   Pass 2 – every STRUCT_SHIPYARD whose scaffolded_ship_id is non-zero must
+ *             point to a ship that actually exists in the sim.
+ *             Stale pointer → clear scaffolded_ship_id on the shipyard.
+ */
+void shipyard_scaffolding_sanity_sweep(void) {
+    if (!global_sim) return;
+
+    int fixed_ships = 0;
+    int fixed_yards = 0;
+
+    /* Pass 1: ships */
+    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+        struct Ship *ship = &global_sim->ships[si];
+        if (!(ship->flags & SHIP_FLAG_SCAFFOLDED)) continue;
+
+        bool has_yard = false;
+        for (uint32_t pi = 0; pi < placed_structure_count; pi++) {
+            PlacedStructure *sy = &placed_structures[pi];
+            if (!sy->active || sy->type != STRUCT_SHIPYARD) continue;
+            if (sy->scaffolded_ship_id == (uint32_t)ship->id) { has_yard = true; break; }
+        }
+
+        if (!has_yard) {
+            log_warn("⚓ [sanity] Ship %u has SHIP_FLAG_SCAFFOLDED but no matching shipyard — clearing",
+                     (unsigned)ship->id);
+            ship->flags &= (uint16_t)~SHIP_FLAG_SCAFFOLDED;
+            ship->initial_plank_count = 10;
+            fixed_ships++;
+        }
+    }
+
+    /* Pass 2: shipyards */
+    for (uint32_t pi = 0; pi < placed_structure_count; pi++) {
+        PlacedStructure *sy = &placed_structures[pi];
+        if (!sy->active || sy->type != STRUCT_SHIPYARD) continue;
+        if (sy->scaffolded_ship_id == 0) continue;
+
+        bool has_ship = false;
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if ((uint32_t)global_sim->ships[si].id == sy->scaffolded_ship_id) {
+                has_ship = true; break;
+            }
+        }
+
+        if (!has_ship) {
+            log_warn("⚓ [sanity] Shipyard %u references missing ship %u — clearing scaffolded_ship_id",
+                     sy->id, sy->scaffolded_ship_id);
+            sy->scaffolded_ship_id   = 0;
+            sy->construction_phase   = CONSTRUCTION_EMPTY;
+            sy->modules_placed       = 0;
+            fixed_yards++;
+        }
+    }
+
+    if (fixed_ships || fixed_yards) {
+        log_info("⚓ [sanity] Shipyard sweep complete: %d ship(s) unscaffolded, %d yard(s) cleared",
+                 fixed_ships, fixed_yards);
+    } else {
+        log_info("⚓ [sanity] Shipyard scaffolding OK");
+    }
 }
 
 /*
