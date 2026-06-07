@@ -859,6 +859,228 @@ export class NetworkManager {
   
   constructor(config: NetworkConfig) {
     this.config = config;
+    // Expose browser-console debug helper: paste a GAME_STATE JSON string and
+    // get a full diagnostic without having to intercept a live tick.
+    (window as any).__debugGameState = (input: string | object) =>
+      NetworkManager.analyzeGameState(input);
+  }
+
+  /**
+   * Diagnose a raw GAME_STATE payload.
+   *
+   * Usage from the browser console:
+   *   __debugGameState('{"type":"GAME_STATE","tick":1,...}')
+   *   __debugGameState(someAlreadyParsedObject)
+   *
+   * Prints a structured report — no return value needed.
+   */
+  static analyzeGameState(input: string | object): void {
+    // ── 1. Parse ────────────────────────────────────────────────────────────
+    let gs: any;
+    if (typeof input === 'string') {
+      const raw = input.startsWith('GAME_STATE:') ? input.substring(11) : input;
+      try {
+        gs = JSON.parse(raw);
+      } catch (e) {
+        const head = raw.substring(0, 400);
+        const tail = raw.length > 400 ? `…${raw.substring(raw.length - 100)}` : '';
+        console.error(
+          `❌ [analyzeGameState] JSON.parse failed (${raw.length} bytes)\n` +
+          `  Error : ${e}\n` +
+          `  Head  : ${head}${tail}`
+        );
+        return;
+      }
+    } else {
+      gs = input;
+    }
+
+    const WARN = 'color:orange;font-weight:bold';
+    const ERR  = 'color:red;font-weight:bold';
+    const OK   = 'color:green;font-weight:bold';
+    const issues: Array<{ level: 'warn'|'error'; msg: string }> = [];
+    const w = (msg: string) => issues.push({ level: 'warn',  msg });
+    const e = (msg: string) => issues.push({ level: 'error', msg });
+
+    // ── 2. Top-level ────────────────────────────────────────────────────────
+    if (gs.type && gs.type !== 'GAME_STATE') e(`type="${gs.type}" — expected "GAME_STATE"`);
+    if (typeof gs.tick !== 'number')         e('missing numeric "tick"');
+
+    // ── 3. Per-typeId rules ──────────────────────────────────────────────────
+    // deck_id: null = field absent (old server), 0 = lower, 1 = upper, 255 = deck-independent
+    // required_fields: fields the server MUST send for this typeId
+    // deck_must: exact deck_id the module must carry (undefined = flexible)
+    type ModRule = {
+      name: string;
+      requiredFields?: string[];
+      deck_must?: number;    // exact required deck_id
+      deck_allow?: number[]; // allowed deck_id values (if not deck_must)
+      posRequired?: boolean; // must carry x/y
+      singleton?: boolean;   // at most one per ship
+    };
+    const TYPE_RULES: Record<number, ModRule> = {
+      0:  { name:'helm',           posRequired:true,  deck_allow:[0,1],    singleton:true,  requiredFields:['wheelRot','state']          },
+      1:  { name:'seat',           posRequired:true,  deck_allow:[0,1,255]                                                               },
+      2:  { name:'cannon',         posRequired:true,  deck_allow:[0,1],                     requiredFields:['aimDir','state','gunportSnapIdx'] },
+      3:  { name:'mast',           posRequired:true,  deck_must:255,                         requiredFields:['openness','sailAngle']       },
+      4:  { name:'steering-wheel', posRequired:true,  deck_allow:[0,1]                                                                   },
+      5:  { name:'ladder',         posRequired:true,  deck_must:255,       singleton:true                                                },
+      6:  { name:'plank',                             deck_allow:[0,1,255], requiredFields:['health','maxHealth']                        },
+      7:  { name:'deck',                              deck_allow:[0,1],    requiredFields:['health','stateBits']                         },
+      8:  { name:'swivel',         posRequired:true,  deck_allow:[0,1,255]                                                               },
+      9:  { name:'ramp',           posRequired:true,  deck_must:255                                                                      },
+      10: { name:'hatch_cover',    posRequired:true,  deck_allow:[0,1]                                                                   },
+      11: { name:'gunport',        posRequired:true,  deck_allow:[0,1],    requiredFields:['isOpen','snapIndex']                         },
+      13: { name:'chest',          posRequired:true,  deck_allow:[0,1,255]                                                               },
+      14: { name:'bed',            posRequired:true,  deck_allow:[0,1,255]                                                               },
+    };
+
+    // ── 4. Ships ─────────────────────────────────────────────────────────────
+    for (const ship of (gs.ships ?? [])) {
+      const sid = `ship[${ship.id ?? '?'}]`;
+      if (typeof ship.id       !== 'number') { e(`${sid}: missing id`);       continue; }
+      if (typeof ship.x        !== 'number') e(`${sid}: missing x`);
+      if (typeof ship.y        !== 'number') e(`${sid}: missing y`);
+      if (typeof ship.rotation !== 'number') e(`${sid}: missing rotation`);
+      if (!Number.isFinite(ship.x)) e(`${sid}: x=${ship.x} is not finite`);
+      if (!Number.isFinite(ship.y)) e(`${sid}: y=${ship.y} is not finite`);
+      if (!Array.isArray(ship.modules)) { e(`${sid}: modules is not an array`); continue; }
+
+      const seenIds = new Map<number, number>(); // id → first index
+      const singletons = new Set<number>();      // typeIds already seen once
+
+      const rows: Array<Record<string,string>> = [];
+      for (let mi = 0; mi < ship.modules.length; mi++) {
+        const mod = ship.modules[mi];
+        if (mod == null) { e(`${sid}[${mi}]: null/undefined module`); continue; }
+
+        const mid = `${sid}/mod[id=${mod.id ?? '?'} idx=${mi}]`;
+        if (typeof mod.id     === 'undefined') { e(`${mid}: missing id`);     continue; }
+        if (typeof mod.typeId === 'undefined') { e(`${mid}: missing typeId`); continue; }
+
+        const rule = TYPE_RULES[mod.typeId as number];
+        const typeName = rule?.name ?? `UNKNOWN(${mod.typeId})`;
+
+        // Duplicate ID
+        if (seenIds.has(mod.id)) {
+          e(`${mid}: DUPLICATE id — first seen at index ${seenIds.get(mod.id)}`);
+        } else {
+          seenIds.set(mod.id, mi);
+        }
+
+        // Unknown typeId
+        if (!rule) w(`${mid}: unknown typeId ${mod.typeId}`);
+
+        // Singleton (ladder, helm — only one per ship)
+        if (rule?.singleton) {
+          if (singletons.has(mod.typeId)) w(`${mid}: more than one ${typeName} on this ship`);
+          singletons.add(mod.typeId);
+        }
+
+        // deck_id checks
+        const dk: number | undefined = mod.deck_id;
+        if (dk !== undefined) {
+          if (dk !== 0 && dk !== 1 && dk !== 255)
+            e(`${mid}: deck_id=${dk} is not 0/1/255`);
+          if (rule?.deck_must !== undefined && dk !== rule.deck_must)
+            e(`${mid}: ${typeName} must have deck_id=${rule.deck_must} but got ${dk}`);
+          if (rule?.deck_allow && rule.deck_must === undefined && !rule.deck_allow.includes(dk))
+            w(`${mid}: ${typeName} has deck_id=${dk}, expected one of [${rule.deck_allow}]`);
+        } else if (rule?.deck_must !== undefined) {
+          w(`${mid}: ${typeName} missing deck_id (expected ${rule.deck_must})`);
+        }
+
+        // Positions
+        if (rule?.posRequired) {
+          if (mod.x === undefined || mod.y === undefined)
+            e(`${mid}: ${typeName} missing x/y position`);
+          else {
+            if (!Number.isFinite(mod.x)) e(`${mid}: x=${mod.x} is not finite`);
+            if (!Number.isFinite(mod.y)) e(`${mid}: y=${mod.y} is not finite`);
+            const dist = Math.sqrt(mod.x * mod.x + mod.y * mod.y);
+            if (dist > 500) w(`${mid}: position (${mod.x},${mod.y}) is >500px from ship center`);
+          }
+        }
+
+        // Health sanity
+        if (mod.health !== undefined && mod.maxHealth !== undefined &&
+            mod.maxHealth > 0 && mod.health > mod.maxHealth * 1.01)
+          e(`${mid}: health=${mod.health} > maxHealth=${mod.maxHealth}`);
+
+        // Required fields per type
+        for (const rf of (rule?.requiredFields ?? [])) {
+          if (mod[rf] === undefined) w(`${mid}: ${typeName} missing expected field "${rf}"`);
+        }
+
+        rows.push({
+          idx: String(mi),
+          id:  String(mod.id),
+          type: typeName,
+          deck: dk !== undefined ? String(dk) : '—',
+          pos: mod.x !== undefined ? `(${mod.x},${mod.y})` : '—',
+          health: mod.health !== undefined ? `${mod.health}/${mod.maxHealth ?? '?'}` : '—',
+        });
+      }
+
+      // Print module table for this ship
+      console.groupCollapsed(`  📦 ${sid}  (${ship.modules.length} modules, company=${ship.company ?? '?'})`);
+      console.table(rows);
+      console.groupEnd();
+    }
+
+    // ── 5. Players ──────────────────────────────────────────────────────────
+    for (const p of (gs.players ?? [])) {
+      const pid = `player[${p.id ?? '?'}]`;
+      if (typeof p.world_x !== 'number') e(`${pid}: missing world_x`);
+      if (typeof p.world_y !== 'number') e(`${pid}: missing world_y`);
+      if (!Number.isFinite(p.world_x))   e(`${pid}: world_x=${p.world_x} is not finite`);
+      if (!Number.isFinite(p.world_y))   e(`${pid}: world_y=${p.world_y} is not finite`);
+      if (p.parent_ship !== undefined && typeof p.parent_ship !== 'number')
+        w(`${pid}: parent_ship is "${p.parent_ship}" (expected number)`);
+      if (p.inventory) {
+        if (!Array.isArray(p.inventory.slots))
+          e(`${pid}: inventory.slots is not an array`);
+        else {
+          for (let si = 0; si < p.inventory.slots.length; si++) {
+            const slot = p.inventory.slots[si];
+            if (slot !== null && typeof slot === 'object' && typeof slot.item === 'undefined')
+              w(`${pid}: inventory.slots[${si}] missing "item" field`);
+          }
+        }
+      }
+    }
+
+    // ── 6. NPCs ─────────────────────────────────────────────────────────────
+    for (const n of (gs.npcs ?? [])) {
+      const nid = `npc[${n.id ?? '?'}]`;
+      if (!Number.isFinite(n.x)) e(`${nid}: x=${n.x} is not finite`);
+      if (!Number.isFinite(n.y)) e(`${nid}: y=${n.y} is not finite`);
+    }
+
+    // ── 7. Print summary ────────────────────────────────────────────────────
+    const sep = '─'.repeat(72);
+    const errors = issues.filter(i => i.level === 'error');
+    const warns  = issues.filter(i => i.level === 'warn');
+
+    console.group(
+      `%c🔍 analyzeGameState  tick=${gs.tick ?? '?'}  ` +
+      `ships=${gs.ships?.length ?? 0}  players=${gs.players?.length ?? 0}  npcs=${gs.npcs?.length ?? 0}`,
+      errors.length ? ERR : warns.length ? WARN : OK
+    );
+    if (errors.length === 0 && warns.length === 0) {
+      console.log('%c✅ No issues found', OK);
+    } else {
+      if (errors.length) {
+        console.log(`%c❌ ${errors.length} error(s):`, ERR);
+        for (const i of errors) console.error('  •', i.msg);
+      }
+      if (warns.length) {
+        console.log(`%c⚠ ${warns.length} warning(s):`, WARN);
+        for (const i of warns) console.warn('  •', i.msg);
+      }
+    }
+    console.log(sep);
+    console.groupEnd();
   }
   
   /**
@@ -2075,7 +2297,14 @@ export class NetworkManager {
                 timestamp: Date.now()
               };
             } catch (parseError) {
-              console.warn('Failed to parse GAME_STATE:', data);
+              const raw = data.substring(11);
+              const head = raw.substring(0, 300);
+              const tail = raw.length > 300 ? `…${raw.substring(raw.length - 100)}` : '';
+              console.error(
+                `❌ [GAME_STATE] JSON.parse failed (payload ${raw.length} bytes)\n` +
+                `  Error : ${parseError}\n` +
+                `  Head  : ${head}${tail}`
+              );
               return;
             }
           } else {
@@ -2151,6 +2380,7 @@ export class NetworkManager {
         
       case 'GAME_STATE': // Handle server's GAME_STATE response
         // Convert server GAME_STATE to client WorldState format
+        try {
         const worldState: WorldState = {
           tick: message.tick || 0,
           timestamp: Date.now(),
@@ -2210,6 +2440,14 @@ export class NetworkManager {
               const deckHealthMap = new Map<number, { health: number; targetHealth: number; maxHealth: number; stateBits: number }>();
               
               for (const mod of ship.modules) {
+                if (mod == null) {
+                  console.warn(`⚠ [GAME_STATE] ship ${ship.id}: null/undefined module entry — skipping`);
+                  continue;
+                }
+                if (typeof mod.id === 'undefined' || typeof mod.typeId === 'undefined') {
+                  console.warn(`⚠ [GAME_STATE] ship ${ship.id}: module missing id or typeId:`, mod);
+                  continue;
+                }
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
@@ -2322,12 +2560,16 @@ export class NetworkManager {
                     };
                   }
                   
+                  // Guard against duplicate IDs sent by the server (e.g. the ladder
+                  // being emitted twice when loading from a save that was written
+                  // before the world_save dedup fix landed).
+                  if (gameplayModules.some(m => m.id === mod.id)) continue;
                   gameplayModules.push({
                     id: mod.id,
                     kind: kind,
                     deckId: mod.deck_id ?? 255, // 255=deck-independent fallback; 0=lower, 1=upper when server sends it
-                    localPos: Vec2.from(mod.x || 0, mod.y || 0),
-                    localRot: mod.rotation || 0,
+                    localPos: Vec2.from(mod.x ?? 0, mod.y ?? 0),
+                    localRot: mod.rotation ?? 0,
                     occupiedBy: null,
                     stateBits: mod.state ?? 0,
                     qualityTier: typeof mod.qt === 'number' && mod.qt >= 0 ? mod.qt : undefined,
@@ -2569,6 +2811,15 @@ export class NetworkManager {
         // Parse world wind fields attached to GAME_STATE
         if (typeof message.windAngle    === 'number') this.windAngle    = message.windAngle;
         if (typeof message.windStrength === 'number') this.windStrength = message.windStrength;
+        } catch (gsErr: any) {
+          console.error(
+            `❌ [GAME_STATE] Processing threw on tick ${message?.tick ?? '?'}\n` +
+            `  Error : ${gsErr?.message ?? gsErr}\n` +
+            `  Stack : ${gsErr?.stack ?? '(no stack)'}`
+          );
+          // Run the full structural analyser so the console shows exactly what's wrong
+          NetworkManager.analyzeGameState(message);
+        }
         break;
         
       case MessageType.PONG: // Handles both 'pong' enum and text response

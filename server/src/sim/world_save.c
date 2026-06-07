@@ -807,12 +807,30 @@ int world_load(const char *path) {
                                         }
                                     }
                                     new_mod.deck_id = (uint8_t)mdeck;
-                                    /* Add to SimpleShip layer */
-                                    if (s->module_count < MAX_MODULES_PER_SHIP)
-                                        s->modules[s->module_count++] = new_mod;
-                                    /* Add to sim layer */
-                                    if (sim_ship && sim_ship->module_count < MAX_MODULES_PER_SHIP)
-                                        sim_ship->modules[sim_ship->module_count++] = new_mod;
+                                    /* Add to SimpleShip layer — replace any pre-init duplicate
+                                     * (e.g. the ladder added unconditionally by init_brigantine_ship
+                                     * before the modules_placed==0 early return). */
+                                    {
+                                        bool dup = false;
+                                        for (uint8_t di = 0; di < s->module_count; di++) {
+                                            if (s->modules[di].id == new_mid) {
+                                                s->modules[di] = new_mod; dup = true; break;
+                                            }
+                                        }
+                                        if (!dup && s->module_count < MAX_MODULES_PER_SHIP)
+                                            s->modules[s->module_count++] = new_mod;
+                                    }
+                                    /* Add to sim layer — same dedup guard */
+                                    if (sim_ship) {
+                                        bool dup = false;
+                                        for (uint8_t di = 0; di < sim_ship->module_count; di++) {
+                                            if ((uint16_t)sim_ship->modules[di].id == new_mid) {
+                                                sim_ship->modules[di] = new_mod; dup = true; break;
+                                            }
+                                        }
+                                        if (!dup && sim_ship->module_count < MAX_MODULES_PER_SHIP)
+                                            sim_ship->modules[sim_ship->module_count++] = new_mod;
+                                    }
                                     free(mobj);
                                     mi++;
                                 }
