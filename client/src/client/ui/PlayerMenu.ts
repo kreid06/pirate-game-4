@@ -191,6 +191,32 @@ export class PlayerMenu {
     if (idx == null) return undefined;
     return this._lootedSchematics.find(bp => bp.index === idx);
   }
+  /**
+   * Maps build-kind → item kind for blueprint lookup (mirrors the inline map in _schematicsTab).
+   * Exported so UIManager can resolve variants outside the schematics tab.
+   */
+  private static readonly BP_KIND_MAP: Partial<Record<string, ItemKind>> = {
+    mast: 'sail',
+    helm: 'helm_kit',
+  };
+
+  /** Returns all quality blueprints available for a given build kind. */
+  public getVariantsForKind(kind: string): SchematicEntry[] {
+    const resolvedKind = (PlayerMenu.BP_KIND_MAP[kind] ?? kind) as ItemKind;
+    const id = ITEM_KIND_ID[resolvedKind];
+    if (typeof id !== 'number') return [];
+    return this._lootedSchematics.filter(bp => bp.item === id);
+  }
+
+  /** Sets the selected blueprint variant for a kind (null = Standard). */
+  public setVariantForKind(kind: string, index: number | null): void {
+    if (index === null) {
+      this._variantSelection.delete(kind);
+    } else {
+      this._variantSelection.set(kind, index);
+    }
+  }
+
   /** Pre-formatted tooltip info for the selected variant, ready for the hotbar tooltip. */
   public getVariantTooltipInfo(kind: string): { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined {
     const bp = this.getVariantSchematic(kind);

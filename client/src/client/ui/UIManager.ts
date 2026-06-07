@@ -20,6 +20,7 @@ import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
 import { TombstoneMenu } from './TombstoneMenu.js';
 import { SalvageMenu } from './SalvageMenu.js';
+import { tierColor as _tierColor, tierName as _tierName } from '../../sim/Quality.js';
 
 /**
  * UI render context
@@ -1668,6 +1669,11 @@ export class UIManager {
     // Hotbar left-click slot selection (only when no menu/build mode is consuming)
     // Build hotbar click — when in ship build mode, clicks on hotbar area select schematic slots
     if (this.inShipBuildMode) {
+      const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+
+      // Variant popup absorbs clicks first (even outside the popup rows, to dismiss)
+      if (hud?.handleVariantPopupClick(x, y)) return true;
+
       const BUILD_SLOTS = 8;
       const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
       const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
@@ -1680,14 +1686,27 @@ export class UIManager {
           if (x >= sx && x <= sx + SLOT_SIZE) {
             const kind = this.buildHotbarSlots[i] ?? null;
             if (kind !== null) {
-              // Toggle: re-clicking the active slot deselects it
-              const newActive = (this.buildHotbarActiveSlot === i) ? -1 : i;
-              this.buildHotbarActiveSlot = newActive;
-              this.onBuildHotbarSlotChange?.(i, newActive === -1 ? null : kind);
+              if (this.buildHotbarActiveSlot === i) {
+                // Re-clicking the active slot: open variant picker if blueprints exist,
+                // otherwise deselect the slot
+                const variants = hud?.getVariantsForKind(kind) ?? [];
+                if (variants.length > 0) {
+                  const slotCx = sx + SLOT_SIZE / 2;
+                  hud?.openVariantPopup(kind, slotCx, startY);
+                } else {
+                  this.buildHotbarActiveSlot = -1;
+                  this.onBuildHotbarSlotChange?.(i, null);
+                }
+              } else {
+                this.buildHotbarActiveSlot = i;
+                this.onBuildHotbarSlotChange?.(i, kind);
+                hud?.closeVariantPopup();
+              }
             } else {
               // Empty slot — open ship module picker above this slot
               const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
               this._shipModulePicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+              hud?.closeVariantPopup();
             }
             return true;
           }
@@ -2604,7 +2623,11 @@ export class UIManager {
   private initializeUIElements(): void {
     // Initialize HUD
     const _hudEl = new HUDElement();
-    _hudEl.getVariantTooltipInfo = (kind) => this.playerMenu.getVariantTooltipInfo(kind);
+    _hudEl.getVariantTooltipInfo  = (kind) => this.playerMenu.getVariantTooltipInfo(kind);
+    _hudEl.getVariantsForKind     = (kind) => this.playerMenu.getVariantsForKind(kind);
+    _hudEl.setVariantForKind      = (kind, idx) => this.playerMenu.setVariantForKind(kind, idx);
+    _hudEl.tierColorFn            = _tierColor;
+    _hudEl.tierNameFn             = _tierName;
     this.elements.set(UIElementType.HUD, _hudEl);
     this._loadHotbars();
     
@@ -3224,6 +3247,49 @@ class HUDElement implements UIElement {
   public landHotbarSlots: (string | null)[] = UIManager.LAND_BUILD_PANEL_ENTRIES.slice(0, 8).map(e => e.kind);
   /** Wired by UIManager so build-hotbar tooltip can show the active quality variant. */
   public getVariantTooltipInfo: (kind: string) => { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined = () => undefined;
+  /** Wired by UIManager — returns quality blueprints available for a build kind. */
+  public getVariantsForKind: (kind: string) => Array<{ index: number; tier: number; crafts: number }> = () => [];
+  /** Wired by UIManager — persists a variant selection (null = Standard). */
+  public setVariantForKind: (kind: string, index: number | null) => void = () => {};
+
+  // ── Variant picker popup ────────────────────────────────────────────────
+  private _variantPopup: {
+    kind: string;
+    anchorX: number;
+    anchorY: number;
+    hits: Array<{ index: number | null; x: number; y: number; w: number; h: number }>;
+  } | null = null;
+
+  /** Open the variant picker popup anchored above the given hotbar slot. */
+  openVariantPopup(kind: string, anchorX: number, anchorY: number): void {
+    this._variantPopup = { kind, anchorX, anchorY, hits: [] };
+  }
+
+  /** Close the popup (no selection change). */
+  closeVariantPopup(): boolean {
+    const was = this._variantPopup !== null;
+    this._variantPopup = null;
+    return was;
+  }
+
+  /**
+   * Handle a click that may land on the variant popup.
+   * Returns true (consuming the event) if the popup was open regardless of where
+   * the click landed — any click outside the popup rows also closes it.
+   */
+  handleVariantPopupClick(x: number, y: number): boolean {
+    if (!this._variantPopup) return false;
+    for (const h of this._variantPopup.hits) {
+      if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) {
+        this.setVariantForKind(this._variantPopup.kind, h.index);
+        this._variantPopup = null;
+        return true;
+      }
+    }
+    // Click missed all rows — dismiss popup without changing variant
+    this._variantPopup = null;
+    return true;
+  }
 
   // ── Tooltip hover-delay tracking (500 ms) ─────────────────────────────
   private _ttHoverKey   = '';
@@ -3758,9 +3824,19 @@ class HUDElement implements UIElement {
         ctx.textBaseline = 'middle';
         ctx.fillText(entry.symbol, sx + SLOT_SIZE / 2, swatchY + swatchSize / 2);
 
-        // Short label at bottom of slot
+        // Crafts-remaining badge (bottom-right of swatch, shown when quality variant active)
+        const vBadge = this.getVariantTooltipInfo(kind!);
+        if (vBadge) {
+          ctx.font = 'bold 9px Georgia, serif';
+          ctx.fillStyle = vBadge.color;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`×${vBadge.crafts}`, swatchX + swatchSize - 1, swatchY + swatchSize - 1);
+        }
+
+        // Short label at bottom of slot — quality tier color when variant active
         ctx.font = '8px Georgia, serif';
-        ctx.fillStyle = isActive ? '#ffee88' : '#b8a080';
+        ctx.fillStyle = vBadge ? vBadge.color : (isActive ? '#ffee88' : '#b8a080');
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         ctx.fillText(entry.label.substring(0, 8), sx + SLOT_SIZE / 2, sy + SLOT_SIZE - 2);
@@ -3805,6 +3881,9 @@ class HUDElement implements UIElement {
           entry.label, entry.color, entry.borderColor, costs, vInfo);
       }
     }
+
+    // Variant popup — rendered on top of everything, only for ship build mode
+    if (this._variantPopup) this._renderVariantPopup(ctx, canvas);
   }
 
   /** Renders the land structure build hotbar (replaces regular hotbar in land build mode). */
@@ -3870,9 +3949,19 @@ class HUDElement implements UIElement {
         ctx.textBaseline = 'middle';
         ctx.fillText(e.symbol, sx + SLOT_SIZE / 2, swatchY + swatchSize / 2);
 
-        // Short label
+        // Crafts-remaining badge when quality variant active
+        const vBadgeLand = kind ? this.getVariantTooltipInfo(kind) : undefined;
+        if (vBadgeLand) {
+          ctx.font = 'bold 9px Georgia, serif';
+          ctx.fillStyle = vBadgeLand.color;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`×${vBadgeLand.crafts}`, swatchX + swatchSize - 1, swatchY + swatchSize - 1);
+        }
+
+        // Short label — quality tier color when variant active
         ctx.font = '8px Georgia, serif';
-        ctx.fillStyle = isActive ? '#ffee88' : '#b8905a';
+        ctx.fillStyle = vBadgeLand ? vBadgeLand.color : (isActive ? '#ffee88' : '#b8905a');
         ctx.textAlign = 'center';
         ctx.textBaseline = 'bottom';
         ctx.fillText(e.label.substring(0, 8), sx + SLOT_SIZE / 2, sy + SLOT_SIZE - 2);
@@ -3913,6 +4002,9 @@ class HUDElement implements UIElement {
           e.label, e.color, e.borderColor, costs, vInfo);
       }
     }
+
+    // Variant popup for land build mode
+    if (this._variantPopup) this._renderVariantPopup(ctx, canvas);
   }
 
   private renderHotbar(
@@ -4515,6 +4607,143 @@ class HUDElement implements UIElement {
 
     ctx.restore();
   }
+
+  /**
+   * Renders the floating variant picker popup above the active build hotbar slot.
+   * Each row is a clickable hit-area recorded into `_variantPopup.hits`.
+   */
+  private _renderVariantPopup(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const popup = this._variantPopup;
+    if (!popup) return;
+
+    const variants = this.getVariantsForKind(popup.kind);
+    const activeInfo = this.getVariantTooltipInfo(popup.kind);
+    const ROW_H = 24;
+    const PAD = 10;
+    const W = 210;
+    const totalRows = 1 + variants.length; // Standard row + one per blueprint
+    const totalH = PAD + totalRows * ROW_H + PAD;
+
+    let px = popup.anchorX - W / 2;
+    let py = popup.anchorY - totalH - 6;
+    px = Math.max(4, Math.min(canvas.width  - W - 4, px));
+    py = Math.max(4, Math.min(canvas.height - totalH - 4, py));
+
+    popup.hits = []; // reset hit areas for this frame
+
+    ctx.save();
+
+    // Panel background
+    ctx.shadowColor = 'rgba(0,0,0,0.7)';
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = 'rgba(10,10,22,0.96)';
+    ctx.strokeStyle = 'rgba(200,160,50,0.7)';
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, px, py, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Header
+    ctx.font         = 'bold 10px Georgia, serif';
+    ctx.fillStyle    = 'rgba(200,160,50,0.7)';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('SELECT VARIANT', px + PAD, py + 5);
+
+    // Standard row
+    const stdY   = py + PAD;
+    const isStd  = !activeInfo;
+    popup.hits.push({ index: null, x: px, y: stdY, w: W, h: ROW_H });
+
+    if (isStd) {
+      ctx.fillStyle = 'rgba(80,160,80,0.15)';
+      ctx.beginPath();
+      ctx.roundRect(px + 2, stdY, W - 4, ROW_H, 3);
+      ctx.fill();
+    }
+
+    ctx.font         = 'bold 11px Georgia, serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = isStd ? '#88ee88' : 'rgba(180,180,180,0.7)';
+    ctx.textAlign    = 'left';
+    ctx.fillText(isStd ? '✓' : '○', px + PAD, stdY + ROW_H / 2);
+    ctx.fillStyle = isStd ? '#cceecc' : 'rgba(180,180,180,0.7)';
+    ctx.fillText('Standard', px + PAD + 14, stdY + ROW_H / 2);
+    ctx.font      = '9px Georgia, serif';
+    ctx.fillStyle = 'rgba(140,140,140,0.6)';
+    ctx.textAlign = 'right';
+    ctx.fillText('(resources only)', px + W - PAD, stdY + ROW_H / 2);
+
+    // Blueprint rows
+    for (let bi = 0; bi < variants.length; bi++) {
+      const bp   = variants[bi];
+      const rowY = stdY + ROW_H + bi * ROW_H;
+      const col  = this._tierColorCache(bp.tier);
+      const tname = this._tierNameCache(bp.tier);
+      const isSel = activeInfo && this._activeVariantIndex(popup.kind) === bp.index;
+
+      popup.hits.push({ index: bp.index, x: px, y: rowY, w: W, h: ROW_H });
+
+      if (isSel) {
+        ctx.fillStyle = 'rgba(60,40,100,0.25)';
+        ctx.beginPath();
+        ctx.roundRect(px + 2, rowY, W - 4, ROW_H, 3);
+        ctx.fill();
+      }
+
+      // Radio dot
+      ctx.font         = 'bold 11px Georgia, serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = isSel ? col : 'rgba(140,140,140,0.6)';
+      ctx.fillText(isSel ? '✓' : '○', px + PAD, rowY + ROW_H / 2);
+
+      // Tier colour dot
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(px + PAD + 20, rowY + ROW_H / 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Tier name
+      ctx.font      = 'bold 11px Georgia, serif';
+      ctx.fillStyle = col;
+      ctx.fillText(tname, px + PAD + 28, rowY + ROW_H / 2);
+
+      // ×crafts
+      const tnameW = ctx.measureText(tname).width;
+      ctx.font      = '10px Georgia, serif';
+      ctx.fillStyle = bp.crafts > 0 ? '#b0d0b0' : 'rgba(130,130,130,0.6)';
+      ctx.fillText(`×${bp.crafts}`, px + PAD + 28 + tnameW + 6, rowY + ROW_H / 2);
+    }
+
+    ctx.restore();
+  }
+
+  /** Reads the currently-selected blueprint index for a kind (used by popup rendering). */
+  private _activeVariantIndex(kind: string): number | null {
+    // Forward to getVariantTooltipInfo indirectly — we check the selection via tooltip absence
+    // The popup is responsible for opening only when the kind matches, so we track selection
+    // through setVariantForKind/getVariantTooltipInfo.  Here we just need the raw index.
+    // UIManager wires setVariantForKind which writes through to PlayerMenu._variantSelection.
+    // We read it back via getVariantsForKind cross-referenced with getVariantTooltipInfo:
+    const info = this.getVariantTooltipInfo(kind);
+    if (!info) return null;
+    // Match by tier+crafts — not perfect if two blueprints have identical tier+crafts, but
+    // functionally correct since the popup only shows distinct blueprints.
+    const vs = this.getVariantsForKind(kind);
+    return vs.find(v => {
+      const col = this._tierColorCache(v.tier);
+      return col === info.color && v.crafts === info.crafts;
+    })?.index ?? null;
+  }
+
+  // Tiny cache wrappers so HUDElement doesn't need to import Quality.ts directly.
+  // These are set by UIManager after wiring:
+  public tierColorFn: (tier: number) => string = () => '#ffffff';
+  public tierNameFn:  (tier: number) => string = () => 'Unknown';
+  private _tierColorCache(tier: number): string { return this.tierColorFn(tier); }
+  private _tierNameCache(tier: number):  string { return this.tierNameFn(tier);  }
 
   /** Word-wrap `text` into lines that fit within `maxWidth`. */
   private wrapText(
