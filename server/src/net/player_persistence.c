@@ -95,10 +95,38 @@ void save_player_to_file(const WebSocketPlayer *p) {
     );
 
     for (int s = 0; s < INVENTORY_SLOTS; s++) {
-        fprintf(f, "%s{\"item\":%u,\"qty\":%u}",
-                s == 0 ? "" : ",",
-                (unsigned)p->inventory.slots[s].item,
-                (unsigned)p->inventory.slots[s].quantity);
+        const QualityPayload* q = &p->inventory.slot_quality[s];
+        if (q->quality_q8 != 0) {
+            fprintf(f, "%s{\"item\":%u,\"qty\":%u,\"q\":%u,\"sm\":[%u,%u,%u,%u,%u]}",
+                    s == 0 ? "" : ",",
+                    (unsigned)p->inventory.slots[s].item,
+                    (unsigned)p->inventory.slots[s].quantity,
+                    (unsigned)q->quality_q8,
+                    (unsigned)q->stat_mult_q8[0], (unsigned)q->stat_mult_q8[1],
+                    (unsigned)q->stat_mult_q8[2], (unsigned)q->stat_mult_q8[3],
+                    (unsigned)q->stat_mult_q8[4]);
+        } else {
+            fprintf(f, "%s{\"item\":%u,\"qty\":%u}",
+                    s == 0 ? "" : ",",
+                    (unsigned)p->inventory.slots[s].item,
+                    (unsigned)p->inventory.slots[s].quantity);
+        }
+    }
+    fprintf(f, "],\n  \"schematics\": [");
+    {
+        bool sfirst = true;
+        for (int i = 0; i < MAX_PLAYER_SCHEMATICS; i++) {
+            const PlayerBlueprint* bp = &p->schematics[i];
+            if (bp->item == 0) continue;
+            fprintf(f, "%s{\"item\":%u,\"crafts\":%u,\"q\":%u,\"sm\":[%u,%u,%u,%u,%u]}",
+                    sfirst ? "" : ",",
+                    (unsigned)bp->item, (unsigned)bp->crafts_remaining,
+                    (unsigned)bp->quality.quality_q8,
+                    (unsigned)bp->quality.stat_mult_q8[0], (unsigned)bp->quality.stat_mult_q8[1],
+                    (unsigned)bp->quality.stat_mult_q8[2], (unsigned)bp->quality.stat_mult_q8[3],
+                    (unsigned)bp->quality.stat_mult_q8[4]);
+            sfirst = false;
+        }
     }
     fprintf(f, "]\n}\n");
     fclose(f);
@@ -124,6 +152,31 @@ static bool json_parse_float_field(const char *json, const char *key, float *out
     p += strlen(search);
     while (*p == ' ') p++;
     return sscanf(p, "%f", out) == 1;
+}
+
+/* Parse a {"q":..,"sm":[..]} quality payload from within [start,end). */
+static void parse_quality_obj(const char *start, const char *end, QualityPayload *out) {
+    memset(out, 0, sizeof(*out));
+    const char *qp = strstr(start, "\"q\":");
+    if (qp && (!end || qp < end)) {
+        unsigned q = 0; sscanf(qp + 4, "%u", &q);
+        out->quality_q8 = (uint8_t)q;
+    }
+    const char *sp = strstr(start, "\"sm\":");
+    if (sp && (!end || sp < end)) {
+        sp = strchr(sp, '[');
+        if (sp && (!end || sp < end)) {
+            sp++;
+            for (int k = 0; k < STAT_COUNT; k++) {
+                unsigned v = 0;
+                if (sscanf(sp, "%u", &v) != 1) break;
+                out->stat_mult_q8[k] = (uint16_t)v;
+                sp = strchr(sp, ',');
+                if (!sp || (end && sp >= end)) break;
+                sp++;
+            }
+        }
+    }
 }
 
 /** Restore persistent fields from a save file into *p.
@@ -209,19 +262,51 @@ bool load_player_from_file(WebSocketPlayer *p) {
         slots_arr = strchr(slots_arr, '[');
         if (slots_arr) {
             memset(p->inventory.slots, 0, sizeof(p->inventory.slots));
+            memset(p->inventory.slot_quality, 0, sizeof(p->inventory.slot_quality));
             const char *cur = slots_arr + 1;
             for (int s = 0; s < INVENTORY_SLOTS && cur; s++) {
                 cur = strchr(cur, '{');
                 if (!cur) break;
+                const char *objend = strchr(cur, '}');
                 unsigned item = 0, qty = 0;
                 const char *ip = strstr(cur, "\"item\":");
-                if (ip) sscanf(ip + 7, "%u", &item);
+                if (ip && (!objend || ip < objend)) sscanf(ip + 7, "%u", &item);
                 const char *qp = strstr(cur, "\"qty\":");
-                if (qp) sscanf(qp + 6, "%u", &qty);
+                if (qp && (!objend || qp < objend)) sscanf(qp + 6, "%u", &qty);
                 p->inventory.slots[s].item     = (ItemKind)item;
                 p->inventory.slots[s].quantity = (uint8_t)qty;
-                cur = strchr(cur, '}');
-                if (cur) cur++;
+                parse_quality_obj(cur, objend, &p->inventory.slot_quality[s]);
+                cur = objend ? objend + 1 : NULL;
+            }
+        }
+    }
+
+    /* Parse schematic inventory (persistent blueprints; absent in old saves) */
+    memset(p->schematics, 0, sizeof(p->schematics));
+    p->schematic_count = 0;
+    {
+        const char *sch = strstr(buf, "\"schematics\":");
+        if (sch) {
+            sch = strchr(sch, '[');
+            if (sch) {
+                const char *cur = sch + 1;
+                for (int i = 0; i < MAX_PLAYER_SCHEMATICS && cur; i++) {
+                    cur = strchr(cur, '{');
+                    if (!cur) break;
+                    const char *objend = strchr(cur, '}');
+                    unsigned item = 0, crafts = 0;
+                    const char *ip = strstr(cur, "\"item\":");
+                    if (ip && (!objend || ip < objend)) sscanf(ip + 7, "%u", &item);
+                    const char *cp = strstr(cur, "\"crafts\":");
+                    if (cp && (!objend || cp < objend)) sscanf(cp + 9, "%u", &crafts);
+                    if (item != 0 && crafts > 0) {
+                        p->schematics[i].item             = (uint8_t)item;
+                        p->schematics[i].crafts_remaining = (uint8_t)crafts;
+                        parse_quality_obj(cur, objend, &p->schematics[i].quality);
+                        p->schematic_count = (uint8_t)(i + 1);
+                    }
+                    cur = objend ? objend + 1 : NULL;
+                }
             }
         }
     }

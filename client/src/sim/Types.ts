@@ -224,6 +224,12 @@ export interface PlacedStructure {
   targetHp?: number;
   /** Land chest resource storage (STRUCT_CHEST only). Present in STRUCTURES snapshot. */
   chestResources?: { wood: number; fiber: number; metal: number; stone: number };
+  /** Shipwreck only: highest loot quality tier among remaining blueprints (0..6).
+   *  Used to color the salvage glint. Absent when the wreck holds no blueprints. */
+  wreckTier?: number;
+  /** Crafted structures only: rolled quality tier (0..6) of the blueprint this was
+   *  crafted from. Used to tint/outline the structure. Absent for plain structures. */
+  qualityTier?: number;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)

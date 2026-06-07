@@ -18,6 +18,7 @@ import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
+import { tierColor } from '../../sim/Quality.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
@@ -1742,6 +1743,44 @@ export class RenderSystem {
       tCtx.fillStyle = inRange ? '#e8dfc0' : '#888070';
       tCtx.fillText(label, labelX, textMid);
       tCtx.restore();
+    }
+  }
+
+  /**
+   * Draw small tier-colored gems on cannon/mast/swivel modules that were crafted
+   * from a quality blueprint (qualityTier >= 1). Shows item prestige in-world.
+   */
+  private drawModuleQualityMarkers(worldState: WorldState, camera: Camera): void {
+    const ctx = this.ctx;
+    for (const ship of worldState.ships) {
+      for (const mod of ship.modules) {
+        const qt = mod.qualityTier;
+        if (typeof qt !== 'number' || qt < 1) continue;
+        if (mod.kind !== 'cannon' && mod.kind !== 'mast' && mod.kind !== 'swivel') continue;
+        const rot = ship.rotation;
+        const wx = ship.position.x + mod.localPos.x * Math.cos(rot) - mod.localPos.y * Math.sin(rot);
+        const wy = ship.position.y + mod.localPos.x * Math.sin(rot) + mod.localPos.y * Math.cos(rot);
+        const sp = camera.worldToScreen(Vec2.from(wx, wy));
+        if (sp.x < -20 || sp.x > this.canvas.width + 20 || sp.y < -20 || sp.y > this.canvas.height + 20) continue;
+        const zoom = camera.getState().zoom;
+        const col = tierColor(qt);
+        const r = Math.max(2, 3.5 * zoom);
+        ctx.save();
+        ctx.shadowColor = col;
+        ctx.shadowBlur = Math.max(3, 6 * zoom);
+        ctx.fillStyle = col;
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(sp.x, sp.y - r);
+        ctx.lineTo(sp.x + r, sp.y);
+        ctx.lineTo(sp.x, sp.y + r);
+        ctx.lineTo(sp.x - r, sp.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
     }
   }
 
@@ -4344,6 +4383,8 @@ export class RenderSystem {
     this.drawMoveToArrowLine(worldState, camera);
     // Module hover glow (always-on, independent of move-to mode)
     this.drawModuleHoverHighlight(camera);
+    // Quality-tier gems on cannons/masts/swivels crafted from quality blueprints
+    this.drawModuleQualityMarkers(worldState, camera);
     // Insufficient-resource badge above cursor in build mode
     this.drawBuildAffordabilityBadge(camera);
     // Hammer repair overlays — damaged module icons when hammer is equipped
@@ -6356,12 +6397,29 @@ export class RenderSystem {
         ctx.moveTo(-wrsz * 0.1, -wrsz * 0.05);
         ctx.lineTo(-wrsz * 0.1 + wrsz * 0.05, -wrsz * 0.5);
         ctx.stroke();
-        // Salvage indicator: small glint if hp > 0
+        // Salvage indicator: small glint if hp > 0. Colored by the best loot
+        // tier inside the wreck (blueprint quality); falls back to gold.
         if (s.hp > 0) {
-          ctx.fillStyle = 'rgba(255, 220, 80, 0.85)';
-          ctx.beginPath();
-          ctx.arc(0, 0, Math.max(3, 5 * zoom), 0, Math.PI * 2);
-          ctx.fill();
+          const glintColor = typeof s.wreckTier === 'number' && s.wreckTier >= 0
+            ? tierColor(s.wreckTier)
+            : 'rgba(255, 220, 80, 0.85)';
+          const glintRadius = Math.max(3, 5 * zoom);
+          if (typeof s.wreckTier === 'number' && s.wreckTier >= 1) {
+            // Higher tiers get a soft halo to draw the eye.
+            ctx.save();
+            ctx.shadowColor = glintColor;
+            ctx.shadowBlur = Math.max(6, 10 * zoom);
+            ctx.fillStyle = glintColor;
+            ctx.beginPath();
+            ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          } else {
+            ctx.fillStyle = glintColor;
+            ctx.beginPath();
+            ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
         ctx.globalAlpha = 1;
         ctx.restore();
@@ -7017,6 +7075,36 @@ export class RenderSystem {
         ctx.restore();
       }
     } // end for sorted
+
+    // ── Quality-tier markers ─────────────────────────────────────────────
+    // Structures crafted from a quality blueprint carry a rolled tier. Draw a
+    // small tier-colored gem above each so the world shows item prestige.
+    for (const s of sorted) {
+      if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
+      if (!this.fogVisibleAt(s.x, s.y)) continue;
+      const gsp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const gsz = Math.max(4, 50 * zoom);
+      if (gsp.x + gsz < 0 || gsp.x - gsz > this.canvas.width ||
+          gsp.y + gsz < 0 || gsp.y - gsz > this.canvas.height) continue;
+      const col = tierColor(s.qualityTier);
+      const r = Math.max(2.5, 4 * zoom);
+      const gy = gsp.y - gsz * 0.5 - r * 1.5;
+      ctx.save();
+      ctx.shadowColor = col;
+      ctx.shadowBlur = Math.max(4, 7 * zoom);
+      ctx.fillStyle = col;
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = Math.max(0.5, 1 * zoom);
+      ctx.beginPath();
+      ctx.moveTo(gsp.x, gy - r);
+      ctx.lineTo(gsp.x + r, gy);
+      ctx.lineTo(gsp.x, gy + r);
+      ctx.lineTo(gsp.x - r, gy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
 
     if (this._hoveredStructure) {
       const s   = this._hoveredStructure;

@@ -52,6 +52,27 @@ static int format_dominators_extra(const PlacedStructure *s, char *buf, int cap)
     return n;
 }
 
+#include "net/quality.h"
+/* Highest loot tier among a wreck's remaining blueprints, or -1 if none. */
+static int wreck_best_tier(const PlacedStructure* w) {
+    int best = -1;
+    for (int i = 0; i < 6; i++) {
+        if (w->wreck_bp_items[i] == 0) continue;
+        int t = quality_tier(quality_from_q8(w->wreck_bp_quality[i].quality_q8));
+        if (t > best) best = t;
+    }
+    return best;
+}
+/* Quality tier of a placed module/structure (-1 = plain, no rolled quality). */
+static int module_quality_tier(const ShipModule* m) {
+    if (m->quality.quality_q8 == 0) return -1;
+    return quality_tier(quality_from_q8(m->quality.quality_q8));
+}
+static int structure_quality_tier(const PlacedStructure* s) {
+    if (s->quality.quality_q8 == 0) return -1;
+    return quality_tier(quality_from_q8(s->quality.quality_q8));
+}
+
 // WebSocket magic key for handshake
 #define WS_MAGIC_KEY "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 #define WS_MAX_CLIENTS 100
@@ -1958,31 +1979,31 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                         float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                         float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
                             fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
                             (int)module->health, (int)module->target_health, (int)module->max_health,
-                            (unsigned)module->deck_id);
+                            (unsigned)module->deck_id, module_quality_tier(module));
                     } else if (module->type_id == MODULE_TYPE_CANNON) {
                         float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"gunportSnapIdx\":%u}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"gunportSnapIdx\":%u,\"qt\":%d}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, aim_direction,
                             (unsigned)module->state_bits,
                             (int)module->health, (int)module->target_health, (int)module->max_health,
                             (unsigned)module->deck_id,
-                            (unsigned)module->data.cannon.gunport_snap_idx);
+                            (unsigned)module->data.cannon.gunport_snap_idx, module_quality_tier(module));
                     } else if (module->type_id == MODULE_TYPE_SWIVEL) {
                         float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, aim_dir,
                             (unsigned)module->state_bits,
                             (int)module->health, (int)module->target_health, (int)module->max_health,
-                            (unsigned)module->deck_id);
+                            (unsigned)module->deck_id, module_quality_tier(module));
                     } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                         float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
@@ -4144,6 +4165,16 @@ int websocket_server_update(struct Sim* sim) {
                                         char hs_claim_extra[320] = "";
                                         char hs_dom_extra[512] = "";
                                         char hs_chest_extra[128] = "";
+                                        char hs_wreck_extra[40] = "";
+                                        char hs_qt_extra[24] = "";
+                                        if (placed_structures[si].type == STRUCT_WRECK) {
+                                            int hwt = wreck_best_tier(&placed_structures[si]);
+                                            if (hwt >= 0) snprintf(hs_wreck_extra, sizeof(hs_wreck_extra), ",\"wreck_tier\":%d", hwt);
+                                        }
+                                        {
+                                            int hqt = structure_quality_tier(&placed_structures[si]);
+                                            if (hqt >= 0) snprintf(hs_qt_extra, sizeof(hs_qt_extra), ",\"qt\":%d", hqt);
+                                        }
                                         format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
                                         if (placed_structures[si].type == STRUCT_CHEST) {
                                             snprintf(hs_chest_extra, sizeof(hs_chest_extra),
@@ -4226,7 +4257,7 @@ int websocket_server_update(struct Sim* sim) {
                                                           "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                           "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                           "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                          ",\"rotation\":%.2f%s%s%s%s%s%s%s}",
+                                                          ",\"rotation\":%.2f%s%s%s%s%s%s%s%s%s}",
                                                           hs_sfirst ? "" : ",",
                                                           placed_structures[si].id, hs_stype,
                                                           placed_structures[si].island_id,
@@ -4243,7 +4274,9 @@ int websocket_server_update(struct Sim* sim) {
                                                           hs_cannon_extra,
                                                           hs_claim_extra,
                                                           hs_dom_extra,
-                                                          hs_chest_extra);
+                                                          hs_chest_extra,
+                                                          hs_wreck_extra,
+                                                          hs_qt_extra);
                                             hs_sfirst = false;
                                         }
                                         hs_sp += snprintf(hs_structs_buf + hs_sp, sizeof(hs_structs_buf) - hs_sp, "]}");
@@ -5088,6 +5121,25 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "craft_blueprint") == 0) {
+                            // Craft one item from a quality schematic
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) {
+                                    handle_craft_blueprint(player, client, payload);
+                                    send_schematic_list(player, client);
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "request_schematics") == 0) {
+                            // Client requests its full schematic inventory
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player) send_schematic_list(player, client);
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "action_event") == 0) {
                             // HYBRID: Action event message
                             // log_info("⚡ Processing ACTION_EVENT message");
@@ -5225,7 +5277,15 @@ int websocket_server_update(struct Sim* sim) {
                                                 const float SWORD_RANGE  = 45.0f;
                                                 const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
                                                 // Base 30 damage, +10% per stat_damage point (mirrors NPC stat)
-                                                const float SWORD_DAMAGE = 30.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                float SWORD_DAMAGE = 30.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                /* Apply the held sword's rolled weapon-damage quality multiplier */
+                                                {
+                                                    const QualityPayload* sq = &player->inventory.slot_quality[aslot];
+                                                    if (sq->quality_q8 != 0) {
+                                                        uint16_t wd_q8 = sq->stat_mult_q8[STAT_WEAPON_DAMAGE];
+                                                        if (wd_q8 > 256) SWORD_DAMAGE *= ((float)wd_q8 / 256.0f);
+                                                    }
+                                                }
 
                                                 // Direction vector toward target
                                                 float atk_dx = target_x - player->x;
@@ -7698,6 +7758,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 nc->data.cannon.reload_time     = CANNON_RELOAD_TIME_MS;
                                                 nc->data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
                                                 nc->deck_id                     = 1; /* upper deck */
+                                                module_apply_quality(nc, &player->inventory.slot_quality[cannon_slot]);
                                                 sim_ship->module_count++;
                                                 player->inventory.slots[cannon_slot].quantity--;
                                                 if (player->inventory.slots[cannon_slot].quantity == 0)
@@ -7798,6 +7859,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 nm->data.mast.fiber_max_health = Q16_FROM_FLOAT(15000.0f);
                                                 nm->data.mast.wind_efficiency = Q16_FROM_FLOAT(1.0f);
                                                 nm->deck_id                   = 0xFF; /* deck-independent */
+                                                module_apply_quality(nm, &player->inventory.slot_quality[sail_slot]);
                                                 sim_ship->module_count++;
                                                 // Mirror into SimpleShip so find_module_on_ship()
                                                 // (used by NPC riggers) can see the new mast.
@@ -10380,6 +10442,16 @@ int websocket_server_update(struct Sim* sim) {
                                         char claim_extra_s[320] = "";
                                         char dom_extra_s[512] = "";
                                         char chest_extra_s[128] = "";
+                                        char wreck_extra_s[40] = "";
+                                        char qt_extra_s[24] = "";
+                                        if (placed_structures[si].type == STRUCT_WRECK) {
+                                            int wt = wreck_best_tier(&placed_structures[si]);
+                                            if (wt >= 0) snprintf(wreck_extra_s, sizeof(wreck_extra_s), ",\"wreck_tier\":%d", wt);
+                                        }
+                                        {
+                                            int qt = structure_quality_tier(&placed_structures[si]);
+                                            if (qt >= 0) snprintf(qt_extra_s, sizeof(qt_extra_s), ",\"qt\":%d", qt);
+                                        }
                                         format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
                                         if (placed_structures[si].type == STRUCT_CHEST) {
                                             snprintf(chest_extra_s, sizeof(chest_extra_s),
@@ -10462,7 +10534,7 @@ int websocket_server_update(struct Sim* sim) {
                                                          "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                          "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                          "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                         ",\"rotation\":%.2f%s%s%s%s%s%s}",
+                                                         ",\"rotation\":%.2f%s%s%s%s%s%s%s%s}",
                                                          sfirst ? "" : ",",
                                                          placed_structures[si].id,
                                                          stype_str,
@@ -10480,7 +10552,9 @@ int websocket_server_update(struct Sim* sim) {
                                                          cannon_extra_s,
                                                          claim_extra_s,
                                                          dom_extra_s,
-                                                         chest_extra_s);
+                                                         chest_extra_s,
+                                                         wreck_extra_s,
+                                                         qt_extra_s);
                                         sfirst = false;
                                     }
                                     spos += snprintf(structs_buf + spos, sizeof(structs_buf) - spos, "]}");
@@ -10528,6 +10602,16 @@ int websocket_server_update(struct Sim* sim) {
                                     char gs_claim_extra[320] = "";
                                     char gs_dom_extra[512] = "";
                                     char gs_chest_extra[128] = "";
+                                    char gs_wreck_extra[40] = "";
+                                    char gs_qt_extra[24] = "";
+                                    if (placed_structures[si].type == STRUCT_WRECK) {
+                                        int gwt = wreck_best_tier(&placed_structures[si]);
+                                        if (gwt >= 0) snprintf(gs_wreck_extra, sizeof(gs_wreck_extra), ",\"wreck_tier\":%d", gwt);
+                                    }
+                                    {
+                                        int gqt = structure_quality_tier(&placed_structures[si]);
+                                        if (gqt >= 0) snprintf(gs_qt_extra, sizeof(gs_qt_extra), ",\"qt\":%d", gqt);
+                                    }
                                     format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
                                     if (placed_structures[si].type == STRUCT_CHEST) {
                                         snprintf(gs_chest_extra, sizeof(gs_chest_extra),
@@ -10610,7 +10694,7 @@ int websocket_server_update(struct Sim* sim) {
                                                    "%s{\"id\":%u,\"structure_type\":\"%s\","
                                                    "\"island_id\":%u,\"x\":%.1f,\"y\":%.1f,"
                                                    "\"company_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u,\"placer_name\":\"%s\""
-                                                                                                     ",\"rotation\":%.2f%s%s%s%s%s%s}",
+                                                                                                     ",\"rotation\":%.2f%s%s%s%s%s%s%s%s}",
                                                    gfirst ? "" : ",",
                                                    placed_structures[si].id, gs_type,
                                                    placed_structures[si].island_id,
@@ -10626,7 +10710,9 @@ int websocket_server_update(struct Sim* sim) {
                                                                                                      gs_cannon_extra,
                                                                                                      gs_claim_extra,
                                                                                                      gs_dom_extra,
-                                                                                                     gs_chest_extra);
+                                                                                                     gs_chest_extra,
+                                                                                                     gs_wreck_extra,
+                                                                                                     gs_qt_extra);
                                     gfirst = false;
                                 }
                                 gp += snprintf(gs_buf + gp, sizeof(gs_buf) - gp, "]}");
@@ -13730,7 +13816,15 @@ void websocket_server_tick(float dt) {
             for (uint8_t m = 0; m < ship->module_count; m++) {
                 if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
                     total_openness += ship->modules[m].data.mast.openness;
-                    total_wind_eff += Q16_TO_FLOAT(ship->modules[m].data.mast.wind_efficiency);
+                    {
+                        float meff = Q16_TO_FLOAT(ship->modules[m].data.mast.wind_efficiency);
+                        /* Boost by this sail's rolled sail-effectiveness quality multiplier */
+                        if (ship->modules[m].quality.quality_q8 != 0) {
+                            uint16_t se_q8 = ship->modules[m].quality.stat_mult_q8[STAT_SAIL_EFFECTIVENESS];
+                            if (se_q8 > 256) meff *= ((float)se_q8 / 256.0f);
+                        }
+                        total_wind_eff += meff;
+                    }
 
                     /* Sail-to-wind angular alignment.
                      * sail world angle = mast_angle + ship_rot + π/2  (same +π/2 as client)

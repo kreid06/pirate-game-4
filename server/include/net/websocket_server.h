@@ -2,6 +2,7 @@
 
 #include "sim/types.h"
 #include "sim/module_ids.h"
+#include "net/quality_payload.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -475,6 +476,13 @@ typedef struct {
     uint8_t  wreck_items[6];     /* ItemKind as uint8_t, 0 = empty slot   */
     uint8_t  wreck_qtys[6];      /* quantity per loot slot                */
     uint8_t  wreck_loot_count;   /* number of remaining non-empty slots   */
+    /* Wreck-only blueprint loot — quality schematics dropped by ghost ships.
+     * Parallel arrays; wreck_bp_items[i]==0 marks an empty/claimed slot. */
+    uint8_t        wreck_bp_items[6];    /* blueprint ItemKind, 0 = empty   */
+    uint8_t        wreck_bp_crafts[6];   /* crafts remaining per blueprint   */
+    QualityPayload wreck_bp_quality[6];  /* rolled-once payload per blueprint */
+    uint8_t        wreck_bp_count;       /* number of remaining blueprints   */
+    QualityPayload quality;              /* placed-item quality (quality_q8==0 = plain) */
     uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
     bool     wreck_resource_cache; /* true = chest-ruin wreck (holds chest_wood/fiber/metal/stone); false = ship-wreck item loot */
     /* Island cannon state (STRUCT_CANNON only) */
@@ -547,9 +555,24 @@ typedef struct {
 
 typedef struct {
     InventorySlot   slots[INVENTORY_SLOTS]; /* regular bag slots 0..57       */
+    /* Per-slot quality payload (parallel to slots[]). quality_q8 == 0 → plain
+     * item, no rolled stats. Quality items do not stack (quantity stays 1). */
+    QualityPayload  slot_quality[INVENTORY_SLOTS];
     PlayerEquipment equipment;              /* 6 body-slot items             */
     uint8_t         active_slot;            /* hotbar selection 0-9; 255=off */
 } PlayerInventory;
+
+/* ── Schematic / blueprint inventory ───────────────────────────────────────
+ * Separate persistent container (NOT the 16 bag slots). Ghost ships drop
+ * blueprints whose quality is rolled once; every craft from a blueprint is
+ * identical. Retained through death; permanent (no research gate yet).
+ * See docs/LOOT_QUALITY_SYSTEM.md. */
+#define MAX_PLAYER_SCHEMATICS 128
+typedef struct {
+    uint8_t        item;             /* ItemKind output of this blueprint (0 = empty) */
+    uint8_t        crafts_remaining; /* charges left; entry freed at 0                */
+    QualityPayload quality;          /* rolled-once payload, copied to every craft    */
+} PlayerBlueprint;
 // ────────────────────────────────────────────────────────────────────────────
 
 typedef enum {
@@ -620,6 +643,10 @@ typedef struct WebSocketPlayer {
 
     // Inventory
     PlayerInventory inventory;
+
+    /* Schematic / blueprint inventory — persistent, retained through death. */
+    PlayerBlueprint schematics[MAX_PLAYER_SCHEMATICS];
+    uint8_t         schematic_count;
 
     /* ── Resource pool ─────────────────────────────────────────────────────
      * Raw resource counts harvested from the world.  Stored separately from

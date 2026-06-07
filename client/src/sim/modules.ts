@@ -111,6 +111,9 @@ export interface ShipModule {
   localRot: number;             // Rotation relative to ship orientation (radians)
   occupiedBy: number | null;    // Player/entity ID currently using this module
   stateBits: number;            // Bit flags for module state (ModuleStateBits)
+  /** Rolled quality tier (0..6) of the blueprint this module was crafted from.
+   *  Used to tint/outline the module. Absent for plain (un-rolled) modules. */
+  qualityTier?: number;
   
   // Module-specific data (varies by kind)
   moduleData?: ModuleData;

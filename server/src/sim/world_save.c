@@ -279,6 +279,15 @@ int world_save(const char *path) {
                     (unsigned)mod->data.chest.fiber,
                     (unsigned)mod->data.chest.metal,
                     (unsigned)mod->data.chest.stone);
+            if (mod->quality.quality_q8 != 0)
+                fprintf(f,
+                    ",\"q\":%u,\"sm\":[%u,%u,%u,%u,%u]",
+                    (unsigned)mod->quality.quality_q8,
+                    (unsigned)mod->quality.stat_mult_q8[0],
+                    (unsigned)mod->quality.stat_mult_q8[1],
+                    (unsigned)mod->quality.stat_mult_q8[2],
+                    (unsigned)mod->quality.stat_mult_q8[3],
+                    (unsigned)mod->quality.stat_mult_q8[4]);
             fprintf(f, "}");
         }
 
@@ -419,6 +428,18 @@ int world_save(const char *path) {
                      (unsigned)ps->chest_wood, (unsigned)ps->chest_fiber,
                      (unsigned)ps->chest_metal, (unsigned)ps->chest_stone);
         }
+        /* Build quality fields (only when the structure carries a rolled payload). */
+        char qual_buf[160]; qual_buf[0] = '\0';
+        if (ps->quality.quality_q8 != 0) {
+            snprintf(qual_buf, sizeof(qual_buf),
+                     ",\n      \"q\": %u,\n      \"sm\": [%u,%u,%u,%u,%u]",
+                     (unsigned)ps->quality.quality_q8,
+                     (unsigned)ps->quality.stat_mult_q8[0],
+                     (unsigned)ps->quality.stat_mult_q8[1],
+                     (unsigned)ps->quality.stat_mult_q8[2],
+                     (unsigned)ps->quality.stat_mult_q8[3],
+                     (unsigned)ps->quality.stat_mult_q8[4]);
+        }
         fprintf(f,
             "\n    {\n"
             "      \"id\": %u,\n"
@@ -438,7 +459,7 @@ int world_save(const char *path) {
             "      \"construction_phase\": %u,\n"
             "      \"construction_company\": %u,\n"
             "      \"modules_placed\": %u,\n"
-            "      \"scaffolded_ship_id\": %u%s%s\n"
+            "      \"scaffolded_ship_id\": %u%s%s%s\n"
             "    }",
             (unsigned)ps->id,
             (unsigned)ps->type,
@@ -459,7 +480,8 @@ int world_save(const char *path) {
             (unsigned)ps->modules_placed,
             (unsigned)ps->scaffolded_ship_id,
             dom_buf,
-            chest_buf
+            chest_buf,
+            qual_buf
         );
     }
     fprintf(f, "\n  ],\n");
@@ -764,6 +786,25 @@ int world_load(const char *path) {
                                         ws_json_uint(mobj, "cm", &cm); ws_json_uint(mobj, "cs", &cs);
                                         new_mod.data.chest.wood=cw; new_mod.data.chest.fiber=cf;
                                         new_mod.data.chest.metal=cm; new_mod.data.chest.stone=cs;
+                                    }
+                                    /* Restore rolled quality payload (max_health was saved
+                                     * already-scaled, so do NOT re-apply durability here). */
+                                    {
+                                        unsigned mq = 0;
+                                        ws_json_uint(mobj, "q", &mq);
+                                        if (mq != 0) {
+                                            new_mod.quality.quality_q8 = (uint8_t)mq;
+                                            const char *smp = strstr(mobj, "\"sm\":[");
+                                            if (smp) {
+                                                unsigned v0=256,v1=0,v2=0,v3=0,v4=0;
+                                                sscanf(smp + 6, "%u,%u,%u,%u,%u", &v0,&v1,&v2,&v3,&v4);
+                                                new_mod.quality.stat_mult_q8[0]=(uint16_t)v0;
+                                                new_mod.quality.stat_mult_q8[1]=(uint16_t)v1;
+                                                new_mod.quality.stat_mult_q8[2]=(uint16_t)v2;
+                                                new_mod.quality.stat_mult_q8[3]=(uint16_t)v3;
+                                                new_mod.quality.stat_mult_q8[4]=(uint16_t)v4;
+                                            }
+                                        }
                                     }
                                     new_mod.deck_id = (uint8_t)mdeck;
                                     /* Add to SimpleShip layer */
@@ -1071,6 +1112,26 @@ int world_load(const char *path) {
                 ps->chest_fiber = (uint16_t)chest_fiber;
                 ps->chest_metal = (uint16_t)chest_metal;
                 ps->chest_stone = (uint16_t)chest_stone;
+
+                /* Restore rolled quality payload (hp/max_hp saved already-scaled). */
+                {
+                    unsigned q = 0;
+                    ws_json_uint(obj, "q", &q);
+                    if (q != 0) {
+                        ps->quality.quality_q8 = (uint8_t)q;
+                        const char *smp = strstr(obj, "\"sm\"");
+                        const char *lb  = smp ? strchr(smp, '[') : NULL;
+                        if (lb) {
+                            unsigned v0=256,v1=0,v2=0,v3=0,v4=0;
+                            sscanf(lb + 1, "%u,%u,%u,%u,%u", &v0,&v1,&v2,&v3,&v4);
+                            ps->quality.stat_mult_q8[0]=(uint16_t)v0;
+                            ps->quality.stat_mult_q8[1]=(uint16_t)v1;
+                            ps->quality.stat_mult_q8[2]=(uint16_t)v2;
+                            ps->quality.stat_mult_q8[3]=(uint16_t)v3;
+                            ps->quality.stat_mult_q8[4]=(uint16_t)v4;
+                        }
+                    }
+                }
 
                 /* Cannons: initialise aim to match base orientation so the barrel
                  * starts at "0 relative to base" rather than world-angle 0.

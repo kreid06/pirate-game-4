@@ -52,6 +52,7 @@ import { AudioManager } from './audio/AudioManager.js';
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS, computeInventoryWeight } from '../sim/Inventory.js';
+import { tierName, itemDisplayName } from '../sim/Quality.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -209,6 +210,13 @@ export class ClientApplication {
   private pendingLandBuildKind: string | null = null;
   /** Build Schematic Hotbar selection — the structure kind selected for triggering construction. */
   private buildSchematicKind: string | null = null;
+  /**
+   * Wall placement variant. A single Wall build entry can be placed as either a solid
+   * 'wall' or an open 'door_frame'. Pressing T while placing a wall toggles between them.
+   * The menu/hotbar kind stays 'wall'; this override only affects the rendered preview
+   * and the structure_type string sent to the server.
+   */
+  private wallVariant: 'wall' | 'door_frame' = 'wall';
   /** Planned land structure ghosts — click places, Enter confirms all to server. */
   private landGhostEntries: (LandGhostPlacement & { buildAction: () => void })[] = [];
 
@@ -1862,8 +1870,8 @@ export class ClientApplication {
               : (sKind === 'workbench' || sKind === 'shipyard' || sKind === 'cannon') ? this.islandBuildRotationDeg
               : sKind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
-            this.networkManager.sendPlaceStructure(sKind, sPos.x, sPos.y, sRot, true);
-            console.log(`🏗️ [SCHEMATIC] Placed ${sKind} @ (${sPos.x.toFixed(0)}, ${sPos.y.toFixed(0)}) rot=${sRot} — consumed resources`);
+            this.networkManager.sendPlaceStructure(this.applyWallVariant(sKind), sPos.x, sPos.y, sRot, true);
+            console.log(`🏗️ [SCHEMATIC] Placed ${this.applyWallVariant(sKind)} @ (${sPos.x.toFixed(0)}, ${sPos.y.toFixed(0)}) rot=${sRot} — consumed resources`);
             return;
           }
 
@@ -1927,7 +1935,7 @@ export class ClientApplication {
               }
               rot = foundRot;
             }
-            const capturedKind = kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            const capturedKind = this.applyWallVariant(kind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
             const capturedPos  = { x: pos.x, y: pos.y };
             const capturedRot  = rot;
             // Reject structurally invalid plans (e.g. wall without a floor)
@@ -2150,6 +2158,11 @@ export class ClientApplication {
 
       this.inputManager.onShowResourcePanel = () => {
         this.uiManager.flashResourcePanel();
+      };
+
+      // T while placing a wall: toggle between a solid wall and a door frame variant
+      this.inputManager.onBuildVariantToggle = () => {
+        this.toggleWallVariant();
       };
 
       // Right-click in build menu or island build mode: cancel ghost or remove nearest
@@ -3279,6 +3292,8 @@ export class ClientApplication {
         } else {
           this.craftingMenu.open(structureId);
           this.uiManager.setActiveMenuId(MENU_ID.CRAFTING);
+          // Pull the player's schematics so the Schematics tab is populated.
+          this.networkManager.sendRequestSchematics();
         }
       };
 
@@ -3341,6 +3356,42 @@ export class ClientApplication {
 
       this.craftingMenu.onCraft = (recipeId) => {
         this.networkManager.sendCraftItem(recipeId);
+      };
+
+      this.craftingMenu.onCraftSchematic = (index) => {
+        this.networkManager.sendCraftBlueprint(index);
+      };
+
+      // Schematic (blueprint) list — populate the Schematics tab.
+      this.networkManager.onSchematicList = (items) => {
+        this.craftingMenu.setSchematics(items);
+      };
+
+      // Crafting a blueprint succeeded/failed; the server re-sends the schematic
+      // list on success, so just surface a toast here.
+      this.networkManager.onCraftBlueprintResult = (success, _index, reason, item, tier, _craftsRemaining) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(
+            `${tierName(tier)} ${itemDisplayName(item)} crafted!`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            missing_ingredients: 'Not enough materials',
+            inventory_full:      'Inventory is full',
+            not_at_workbench:    'Must be at a workbench',
+            invalid_schematic:   'Schematic no longer available',
+            unknown_item:        'Unknown blueprint item',
+          };
+          this.renderSystem.showAnnouncement(`⚒ ${msg[reason] ?? `Craft failed (${reason})`}`, 'warning', 2.5);
+        }
+      };
+
+      // Salvaged a quality blueprint from a wreck.
+      this.networkManager.onSalvageBlueprint = (item, tier, crafts, _wreckId, _bpRemaining, _lootRemaining) => {
+        this.renderSystem.showAnnouncement(
+          `📜 Salvaged ${tierName(tier)} ${itemDisplayName(item)} blueprint (${crafts} craft${crafts === 1 ? '' : 's'})`,
+          'info', 3.0);
+        // Refresh the Schematics tab if the crafting menu is open.
+        if (this.craftingMenu.visible) this.networkManager.sendRequestSchematics();
       };
 
       this.networkManager.onCraftResult = (success, recipeId, reason) => {
@@ -3502,6 +3553,7 @@ export class ClientApplication {
       this.uiManager.onLandBuildPanelSelect = (kind: string) => {
         if (!kind) return;
         this.pendingLandBuildKind = kind;
+        this.wallVariant = 'wall';
         // Mutual exclusion: selecting a plan clears the Build Schematic Hotbar selection.
         this.buildSchematicKind = null;
         this.renderSystem.setBuildSchematicKind(null);
@@ -3514,6 +3566,7 @@ export class ClientApplication {
       // Build Schematic Hotbar: player clicked a hotbar slot (may deselect if toggled)
       this.uiManager.onBuildSchematicSelect = (kind: string | null) => {
         this.buildSchematicKind = kind;
+        this.wallVariant = 'wall';
         this.renderSystem.setBuildSchematicKind(kind);
         // Mutual exclusion: selecting a schematic clears the Plan Menu selection.
         if (kind !== null) {
@@ -4058,7 +4111,7 @@ export class ClientApplication {
       if (this.islandBuildMode) {
         const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
         const hotbarKind = localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor';
-        const islandBuildKind = (this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
+        const islandBuildKind = this.applyWallVariant(this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
         this.uiManager.setIslandBuildState({
           kind: islandBuildKind,
           tooFar: this.renderSystem.getIslandBuildTooFar(),
@@ -4801,6 +4854,29 @@ export class ClientApplication {
    * Check whether the active hotbar item puts the player in build mode.
    * Plank in active slot → build mode on. Anything else → build mode off.
    */
+  /**
+   * Map a raw land-build kind through the active wall variant. When the kind is a wall
+   * (or door frame), it resolves to whichever variant is currently selected via the T key;
+   * all other kinds pass through unchanged.
+   */
+  private applyWallVariant<T extends string | null>(kind: T): T {
+    return (kind === 'wall' || kind === 'door_frame') ? (this.wallVariant as T) : kind;
+  }
+
+  /** Toggle the active wall placement between a solid wall and a door frame (T key). */
+  private toggleWallVariant(): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager?.getAssignedPlayerId();
+    const player   = ws?.players.find(p => p.id === playerId);
+    const activeSlot = player?.inventory?.activeSlot ?? 0;
+    const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
+    const base = this.buildSchematicKind ?? this.pendingLandBuildKind ?? activeItem;
+    if (base !== 'wall' && base !== 'door_frame') return;
+    this.wallVariant = this.wallVariant === 'wall' ? 'door_frame' : 'wall';
+    this.checkBuildMode(); // refresh the placement preview immediately
+    console.log(`🧱 Wall variant → ${this.wallVariant}`);
+  }
+
   private checkBuildMode(): void {
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     const playerId = this.networkManager?.getAssignedPlayerId();
@@ -4849,7 +4925,7 @@ export class ClientApplication {
     //  - schematic kind when the Build Schematic Hotbar slot is selected (preview follows cursor,
     //    and snaps onto the matching planned ghost when hovered)
     const _previewKind = !this.explicitBuildMode
-      ? (inIslandBuildMode ? islandItem : (inSchematicBuildMode ? this.buildSchematicKind! : null))
+      ? (inIslandBuildMode ? this.applyWallVariant(islandItem) : (inSchematicBuildMode ? this.applyWallVariant(this.buildSchematicKind!) : null))
       : null;
     this.renderSystem.setIslandBuildItem(
       _previewKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null

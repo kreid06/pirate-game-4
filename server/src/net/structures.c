@@ -13,6 +13,7 @@
 #include "net/dock_physics.h"
 #include "net/cannon_fire.h"
 #include "net/crafting.h"
+#include "net/quality.h"
 #include "net/claim.h"
 #include "sim/island.h"
 #include "util/time.h"
@@ -335,7 +336,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         required_item = ITEM_WALL;
     } else if (strcmp(stype, "door_frame") == 0) {
         stype_enum    = STRUCT_DOOR_FRAME;
-        required_item = ITEM_DOOR_FRAME;
+        required_item = ITEM_WALL;   /* door-frame is a T-cycle variant of the Wall item */
     } else if (strcmp(stype, "door") == 0) {
         stype_enum    = STRUCT_DOOR;
         required_item = ITEM_DOOR;
@@ -393,7 +394,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         [STRUCT_WOODEN_FLOOR]     = {  5, 0,  0,  0 },
         [STRUCT_WORKBENCH]        = { 15, 0,  0,  0 },
         [STRUCT_WALL]             = {  8, 0,  0,  0 },
-        [STRUCT_DOOR_FRAME]       = {  6, 0,  0,  0 },
+        [STRUCT_DOOR_FRAME]       = {  8, 0,  0,  0 },
         [STRUCT_DOOR]             = {  8, 0,  0,  0 },
         [STRUCT_SHIPYARD]         = { 50, 0,  0,  0 },
         [STRUCT_WRECK]            = {  0, 0,  0,  0 },
@@ -1177,7 +1178,10 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Consume 1 item from the found slot */
+    QualityPayload place_quality;
+    memset(&place_quality, 0, sizeof(place_quality));
     if (found_slot >= 0) {
+        place_quality = player->inventory.slot_quality[found_slot];
         player->inventory.slots[found_slot].quantity--;
         if (player->inventory.slots[found_slot].quantity == 0)
             player->inventory.slots[found_slot].item = ITEM_NONE;
@@ -1228,6 +1232,17 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else {
         placed_structures[placed_structure_count].hp         = init_hp;
         placed_structures[placed_structure_count].target_hp  = init_hp;
+    }
+    /* Apply source-item quality: store payload and scale HP by durability mult */
+    placed_structures[placed_structure_count].quality = place_quality;
+    if (place_quality.quality_q8 != 0) {
+        uint16_t dm_q8 = place_quality.stat_mult_q8[STAT_DURABILITY];
+        if (dm_q8 > 256) {  /* 256 = 1.00x; only scale up */
+            PlacedStructure* qs = &placed_structures[placed_structure_count];
+            qs->max_hp    = (uint32_t)(((uint64_t)qs->max_hp    * dm_q8) / 256);
+            qs->target_hp = (uint32_t)(((uint64_t)qs->target_hp * dm_q8) / 256);
+            qs->hp        = (uint32_t)(((uint64_t)qs->hp        * dm_q8) / 256);
+        }
     }
     placed_structures[placed_structure_count].placer_id  = player->player_id;
     snprintf(placed_structures[placed_structure_count].placer_name,
@@ -1489,6 +1504,49 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             goto si_send;
         }
 
+        /* ── Blueprint salvage: one schematic per interact into the persistent
+         *    schematic inventory (retained through death). ──────────────── */
+        if (w->wreck_bp_count > 0) {
+            int bslot = -1;
+            for (int bi = 0; bi < 6; bi++) {
+                if (w->wreck_bp_items[bi] != 0) { bslot = bi; break; }
+            }
+            if (bslot >= 0) {
+                ItemKind bitem = (ItemKind)w->wreck_bp_items[bslot];
+                uint8_t  bcr   = w->wreck_bp_crafts[bslot];
+                if (!schematic_add(player, bitem, bcr, &w->wreck_bp_quality[bslot])) {
+                    snprintf(response, sizeof(response),
+                             "{\"type\":\"salvage_fail\",\"reason\":\"schematics_full\"}");
+                    goto si_send;
+                }
+                int btier = quality_tier(quality_from_q8(w->wreck_bp_quality[bslot].quality_q8));
+                w->wreck_bp_items[bslot]  = 0;
+                w->wreck_bp_crafts[bslot] = 0;
+                w->wreck_bp_count--;
+
+                char bbcast[96];
+                if (w->wreck_loot_count == 0 && w->wreck_bp_count == 0) {
+                    w->active = false;
+                    snprintf(bbcast, sizeof(bbcast),
+                             "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
+                } else {
+                    snprintf(bbcast, sizeof(bbcast),
+                             "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u,\"bp_count\":%u}",
+                             (unsigned)w->id, (unsigned)w->wreck_loot_count, (unsigned)w->wreck_bp_count);
+                }
+                websocket_server_broadcast(bbcast);
+
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"salvage_blueprint\",\"item\":%u,\"tier\":%d,"
+                         "\"crafts\":%u,\"wreck_id\":%u,\"bp_remaining\":%u,\"loot_remaining\":%u}",
+                         (unsigned)bitem, btier,
+                         (unsigned)(bcr ? bcr : quality_item_max_crafts(bitem)),
+                         (unsigned)w->id, (unsigned)w->wreck_bp_count,
+                         (unsigned)w->wreck_loot_count);
+                goto si_send;
+            }
+        }
+
         if (w->wreck_loot_count == 0) {
             /* Empty wreck — remove it */
             w->active = false;
@@ -1500,7 +1558,6 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
                      "{\"type\":\"salvage_fail\",\"reason\":\"empty\"}");
             goto si_send;
         }
-
         /* Find the first non-empty loot slot */
         int slot = -1;
         for (int li = 0; li < 6; li++) {
@@ -1537,14 +1594,14 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
 
         /* Broadcast wreck state update */
         char bcast[96];
-        if (w->wreck_loot_count == 0) {
+        if (w->wreck_loot_count == 0 && w->wreck_bp_count == 0) {
             w->active = false;
             snprintf(bcast, sizeof(bcast),
                      "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
         } else {
             snprintf(bcast, sizeof(bcast),
-                     "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u}",
-                     (unsigned)w->id, (unsigned)w->wreck_loot_count);
+                     "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u,\"bp_count\":%u}",
+                     (unsigned)w->id, (unsigned)w->wreck_loot_count, (unsigned)w->wreck_bp_count);
         }
         websocket_server_broadcast(bcast);
 
@@ -2461,6 +2518,12 @@ bool apply_structure_damage(PlacedStructure *s, uint32_t dmg, float hit_x, float
      * become vulnerable once the 1-min ground claim succeeds and they enter
      * BUILDING. */
     if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) return false;
+    /* Quality structural-resistance: reduce incoming damage by the rolled mult. */
+    if (s->quality.quality_q8 != 0) {
+        uint16_t sr_q8 = s->quality.stat_mult_q8[STAT_STRUCT_RESISTANCE];
+        if (sr_q8 > 256)
+            dmg = (uint32_t)(((uint64_t)dmg * 256) / sr_q8);
+    }
     s->hp = (s->hp > dmg) ? (s->hp - dmg) : 0u;
     /* All structures track a heal ceiling that combat damage permanently
      * lowers. For most types there is no auto-repair (so target_hp just

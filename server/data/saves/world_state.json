@@ -1,9 +1,9 @@
 {
   "meta": {
-    "timestamp": 1780786668,
+    "timestamp": 1780810510,
     "ship_count": 2,
     "npc_count": 64,
-    "structure_count": 38
+    "structure_count": 35
   },
   "ships": [
     {
@@ -1615,7 +1615,7 @@
       "ship_id": 0,
       "lx": -149.031,
       "ly": 72.501,
-      "health": 75,
+      "health": 100,
       "max_health": 100,
       "level": 33,
       "xp": 2775,

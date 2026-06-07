@@ -237,7 +237,6 @@ export class UIManager {
   }> = [
     { kind: 'wooden_floor', label: 'Floor',        symbol: '\u229f',       color: '#8b6914', borderColor: '#5c4008', cost: [{ item: 'wood',  qty: 40  }] },
     { kind: 'wall',         label: 'Wall',          symbol: '\u258b',       color: '#7a6030', borderColor: '#4a3818', cost: [{ item: 'wood',  qty: 20  }] },
-    { kind: 'door_frame',   label: 'Door Frame',    symbol: '\u2293',       color: '#6a5028', borderColor: '#3a2808', cost: [{ item: 'wood',  qty: 15  }] },
     { kind: 'door',         label: 'Door',          symbol: '\uD83D\uDEAA', color: '#7a5838', borderColor: '#4a3010', cost: [{ item: 'wood',  qty: 8   }] },
     { kind: 'wood_ceiling', label: 'Ceiling',       symbol: '\u229e',       color: '#7a5c2a', borderColor: '#4a3410', cost: [{ item: 'wood',  qty: 25  }] },
     { kind: 'workbench',    label: 'Workbench',     symbol: '\u2692',       color: '#6a4a20', borderColor: '#3a2808', cost: [{ item: 'wood',  qty: 12  }] },

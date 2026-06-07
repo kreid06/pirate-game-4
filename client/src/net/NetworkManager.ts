@@ -11,6 +11,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
 import { parseInventoryFromServer, createEmptyInventory } from '../sim/Inventory.js';
+import { SchematicEntry } from '../sim/Quality.js';
 import { PlayerActions } from '../sim/Physics.js';
 
 /**
@@ -662,6 +663,14 @@ export class NetworkManager {
   public onFlagRemoved: ((shipId: number) => void) | null = null;
   public onFlagCaptureComplete: ((shipId: number, planterCompany: number) => void) | null = null;
   public onSalvageSuccess: ((item: number, quantity: number) => void) | null = null;
+  /** Fired when the server sends the player's full schematic (blueprint) list. */
+  public onSchematicList: ((items: SchematicEntry[]) => void) | null = null;
+  /** Fired when the player salvages a quality blueprint from a wreck. */
+  public onSalvageBlueprint: ((item: number, tier: number, crafts: number,
+    wreckId: number, bpRemaining: number, lootRemaining: number) => void) | null = null;
+  /** Fired when the server responds to a craft_blueprint request. */
+  public onCraftBlueprintResult: ((success: boolean, index: number, reason: string,
+    item: number, tier: number, craftsRemaining: number) => void) | null = null;
   public onNpcUnclaimed: ((npcId: number) => void) | null = null;
   public onShipRenamed: ((shipId: number, name: string) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
@@ -1599,6 +1608,18 @@ export class NetworkManager {
     this.socket.send(JSON.stringify({ type: 'structure_lock', timestamp: Date.now(), structure_id: structureId, locked }));
   }
 
+  /** Request the player's current schematic (blueprint) list from the server. */
+  sendRequestSchematics(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'request_schematics', timestamp: Date.now() }));
+  }
+
+  /** Craft one item from the schematic at the given index (must be at a workbench). */
+  sendCraftBlueprint(index: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'craft_blueprint', timestamp: Date.now(), index }));
+  }
+
   sendDemolishStructure(structureId: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'demolish_structure', timestamp: Date.now(), structure_id: structureId }));
@@ -2305,6 +2326,7 @@ export class NetworkManager {
                     localRot: mod.rotation || 0,
                     occupiedBy: null,
                     stateBits: mod.state ?? 0,
+                    qualityTier: typeof mod.qt === 'number' && mod.qt >= 0 ? mod.qt : undefined,
                     moduleData: moduleData
                   } as ShipModule);
                 }
@@ -3007,6 +3029,8 @@ export class NetworkManager {
             metal: s.chest_metal ?? 0,
             stone: s.chest_stone ?? 0,
           } : undefined,
+          wreckTier: typeof s.wreck_tier === 'number' ? s.wreck_tier : undefined,
+          qualityTier: typeof s.qt === 'number' && s.qt >= 0 ? s.qt : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
@@ -3066,6 +3090,8 @@ export class NetworkManager {
             metal: message.chest_metal ?? 0,
             stone: message.chest_stone ?? 0,
           } : undefined,
+          wreckTier: typeof message.wreck_tier === 'number' ? message.wreck_tier : undefined,
+          qualityTier: typeof message.qt === 'number' && message.qt >= 0 ? message.qt : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -3082,6 +3108,7 @@ export class NetworkManager {
           hp:        message.loot_count ?? 1,
           maxHp:     message.loot_count ?? 1,
           placerName: 'shipwreck',
+          wreckTier: typeof message.wreck_tier === 'number' ? message.wreck_tier : undefined,
         };
         this.onWreckSpawned?.(w);
         this.onStructurePlaced?.(w);
@@ -3453,6 +3480,44 @@ export class NetworkManager {
         const unclaimedNpcId: number = message.npcId || 0;
         console.log(`⚓ npc_unclaimed: NPC ${unclaimedNpcId} is now unclaimed`);
         this.onNpcUnclaimed?.(unclaimedNpcId);
+        break;
+      }
+
+      case 'schematic_list': {
+        const rawItems: any[] = Array.isArray(message.items) ? message.items : [];
+        const items: SchematicEntry[] = rawItems.map((it: any) => ({
+          index:  typeof it.i === 'number' ? it.i : 0,
+          item:   typeof it.item === 'number' ? it.item : 0,
+          quality: typeof it.q === 'number' ? it.q : 0,
+          tier:   typeof it.tier === 'number' ? it.tier : 0,
+          crafts: typeof it.crafts === 'number' ? it.crafts : 0,
+          stats:  Array.isArray(it.stats) ? it.stats.map((s: any) => (typeof s === 'number' ? s : 0)) : [0, 0, 0, 0, 0],
+        }));
+        this.onSchematicList?.(items);
+        break;
+      }
+
+      case 'salvage_blueprint': {
+        this.onSalvageBlueprint?.(
+          message.item ?? 0,
+          message.tier ?? 0,
+          message.crafts ?? 0,
+          message.wreck_id ?? 0,
+          message.bp_remaining ?? 0,
+          message.loot_remaining ?? 0,
+        );
+        break;
+      }
+
+      case 'craft_blueprint_result': {
+        this.onCraftBlueprintResult?.(
+          message.success === true,
+          message.index ?? -1,
+          message.reason ?? '',
+          message.item ?? 0,
+          message.tier ?? 0,
+          message.crafts_remaining ?? 0,
+        );
         break;
       }
 

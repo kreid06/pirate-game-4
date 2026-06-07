@@ -12,6 +12,7 @@
 #include "../../../protocol/ship_definitions.h"
 #include "net/module_interactions.h"
 #include "sim/ship_level.h"
+#include "net/quality.h"
 
 void tick_sinking_ships(void) {
     uint32_t now = get_time_ms();
@@ -33,6 +34,8 @@ void tick_sinking_ships(void) {
 
         entity_id sunk_id = ship->ship_id;
         float wx = ship->x, wy = ship->y;
+        uint8_t sunk_company = ship->company_id;
+        uint8_t sunk_level   = ship->npc_level ? ship->npc_level : 1;
 
         /* Eject any remaining players to the water */
         for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
@@ -128,16 +131,50 @@ void tick_sinking_ships(void) {
                 w->wreck_items[li] = l_items[li];
                 w->wreck_qtys[li]  = l_qtys[li];
             }
+
+            /* ── Ghost ships also drop 2-6 quality blueprints (schematics) ──
+             * Quality is rolled ONCE here from the ghost's level; every craft
+             * from the blueprint is identical (see docs/LOOT_QUALITY_SYSTEM.md). */
+            w->wreck_bp_count = 0;
+            if (sunk_company == COMPANY_GHOST) {
+                static const ItemKind BP_POOL[] = {
+                    ITEM_CANNON, ITEM_SWIVEL, ITEM_SWORD, ITEM_AXE, ITEM_PICKAXE,
+                    ITEM_SAIL, ITEM_PLANK, ITEM_DECK, ITEM_HELM, ITEM_WOODEN_FLOOR,
+                    ITEM_WALL, ITEM_WOOD_CEILING, ITEM_DOOR, ITEM_FLAG_FORT, ITEM_SHIPYARD,
+                };
+                const int BP_POOL_N = (int)(sizeof(BP_POOL) / sizeof(BP_POOL[0]));
+                uint32_t rng = (uint32_t)(get_time_ms() ^ (sunk_id * 2654435761u) ^ 0xB17EC0DEu);
+                int bp_n = 2 + (int)(quality_rand_unit(&rng) * 5.0f);   /* 2..6 */
+                if (bp_n > 6) bp_n = 6;
+                for (int bi = 0; bi < bp_n; bi++) {
+                    ItemKind it = BP_POOL[(int)(quality_rand_unit(&rng) * BP_POOL_N) % BP_POOL_N];
+                    float    q  = quality_roll_from_ghost_level(sunk_level, &rng);
+                    w->wreck_bp_items[bi]  = (uint8_t)it;
+                    w->wreck_bp_crafts[bi] = quality_item_max_crafts(it);
+                    quality_roll_payload(it, q, &rng, &w->wreck_bp_quality[bi]);
+                }
+                w->wreck_bp_count = (uint8_t)bp_n;
+            }
             strncpy(w->placer_name, "shipwreck", sizeof(w->placer_name) - 1);
             placed_structure_count++;
+
+            /* Best loot tier among the dropped blueprints (-1 = none) — used by
+             * clients to color the salvage glint. */
+            int wreck_tier = -1;
+            for (int bi = 0; bi < w->wreck_bp_count; bi++) {
+                if (w->wreck_bp_items[bi] == 0) continue;
+                int t = quality_tier(quality_from_q8(w->wreck_bp_quality[bi].quality_q8));
+                if (t > wreck_tier) wreck_tier = t;
+            }
 
             /* Broadcast so clients can render the wreck */
             char wbcast[256];
             snprintf(wbcast, sizeof(wbcast),
                 "{\"type\":\"wreck_spawned\",\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
-                "\"loot_count\":%u,\"expires_ms\":%u}",
+                "\"loot_count\":%u,\"bp_count\":%u,\"wreck_tier\":%d,\"expires_ms\":%u}",
                 (unsigned)w->id, wx, wy,
-                (unsigned)l_count, (unsigned)w->wreck_expires_ms);
+                (unsigned)l_count, (unsigned)w->wreck_bp_count, wreck_tier,
+                (unsigned)w->wreck_expires_ms);
             websocket_server_broadcast(wbcast);
             log_info("🪵 Wreck %u spawned at (%.0f,%.0f) with %d loot slots",
                      (unsigned)w->id, wx, wy, l_count);

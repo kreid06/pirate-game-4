@@ -759,6 +759,12 @@ void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, 
                     float ghost_dmg = 1.0f + (ship->npc_level - 1) * 4.0f / 59.0f;
                     proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * ghost_dmg);
                 }
+                /* Apply this cannon's rolled weapon-damage quality multiplier */
+                if (cannon->quality.quality_q8 != 0) {
+                    uint16_t wd_q8 = cannon->quality.stat_mult_q8[STAT_WEAPON_DAMAGE];
+                    if (wd_q8 > 256)
+                        proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * ((float)wd_q8 / 256.0f));
+                }
             }
         }
         

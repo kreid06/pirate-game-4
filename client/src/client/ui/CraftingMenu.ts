@@ -7,10 +7,11 @@
  */
 
 import { type PlayerInventory, type ItemKind, ITEM_DEFS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon } from '../../sim/Inventory.js';
+import { type SchematicEntry, tierColor, tierName, statMultLabel, itemDisplayName, QUALITY_STAT_NAMES } from '../../sim/Quality.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-type Category = 'Weapons' | 'Structures' | 'Tools' | 'Ship';
+type Category = 'Weapons' | 'Structures' | 'Tools' | 'Ship' | 'Schematics';
 
 interface Ingredient {
   label: string;
@@ -82,18 +83,6 @@ const RECIPES: Recipe[] = [
     borderColor: '#2e1a08',
     ingredients: [
       { label: 'Wood', count: 10 },
-    ],
-  },
-  {
-    id: 'craft_door_frame',
-    category: 'Structures',
-    outputName: 'Door Frame',
-    outputCount: 1,
-    symbol: 'Fr',
-    color: '#7a4820',
-    borderColor: '#3e200c',
-    ingredients: [
-      { label: 'Wood', count: 6 },
     ],
   },
   {
@@ -321,11 +310,14 @@ const SIDEBAR_W  = 130;
 const ROW_H      = 68;
 const ROW_GAP    = 6;
 const CONTENT_PAD = 10;
+/** Schematic rows are slightly taller to fit the tier + stat summary lines. */
+const SCHEM_ROW_H = 80;
 
 const CATEGORIES: { id: Category; icon: string }[] = [
-  { id: 'Weapons', icon: '⚔' },
-  { id: 'Tools',   icon: '⛏' },
-  { id: 'Ship',    icon: '⛵' },
+  { id: 'Weapons',    icon: '⚔' },
+  { id: 'Tools',      icon: '⛏' },
+  { id: 'Ship',       icon: '⛵' },
+  { id: 'Schematics', icon: '📜' },
 ];
 
 const BG_PANEL    = 'rgba(14, 10, 5, 0.97)';
@@ -379,10 +371,21 @@ export class CraftingMenu {
   /** Called when the player clicks Craft on a recipe. */
   public onCraft: ((recipeId: string) => void) | null = null;
 
+  /** Called when the player crafts from a schematic (passes the schematic index). */
+  public onCraftSchematic: ((index: number) => void) | null = null;
+
   private _activeCategory: Category = 'Weapons';
   private _scrollOffset = 0;
   private _mouseX = -1;
   private _mouseY = -1;
+
+  /** Player's owned schematics, fed from the server `schematic_list` message. */
+  private _schematics: SchematicEntry[] = [];
+
+  /** Replace the schematic list shown under the Schematics tab. */
+  setSchematics(items: SchematicEntry[]): void {
+    this._schematics = items;
+  }
 
   open(structureId: number): void {
     this.structureId = structureId;
@@ -406,9 +409,14 @@ export class CraftingMenu {
 
   handleWheel(deltaY: number): boolean {
     if (!this.visible) return false;
-    const recipes = RECIPES.filter(r => r.category === this._activeCategory);
     const contentH = PANEL_H - HDR_H - FOOTER_H;
-    const totalH = recipes.length * (ROW_H + ROW_GAP) + CONTENT_PAD * 2;
+    let totalH: number;
+    if (this._activeCategory === 'Schematics') {
+      totalH = this._schematics.length * (SCHEM_ROW_H + ROW_GAP) + CONTENT_PAD * 2;
+    } else {
+      const recipes = RECIPES.filter(r => r.category === this._activeCategory);
+      totalH = recipes.length * (ROW_H + ROW_GAP) + CONTENT_PAD * 2;
+    }
     const maxScroll = Math.max(0, totalH - contentH);
     this._scrollOffset = Math.max(0, Math.min(maxScroll, this._scrollOffset + deltaY * 0.4));
     return true;
@@ -540,7 +548,8 @@ export class CraftingMenu {
     ctx.rect(listX, listY, listW, listH);
     ctx.clip();
 
-    const recipes = RECIPES.filter(r => r.category === this._activeCategory);
+    const isSchem = this._activeCategory === 'Schematics';
+    const recipes = isSchem ? [] : RECIPES.filter(r => r.category === this._activeCategory);
     const bodyY = listY + CONTENT_PAD - this._scrollOffset;
 
     for (let i = 0; i < recipes.length; i++) {
@@ -623,8 +632,13 @@ export class CraftingMenu {
       ctx.fillText('Craft', btnX + btnW / 2, btnY + btnH / 2);
     }
 
+    // Schematics tab — render owned blueprints in place of static recipes
+    if (isSchem) {
+      this._renderSchematicRows(ctx, listX, listY, listW, listH);
+    }
+
     // Empty state
-    if (recipes.length === 0) {
+    if (!isSchem && recipes.length === 0) {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = '14px Georgia, serif';
@@ -635,7 +649,9 @@ export class CraftingMenu {
     ctx.restore(); // pop clip
 
     // ── Scroll indicator (fade at bottom of list) ─────────────────────────
-    const totalH = recipes.length * (ROW_H + ROW_GAP) + CONTENT_PAD * 2;
+    const totalH = isSchem
+      ? this._schematics.length * (SCHEM_ROW_H + ROW_GAP) + CONTENT_PAD * 2
+      : recipes.length * (ROW_H + ROW_GAP) + CONTENT_PAD * 2;
     if (totalH > listH) {
       const grad = ctx.createLinearGradient(0, listY + listH - 32, 0, listY + listH);
       grad.addColorStop(0, 'rgba(14,10,5,0)');
@@ -802,6 +818,108 @@ export class CraftingMenu {
     return lines;
   }
 
+  /** Render the owned-schematics list (Schematics tab). Caller has already clipped. */
+  private _renderSchematicRows(
+    ctx: CanvasRenderingContext2D,
+    listX: number, listY: number, listW: number, listH: number,
+  ): void {
+    if (this._schematics.length === 0) {
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '13px Georgia, serif';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText('No schematics — salvage blueprints from shipwrecks.', listX + listW / 2, listY + listH / 2);
+      return;
+    }
+
+    const bodyY = listY + CONTENT_PAD - this._scrollOffset;
+    const iconSize = 46;
+    const btnW = 72;
+    const btnH = 30;
+    const btnX = listX + listW - 16 - btnW;
+
+    for (let i = 0; i < this._schematics.length; i++) {
+      const s  = this._schematics[i];
+      const ry = bodyY + i * (SCHEM_ROW_H + ROW_GAP);
+      if (ry + SCHEM_ROW_H < listY || ry > listY + listH) continue;
+
+      const col = tierColor(s.tier);
+
+      // Row background with a tier-coloured border
+      ctx.fillStyle = 'rgba(40, 28, 10, 0.65)';
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.roundRect(listX + 8, ry, listW - 16, SCHEM_ROW_H, 5);
+      ctx.fill();
+      ctx.stroke();
+
+      // Tier-coloured icon box with the item's initial
+      const iconX = listX + 16;
+      const iconY = ry + (SCHEM_ROW_H - iconSize) / 2;
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.roundRect(iconX, iconY, iconSize, iconSize, 5);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = col;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.roundRect(iconX, iconY, iconSize, iconSize, 5);
+      ctx.stroke();
+
+      const name = itemDisplayName(s.item);
+      ctx.font = '22px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = col;
+      ctx.fillText(name.charAt(0).toUpperCase(), iconX + iconSize / 2, iconY + iconSize / 2);
+
+      // Name + tier + crafts remaining
+      const textX = iconX + iconSize + 10;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.font = 'bold 14px Georgia, serif';
+      ctx.fillStyle = col;
+      ctx.fillText(`${tierName(s.tier)} ${name}`, textX, ry + 10);
+
+      ctx.font = '11px Georgia, serif';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.fillText(`${s.crafts} craft${s.crafts === 1 ? '' : 's'} left`, textX, ry + 30);
+
+      // Stat summary — abbreviated, only applicable stats
+      let sx = textX;
+      let drew = false;
+      for (let st = 0; st < s.stats.length; st++) {
+        const lbl = statMultLabel(s.stats[st]);
+        if (lbl === null) continue;
+        const abbr = (QUALITY_STAT_NAMES[st] ?? '').split(' ').map(w => w.charAt(0)).join('');
+        const seg = (drew ? '   ' : '') + `${abbr} ${lbl}`;
+        ctx.fillStyle = '#9fd0a0';
+        ctx.fillText(seg, sx, ry + 50);
+        sx += ctx.measureText(seg).width;
+        drew = true;
+      }
+
+      // Craft button (enabled while crafts remain)
+      const canDo = s.crafts > 0;
+      const btnY = ry + (SCHEM_ROW_H - btnH) / 2;
+      ctx.fillStyle = canDo ? 'rgba(60, 130, 50, 0.9)' : 'rgba(50, 50, 50, 0.7)';
+      ctx.strokeStyle = canDo ? '#55bb35' : '#444444';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(btnX, btnY, btnW, btnH, 5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = canDo ? '#dfffcc' : '#777777';
+      ctx.fillText('Craft', btnX + btnW / 2, btnY + btnH / 2);
+    }
+  }
+
   /**
    * Returns true if the click was consumed by the crafting menu.
    * Pass canvas-space (screen) coordinates.
@@ -851,11 +969,26 @@ export class CraftingMenu {
     const listH = PANEL_H - HDR_H - FOOTER_H;
 
     if (x >= listX && x <= listX + listW && y >= listY && y <= listY + listH) {
-      const recipes = RECIPES.filter(r => r.category === this._activeCategory);
-      const bodyY = listY + CONTENT_PAD - this._scrollOffset;
       const btnW = 72;
       const btnH = 30;
       const btnX = listX + listW - 16 - btnW;
+      const bodyY = listY + CONTENT_PAD - this._scrollOffset;
+
+      // Schematics tab — craft from owned blueprints by index
+      if (this._activeCategory === 'Schematics') {
+        for (let i = 0; i < this._schematics.length; i++) {
+          const ry = bodyY + i * (SCHEM_ROW_H + ROW_GAP);
+          const btnY = ry + (SCHEM_ROW_H - btnH) / 2;
+          if (x >= btnX && x <= btnX + btnW && y >= btnY && y <= btnY + btnH) {
+            const s = this._schematics[i];
+            if (s && s.crafts > 0) this.onCraftSchematic?.(s.index);
+            return true;
+          }
+        }
+        return true;
+      }
+
+      const recipes = RECIPES.filter(r => r.category === this._activeCategory);
 
       for (let i = 0; i < recipes.length; i++) {
         const ry = bodyY + i * (ROW_H + ROW_GAP);

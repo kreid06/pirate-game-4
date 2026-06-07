@@ -153,6 +153,8 @@ export class InputManager {
   public onCombatModeToggle: (() => void) | null = null;
   public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
+  /** Called when T is pressed while placing a wall — toggles the wall/door-frame variant. */
+  public onBuildVariantToggle: (() => void) | null = null;
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
   public onRepairSail: (() => void) | null = null;
   /** Called when E/Q is pressed in ramp or hatch build mode to cycle the facing by 90°. dir=+1 (E) or -1 (Q). */
@@ -1409,6 +1411,13 @@ export class InputManager {
           for (const m of this.actionMappings) {
             if (m.action === 'interact' || m.action === 'ship_interact') m.pressed = false;
           }
+          event.preventDefault();
+        }
+        break;
+      case 'KeyT':
+        // While placing a land structure, T toggles the wall ⇄ door-frame variant.
+        if (this.islandBuildMode && this.onBuildVariantToggle) {
+          this.onBuildVariantToggle();
           event.preventDefault();
         }
         break;

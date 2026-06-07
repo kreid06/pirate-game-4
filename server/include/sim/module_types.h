@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "core/math.h"
+#include "net/quality_payload.h"
 
 /** Cannon reload time: shared by all sources so every cannon reloads identically. */
 #define CANNON_RELOAD_TIME_MS 3000
@@ -179,6 +180,7 @@ typedef struct {
 
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
     uint32_t player_mounted_id;
+    QualityPayload quality;  // rolled quality of source item (quality_q8==0 = plain)
 } ShipModule;
 
 /**
@@ -194,6 +196,14 @@ typedef struct {
  * Create a default module of specified type
  */
 ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t rotation);
+
+/**
+ * Apply a rolled quality payload to a freshly-placed module.
+ * Stores the payload and scales HP (and sail fiber HP) by the durability
+ * multiplier. No-op for plain items (quality_q8 == 0). Self-contained: only
+ * uses QualityPayload (no link against net/quality).
+ */
+void module_apply_quality(ShipModule* module, const QualityPayload* q);
 
 /**
  * Update module state based on gameplay
