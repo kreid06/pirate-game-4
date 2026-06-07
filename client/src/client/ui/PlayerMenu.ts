@@ -171,9 +171,43 @@ export class PlayerMenu {
   private _variantSelection: Map<string, number | null> = new Map();
   /** Quality blueprints looted from wrecks — fed from the server `schematic_list` message. */
   private _lootedSchematics: SchematicEntry[] = [];
+
+  private static readonly VARIANT_STORAGE_KEY = 'pirate_mmo_variant_selections';
+
+  /** Persist the current variant selections to localStorage (index keyed by kind). */
+  private _saveVariantSelections(): void {
+    try {
+      const obj: Record<string, number> = {};
+      for (const [kind, idx] of this._variantSelection) {
+        if (idx !== null) obj[kind] = idx;
+      }
+      localStorage.setItem(PlayerMenu.VARIANT_STORAGE_KEY, JSON.stringify(obj));
+    } catch { /* quota or private mode — ignore */ }
+  }
+
+  /**
+   * Restore variant selections from localStorage, keeping only those whose
+   * blueprint index still exists in `items` (server may have a different list
+   * after a restart, so validate before applying).
+   */
+  private _restoreVariantSelections(items: SchematicEntry[]): void {
+    try {
+      const raw = localStorage.getItem(PlayerMenu.VARIANT_STORAGE_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Record<string, unknown>;
+      for (const [kind, idx] of Object.entries(saved)) {
+        if (typeof idx === 'number' && items.find(bp => bp.index === idx)) {
+          this._variantSelection.set(kind, idx);
+        }
+      }
+    } catch { /* corrupt data — ignore */ }
+  }
+
   /** Replace the displayed quality blueprint list (called by ClientApplication on `schematic_list`). */
   setSchematics(items: SchematicEntry[]): void {
     this._lootedSchematics = items;
+    // Restore persisted selections for blueprints that are still valid
+    this._restoreVariantSelections(items);
     // Remove variant selections for blueprints that are now gone (consumed/expired)
     for (const [kind, idx] of this._variantSelection) {
       if (idx !== null && !items.find(bp => bp.index === idx)) {
@@ -215,6 +249,7 @@ export class PlayerMenu {
     } else {
       this._variantSelection.set(kind, index);
     }
+    this._saveVariantSelections();
   }
 
   /** Pre-formatted tooltip info for the selected variant, ready for the hotbar tooltip. */
@@ -497,6 +532,7 @@ export class PlayerMenu {
         } else {
           this._variantSelection.set(hit.kind, hit.bpIndex);
         }
+        this._saveVariantSelections();
         return true;
       }
     }

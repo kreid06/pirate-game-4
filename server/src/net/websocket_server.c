@@ -2445,6 +2445,10 @@ void player_die(WebSocketPlayer* player) {
     /* Wipe player inventory regardless of whether a tombstone was created */
     memset(&player->inventory, 0, sizeof(PlayerInventory));
     player->inventory.active_slot = 255; /* sentinel: nothing equipped */
+
+    player->health  = 0;
+    player->is_dead = true;
+    player->fire_timer_ms = 0; /* extinguish any active burn on death */
 }
 
 /**
@@ -4299,7 +4303,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // If the reconnecting player is dead, re-trigger the respawn
                                     // screen on the client by sending a killed=true ENTITY_HIT.
-                                    if (player->health == 0) {
+                                    if (player->is_dead) {
                                         char dead_msg[192];
                                         snprintf(dead_msg, sizeof(dead_msg),
                                             "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
@@ -4899,9 +4903,10 @@ int websocket_server_update(struct Sim* sim) {
                             // Player chose a spawn location on the respawn screen
                             if (client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
-                                if (player && player->health == 0) {
-                                    // Restore full health
-                                    player->health = player->max_health;
+                                if (player && player->is_dead) {
+                                    // Restore full health and clear death state
+                                    player->health  = player->max_health;
+                                    player->is_dead = false;
 
                                     // ── Bed respawn: client requests to use stored bed/ship spawn ──
                                     bool bed_respawn = (strstr(payload, "\"bedRespawn\":true") != NULL);
@@ -5360,7 +5365,7 @@ int websocket_server_update(struct Sim* sim) {
                                     // No friendly fire: skip players of the same company
                                     if (player->company_id != 0 &&
                                         tp->company_id == player->company_id) continue;
-                                                    if (tp->health == 0) continue; /* already dead */
+                                                    if (tp->is_dead) continue; /* already dead */
                                                     float px2 = tp->x - player->x;
                                                     float py2 = tp->y - player->y;
                                                     if (px2*px2 + py2*py2 > SWORD_RANGE2) continue;
@@ -5515,7 +5520,7 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (!tp->active || tp->player_id == player->player_id) continue;
                                                     if (player->company_id != 0 &&
                                                         tp->company_id == player->company_id) continue;
-                                                    if (tp->health == 0) continue; /* already dead */
+                                                    if (tp->is_dead) continue; /* already dead */
                                                     float px2 = tp->x - player->x;
                                                     float py2 = tp->y - player->y;
                                                     if (px2*px2 + py2*py2 > melee_range2) continue;
@@ -11999,7 +12004,7 @@ void websocket_server_tick(float dt) {
             // ── Check Players ────────────────────────────────────────────────
             for (int wpi = 0; wpi < WS_MAX_CLIENTS && (is_flame || !proj_consumed); wpi++) {
                 WebSocketPlayer* wp = &players[wpi];
-                if (!wp->active || wp->health == 0) continue; /* skip dead players */
+                if (!wp->active || wp->is_dead) continue; /* skip dead players */
                 if (proj->firing_ship_id != INVALID_ENTITY_ID &&
                     wp->parent_ship_id == (uint32_t)proj->firing_ship_id) continue;
 
@@ -12057,13 +12062,15 @@ void websocket_server_tick(float dt) {
                             }
                         }
                     }
+                    bool wp_killed = (wp->health == 0);
                     char hit_msg[256];
                     snprintf(hit_msg, sizeof(hit_msg),
                         "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
                         "\"x\":%.1f,\"y\":%.1f,\"damage\":%.0f,"
-                        "\"health\":%u,\"maxHealth\":%u}",
+                        "\"health\":%u,\"maxHealth\":%u,\"killed\":%s}",
                         wp->player_id, wp->x, wp->y, damage,
-                        (unsigned)wp->health, (unsigned)wp->max_health);
+                        (unsigned)wp->health, (unsigned)wp->max_health,
+                        wp_killed ? "true" : "false");
                     char hit_frame[320];
                     size_t hfl = websocket_create_frame(WS_OPCODE_TEXT, hit_msg, strlen(hit_msg),
                                                         hit_frame, sizeof(hit_frame));
@@ -12074,8 +12081,10 @@ void websocket_server_tick(float dt) {
                                 send(wc->fd, hit_frame, hfl, 0);
                         }
                     }
-                    log_info("💣 DESPAWN proj %u — player %u hit at (%.1f,%.1f) dmg=%.0f",
-                             proj->id, wp->player_id, wp->x, wp->y, damage);
+                    if (wp_killed) save_player_to_file(wp);
+                    log_info("💣 DESPAWN proj %u — player %u hit at (%.1f,%.1f) dmg=%.0f%s",
+                             proj->id, wp->player_id, wp->x, wp->y, damage,
+                             wp_killed ? " [KILLED]" : "");
                     proj_consumed = true;
                 }
             }
@@ -12486,7 +12495,7 @@ void websocket_server_tick(float dt) {
                 }
 
                 // Players who are mounted cannot move - they're locked to the module position
-                if (ws_player->health == 0) {
+                if (ws_player->is_dead) {
                     // Dead players cannot move; ensure movement state is cleared
                     ws_player->is_moving = false;
                     ws_player->movement_direction_x = 0.0f;
@@ -12547,7 +12556,7 @@ void websocket_server_tick(float dt) {
                         ws_player->hp_regen_accum_ms = 0; /* reset when dead, full, or recently damaged */
                     }
                 }
-                if (ws_player->health == 0) {
+                if (ws_player->is_dead) {
                     /* already handled above — no-op block to keep else-chain correct */
                 } else if (ws_player->is_mounted) {
                     // Mounted players stay at their mount position
@@ -13514,7 +13523,7 @@ void websocket_server_tick(float dt) {
         /* Players on fire: 5 base HP + 1.25% max_health per 500ms tick */
         for (int wpi = 0; wpi < WS_MAX_CLIENTS; wpi++) {
             WebSocketPlayer* wp = &players[wpi];
-            if (!wp->active || wp->health == 0 || wp->fire_timer_ms == 0) continue;
+            if (!wp->active || wp->is_dead || wp->fire_timer_ms == 0) continue;
             /* Water extinguishes fire — player swimming */
             if (wp->movement_state == PLAYER_STATE_SWIMMING) {
                 wp->fire_timer_ms = 0;
@@ -13526,7 +13535,20 @@ void websocket_server_tick(float dt) {
                 continue;
             }
             uint16_t pl_fire_dmg = 5u + (uint16_t)(wp->max_health / 80u);
-            if (wp->health > pl_fire_dmg) { wp->health -= pl_fire_dmg; } else { wp->health = 0; player_die(wp); }
+            bool fire_killed = (wp->health <= pl_fire_dmg);
+            if (!fire_killed) { wp->health -= pl_fire_dmg; } else {
+                wp->health = 0;
+                player_die(wp);
+                save_player_to_file(wp);
+                char fk_msg[256];
+                snprintf(fk_msg, sizeof(fk_msg),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
+                    "\"x\":%.1f,\"y\":%.1f,\"damage\":%u,"
+                    "\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    wp->player_id, wp->x, wp->y,
+                    (unsigned)pl_fire_dmg, (unsigned)wp->max_health);
+                broadcast_json_all(fk_msg);
+            }
             wp->last_damage_ms = get_time_ms();
             wp->hp_regen_accum_ms = 0;
             if (wp->fire_timer_ms > dot_elapsed) {

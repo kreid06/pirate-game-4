@@ -620,8 +620,9 @@ typedef struct WebSocketPlayer {
     uint8_t company_id;            // Inherited from the ship this player boards
 
     // Health
-    uint16_t health;             // Current HP (0 = dead)
+    uint16_t health;             // Current HP (0 when dead)
     uint16_t max_health;         // Max HP (default 100)
+    bool     is_dead;            // Explicit death flag — set by player_die(), cleared by respawn
 
     // Stamina pool — drained by sprinting, attacking, and harvesting; regens when idle
     uint16_t stamina;            // Current stamina (0–max_stamina)

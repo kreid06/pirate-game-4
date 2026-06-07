@@ -211,10 +211,12 @@ bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_float_field(buf, "y", &ftmp)) p->y = ftmp;
     if (json_parse_uint_field(buf, "player_id", &tmp) && tmp != 0) p->player_id = (uint32_t)tmp;
     unsigned saved_ship_id = 0;
+    unsigned saved_deck_level = 1;
     float saved_lx = 0.f, saved_ly = 0.f;
     json_parse_uint_field(buf, "parent_ship_id", &saved_ship_id);
     json_parse_float_field(buf, "local_x", &saved_lx);
     json_parse_float_field(buf, "local_y", &saved_ly);
+    json_parse_uint_field(buf, "deck_level", &saved_deck_level);
     if (json_parse_uint_field(buf, "health", &tmp))       p->health        = (uint16_t)tmp;
     if (json_parse_uint_field(buf, "max_health", &tmp))   p->max_health    = (uint16_t)tmp;
     if (json_parse_uint_field(buf, "player_level", &tmp)) p->player_level  = (uint8_t)tmp;
@@ -223,7 +225,7 @@ bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_uint_field(buf, "stat_damage", &tmp))  p->stat_damage   = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "stat_stamina", &tmp)) p->stat_stamina  = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "stat_weight", &tmp))  p->stat_weight   = (uint8_t)tmp;
-    if (json_parse_uint_field(buf, "deck_level",  &tmp))  p->deck_level    = (uint8_t)(tmp <= 1 ? tmp : 0);
+    /* deck_level is applied after board_player_on_ship to avoid being reset — see below */
     if (json_parse_uint_field(buf, "company_id", &tmp))   p->company_id    = (uint8_t)(tmp < COMPANY_SOLO ? COMPANY_SOLO : tmp); /* players never in company 0 */
     if (json_parse_uint_field(buf, "active_slot", &tmp))  p->inventory.active_slot = (uint8_t)tmp;
     if (json_parse_uint_field(buf, "helm",  &tmp))        p->inventory.equipment.helm   = (ItemKind)tmp;
@@ -243,8 +245,10 @@ bool load_player_from_file(WebSocketPlayer *p) {
             // parent_ship_id, local_x/y, movement_state, world pos and velocity are
             // all set consistently.
             board_player_on_ship(p, ship, saved_lx, saved_ly);
-            log_info("💾 Restored '%s' onto ship %u at local (%.1f, %.1f)",
-                     p->name, saved_ship_id, saved_lx, saved_ly);
+            // board_player_on_ship always sets deck_level=1; restore the saved deck
+            p->deck_level = (uint8_t)(saved_deck_level <= 1 ? saved_deck_level : 1);
+            log_info("💾 Restored '%s' onto ship %u at local (%.1f, %.1f) deck %u",
+                     p->name, saved_ship_id, saved_lx, saved_ly, (unsigned)p->deck_level);
         } else {
             // Ship is gone — fall back to swimming at the saved world coords
             p->parent_ship_id = 0;
@@ -254,6 +258,7 @@ bool load_player_from_file(WebSocketPlayer *p) {
         }
     } else {
         p->movement_state = PLAYER_STATE_SWIMMING;
+        p->deck_level = (uint8_t)(saved_deck_level <= 1 ? saved_deck_level : 1);
     }
 
     // Parse inventory slots array
@@ -316,6 +321,9 @@ bool load_player_from_file(WebSocketPlayer *p) {
     if (json_parse_uint_field(buf, "res_fiber", &tmp)) p->res_fiber = (uint16_t)(tmp > 9999u ? 9999u : tmp);
     if (json_parse_uint_field(buf, "res_metal", &tmp)) p->res_metal = (uint16_t)(tmp > 9999u ? 9999u : tmp);
     if (json_parse_uint_field(buf, "res_stone", &tmp)) p->res_stone = (uint16_t)(tmp > 9999u ? 9999u : tmp);
+
+    /* Derive is_dead from health — a player saved at 0 HP was dead when disconnected */
+    p->is_dead = (p->health == 0);
 
     free(buf);
     log_info("💾 Loaded player '%s' (id %u, lvl %u, xp %u) from %s",

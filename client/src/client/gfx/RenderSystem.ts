@@ -1744,75 +1744,6 @@ export class RenderSystem {
       tCtx.fillText(label, labelX, textMid);
       tCtx.restore();
 
-      // Quality tooltip popup — only for modules with a non-zero quality tier
-      const qt = mod.qualityTier;
-      if (typeof qt === 'number' && qt >= 1) {
-        const qCol  = tierColor(qt);
-        const qName = tierName(qt);
-
-        // Determine stat lines
-        const statLines: string[] = [];
-        const qwRaw = (mod as any).qualityWeaponDmgQ8;
-        const qsRaw = (mod as any).qualitySailEffQ8;
-        if (typeof qwRaw === 'number' && qwRaw > 0) {
-          statLines.push(`Damage  ${statMultLabel(qwRaw)}`);
-        }
-        if (typeof qsRaw === 'number' && qsRaw > 0) {
-          statLines.push(`Sail  ${statMultLabel(qsRaw)}`);
-        }
-
-        // HP ratio
-        const hpCur = mod.health ?? 0;
-        const hpMax = mod.maxHealth ?? 0;
-        if (hpMax > 0) {
-          const hpFrac = Math.max(0, Math.min(1, hpCur / hpMax));
-          statLines.push(`HP  ${hpCur.toFixed(0)} / ${hpMax.toFixed(0)}`);
-        }
-
-        const kindLabel = kind === 'mast' ? 'Sail' : kind.charAt(0).toUpperCase() + kind.slice(1);
-        const titleLine = `${qName} ${kindLabel}`;
-
-        const ttCtx = this.ctx;
-        ttCtx.save();
-        ttCtx.font = 'bold 12px Georgia, serif';
-        const titleW = ttCtx.measureText(titleLine).width;
-        ttCtx.font = '11px Georgia, serif';
-        let maxStatW = 0;
-        for (const sl of statLines) maxStatW = Math.max(maxStatW, ttCtx.measureText(sl).width);
-        const boxW   = Math.max(titleW, maxStatW) + 24;
-        const lineH  = 16;
-        const boxH   = 10 + lineH + (statLines.length > 0 ? 4 + statLines.length * lineH : 0);
-        const bx     = hintScreen.x - boxW / 2;
-        const by     = labelY - boxH - 12;
-
-        // Background
-        ttCtx.fillStyle   = 'rgba(8,12,20,0.82)';
-        ttCtx.strokeStyle = qCol;
-        ttCtx.lineWidth   = 1.5;
-        ttCtx.beginPath();
-        ttCtx.roundRect(bx, by, boxW, boxH, 5);
-        ttCtx.fill();
-        ttCtx.stroke();
-
-        // Title
-        ttCtx.font        = 'bold 12px Georgia, serif';
-        ttCtx.fillStyle   = qCol;
-        ttCtx.textAlign   = 'center';
-        ttCtx.textBaseline = 'top';
-        ttCtx.fillText(titleLine, hintScreen.x, by + 6);
-
-        // Stat lines
-        if (statLines.length > 0) {
-          ttCtx.font      = '11px Georgia, serif';
-          ttCtx.fillStyle = '#d0cbb8';
-          let sy = by + 6 + lineH + 4;
-          for (const sl of statLines) {
-            ttCtx.fillText(sl, hintScreen.x, sy);
-            sy += lineH;
-          }
-        }
-        ttCtx.restore();
-      }
     }
   }
 
@@ -18399,6 +18330,14 @@ export class RenderSystem {
     };
     const meta = KIND_META[moduleData.kind] ?? { name: moduleData.kind, color: '#555566', border: '#8888aa', desc: '' };
 
+    // Quality tier — overrides name colour, accent bar and border when present
+    const qt        = module.qualityTier;
+    const hasQuality = typeof qt === 'number' && qt >= 1;
+    const qCol      = hasQuality ? tierColor(qt!) : null;
+    const qName     = hasQuality ? tierName(qt!)  : null;
+    const accentCol = qCol ?? meta.color;
+    const borderCol = qCol ?? meta.border;
+
     // Quality helper
     const qualityFromMaterial = (mat: string): string => {
       switch (mat) {
@@ -18424,9 +18363,9 @@ export class RenderSystem {
       const maxHp = (moduleData as any).maxHealth ?? 8000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      stats.push({ label: 'Damage',  value: '3000' });
+      stats.push({ label: 'Base Damage',  value: '3000' });
       stats.push({ label: 'Reload',  value: `${(moduleData as any).reloadTime ?? 3.0}s` });
-      stats.push({ label: 'Quality', value: 'Common' });
+      if (!hasQuality) stats.push({ label: 'Quality', value: 'Common' });
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
       const hp    = Math.round((moduleData as any).health ?? 10000);
       const maxHp = (moduleData as any).maxHealth ?? 10000;
@@ -18468,6 +18407,20 @@ export class RenderSystem {
                      : module.deckId === 0    ? 'Lower'
                      :                          'Upper';
       stats.push({ label: 'Deck', value: `${_deckVal} (${module.deckId === 255 ? '—' : module.deckId})` });
+    }
+
+    // Quality bonuses — shown when the module was crafted from a quality blueprint
+    if (hasQuality) {
+      const qwRaw = module.qualityWeaponDmgQ8;
+      const qsRaw = module.qualitySailEffQ8;
+      if (typeof qwRaw === 'number' && qwRaw > 0) {
+        const lbl = statMultLabel(qwRaw);
+        if (lbl) stats.push({ label: 'Damage Bonus', value: lbl, color: qCol! });
+      }
+      if (typeof qsRaw === 'number' && qsRaw > 0) {
+        const lbl = statMultLabel(qsRaw);
+        if (lbl) stats.push({ label: 'Sail Bonus', value: lbl, color: qCol! });
+      }
     }
 
     // Weight
@@ -18556,7 +18509,7 @@ export class RenderSystem {
     ctx.shadowColor = 'rgba(0,0,0,0.6)';
     ctx.shadowBlur  = 8;
     ctx.fillStyle   = 'rgba(12,12,20,0.94)';
-    ctx.strokeStyle = meta.border;
+    ctx.strokeStyle = borderCol;
     ctx.lineWidth   = 1.5;
     ctx.beginPath();
     ctx.roundRect(tx, ty, W, totalH, 6);
@@ -18565,7 +18518,7 @@ export class RenderSystem {
     ctx.shadowBlur = 0;
 
     // Left accent bar
-    ctx.fillStyle = meta.color;
+    ctx.fillStyle = accentCol;
     ctx.beginPath();
     ctx.roundRect(tx, ty, 4, totalH, [6, 0, 0, 6]);
     ctx.fill();
@@ -18574,10 +18527,10 @@ export class RenderSystem {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
 
-    // Name
+    // Name — tier-colored when quality, white otherwise
     ctx.font      = 'bold 14px Georgia, serif';
-    ctx.fillStyle = '#ffffff';
-    ctx.fillText(meta.name, tx + PAD + 4, cy);
+    ctx.fillStyle = qCol ?? '#ffffff';
+    ctx.fillText(hasQuality ? `${qName} ${meta.name}` : meta.name, tx + PAD + 4, cy);
     cy += NAME_H + 4;
 
     // ID + kind
