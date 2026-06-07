@@ -230,6 +230,10 @@ export class PlayerMenu {
   private _panelContentH   = 0;   // total content height (measured each frame)
   private _contentStartY   = 0;   // canvas Y where scrollable content begins
   private _contentViewH    = 0;   // height of the visible content area
+  // Schematics-tab card scroll geometry (set each render frame by _schematicsTab)
+  private _schemScrollTotalH = 0;   // total height of all schematic cards
+  private _schemScrollViewH  = 0;   // height of the visible card viewport
+  private _schemScrollStartY = 0;   // canvas Y where the card viewport begins
 
   // Drag-and-drop state
   private _dragSlot    = -1;   // source slot index, -1 = not dragging
@@ -431,10 +435,13 @@ export class PlayerMenu {
     const tabBarY = py + HEADER_H;
     if (y >= tabBarY && y < tabBarY + TAB_H) {
       const tabW = PANEL_W / 3;
+      const prevTab = this.activeTab;
       const rel = x - px;
       if      (rel < tabW)         this.activeTab = 'character';
       else if (rel < tabW * 2)     this.activeTab = 'skills';
       else                         this.activeTab = 'schematics';
+      // Reset scroll when switching tabs so stale offsets don't carry across
+      if (this.activeTab !== prevTab) this._panelScrollY = 0;
       return true;
     }
 
@@ -549,6 +556,17 @@ export class PlayerMenu {
       return true;
     }
     if (this.activeTab !== 'character' && this.activeTab !== 'schematics') return false;
+
+    // Schematics tab: use the card-area geometry measured during the last render.
+    if (this.activeTab === 'schematics') {
+      if (y < this._schemScrollStartY || y > this._schemScrollStartY + this._schemScrollViewH) return false;
+      const maxScroll = Math.max(0, this._schemScrollTotalH - this._schemScrollViewH);
+      if (maxScroll === 0) return false;
+      this._panelScrollY = Math.max(0, Math.min(maxScroll, this._panelScrollY + deltaY * 0.5));
+      return true;
+    }
+
+    // Character tab: use the panel content geometry.
     if (y < this._contentStartY || y > this._panelY + PANEL_H) return false;
     const maxScroll = Math.max(0, this._panelContentH - this._contentViewH);
     if (maxScroll === 0) return false;
@@ -2341,29 +2359,27 @@ export class PlayerMenu {
     color: string;
     wood: number; fiber: number; metal: number; stone: number;
   }[] = [
-    // LAND
-    { subTab: 'LAND', kind: 'wooden_floor',    name: 'Wooden Floor',    symbol: '\u229f', color: '#8b6914', wood: 10, fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'wall',             name: 'Wall',            symbol: '\u258b', color: '#7a6030', wood: 10, fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'door_frame',       name: 'Door Frame',      symbol: '\u2293', color: '#6a5028', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'door',             name: 'Door',            symbol: '\uD83D\uDEAA', color: '#7a5838', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'wood_ceiling',     name: 'Wood Ceiling',    symbol: '\u229e', color: '#7a5c2a', wood: 8,  fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'workbench',        name: 'Workbench',       symbol: '\u2692', color: '#6b4c1e', wood: 15, fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'shipyard',         name: 'Shipyard',        symbol: '\u26F5', color: '#4a6080', wood: 20, fiber: 0, metal: 5,  stone: 0 },
-    { subTab: 'LAND', kind: 'cannon',           name: 'Cannon',          symbol: '\u25CF', color: '#333333', wood: 8,  fiber: 0, metal: 20, stone: 0 },
-    { subTab: 'LAND', kind: 'flag_fort',        name: 'Flag Fort',       symbol: '\uD83D\uDEA9', color: '#2a5c2a', wood: 20, fiber: 0, metal: 10, stone: 10 },
-    { subTab: 'LAND', kind: 'company_fortress', name: 'Fortress',        symbol: '\uD83C\uDFF0', color: '#4a3060', wood: 40, fiber: 0, metal: 20, stone: 20 },
-    { subTab: 'LAND', kind: 'claim_flag',       name: 'Claim Flag',      symbol: '\uD83C\uDFF3', color: '#c0a020', wood: 5,  fiber: 5, metal: 0,  stone: 0 },
-    // SHIP
-    { subTab: 'SHIP', kind: 'plank',     name: 'Plank',      symbol: '\u25A1', color: '#7a5c2a', wood: 10, fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'deck',      name: 'Deck',       symbol: '\u25A0', color: '#4a3820', wood: 15, fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'cannon',    name: 'Cannon',     symbol: '\u25CF', color: '#333333', wood: 2,  fiber: 0,  metal: 5, stone: 0 },
-    { subTab: 'SHIP', kind: 'swivel',    name: 'Swivel Gun', symbol: '\u203A', color: '#7a4a2a', wood: 1,  fiber: 0,  metal: 3, stone: 0 },
-    { subTab: 'SHIP', kind: 'mast',      name: 'Mast',       symbol: '\u2021', color: '#8b6914', wood: 20, fiber: 10, metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'helm',      name: 'Helm',       symbol: '\u2388', color: '#6a4820', wood: 5,  fiber: 0,  metal: 3, stone: 0 },
-    { subTab: 'SHIP', kind: 'ramp',      name: 'Ramp',       symbol: '\u2571', color: '#5c4018', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'hatch',     name: 'Hatch',      symbol: '\u25A3', color: '#4a3010', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'helm_kit',  name: 'Helm Kit',   symbol: '\u2388', color: '#7a5838', wood: 5,  fiber: 0,  metal: 3, stone: 0 },
-    { subTab: 'SHIP', kind: 'sail',      name: 'Sail',       symbol: '\u25B3', color: '#e0e0e0', wood: 0,  fiber: 20, metal: 0, stone: 0 },
+    // LAND — symbols & colours match LAND_BUILD_PANEL_ENTRIES in UIManager
+    { subTab: 'LAND', kind: 'wooden_floor',    name: 'Wooden Floor', symbol: '\u229f',       color: '#8b6914', wood: 10, fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'wall',            name: 'Wall',         symbol: '\u258b',       color: '#7a6030', wood: 10, fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'door_frame',      name: 'Door Frame',   symbol: '\u2293',       color: '#6a5028', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'door',            name: 'Door',         symbol: '\uD83D\uDEAA', color: '#7a5838', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'wood_ceiling',    name: 'Wood Ceiling', symbol: '\u229e',       color: '#7a5c2a', wood: 8,  fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'workbench',       name: 'Workbench',    symbol: '\u2692',       color: '#6a4a20', wood: 15, fiber: 0, metal: 0,  stone: 0 },
+    { subTab: 'LAND', kind: 'shipyard',        name: 'Shipyard',     symbol: '\u26F5',       color: '#1e6080', wood: 20, fiber: 0, metal: 5,  stone: 0 },
+    { subTab: 'LAND', kind: 'cannon',          name: 'Cannon',       symbol: '\u26AB',       color: '#444444', wood: 8,  fiber: 0, metal: 20, stone: 0 },
+    { subTab: 'LAND', kind: 'flag_fort',       name: 'Flag Fort',    symbol: '\u2302',       color: '#5a5848', wood: 20, fiber: 0, metal: 10, stone: 10 },
+    { subTab: 'LAND', kind: 'company_fortress',name: 'Fortress',     symbol: '\uD83C\uDFF0', color: '#4a3060', wood: 40, fiber: 0, metal: 20, stone: 20 },
+    { subTab: 'LAND', kind: 'claim_flag',      name: 'Claim Flag',   symbol: '\uD83C\uDFF3', color: '#c0a020', wood: 5,  fiber: 5, metal: 0,  stone: 0 },
+    // SHIP — symbols & colours match BUILD_PANEL_ENTRIES in UIManager
+    { subTab: 'SHIP', kind: 'plank',       name: 'Plank',       symbol: 'P',      color: '#b8832b', wood: 10, fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'deck',        name: 'Deck',        symbol: '\u229F', color: '#8b5e3c', wood: 15, fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'cannon',      name: 'Cannon',      symbol: '\u26AB', color: '#444444', wood: 2,  fiber: 0,  metal: 5, stone: 0 },
+    { subTab: 'SHIP', kind: 'swivel',      name: 'Swivel Gun',  symbol: '\u203A', color: '#7a4a2a', wood: 1,  fiber: 0,  metal: 3, stone: 0 },
+    { subTab: 'SHIP', kind: 'mast',        name: 'Sail / Mast', symbol: '\u26F5', color: '#1e8c6e', wood: 20, fiber: 10, metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'helm',        name: 'Helm',        symbol: 'W',      color: '#6a3d8f', wood: 5,  fiber: 0,  metal: 3, stone: 0 },
+    { subTab: 'SHIP', kind: 'ramp',        name: 'Ramp',        symbol: '/',      color: '#7a5c2a', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
+    { subTab: 'SHIP', kind: 'hatch_cover', name: 'Hatch Cover', symbol: '\u229E', color: '#8b832b', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
   ];
 
   private _schematicsTab(
@@ -2557,6 +2573,11 @@ export class PlayerMenu {
       return CARD_H + (bps.length > 0 ? 4 + (1 + bps.length) * BP_ROW_H + 4 : 0);
     };
     const totalH = items.reduce((sum, s) => sum + cardH(s.kind) + CARD_GAP, 0);
+
+    // Record scroll geometry so handleWheel can use it regardless of tab
+    this._schemScrollTotalH = totalH;
+    this._schemScrollViewH  = viewH;
+    this._schemScrollStartY = cy;
 
     // Clamp scroll
     this._panelScrollY = Math.max(0, Math.min(this._panelScrollY, Math.max(0, totalH - viewH)));

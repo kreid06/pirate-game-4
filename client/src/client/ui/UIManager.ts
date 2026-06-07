@@ -3221,7 +3221,7 @@ class HUDElement implements UIElement {
   /** The currently selected land structure kind (highlighted in land build hotbar). */
   public selectedLandKind: string | null = null;
   /** 8 land schematic hotbar slots; string kind or null = empty. */
-  public landHotbarSlots: (string | null)[] = UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind);
+  public landHotbarSlots: (string | null)[] = UIManager.LAND_BUILD_PANEL_ENTRIES.slice(0, 8).map(e => e.kind);
   /** Wired by UIManager so build-hotbar tooltip can show the active quality variant. */
   public getVariantTooltipInfo: (kind: string) => { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined = () => undefined;
 
