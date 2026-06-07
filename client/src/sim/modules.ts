@@ -114,6 +114,10 @@ export interface ShipModule {
   /** Rolled quality tier (0..6) of the blueprint this module was crafted from.
    *  Used to tint/outline the module. Absent for plain (un-rolled) modules. */
   qualityTier?: number;
+  /** q8 weapon-damage multiplier (256=1.00x, 0=N/A). Present on cannons/swivels. */
+  qualityWeaponDmgQ8?: number;
+  /** q8 sail-effectiveness multiplier (256=1.00x, 0=N/A). Present on masts. */
+  qualitySailEffQ8?: number;
   
   // Module-specific data (varies by kind)
   moduleData?: ModuleData;

@@ -79,40 +79,19 @@ void tick_sinking_ships(void) {
          * a STRUCT_WRECK at the same world position.  Players can swim out
          * and E-interact to salvage one slot at a time.                   */
         if (placed_structure_count < MAX_PLACED_STRUCTURES) {
-            /* -- Build loot -- */
+            /* Shared RNG for loot + blueprint rolls */
+            uint32_t rng = (uint32_t)(get_time_ms() ^ (sunk_id * 2654435761u) ^ 0xB17EC0DEu);
+
+            /* -- Build loot: ammo only (blueprints carry the module drops) -- */
             uint8_t l_items[6] = {0};
             uint8_t l_qtys[6]  = {0};
             int     l_count    = 0;
 
-            /* Always drop some planks (2-6) */
-            l_items[l_count] = (uint8_t)ITEM_PLANK;
-            l_qtys[l_count]  = 2 + (uint8_t)(sunk_id % 5);  /* deterministic 2-6 */
+            /* Cannonballs: 3–12 */
+            uint8_t ball_qty = (uint8_t)(3 + (int)(quality_rand_unit(&rng) * 10.0f));
+            l_items[l_count] = (uint8_t)ITEM_CANNON_BALL;
+            l_qtys[l_count]  = ball_qty;
             l_count++;
-
-            /* Count cannon modules on the sunk ship and add loot.
-             * The sim entity is already destroyed by this point, so use
-             * ship_id as a deterministic seed for loot quantities.       */
-            {
-                /* Seed cannonballs 1-8 based on ship_id */
-                uint8_t ball_qty = (uint8_t)((sunk_id * 7 + 3) % 8 + 1);
-                if (l_count < 6) {
-                    l_items[l_count] = (uint8_t)ITEM_CANNON_BALL;
-                    l_qtys[l_count]  = ball_qty;
-                    l_count++;
-                }
-                /* 50% chance of a salvageable cannon */
-                if (l_count < 6 && (sunk_id % 2) == 0) {
-                    l_items[l_count] = (uint8_t)ITEM_CANNON;
-                    l_qtys[l_count]  = 1;
-                    l_count++;
-                }
-                /* 33% chance of a sail */
-                if (l_count < 6 && (sunk_id % 3) == 0) {
-                    l_items[l_count] = (uint8_t)ITEM_SAIL;
-                    l_qtys[l_count]  = 1;
-                    l_count++;
-                }
-            }
 
             /* -- Place wreck -- */
             PlacedStructure *w = &placed_structures[placed_structure_count];
@@ -132,25 +111,30 @@ void tick_sinking_ships(void) {
                 w->wreck_qtys[li]  = l_qtys[li];
             }
 
-            /* ── Ghost ships also drop 2-6 quality blueprints (schematics) ──
+            /* ── Ghost ships also drop 2-6 quality blueprints (ship modules only) ──
              * Quality is rolled ONCE here from the ghost's level; every craft
              * from the blueprint is identical (see docs/LOOT_QUALITY_SYSTEM.md). */
             w->wreck_bp_count = 0;
             if (sunk_company == COMPANY_GHOST) {
                 static const ItemKind BP_POOL[] = {
-                    ITEM_CANNON, ITEM_SWIVEL, ITEM_SWORD, ITEM_AXE, ITEM_PICKAXE,
+                    ITEM_CANNON, ITEM_SWIVEL,
                     ITEM_SAIL, ITEM_PLANK, ITEM_DECK, ITEM_HELM, ITEM_WOODEN_FLOOR,
                     ITEM_WALL, ITEM_WOOD_CEILING, ITEM_DOOR, ITEM_FLAG_FORT, ITEM_SHIPYARD,
                 };
                 const int BP_POOL_N = (int)(sizeof(BP_POOL) / sizeof(BP_POOL[0]));
-                uint32_t rng = (uint32_t)(get_time_ms() ^ (sunk_id * 2654435761u) ^ 0xB17EC0DEu);
                 int bp_n = 2 + (int)(quality_rand_unit(&rng) * 5.0f);   /* 2..6 */
                 if (bp_n > 6) bp_n = 6;
                 for (int bi = 0; bi < bp_n; bi++) {
                     ItemKind it = BP_POOL[(int)(quality_rand_unit(&rng) * BP_POOL_N) % BP_POOL_N];
                     float    q  = quality_roll_from_ghost_level(sunk_level, &rng);
                     w->wreck_bp_items[bi]  = (uint8_t)it;
-                    w->wreck_bp_crafts[bi] = quality_item_max_crafts(it);
+                    /* Crafts = MaxCrafts * (rand + 0.25), clamped to [1, MaxCrafts] */
+                    uint8_t mc     = quality_item_max_crafts(it);
+                    float   factor = quality_rand_unit(&rng) + 0.25f;
+                    if (factor > 1.0f) factor = 1.0f;
+                    uint8_t bc = (uint8_t)((float)mc * factor);
+                    if (bc < 1) bc = 1;
+                    w->wreck_bp_crafts[bi] = bc;
                     quality_roll_payload(it, q, &rng, &w->wreck_bp_quality[bi]);
                 }
                 w->wreck_bp_count = (uint8_t)bp_n;

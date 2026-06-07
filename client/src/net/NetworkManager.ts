@@ -1683,11 +1683,12 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_CANNON from the player's inventory.
    */
-  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
     if (snapIndex !== undefined && snapIndex >= 0 && snapIndex <= 11) msg.snapIndex = snapIndex;
     if (deckId !== undefined) msg.deckId = deckId;
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
     this.sendMessage(msg);
   }
 
@@ -1706,9 +1707,11 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates.
    * Consumes 1 ITEM_SAIL from the player's inventory.
    */
-  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY, resource_source: resourceSource });
+    const msg: any = { type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY, resource_source: resourceSource };
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
   }
 
   /**
@@ -1716,10 +1719,11 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_SWIVEL from the player's inventory.
    */
-  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
     if (deckId !== undefined) msg.deckId = deckId;
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
     this.sendMessage(msg);
   }
 
@@ -2327,6 +2331,8 @@ export class NetworkManager {
                     occupiedBy: null,
                     stateBits: mod.state ?? 0,
                     qualityTier: typeof mod.qt === 'number' && mod.qt >= 0 ? mod.qt : undefined,
+                    qualityWeaponDmgQ8: typeof mod.qw === 'number' ? mod.qw : undefined,
+                    qualitySailEffQ8: typeof mod.qse === 'number' ? mod.qse : undefined,
                     moduleData: moduleData
                   } as ShipModule);
                 }

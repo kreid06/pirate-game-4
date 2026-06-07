@@ -18,7 +18,7 @@ import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
-import { tierColor } from '../../sim/Quality.js';
+import { tierColor, tierName, statMultLabel } from '../../sim/Quality.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
@@ -1743,6 +1743,76 @@ export class RenderSystem {
       tCtx.fillStyle = inRange ? '#e8dfc0' : '#888070';
       tCtx.fillText(label, labelX, textMid);
       tCtx.restore();
+
+      // Quality tooltip popup — only for modules with a non-zero quality tier
+      const qt = mod.qualityTier;
+      if (typeof qt === 'number' && qt >= 1) {
+        const qCol  = tierColor(qt);
+        const qName = tierName(qt);
+
+        // Determine stat lines
+        const statLines: string[] = [];
+        const qwRaw = (mod as any).qualityWeaponDmgQ8;
+        const qsRaw = (mod as any).qualitySailEffQ8;
+        if (typeof qwRaw === 'number' && qwRaw > 0) {
+          statLines.push(`Damage  ${statMultLabel(qwRaw)}`);
+        }
+        if (typeof qsRaw === 'number' && qsRaw > 0) {
+          statLines.push(`Sail  ${statMultLabel(qsRaw)}`);
+        }
+
+        // HP ratio
+        const hpCur = mod.health ?? 0;
+        const hpMax = mod.maxHealth ?? 0;
+        if (hpMax > 0) {
+          const hpFrac = Math.max(0, Math.min(1, hpCur / hpMax));
+          statLines.push(`HP  ${hpCur.toFixed(0)} / ${hpMax.toFixed(0)}`);
+        }
+
+        const kindLabel = kind === 'mast' ? 'Sail' : kind.charAt(0).toUpperCase() + kind.slice(1);
+        const titleLine = `${qName} ${kindLabel}`;
+
+        const ttCtx = this.ctx;
+        ttCtx.save();
+        ttCtx.font = 'bold 12px Georgia, serif';
+        const titleW = ttCtx.measureText(titleLine).width;
+        ttCtx.font = '11px Georgia, serif';
+        let maxStatW = 0;
+        for (const sl of statLines) maxStatW = Math.max(maxStatW, ttCtx.measureText(sl).width);
+        const boxW   = Math.max(titleW, maxStatW) + 24;
+        const lineH  = 16;
+        const boxH   = 10 + lineH + (statLines.length > 0 ? 4 + statLines.length * lineH : 0);
+        const bx     = hintScreen.x - boxW / 2;
+        const by     = labelY - boxH - 12;
+
+        // Background
+        ttCtx.fillStyle   = 'rgba(8,12,20,0.82)';
+        ttCtx.strokeStyle = qCol;
+        ttCtx.lineWidth   = 1.5;
+        ttCtx.beginPath();
+        ttCtx.roundRect(bx, by, boxW, boxH, 5);
+        ttCtx.fill();
+        ttCtx.stroke();
+
+        // Title
+        ttCtx.font        = 'bold 12px Georgia, serif';
+        ttCtx.fillStyle   = qCol;
+        ttCtx.textAlign   = 'center';
+        ttCtx.textBaseline = 'top';
+        ttCtx.fillText(titleLine, hintScreen.x, by + 6);
+
+        // Stat lines
+        if (statLines.length > 0) {
+          ttCtx.font      = '11px Georgia, serif';
+          ttCtx.fillStyle = '#d0cbb8';
+          let sy = by + 6 + lineH + 4;
+          for (const sl of statLines) {
+            ttCtx.fillText(sl, hintScreen.x, sy);
+            sy += lineH;
+          }
+        }
+        ttCtx.restore();
+      }
     }
   }
 

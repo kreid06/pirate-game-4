@@ -2691,6 +2691,12 @@ export class ClientApplication {
         this.networkManager.sendPlayerStatUpgrade(stat);
       });
 
+      // Request schematic list when the player menu opens so the Schematics tab
+      // shows the player's current quality blueprints without needing a workbench.
+      this.uiManager.onPlayerMenuOpen = () => {
+        this.networkManager.sendRequestSchematics();
+      };
+
       this.uiManager.onPlayerLevelUp = () => {
         this.networkManager.sendPlayerLevelUp();
       };
@@ -3362,9 +3368,10 @@ export class ClientApplication {
         this.networkManager.sendCraftBlueprint(index);
       };
 
-      // Schematic (blueprint) list — populate the Schematics tab.
+      // Schematic (blueprint) list — populate the Schematics tab in both menus.
       this.networkManager.onSchematicList = (items) => {
         this.craftingMenu.setSchematics(items);
+        this.uiManager.playerMenu.setSchematics(items);
       };
 
       // Crafting a blueprint succeeded/failed; the server re-sends the schematic
@@ -5117,7 +5124,8 @@ export class ClientApplication {
         if (!this._consumeShipBuildResources('mast')) return;
         const snapX = RenderSystem.MAST_XS[ms.mastIndex];
         console.log(`⛵ [SHIP BUILD] Placed mast at snap ${ms.mastIndex} (${snapX.toFixed(0)}, 0) — consumed resources`);
-        this.networkManager.sendPlaceMastAt(ms.ship.id, snapX, 0, this._buildResourceSource);
+        this.networkManager.sendPlaceMastAt(ms.ship.id, snapX, 0, this._buildResourceSource,
+          this.uiManager.playerMenu.getVariantForKind('mast') ?? undefined);
         return;
       }
       // No canonical snap nearby — fall through to free-placement ghost below
@@ -5135,7 +5143,8 @@ export class ClientApplication {
         const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
         const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
         console.log(`🔳 [SHIP BUILD] Placed cannon at gunport snap=${snapIdx ?? 'none'} — consumed resources (${this._buildResourceSource})`);
-        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, 0 /* gunport cannons are always lower deck */, this._buildResourceSource);
+        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, 0 /* gunport cannons are always lower deck */, this._buildResourceSource,
+          this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
         return;
       }
       // Fixed-position slot ghosts (old helm-offset layout) — snap schematic to slot position
@@ -5143,7 +5152,8 @@ export class ClientApplication {
       if (cs) {
         if (!this._consumeShipBuildResources('cannon')) return;
         console.log(`🔳 [SHIP BUILD] Placed cannon at fixed slot ${cs.cannonIndex} (${cs.localX.toFixed(0)}, ${cs.localY.toFixed(0)}) — consumed resources (${this._buildResourceSource})`);
-        this.networkManager.sendPlaceCannonAt(cs.ship.id, cs.localX, cs.localY, cs.rot, undefined, 1, this._buildResourceSource);
+        this.networkManager.sendPlaceCannonAt(cs.ship.id, cs.localX, cs.localY, cs.rot, undefined, 1, this._buildResourceSource,
+          this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
         return;
       }
     }
@@ -5384,9 +5394,12 @@ export class ClientApplication {
   ): () => void {
     const src = this._buildResourceSource;
     switch (kind) {
-      case 'cannon': return () => this.networkManager.sendPlaceCannonAt(shipId, lx, ly, rot, undefined, this.renderSystem.playerDeckLevel, src);
-      case 'mast':   return () => this.networkManager.sendPlaceMastAt(shipId, lx, ly, src);
-      case 'swivel': return () => this.networkManager.sendPlaceSwivelAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
+      case 'cannon': return () => this.networkManager.sendPlaceCannonAt(shipId, lx, ly, rot, undefined, this.renderSystem.playerDeckLevel, src,
+        this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
+      case 'mast':   return () => this.networkManager.sendPlaceMastAt(shipId, lx, ly, src,
+        this.uiManager.playerMenu.getVariantForKind('mast') ?? undefined);
+      case 'swivel': return () => this.networkManager.sendPlaceSwivelAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src,
+        this.uiManager.playerMenu.getVariantForKind('swivel') ?? undefined);
       case 'chest':  return () => this.networkManager.sendPlaceChestAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
       case 'bed':    return () => this.networkManager.sendPlaceBedAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
       default:       return () => {};
@@ -5601,7 +5614,8 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad, undefined, this.renderSystem.playerDeckLevel);
+      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad, undefined, this.renderSystem.playerDeckLevel,
+        undefined, this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
     } else if (this.buildSelectedItem === 'swivel') {
       console.log(`🔫 [BUILD] Placing swivel at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
       const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
@@ -5614,7 +5628,8 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad, this.renderSystem.playerDeckLevel);
+      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad, this.renderSystem.playerDeckLevel,
+        undefined, this.uiManager.playerMenu.getVariantForKind('swivel') ?? undefined);
     } else {
       // Sail — constrain to rectangular body of ship (away from bow/stern curves)
       const MAST_X_MIN = -240, MAST_X_MAX = 200;
@@ -5648,7 +5663,8 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newMast, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceMastAt(shipRef.id, localX, localY);
+      this.networkManager.sendPlaceMastAt(shipRef.id, localX, localY,
+        undefined, this.uiManager.playerMenu.getVariantForKind('mast') ?? undefined);
     }
   }
 

@@ -1979,31 +1979,34 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                         float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                         float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d,\"qse\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
                             fh, fhmax, (unsigned)module->data.mast.sail_fire_intensity,
                             (int)module->health, (int)module->target_health, (int)module->max_health,
-                            (unsigned)module->deck_id, module_quality_tier(module));
+                            (unsigned)module->deck_id, module_quality_tier(module),
+                            (unsigned)module->quality.stat_mult_q8[STAT_SAIL_EFFECTIVENESS]);
                     } else if (module->type_id == MODULE_TYPE_CANNON) {
                         float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"gunportSnapIdx\":%u,\"qt\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"gunportSnapIdx\":%u,\"qt\":%d,\"qw\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, aim_direction,
                             (unsigned)module->state_bits,
                             (int)module->health, (int)module->target_health, (int)module->max_health,
                             (unsigned)module->deck_id,
-                            (unsigned)module->data.cannon.gunport_snap_idx, module_quality_tier(module));
+                            (unsigned)module->data.cannon.gunport_snap_idx, module_quality_tier(module),
+                            (unsigned)module->quality.stat_mult_q8[STAT_WEAPON_DAMAGE]);
                     } else if (module->type_id == MODULE_TYPE_SWIVEL) {
                         float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d}",
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d,\"qw\":%u}",
                             m > 0 ? "," : "", module->id, module->type_id,
                             module_x, module_y, module_rot, aim_dir,
                             (unsigned)module->state_bits,
                             (int)module->health, (int)module->target_health, (int)module->max_health,
-                            (unsigned)module->deck_id, module_quality_tier(module));
+                            (unsigned)module->deck_id, module_quality_tier(module),
+                            (unsigned)module->quality.stat_mult_q8[STAT_WEAPON_DAMAGE]);
                     } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                         float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
@@ -7409,6 +7412,25 @@ int websocket_server_update(struct Sim* sim) {
                                             simple->modules[simple->module_count++] = nc;
                                             recalc_ship_mass(simple);
 
+                                            /* Apply quality blueprint if the player selected one */
+                                            {
+                                                const char *_pbp = strstr(payload, "\"bp_index\":");
+                                                int _bpi = -1;
+                                                if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+                                                if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+                                                    PlayerBlueprint *_bp = &player->schematics[_bpi];
+                                                    if (_bp->item == (uint8_t)ITEM_CANNON && _bp->crafts_remaining > 0) {
+                                                        /* Apply quality to the LAST-ADDED module in both arrays */
+                                                        module_apply_quality(&sim_ship->modules[sim_ship->module_count - 1], &_bp->quality);
+                                                        simple->modules[simple->module_count - 1] = sim_ship->modules[sim_ship->module_count - 1];
+                                                        if (--_bp->crafts_remaining == 0) {
+                                                            player->schematics[_bpi] = player->schematics[--player->schematic_count];
+                                                            memset(&player->schematics[player->schematic_count], 0, sizeof(PlayerBlueprint));
+                                                        }
+                                                    }
+                                                }
+                                            }
+
                                             /* Auto-assign to weapon group based on fire sector.
                                              * Sector is derived from the cannon's local_rot:
                                              *   315°–45°  → port      → group 0
@@ -7552,6 +7574,24 @@ int websocket_server_update(struct Sim* sim) {
                                             sim_ship->modules[sim_ship->module_count++] = nm;
                                             simple_mast->modules[simple_mast->module_count++] = nm;
 
+                                            /* Apply quality blueprint if the player selected one */
+                                            {
+                                                const char *_pbp = strstr(payload, "\"bp_index\":");
+                                                int _bpi = -1;
+                                                if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+                                                if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+                                                    PlayerBlueprint *_bp = &player->schematics[_bpi];
+                                                    if (_bp->item == (uint8_t)ITEM_SAIL && _bp->crafts_remaining > 0) {
+                                                        module_apply_quality(&sim_ship->modules[sim_ship->module_count - 1], &_bp->quality);
+                                                        simple_mast->modules[simple_mast->module_count - 1] = sim_ship->modules[sim_ship->module_count - 1];
+                                                        if (--_bp->crafts_remaining == 0) {
+                                                            player->schematics[_bpi] = player->schematics[--player->schematic_count];
+                                                            memset(&player->schematics[player->schematic_count], 0, sizeof(PlayerBlueprint));
+                                                        }
+                                                    }
+                                                }
+                                            }
+
                                             if (_ship_only)       res_consume_ship(_res_ship, MODULE_TYPE_MAST);
                                             else if (_pack_only)  res_consume(player, MODULE_TYPE_MAST);
                                             else                  res_consume_combined(player, _res_ship, MODULE_TYPE_MAST);
@@ -7665,6 +7705,24 @@ int websocket_server_update(struct Sim* sim) {
 
                                             sw_sim->modules[sw_sim->module_count++]       = ns;
                                             sw_simple->modules[sw_simple->module_count++] = ns;
+
+                                            /* Apply quality blueprint if the player selected one */
+                                            {
+                                                const char *_pbp = strstr(payload, "\"bp_index\":");
+                                                int _bpi = -1;
+                                                if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+                                                if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+                                                    PlayerBlueprint *_bp = &player->schematics[_bpi];
+                                                    if (_bp->item == (uint8_t)ITEM_SWIVEL && _bp->crafts_remaining > 0) {
+                                                        module_apply_quality(&sw_sim->modules[sw_sim->module_count - 1], &_bp->quality);
+                                                        sw_simple->modules[sw_simple->module_count - 1] = sw_sim->modules[sw_sim->module_count - 1];
+                                                        if (--_bp->crafts_remaining == 0) {
+                                                            player->schematics[_bpi] = player->schematics[--player->schematic_count];
+                                                            memset(&player->schematics[player->schematic_count], 0, sizeof(PlayerBlueprint));
+                                                        }
+                                                    }
+                                                }
+                                            }
 
                                             if (_ship_only)       res_consume_ship(_res_ship, MODULE_TYPE_SWIVEL);
                                             else if (_pack_only)  res_consume(player, MODULE_TYPE_SWIVEL);

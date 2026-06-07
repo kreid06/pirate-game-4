@@ -17,6 +17,7 @@ import {
   COMPANY_NAVY,
 } from '../../sim/Types.js';
 import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, INVENTORY_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight, PlayerResources } from '../../sim/Inventory.js';
+import { SchematicEntry, tierColor, tierName, statMultLabel, QUALITY_STAT_NAMES, qualityCostMult } from '../../sim/Quality.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -164,6 +165,38 @@ export class PlayerMenu {
   private _schematicsHotbarHits: Array<{ slot: number; x: number; y: number; w: number; h: number }> = [];
   /** Hit areas for each schematic card (for click-to-assign). */
   private _schematicsCardHits: Array<{ idx: number; kind: string; x: number; y: number; w: number; h: number }> = [];
+  /** Hit areas for variant selection rows (Standard row + quality blueprint rows). */
+  private _variantHits: Array<{ kind: string; bpIndex: number | null; x: number; y: number; w: number; h: number }> = [];
+  /** Per-kind variant selection: undefined/null = Standard, number = blueprint server index. */
+  private _variantSelection: Map<string, number | null> = new Map();
+  /** Quality blueprints looted from wrecks — fed from the server `schematic_list` message. */
+  private _lootedSchematics: SchematicEntry[] = [];
+  /** Replace the displayed quality blueprint list (called by ClientApplication on `schematic_list`). */
+  setSchematics(items: SchematicEntry[]): void {
+    this._lootedSchematics = items;
+    // Remove variant selections for blueprints that are now gone (consumed/expired)
+    for (const [kind, idx] of this._variantSelection) {
+      if (idx !== null && !items.find(bp => bp.index === idx)) {
+        this._variantSelection.delete(kind);
+      }
+    }
+  }
+  /** Returns the selected blueprint index for a kind, or null for Standard (default). */
+  public getVariantForKind(kind: string): number | null {
+    return this._variantSelection.get(kind) ?? null;
+  }
+  /** Returns the SchematicEntry for the selected quality variant, or undefined if Standard. */
+  public getVariantSchematic(kind: string): SchematicEntry | undefined {
+    const idx = this._variantSelection.get(kind);
+    if (idx == null) return undefined;
+    return this._lootedSchematics.find(bp => bp.index === idx);
+  }
+  /** Pre-formatted tooltip info for the selected variant, ready for the hotbar tooltip. */
+  public getVariantTooltipInfo(kind: string): { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined {
+    const bp = this.getVariantSchematic(kind);
+    if (!bp) return undefined;
+    return { tierPrefix: tierName(bp.tier), crafts: bp.crafts, color: tierColor(bp.tier), costMult: qualityCostMult(bp.tier) };
+  }
 
   /** Current land hotbar slots — set by UIManager before each render. */
   public landHotbarSlots: (string | null)[] = [];
@@ -423,6 +456,18 @@ export class PlayerMenu {
       }
     }
 
+    // Variant selection (Standard row or quality blueprint row)
+    for (const hit of this._variantHits) {
+      if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+        if (hit.bpIndex === null) {
+          this._variantSelection.delete(hit.kind); // delete = revert to Standard
+        } else {
+          this._variantSelection.set(hit.kind, hit.bpIndex);
+        }
+        return true;
+      }
+    }
+
     // Schematics card clicks — assign to selected hotbar slot (or clear if already there)
     if (this._schematicsSelectedSlot >= 0) {
       for (const hit of this._schematicsCardHits) {
@@ -517,6 +562,12 @@ export class PlayerMenu {
 
     // Schematics tab: drag a card to assign it to a hotbar slot
     if (this.activeTab === 'schematics') {
+      // Variant selection rows are NOT draggable — let handleClick handle them
+      for (const hit of this._variantHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          return false;
+        }
+      }
       for (const hit of this._schematicsCardHits) {
         if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
           this._schemDragKind   = hit.kind;
@@ -2335,6 +2386,7 @@ export class PlayerMenu {
     this._schematicsSubTabHits = [];
     this._schematicsHotbarHits = [];
     this._schematicsCardHits   = [];
+    this._variantHits          = [];
     const subTabs: ('LAND' | 'SHIP')[] = ['LAND', 'SHIP'];
     const subTabW = Math.floor(CARD_W / subTabs.length);
     for (let i = 0; i < subTabs.length; i++) {
@@ -2485,7 +2537,26 @@ export class PlayerMenu {
     // ── Scrollable schematic cards ────────────────────────────────────────
     const viewH  = contentBottom - cy - INNER_PAD;
     const items  = PlayerMenu.SCHEMATICS.filter(s => s.subTab === this._schematicsSubTab);
-    const totalH = items.length * (CARD_H + CARD_GAP);
+    const BP_ROW_H = 20; // height per looted-blueprint variant row
+    /** Module kind → the ItemKind used in quality blueprints (some differ from the build kind). */
+    const BP_KIND_MAP: Partial<Record<string, ItemKind>> = {
+      mast: 'sail',       // blueprints drop as ITEM_SAIL (id 8) but build as mast modules
+      helm: 'helm_kit',   // blueprints drop as ITEM_HELM  (id 9)
+    };
+    /** Blueprints owned by the player for a given card kind. */
+    const cardBlueprints = (kind: string): SchematicEntry[] => {
+      const resolvedKind = (BP_KIND_MAP[kind] ?? kind) as ItemKind;
+      const id = ITEM_KIND_ID[resolvedKind];
+      if (typeof id !== 'number') return [];
+      return this._lootedSchematics.filter(bp => bp.item === id);
+    };
+    /** Total rendered height of one card (standard content + optional blueprint rows). */
+    const cardH = (kind: string): number => {
+      const bps = cardBlueprints(kind);
+      // Standard row + each blueprint row, when blueprints exist
+      return CARD_H + (bps.length > 0 ? 4 + (1 + bps.length) * BP_ROW_H + 4 : 0);
+    };
+    const totalH = items.reduce((sum, s) => sum + cardH(s.kind) + CARD_GAP, 0);
 
     // Clamp scroll
     this._panelScrollY = Math.max(0, Math.min(this._panelScrollY, Math.max(0, totalH - viewH)));
@@ -2506,6 +2577,9 @@ export class PlayerMenu {
       const s = items[si];
       const cardX = px + INNER_PAD;
 
+      const blueprints = cardBlueprints(s.kind);
+      const thisCardH  = cardH(s.kind);
+
       // Which hotbar slot (if any) is this schematic assigned to?
       const hotbarSlotIdx = currentHotbar.findIndex(k => k === s.kind);
       // Is the currently-selected slot pointing at this card?
@@ -2518,15 +2592,17 @@ export class PlayerMenu {
         ? GOLD
         : hotbarSlotIdx >= 0
           ? 'rgba(255,180,0,0.35)'
-          : 'rgba(120,90,30,0.35)';
-      ctx.lineWidth = isAssignTarget || hotbarSlotIdx >= 0 ? 1.5 : 1;
+          : blueprints.length > 0
+            ? 'rgba(80,120,200,0.40)'
+            : 'rgba(120,90,30,0.35)';
+      ctx.lineWidth = isAssignTarget || hotbarSlotIdx >= 0 || blueprints.length > 0 ? 1.5 : 1;
       ctx.beginPath();
-      ctx.roundRect(cardX, cardY, CARD_W, CARD_H, 5);
+      ctx.roundRect(cardX, cardY, CARD_W, thisCardH, 5);
       ctx.fill();
       ctx.stroke();
 
       // Register card hit area
-      this._schematicsCardHits.push({ idx: si, kind: s.kind, x: cardX, y: cardY, w: CARD_W, h: CARD_H });
+      this._schematicsCardHits.push({ idx: si, kind: s.kind, x: cardX, y: cardY, w: CARD_W, h: thisCardH });
 
       // Icon box
       const ICON_SZ = 42;
@@ -2553,25 +2629,34 @@ export class PlayerMenu {
         _hovIconY = iconY;
       }
 
-      // Name
+      // Name — show tier prefix + tier color when a quality variant is selected
+      const selVarBp = this.getVariantSchematic(s.kind);
+      const displayName = selVarBp ? `${tierName(selVarBp.tier)} ${s.name}` : s.name;
+      const nameColor   = selVarBp ? tierColor(selVarBp.tier) : TEXT_HEAD;
       const textX = iconX + ICON_SZ + 12;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.font = 'bold 14px Georgia, serif';
-      ctx.fillStyle = TEXT_HEAD;
-      ctx.fillText(s.name, textX, cardY + 12);
+      ctx.fillStyle = nameColor;
+      ctx.fillText(displayName, textX, cardY + 12);
 
-      // Quality badge — all defaults are Common
-      const QUAL_LABEL = '\u25c6 Common';
+      // Quality badge — show best-tier blueprint owned, or "Common" if none
+      const bestBp = blueprints.length > 0
+        ? blueprints.reduce((a, b) => b.tier > a.tier ? b : a)
+        : null;
+      const QUAL_LABEL = bestBp
+        ? `\u25c6 ${tierName(bestBp.tier)}`
+        : '\u25c6 Common';
+      const QUAL_COLOR = bestBp ? tierColor(bestBp.tier) : '#c0bcd0';
       ctx.font = '10px Georgia, serif';
       const qualW = ctx.measureText(QUAL_LABEL).width + 8;
       const qualX = cardX + CARD_W - qualW - 8;
       const qualY = cardY + 8;
-      ctx.fillStyle = 'rgba(180,180,200,0.18)';
+      ctx.fillStyle = bestBp ? 'rgba(60,40,80,0.40)' : 'rgba(180,180,200,0.18)';
       ctx.beginPath();
       ctx.roundRect(qualX, qualY, qualW, 16, 3);
       ctx.fill();
-      ctx.fillStyle = '#c0bcd0';
+      ctx.fillStyle = QUAL_COLOR;
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       ctx.fillText(QUAL_LABEL, qualX + 4, qualY + 3);
@@ -2592,12 +2677,13 @@ export class PlayerMenu {
         ctx.fillText(slotLabel, badgeX + badgeW / 2, qualY + 8);
       }
 
-      // Resource costs inline
+      // Resource costs inline — scale by quality tier when a variant is selected
+      const costMult = selVarBp ? qualityCostMult(selVarBp.tier) : 1.0;
       const costs: Array<{ label: string; cost: number; have: number }> = [
-        { label: 'Wood',  cost: s.wood,  have: res.wood  },
-        { label: 'Fiber', cost: s.fiber, have: res.fiber },
-        { label: 'Metal', cost: s.metal, have: res.metal },
-        { label: 'Stone', cost: s.stone, have: res.stone },
+        { label: 'Wood',  cost: Math.ceil(s.wood  * costMult), have: res.wood  },
+        { label: 'Fiber', cost: Math.ceil(s.fiber * costMult), have: res.fiber },
+        { label: 'Metal', cost: Math.ceil(s.metal * costMult), have: res.metal },
+        { label: 'Stone', cost: Math.ceil(s.stone * costMult), have: res.stone },
       ].filter(c => c.cost > 0);
 
       ctx.font = '11px Georgia, serif';
@@ -2617,12 +2703,121 @@ export class PlayerMenu {
         ctx.fillText(chip, rx + 5, costY + 4);
         rx += chipW + 5;
       }
-      if (costs.length === 0) {
+      // Blueprint use chip — shown when a quality variant is selected
+      if (selVarBp) {
+        ctx.font = '11px Georgia, serif';
+        const bpCol   = tierColor(selVarBp.tier);
+        const bpChip  = `\u25c6 Blueprint \u00d7${selVarBp.crafts}`;
+        const bpChipW = ctx.measureText(bpChip).width + 10;
+        ctx.fillStyle = 'rgba(60,40,80,0.55)';
+        ctx.beginPath();
+        ctx.roundRect(rx, costY, bpChipW, 18, 3);
+        ctx.fill();
+        ctx.fillStyle = bpCol;
+        ctx.fillText(bpChip, rx + 5, costY + 4);
+      }
+      if (costs.length === 0 && !selVarBp) {
         ctx.fillStyle = TEXT_DIM;
         ctx.fillText('No resources required', rx, costY + 3);
       }
 
-      cardY += CARD_H + CARD_GAP;
+      // ── Variant selector (Standard + looted quality blueprints) ──────────
+      if (blueprints.length > 0) {
+        const divY = cardY + CARD_H;
+        ctx.strokeStyle = 'rgba(80,120,200,0.30)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(cardX + 8, divY + 2);
+        ctx.lineTo(cardX + CARD_W - 8, divY + 2);
+        ctx.stroke();
+
+        // Standard option row (always first)
+        const stdSelected = (this._variantSelection.get(s.kind) ?? null) === null;
+        const stdRowY = divY + 4;
+        this._variantHits.push({ kind: s.kind, bpIndex: null, x: cardX, y: stdRowY, w: CARD_W, h: BP_ROW_H });
+        if (stdSelected) {
+          ctx.fillStyle = 'rgba(100,180,100,0.12)';
+          ctx.beginPath();
+          ctx.roundRect(cardX + 2, stdRowY, CARD_W - 4, BP_ROW_H, 2);
+          ctx.fill();
+        }
+        ctx.font = 'bold 11px Georgia, serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = stdSelected ? '#88ee88' : TEXT_DIM;
+        ctx.fillText(stdSelected ? '✓' : '○', cardX + 12, stdRowY + BP_ROW_H / 2);
+        ctx.fillStyle = stdSelected ? '#cceecc' : TEXT_DIM;
+        ctx.fillText('Standard', cardX + 24, stdRowY + BP_ROW_H / 2);
+        ctx.font = '9px Georgia, serif';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.textAlign = 'right';
+        ctx.fillText('(resources)', cardX + CARD_W - 8, stdRowY + BP_ROW_H / 2);
+
+        // Blueprint variant rows
+        for (let bi = 0; bi < blueprints.length; bi++) {
+          const bp = blueprints[bi];
+          const rowY = stdRowY + BP_ROW_H + bi * BP_ROW_H;
+          const col    = tierColor(bp.tier);
+          const tname  = tierName(bp.tier);
+          const isSel  = this._variantSelection.get(s.kind) === bp.index;
+
+          this._variantHits.push({ kind: s.kind, bpIndex: bp.index, x: cardX, y: rowY, w: CARD_W, h: BP_ROW_H });
+
+          if (isSel) {
+            ctx.fillStyle = 'rgba(60,40,100,0.25)';
+            ctx.beginPath();
+            ctx.roundRect(cardX + 2, rowY, CARD_W - 4, BP_ROW_H, 2);
+            ctx.fill();
+          }
+
+          // Radio indicator
+          ctx.font = 'bold 11px Georgia, serif';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = isSel ? col : TEXT_DIM;
+          ctx.fillText(isSel ? '✓' : '○', cardX + 12, rowY + BP_ROW_H / 2);
+
+          // Tier dot
+          ctx.fillStyle = col;
+          ctx.beginPath();
+          ctx.arc(cardX + 26, rowY + BP_ROW_H / 2, 4, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Tier name
+          ctx.font = 'bold 11px Georgia, serif';
+          ctx.fillStyle = col;
+          ctx.fillText(tname, cardX + 34, rowY + BP_ROW_H / 2);
+
+          // Crafts count
+          const tierW = ctx.measureText(tname).width;
+          ctx.font = '10px Georgia, serif';
+          ctx.fillStyle = bp.crafts > 0 ? '#b0d0b0' : TEXT_DIM;
+          const craftsLabel = `\u00d7${bp.crafts}`;
+          ctx.fillText(craftsLabel, cardX + 34 + tierW + 6, rowY + BP_ROW_H / 2);
+
+          // Stat pills
+          let pillX = cardX + 34 + tierW + 6 + ctx.measureText(craftsLabel).width + 8;
+          const MAX_PILL_X = cardX + CARD_W - 8;
+          for (let si2 = 0; si2 < bp.stats.length && pillX < MAX_PILL_X - 28; si2++) {
+            const label = statMultLabel(bp.stats[si2]);
+            if (!label) continue;
+            const statInitial = (QUALITY_STAT_NAMES[si2] ?? '?')[0];
+            const pill = `${statInitial}:${label}`;
+            ctx.font = '9px Georgia, serif';
+            const pillW = ctx.measureText(pill).width + 6;
+            if (pillX + pillW > MAX_PILL_X) break;
+            ctx.fillStyle = 'rgba(50,80,50,0.55)';
+            ctx.beginPath();
+            ctx.roundRect(pillX, rowY + 3, pillW, BP_ROW_H - 6, 2);
+            ctx.fill();
+            ctx.fillStyle = '#88ee88';
+            ctx.fillText(pill, pillX + 3, rowY + BP_ROW_H / 2);
+            pillX += pillW + 3;
+          }
+        }
+      }
+
+      cardY += thisCardH + CARD_GAP;
     }
 
     ctx.restore();

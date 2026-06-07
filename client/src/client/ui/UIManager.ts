@@ -436,6 +436,8 @@ export class UIManager {
 
   /** Called whenever a menu is opened — used by ClientApplication to exit free-camera mode. */
   public onMenuOpen: (() => void) | null = null;
+  /** Fired when the Player (character/inventory) menu specifically opens. */
+  public onPlayerMenuOpen: (() => void) | null = null;
 
   /**
    * Open one of the UIManager-owned menus by ID, closing any currently open menu first.
@@ -448,7 +450,7 @@ export class UIManager {
     this.activeMenuId = id;
     switch (id) {
       case MENU_ID.COMPANY: this.companyMenu.open(); break;
-      case MENU_ID.PLAYER:  this.playerMenu.open();  break;
+      case MENU_ID.PLAYER:  this.playerMenu.open(); this.onPlayerMenuOpen?.(); break;
       case MENU_ID.SHIP:    this.shipMenu.open();     break;
       case MENU_ID.CREW:    /* opened externally via openCrewMenu() */ break;
       case MENU_ID.SALVAGE: /* opened externally with salvageMenu.open(wreckId, count) */ break;
@@ -2601,7 +2603,9 @@ export class UIManager {
 
   private initializeUIElements(): void {
     // Initialize HUD
-    this.elements.set(UIElementType.HUD, new HUDElement());
+    const _hudEl = new HUDElement();
+    _hudEl.getVariantTooltipInfo = (kind) => this.playerMenu.getVariantTooltipInfo(kind);
+    this.elements.set(UIElementType.HUD, _hudEl);
     this._loadHotbars();
     
     // Initialize Debug Overlay
@@ -2711,6 +2715,7 @@ export class UIManager {
           this.closeActiveMenu();
           this.activeMenuId = MENU_ID.PLAYER;
           this.playerMenu.openSkillsTab();
+          this.onPlayerMenuOpen?.();
         }
         event.preventDefault();
         event.stopPropagation();
@@ -3217,6 +3222,8 @@ class HUDElement implements UIElement {
   public selectedLandKind: string | null = null;
   /** 8 land schematic hotbar slots; string kind or null = empty. */
   public landHotbarSlots: (string | null)[] = UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind);
+  /** Wired by UIManager so build-hotbar tooltip can show the active quality variant. */
+  public getVariantTooltipInfo: (kind: string) => { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined = () => undefined;
 
   // ── Tooltip hover-delay tracking (500 ms) ─────────────────────────────
   private _ttHoverKey   = '';
@@ -3786,14 +3793,16 @@ class HUDElement implements UIElement {
       if (this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
           this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE &&
           this._ttHit(`build-ship-${i}`)) {
+        const vInfo = this.getVariantTooltipInfo(kind!);
+        const m = vInfo?.costMult ?? 1;
         const costs = ([
-          entry.cost.wood  > 0 ? `Wood:  ${entry.cost.wood}`  : null,
-          entry.cost.fiber > 0 ? `Fiber: ${entry.cost.fiber}` : null,
-          entry.cost.metal > 0 ? `Metal: ${entry.cost.metal}` : null,
-          entry.cost.stone > 0 ? `Stone: ${entry.cost.stone}` : null,
+          entry.cost.wood  > 0 ? `Wood:  ${Math.ceil(entry.cost.wood  * m)}` : null,
+          entry.cost.fiber > 0 ? `Fiber: ${Math.ceil(entry.cost.fiber * m)}` : null,
+          entry.cost.metal > 0 ? `Metal: ${Math.ceil(entry.cost.metal * m)}` : null,
+          entry.cost.stone > 0 ? `Stone: ${Math.ceil(entry.cost.stone * m)}` : null,
         ] as Array<string | null>).filter((l): l is string => l !== null);
         this._drawBuildSlotTooltip(ctx, canvas, sx, sy, SLOT_SIZE,
-          entry.label, entry.color, entry.borderColor, costs);
+          entry.label, entry.color, entry.borderColor, costs, vInfo);
       }
     }
   }
@@ -3896,10 +3905,12 @@ class HUDElement implements UIElement {
       if (this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
           this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE &&
           this._ttHit(`build-land-${i}`)) {
+        const vInfo = this.getVariantTooltipInfo(kind!);
+        const m = vInfo?.costMult ?? 1;
         const costs = e.cost
-          .map(c => `${c.item.charAt(0).toUpperCase() + c.item.slice(1)}: ${c.qty}`)
+          .map(c => `${c.item.charAt(0).toUpperCase() + c.item.slice(1)}: ${Math.ceil(c.qty * m)}`);
         this._drawBuildSlotTooltip(ctx, canvas, sx, sy, SLOT_SIZE,
-          e.label, e.color, e.borderColor, costs);
+          e.label, e.color, e.borderColor, costs, vInfo);
       }
     }
   }
@@ -4446,11 +4457,14 @@ class HUDElement implements UIElement {
     color:       string,
     borderColor: string,
     costLines:   string[],
+    variantInfo?: { tierPrefix: string; crafts: number; color: string; costMult: number },
   ): void {
     const PAD    = 10;
     const LINE   = 15;
     const W      = 190;
-    const totalH = PAD + 18 + (costLines.length > 0 ? 6 + costLines.length * LINE : 0) + PAD;
+    // When a variant is active, add a blueprint cost line
+    const extraLines = variantInfo ? 1 : 0;
+    const totalH = PAD + 18 + (costLines.length + extraLines > 0 ? 6 + (costLines.length + extraLines) * LINE : 0) + PAD;
 
     let tx = sx + slotSize / 2 - W / 2;
     let ty = sy - totalH - 6;
@@ -4461,7 +4475,7 @@ class HUDElement implements UIElement {
     ctx.shadowColor = 'rgba(0,0,0,0.6)';
     ctx.shadowBlur  = 8;
     ctx.fillStyle   = 'rgba(12,12,20,0.94)';
-    ctx.strokeStyle = borderColor;
+    ctx.strokeStyle = variantInfo ? variantInfo.color : borderColor;
     ctx.lineWidth   = 1.5;
     this.roundRect(ctx, tx, ty, W, totalH, 6);
     ctx.fill();
@@ -4469,27 +4483,32 @@ class HUDElement implements UIElement {
     ctx.shadowBlur = 0;
 
     // Left colour accent bar
-    ctx.fillStyle = color;
+    ctx.fillStyle = variantInfo ? variantInfo.color : color;
     this.roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
     ctx.fill();
 
     let cy = ty + PAD;
 
-    // Structure name
-    ctx.fillStyle    = '#ffffff';
+    // Structure name — prefixed with tier name and coloured when a variant is active
+    const displayLabel = variantInfo ? `${variantInfo.tierPrefix} ${label}` : label;
+    ctx.fillStyle    = variantInfo ? variantInfo.color : '#ffffff';
     ctx.font         = 'bold 14px Georgia, serif';
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
-    ctx.fillText(label, tx + PAD + 4, cy);
+    ctx.fillText(displayLabel, tx + PAD + 4, cy);
     cy += 18;
 
     // Resource costs
-    if (costLines.length > 0) {
+    const allCostLines = variantInfo
+      ? [...costLines, `\u25c6 Blueprint \u00d7${variantInfo.crafts} remaining`]
+      : costLines;
+    if (allCostLines.length > 0) {
       cy += 6;
-      ctx.fillStyle = '#aaaaaa';
-      ctx.font      = '11px Georgia, serif';
-      for (const line of costLines) {
-        ctx.fillText(line, tx + PAD + 4, cy);
+      ctx.font = '11px Georgia, serif';
+      for (let i = 0; i < allCostLines.length; i++) {
+        // Blueprint line gets tier color; resource lines are dimmed
+        ctx.fillStyle = (variantInfo && i === allCostLines.length - 1) ? variantInfo.color : '#aaaaaa';
+        ctx.fillText(allCostLines[i], tx + PAD + 4, cy);
         cy += LINE;
       }
     }

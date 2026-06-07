@@ -61,6 +61,13 @@ export function statMultLabel(q8: number): string | null {
   return (pct >= 0 ? '+' : '') + pct + '%';
 }
 
+/** Resource cost multiplier by tier (Crude=1×, Eternal=6×). */
+const TIER_COST_MULT = [1.0, 1.25, 1.5, 2.0, 3.0, 4.5, 6.0];
+export function qualityCostMult(tier: number): number {
+  const i = Math.max(0, Math.min(TIER_COST_MULT.length - 1, Math.floor(tier)));
+  return TIER_COST_MULT[i];
+}
+
 /** A schematic/blueprint entry as sent by the server in `schematic_list`. */
 export interface SchematicEntry {
   /** Server-side slot index (used as the craft index). */
