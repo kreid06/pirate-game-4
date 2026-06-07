@@ -2244,7 +2244,13 @@ void handle_projectile_collisions(struct Sim* sim) {
             if (ship->id == proj->owner_id || ship->id == proj->firing_ship_id) {
                 continue;
             }
-            
+
+            // Ghost ships are immune to projectiles fired by other ghost ships
+            if (ship->company_id == 99 && proj->firing_ship_id != INVALID_ENTITY_ID) {
+                struct Ship* shooter = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                if (shooter && shooter->company_id == 99) continue;
+            }
+
             // Cannonballs hit all ships including allies — no friendly-fire skip
 
             // Broad-phase bounding radius

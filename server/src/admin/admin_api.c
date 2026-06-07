@@ -1083,3 +1083,117 @@ int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t b
     resp->body_length = (size_t)len;
     return 0;
 }
+
+/* ── Island reposition endpoint ──────────────────────────────────────────── *
+ * POST /api/islands/reposition                                                *
+ * Body: [{id, x, y}, ...]                                                    *
+ * Updates the centre positions in data/islands/islands.json.                 */
+static char reposition_resp_buf[512];
+
+int admin_api_islands_reposition(struct HttpResponse *resp, const char *body, size_t body_len)
+{
+    if (!resp || !body || body_len == 0) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"empty body\"}";
+        resp->body_length = 22;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    struct json_object *arr = json_tokener_parse(body);
+    if (!arr || !json_object_is_type(arr, json_type_array)) {
+        if (arr) json_object_put(arr);
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"expected JSON array\"}";
+        resp->body_length = 30;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    /* Load the current islands.json */
+    const char *islands_path = "data/islands/islands.json";
+    struct json_object *islands_arr = NULL;
+    {
+        FILE *f = fopen(islands_path, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long fsz = ftell(f);
+            rewind(f);
+            if (fsz > 0 && fsz < 65536) {
+                char *buf = (char *)malloc((size_t)fsz + 1);
+                if (buf) {
+                    fread(buf, 1, (size_t)fsz, f);
+                    buf[fsz] = '\0';
+                    islands_arr = json_tokener_parse(buf);
+                    free(buf);
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (!islands_arr || !json_object_is_type(islands_arr, json_type_array)) {
+        if (islands_arr) json_object_put(islands_arr);
+        json_object_put(arr);
+        resp->status_code = 500;
+        resp->body = (char *)"{\"error\":\"cannot read islands.json\"}";
+        resp->body_length = 36;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    /* Apply the requested position changes */
+    int updates = 0;
+    int count = (int)json_object_array_length(arr);
+    for (int i = 0; i < count; i++) {
+        struct json_object *entry = json_object_array_get_idx(arr, i);
+        struct json_object *id_j = NULL, *x_j = NULL, *y_j = NULL;
+        json_object_object_get_ex(entry, "id", &id_j);
+        json_object_object_get_ex(entry, "x",  &x_j);
+        json_object_object_get_ex(entry, "y",  &y_j);
+        if (!id_j || !x_j || !y_j) continue;
+        int target_id = json_object_get_int(id_j);
+        double nx = json_object_get_double(x_j);
+        double ny = json_object_get_double(y_j);
+
+        int n = (int)json_object_array_length(islands_arr);
+        for (int k = 0; k < n; k++) {
+            struct json_object *isle = json_object_array_get_idx(islands_arr, k);
+            struct json_object *isle_id = NULL;
+            json_object_object_get_ex(isle, "id", &isle_id);
+            if (!isle_id || json_object_get_int(isle_id) != target_id) continue;
+
+            /* Update or create the "centre" object */
+            struct json_object *centre = NULL;
+            if (!json_object_object_get_ex(isle, "centre", &centre)) {
+                centre = json_object_new_object();
+                json_object_object_add(isle, "centre", centre);
+            }
+            json_object_object_add(centre, "x", json_object_new_double(nx));
+            json_object_object_add(centre, "y", json_object_new_double(ny));
+            updates++;
+            break;
+        }
+    }
+
+    /* Write back */
+    int rc = json_object_to_file_ext(islands_path, islands_arr, JSON_C_TO_STRING_PRETTY);
+    json_object_put(islands_arr);
+    json_object_put(arr);
+
+    if (rc != 0) {
+        resp->status_code = 500;
+        resp->body = (char *)"{\"error\":\"failed to write islands.json\"}";
+        resp->body_length = 40;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    int len = snprintf(reposition_resp_buf, sizeof(reposition_resp_buf),
+                       "{\"ok\":true,\"updated\":%d}", updates);
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = reposition_resp_buf;
+    resp->body_length = (size_t)len;
+    return 0;
+}
