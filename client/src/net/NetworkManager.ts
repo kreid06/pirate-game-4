@@ -814,7 +814,7 @@ export class NetworkManager {
   /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
   public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
-  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
+  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number, spawnerPlayerId?: number) => void) | null = null;
   /** Fired when a shipyard action is rejected (e.g. ship_limit, missing_materials). */
   public onShipyardActionFail: ((reason: string) => void) | null = null;
   /** Fired when the server sends land chest state (after E-key interact or after a transfer). */
@@ -3606,7 +3606,7 @@ export class NetworkManager {
       case 'shipyard_state': {
         const phase = message.phase === 'building' ? 'building' : 'empty' as const;
         const modules: string[] = Array.isArray(message.modules_placed) ? message.modules_placed : [];
-        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned, message.scaffolded_ship_id);
+        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned, message.scaffolded_ship_id, message.spawner_player_id);
         break;
       }
 

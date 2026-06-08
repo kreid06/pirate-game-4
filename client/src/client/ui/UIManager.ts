@@ -60,6 +60,8 @@ export interface UIRenderContext {
   debugMode?: boolean;
   /** True when the player has combat mode enabled (Z key). */
   combatMode?: boolean;
+  /** Shipyard structure ID if the player's current ship is scaffolded there, 0 otherwise. */
+  scaffoldedShipyardId?: number;
   /** True when Alt is held — used for detail overlays (e.g. ship IDs on map). */
   altHeld?: boolean;
 }
@@ -821,6 +823,7 @@ export class UIManager {
     }
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
     this.shipMenu.controlGroups = context.controlGroups ?? new Map();
+    this.shipMenu.scaffoldedAtShipyardId = context.scaffoldedShipyardId ?? 0;
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
@@ -1387,6 +1390,11 @@ export class UIManager {
     this.shipMenu.onGroupRename = cb;
   }
 
+  /** Set callback for the "Release Ship" button in the ship settings panel (shown when docked at a shipyard). */
+  setShipReleaseCallback(cb: (shipId: number, shipyardId: number) => void): void {
+    this.shipMenu.onReleaseShipRequest = cb;
+  }
+
   /** Set callback for deck demolish buttons in the ship status menu. */
   setShipDemolishDeckCallback(cb: (shipId: number, moduleId: number, deckLevel: number) => void): void {
     this.shipMenu.onDemolishDeck = cb;
@@ -1594,6 +1602,11 @@ export class UIManager {
     }
     // Land build hotbar slot click — selects (or deselects) the Build Schematic Hotbar slot
     if (this.inLandBuildMode) {
+      const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+
+      // Variant popup absorbs clicks first (even outside the popup rows, to dismiss)
+      if (hud?.handleVariantPopupClick(x, y)) return true;
+
       const N_SLOTS = this.landHotbarSlots.length;
       const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
       const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
@@ -1606,20 +1619,28 @@ export class UIManager {
           if (x >= sx && x <= sx + SLOT_SIZE) {
             const kind = this.landHotbarSlots[i] ?? null;
             if (kind !== null) {
-              // Toggle: re-clicking the active slot deselects it
-              const newKind = (this.selectedLandKind === kind) ? null : kind;
-              this.selectedLandKind = newKind;
-              this.onBuildSchematicSelect?.(newKind);
+              if (this.selectedLandKind === kind) {
+                // Re-clicking the active slot: open variant picker if blueprints exist,
+                // otherwise deselect
+                const variants = hud?.getVariantsForKind(kind) ?? [];
+                if (variants.length > 0) {
+                  const slotCx = sx + SLOT_SIZE / 2;
+                  hud?.openVariantPopup(kind, slotCx, startY);
+                } else {
+                  this.selectedLandKind = null;
+                  this.onBuildSchematicSelect?.(null);
+                }
+              } else {
+                // Select this slot
+                this.selectedLandKind = kind;
+                this.onBuildSchematicSelect?.(kind);
+                hud?.closeVariantPopup();
+              }
             } else {
               // Empty slot — open inline schematic picker above this slot
-              const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
-              const N_SL = this.landHotbarSlots.length;
-              const totalW2 = N_SL * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
-              const totalH2 = SLOT_SIZE + PADDING * 2 + LABEL_H;
-              const startX2 = Math.round((this.canvas.width - totalW2) / 2);
-              const startY2 = this.canvas.height - totalH2 - 8;
-              const slotCx = startX2 + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
-              this._schematicPicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY2 };
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._schematicPicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+              hud?.closeVariantPopup();
             }
             return true;
           }

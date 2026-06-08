@@ -4886,8 +4886,14 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                     }
 
-                                    if (rs_ship && player->parent_ship_id == rs_ship_id
-                                        && rs_name[0] != '\0') {
+                                    /* Allow rename if aboard the ship OR if the player
+                                     * shares the ship's company (covers freshly-launched
+                                     * ships where the player hasn't boarded yet). */
+                                    int rs_can_rename = rs_ship && rs_name[0] != '\0'
+                                        && (player->parent_ship_id == rs_ship_id
+                                            || (player->company_id != 0
+                                                && rs_ship->company_id == player->company_id));
+                                    if (rs_can_rename) {
                                         snprintf(rs_ship->ship_name, sizeof(rs_ship->ship_name), "%s", rs_name);
                                         /* Broadcast the new name to all clients */
                                         char rs_msg[128];
@@ -4903,8 +4909,8 @@ int websocket_server_update(struct Sim* sim) {
                                     } else {
                                         snprintf(response, sizeof(response),
                                             "{\"type\":\"rename_ship_fail\",\"reason\":\"%s\"}",
-                                            !rs_ship   ? "ship_not_found" :
-                                            rs_name[0] == '\0' ? "empty_name" : "not_aboard");
+                                            !rs_ship        ? "ship_not_found" :
+                                            rs_name[0]=='\0'? "empty_name"     : "not_permitted");
                                     }
                                 }
                             }
@@ -6278,7 +6284,6 @@ int websocket_server_update(struct Sim* sim) {
                                                 uint16_t deck_mid = MID(deck_seq, deck_off);
                                                 ShipModule new_deck = module_create(deck_mid, MODULE_TYPE_DECK, (Vec2Q16){0,0}, 0);
                                                 new_deck.deck_id = req_deck_lvl;
-                                                new_deck.health = new_deck.max_health / 10; // start at 10%
                                                 new_deck.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
                                                 sim_ship->modules[sim_ship->module_count++] = new_deck;
                                                 if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
@@ -6305,6 +6310,16 @@ int websocket_server_update(struct Sim* sim) {
                                                                      player->player_id, _bpi, _bp->crafts_remaining);
                                                         }
                                                     }
+                                                }
+                                                /* After any quality scaling, set health to 10% so the
+                                                 * deck heals up from placement. target_health = max_health
+                                                 * so the passive heal tick in simulation.c brings it to full. */
+                                                {
+                                                    ShipModule *_dm = &sim_ship->modules[sim_ship->module_count - 1];
+                                                    _dm->target_health = _dm->max_health;
+                                                    _dm->health        = _dm->max_health / 10;
+                                                    if (simple && simple->module_count > 0)
+                                                        simple->modules[simple->module_count - 1] = *_dm;
                                                 }
                                                 log_info("🔨 Player %u placed deck (level %u) on ship %u",
                                                          player->player_id, (unsigned)req_deck_lvl, sim_ship->id);

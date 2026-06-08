@@ -104,6 +104,12 @@ export class ShipMenu {
   /** Called when the player clicks Rename in settings — opens the rename dialog. */
   public onRenameRequest?: (shipId: number, currentName: string) => void;
 
+  /** Called when the player clicks Release Ship — caller shows confirm dialog. */
+  public onReleaseShipRequest?: (shipId: number, shipyardId: number) => void;
+
+  /** Set to the shipyard structure ID when this ship is currently scaffolded there, 0 otherwise. */
+  public scaffoldedAtShipyardId = 0;
+
   /** Called when the player clicks a weapon group name row — prompt to rename. */
   public onGroupRename?: (shipId: number, groupIndex: number, currentName: string) => void;
 
@@ -125,6 +131,7 @@ export class ShipMenu {
   private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
   private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+  private _releaseBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _currentShipName = '';
 
   /** Current vertical scroll offset (px) for the crew section. */
@@ -183,6 +190,14 @@ export class ShipMenu {
         if (x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h) {
           this.onClaimShip?.(this._currentShipId);
           this._settingsOpen = false;
+          return true;
+        }
+      }
+      if (this._releaseBtnArea) {
+        const r = this._releaseBtnArea;
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+          this._settingsOpen = false;
+          this.onReleaseShipRequest?.(this._currentShipId, this.scaffoldedAtShipyardId);
           return true;
         }
       }
@@ -366,7 +381,8 @@ export class ShipMenu {
     const OW = 360;
     const GRP_ROW_H = 26;
     const GRP_COUNT = 10;
-    const OH = 38 + 8 + 38 + 12 + 38 + 12 + 20 + GRP_COUNT * GRP_ROW_H + 14;
+    const showRelease = this.scaffoldedAtShipyardId !== 0;
+    const OH = 38 + 8 + 38 + 12 + 38 + 12 + (showRelease ? 40 : 0) + 20 + GRP_COUNT * GRP_ROW_H + 14;
     const ox = px + Math.round((PANEL_W - OW) / 2);
     const oy = py + Math.round((PANEL_H - OH) / 2);
 
@@ -405,6 +421,7 @@ export class ShipMenu {
     this._renameBtnArea  = null;
     this._unclaimBtnArea = null;
     this._claimBtnArea   = null;
+    this._releaseBtnArea = null;
     this._groupRenameAreas = [];
 
     let cy = oy + 46;
@@ -448,6 +465,20 @@ export class ShipMenu {
       ctx.fillText('You do not own this ship.', btnX + btnW / 2, cy + btnH / 2);
     }
     cy += btnH + 10;
+
+    // ── RELEASE SHIP button (only while docked at a shipyard) ───────────────
+    if (showRelease) {
+      div(cy); cy += 10;
+      ctx.fillStyle = 'rgba(255,140,0,0.15)';
+      ctx.fillRect(btnX, cy, btnW, btnH);
+      ctx.strokeStyle = '#ff8c00'; ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, cy, btnW, btnH);
+      ctx.font = 'bold 13px Georgia, serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ffb84d';
+      ctx.fillText('⚓  RELEASE SHIP', btnX + btnW / 2, cy + btnH / 2);
+      this._releaseBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
+      cy += btnH + 10;
+    }
 
     div(cy); cy += 10;
 

@@ -512,6 +512,9 @@ export class ClientApplication {
           this.setLoadingStep(3);
           this.hideLoadingOverlay();
           console.log('🎮 Entered game world (server ack)');
+          // Fetch schematics immediately so hotbar variant badges are visible
+          // without needing to open the player menu first.
+          this.networkManager.sendRequestSchematics();
         }
       };
       
@@ -2650,6 +2653,15 @@ export class ClientApplication {
         this.groupRenameDialog.open(groupIndex, grp?.name ?? currentName, grp?.name || `G${groupIndex + 1}`);
       });
 
+      // Wire Release Ship button in ship settings — shown when docked at a shipyard
+      this.uiManager.setShipReleaseCallback((_shipId, shipyardId) => {
+        this.confirmDialog.open(
+          '⚓  Release Ship?',
+          'The ship will be launched from the shipyard. You can still board it afterwards.',
+          () => { this.networkManager.sendShipyardAction(shipyardId, 'release_ship'); },
+        );
+      });
+
       // Wire deck demolish buttons in the ship menu — confirm before sending to server
       this.uiManager.setShipDemolishDeckCallback((shipId, moduleId, deckLevel) => {
         const deckName = deckLevel === 1 ? 'Upper' : 'Lower';
@@ -3327,7 +3339,7 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId) => {
+      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId, spawnerPlayerId) => {
         this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced, scaffoldedShipId);
         if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
           this.shipyardMenu.updateState(phase, modulesPlaced);
@@ -3335,11 +3347,17 @@ export class ClientApplication {
         // Don't auto-open the menu on broadcast — player opens it with E or
         // installs modules by clicking on the skeleton directly.
         if (shipSpawned) {
-          this.shipyardMenu.close();
-          this.uiManager.setActiveMenuId(null);
+          const myId = this.networkManager.getAssignedPlayerId();
+          const isMyShip = spawnerPlayerId != null && myId != null && spawnerPlayerId === myId;
+          if (isMyShip) {
+            this.shipyardMenu.close();
+            this.uiManager.setActiveMenuId(null);
+          }
           this.renderSystem.showAnnouncement('⚓ Ship released!', 'info', 3.5);
-          // Open custom rename dialog for the newly-launched ship
-          this.renameDialog.open(shipSpawned, '');
+          // Only open the rename dialog for the player who released the ship
+          if (isMyShip) {
+            this.renameDialog.open(shipSpawned, '');
+          }
         }
       };
 
@@ -4133,6 +4151,14 @@ export class ClientApplication {
       const playerShip = playerShipId
         ? (worldToRender.ships.find(s => s.id === playerShipId) ?? null)
         : null;
+      // Determine if the player's ship is currently scaffolded at a shipyard
+      const _scaffoldedShipyardId = (() => {
+        if (!playerShipId) return 0;
+        const structs = this.renderSystem.getPlacedStructures();
+        const sy = structs.find(s => s.type === 'shipyard' && s.construction?.scaffoldedShipId === playerShipId);
+        return sy?.id ?? 0;
+      })();
+
       this.uiManager.render(this.renderSystem.getContext(), {
         worldState: worldToRender,
         camera: this.camera,
@@ -4156,6 +4182,7 @@ export class ClientApplication {
         debugMode: this.uiManager.isDebugMode,
         combatMode: this.combatMode,
         altHeld: this.inputManager?.isAltHeld() ?? false,
+        scaffoldedShipyardId: _scaffoldedShipyardId,
       });
 
       // Crafting menu (rendered on top of all other UI)

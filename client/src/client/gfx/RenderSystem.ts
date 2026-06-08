@@ -1041,6 +1041,28 @@ export class RenderSystem {
     return out;
   }
 
+  /**
+   * Cache of hull bounding radii keyed by ship ID.
+   * Computed once per unique hull polygon; used for accurate camera/fog culling
+   * so ships are not culled while any part of their hull is still on screen.
+   * Includes a +80 padding for modules/planks that extend beyond the hull polygon.
+   */
+  private _hullRadiusCache = new Map<number, number>();
+
+  /** Returns the world-space bounding radius of a ship's hull (cached). */
+  private _hullRadius(ship: import('../../sim/Types.js').Ship): number {
+    const cached = this._hullRadiusCache.get(ship.id);
+    if (cached !== undefined) return cached;
+    let r2 = 0;
+    for (const v of ship.hull) {
+      const d = v.x * v.x + v.y * v.y;
+      if (d > r2) r2 = d;
+    }
+    const r = Math.sqrt(r2) + 80; // +80 for modules/planks beyond hull outline
+    this._hullRadiusCache.set(ship.id, r);
+    return r;
+  }
+
   /** Active flamethrower wave states keyed by cannonId. Client interpolates between server ticks. */
   private flameWaves: Map<number, {
     x: number; y: number; angle: number; halfCone: number;
@@ -8844,6 +8866,10 @@ export class RenderSystem {
         this.shipWakeLastEmit.delete(id);
       }
     }
+    // Evict hull-radius cache entries for ships that have left the world.
+    for (const id of this._hullRadiusCache.keys()) {
+      if (!currentShipIds.has(id)) this._hullRadiusCache.delete(id);
+    }
     // ───────────────────────────────────────────────────────────────────────
 
     // ── NPC kill detection ─────────────────────────────────────────────────
@@ -8911,8 +8937,8 @@ export class RenderSystem {
     // Filter ships by fog visibility. The carrier ship (if any) is always included
     // so the player never loses their own ship when at the fog boundary.
     const renderShips = this.buildWrappedRenderCopies(
-      worldState.ships.filter(s => s.id === _localCarrierId || this.fogVisibleAt(s.position.x, s.position.y, 200)),
-      camera, 320
+      worldState.ships.filter(s => s.id === _localCarrierId || this.fogVisibleAt(s.position.x, s.position.y, this._hullRadius(s))),
+      camera, 520
     );
     const renderPlayers = this.buildWrappedRenderCopies(
       // Dead players (health ≤ 0) are hidden from the world — they're either
@@ -9873,7 +9899,7 @@ export class RenderSystem {
   
   private drawShipHull(ship: Ship, camera: Camera): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
     
@@ -10080,7 +10106,7 @@ export class RenderSystem {
    * to the surrounding shipyard dock walls.
    */
   private drawScaffoldingVisuals(ship: Ship, scaffold: PlacedStructure, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const ctx = this.ctx;
     const cameraState = camera.getState();
@@ -10172,7 +10198,7 @@ export class RenderSystem {
   
   private drawShipPlanks(ship: Ship, camera: Camera): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
 
@@ -10409,7 +10435,7 @@ export class RenderSystem {
    * A brighter ghost is shown for the slot currently under the cursor.
    */
   private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     // Build set of present plank slot keys — only slots with health > 0 are "placed".
     // Slots with health = 0 are absent (not yet built) and should show ghost highlights.
@@ -10510,7 +10536,7 @@ export class RenderSystem {
    */
   private _fireDbgLastLog = 0;
   private drawBurningModules(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     // Suppress fire overlays for ships under construction in a shipyard
     if (this._scaffoldedShips.has(ship.id)) return;
     const cosR = Math.cos(ship.rotation);
@@ -10736,7 +10762,7 @@ export class RenderSystem {
    *   Blue wave lines — plank is leaking (health < 30% max)
    */
   private drawPlankStatusIcons(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     // Scaffolded ships under construction — suppress plank status icons
     if (this._scaffoldedShips.has(ship.id)) return;
@@ -11176,7 +11202,7 @@ export class RenderSystem {
    *   ghost cannons at gunport snap positions (used in gunport build mode preview).
    */
   private drawMissingCannonGhosts(ship: Ship, camera: Camera, gunportOnly = false): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const helm = ship.modules.find(m => m.kind === 'helm');
     if (!helm) return;
@@ -11426,7 +11452,7 @@ export class RenderSystem {
    * Draw ghost circles at missing mast positions (mast build mode).
    */
   private drawMissingMastGhosts(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const helm = ship.modules.find(m => m.kind === 'helm');
     if (!helm) return;
@@ -11488,7 +11514,7 @@ export class RenderSystem {
    * Draw a ghost helm at its position if the helm is destroyed (helm build mode).
    */
   private drawMissingHelmGhost(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const helmPresent = ship.modules.some(m => m.kind === 'helm');
     if (helmPresent) return; // Nothing to draw
@@ -11565,7 +11591,7 @@ export class RenderSystem {
    * amber/gold tones with a dashed border to distinguish the two layers.
    */
   private drawMissingDeckGhost(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     if (ship.shipType === SHIP_TYPE_GHOST) return; // ghost ships have no deck to place
 
     const decks    = ship.modules.filter(m => m.kind === 'deck');
@@ -11789,10 +11815,17 @@ export class RenderSystem {
   private drawLowerDeckFloor(ship: Ship, camera: Camera): void {
     const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
     if (!hasUpperDeck) return;
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const isPlayerBelow = this._lowerDeckShipId === ship.id;
-    const hasLowerDeck  = ship.modules.some(m => m.kind === 'deck' && m.deckId === 0);
+    const lowerDeckMod  = ship.modules.find(m => m.kind === 'deck' && m.deckId === 0);
+    const hasLowerDeck  = lowerDeckMod !== undefined;
+    const lowerDeckData = lowerDeckMod?.moduleData as any;
+    const lowerDeckHealthRatio = (lowerDeckData && typeof lowerDeckData.health === 'number'
+        && typeof lowerDeckData.maxHealth === 'number' && lowerDeckData.maxHealth > 0)
+        ? Math.max(0, lowerDeckData.health / lowerDeckData.maxHealth)
+        : 1;
+    const lowerDeckFloorColor = this.darkenByDamage('#5c3d1e', lowerDeckHealthRatio);
 
     this.ctx.save();
     const screenPos   = camera.worldToScreen(ship.position);
@@ -11819,7 +11852,7 @@ export class RenderSystem {
       this.ctx.clip();
 
       if (hasLowerDeck) {
-        this.ctx.fillStyle = '#5c3d1e';
+        this.ctx.fillStyle = lowerDeckFloorColor;
         this.ctx.fill();
 
         let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
@@ -11864,7 +11897,7 @@ export class RenderSystem {
           // Solid sealed hatch — looks like regular deck planking
           this.drawHatchCoverAt(sp, lw);
         } else if (hasLowerDeck) {
-          this.ctx.fillStyle = '#5c3d1e';
+          this.ctx.fillStyle = lowerDeckFloorColor;
           this.ctx.fillRect(rx, ry, 50, 50);
           this.ctx.strokeStyle = '#3d2610';
           this.ctx.lineWidth = lw;
@@ -11900,7 +11933,7 @@ export class RenderSystem {
    * player is not below deck — even through gaps between individual plank boards.
    */
   private drawUpperDeckCover(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     if (ship.hull.length < 3) return;
 
     const { floodTint, phase1Alpha } = this.computeSinkState(ship);
@@ -11981,7 +12014,7 @@ export class RenderSystem {
    * The upper-deck cover at layer 2 hides them from any other viewpoint (option B).
    */
   private drawGunportOverlays(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
@@ -12146,7 +12179,7 @@ export class RenderSystem {
    * When in hatch build mode, shows a hatch cover preview instead.
    */
   private drawRampSnapGhosts(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     this.ctx.save();
     const screenPos   = camera.worldToScreen(ship.position);
@@ -12278,7 +12311,7 @@ export class RenderSystem {
   }
 
   private drawGunportSnapGhosts(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     this.ctx.save();
     const screenPos   = camera.worldToScreen(ship.position);
@@ -12339,7 +12372,7 @@ export class RenderSystem {
 
   private drawShipCannons(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
 
@@ -12500,7 +12533,7 @@ export class RenderSystem {
    * Visual: circular pivot base + short rotating barrel.
    */
   private drawShipSwivelGuns(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const { phase2Alpha } = this.computeSinkState(ship);
     if (phase2Alpha <= 0) return;
@@ -12567,7 +12600,7 @@ export class RenderSystem {
    */
   private drawSwivelAimGuide(ship: Ship, worldState: WorldState, camera: Camera): void {
     if (!this.playerIsAiming) return;
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const localPlayer = this._cachedLocalPlayer;
     if (!localPlayer || !localPlayer.isMounted || localPlayer.carrierId !== ship.id) return;
@@ -14407,7 +14440,7 @@ export class RenderSystem {
 
   private drawCannonGroupOverlay(ship: Ship, camera: Camera): void {
     if (!this.controlGroups) return;
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const GROUP_COLORS = [
       '#e74c3c', '#3498db', '#2ecc71', '#f1c40f', '#9b59b6',
@@ -14515,7 +14548,7 @@ export class RenderSystem {
    * on top of the group-colour overlay (layer 5).
    */
   private drawCannonReloadIndicators(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const screenPos    = camera.worldToScreen(ship.position);
     const cameraState  = camera.getState();
@@ -14634,7 +14667,7 @@ export class RenderSystem {
   }
 
   private drawCannonAimGuides(ship: Ship, worldState: WorldState, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     if (!this.playerIsAiming) return;
 
     // Use frame-cached local player (set once in renderWorld).
@@ -15107,7 +15140,7 @@ export class RenderSystem {
    * Chests are classic wooden box shapes (40×28 world units) with a golden latch.
    */
   private drawShipChests(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const chests = ship.modules.filter(m => m.kind === 'chest' && (
       deckFilter === undefined ? true :
@@ -15144,7 +15177,7 @@ export class RenderSystem {
 
   /** Draw all bed modules on a ship. */
   private drawShipBeds(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     const beds = ship.modules.filter(m => m.kind === 'bed' && (
       deckFilter === undefined ? true :
       deckFilter === 0 ? m.deckId === 0 :
@@ -15385,7 +15418,7 @@ export class RenderSystem {
 
   private drawShipLadders(ship: Ship, camera: Camera): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
     
@@ -15465,7 +15498,7 @@ export class RenderSystem {
    * fade in and out asynchronously.
    */
   private drawGhostDeckEffects(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
@@ -15557,7 +15590,7 @@ export class RenderSystem {
    * Draw wispy fog/mist aura around the ghost ship hull edges + stern whisps.
    */
   private drawGhostFogAura(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
@@ -15637,7 +15670,7 @@ export class RenderSystem {
 
   private drawShipRudder(ship: Ship, camera: Camera): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
     
@@ -15709,7 +15742,7 @@ export class RenderSystem {
    * 2 cleats: one spanning x0→x1, one spanning x2→x3
    */
   private drawShipSailRopes(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const { phase3Alpha } = this.computeSinkState(ship);
     if (phase3Alpha <= 0) return;
@@ -15922,7 +15955,7 @@ export class RenderSystem {
 
   private drawShipSailFibers(ship: Ship, camera: Camera): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
 
@@ -16255,7 +16288,7 @@ export class RenderSystem {
   }
 
   private drawShipAmmoLabel(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const screenPos = camera.worldToScreen(ship.position);
     const zoom = camera.getState().zoom;
@@ -16286,7 +16319,7 @@ export class RenderSystem {
   }
 
   private drawShipNameLabel(ship: Ship, camera: Camera): void {
-    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const isGhostShipLabel = ship.shipType === SHIP_TYPE_GHOST;
     const ghostLvl = isGhostShipLabel ? (ship.npcLevel ?? 1) : 0;
@@ -16347,7 +16380,7 @@ export class RenderSystem {
   private drawShipClaimFlag(ship: Ship, camera: Camera): void {
     const cf = ship.claimFlag;
     if (!cf) return;
-    if (!camera.isWorldPositionVisible(ship.position, 300)) return;
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const zoom = camera.getState().zoom;
     const cos = Math.cos(ship.rotation);
@@ -16442,7 +16475,7 @@ export class RenderSystem {
 
   private drawShipSailMasts(ship: Ship, camera: Camera): void {
     // Check if ship is visible
-    if (!camera.isWorldPositionVisible(ship.position, 200)) {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
     }
 

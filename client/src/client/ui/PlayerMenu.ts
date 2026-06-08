@@ -974,6 +974,11 @@ export class PlayerMenu {
     this._craftBtnHits = [];
     this._craftTabHits = [];
     this._schematicsSubTabHits = [];
+    this._schematicsHotbarHits = [];
+    this._schematicsCardHits   = [];
+    this._variantHits          = [];
+    this._schematicsCollapseHits = [];
+    this._collapseAllHit       = null;
 
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
@@ -2456,18 +2461,18 @@ export class PlayerMenu {
     color: string;
     wood: number; fiber: number; metal: number; stone: number;
   }[] = [
-    // LAND — symbols & colours match LAND_BUILD_PANEL_ENTRIES in UIManager
-    { subTab: 'LAND', kind: 'wooden_floor',    name: 'Wooden Floor', symbol: '\u229f',       color: '#8b6914', wood: 10, fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'wall',            name: 'Wall',         symbol: '\u258b',       color: '#7a6030', wood: 10, fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'door_frame',      name: 'Door Frame',   symbol: '\u2293',       color: '#6a5028', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'door',            name: 'Door',         symbol: '\uD83D\uDEAA', color: '#7a5838', wood: 6,  fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'wood_ceiling',    name: 'Wood Ceiling', symbol: '\u229e',       color: '#7a5c2a', wood: 8,  fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'workbench',       name: 'Workbench',    symbol: '\u2692',       color: '#6a4a20', wood: 15, fiber: 0, metal: 0,  stone: 0 },
-    { subTab: 'LAND', kind: 'shipyard',        name: 'Shipyard',     symbol: '\u26F5',       color: '#1e6080', wood: 20, fiber: 0, metal: 5,  stone: 0 },
-    { subTab: 'LAND', kind: 'cannon',          name: 'Cannon',       symbol: '\u26AB',       color: '#444444', wood: 8,  fiber: 0, metal: 20, stone: 0 },
-    { subTab: 'LAND', kind: 'flag_fort',       name: 'Flag Fort',    symbol: '\u2302',       color: '#5a5848', wood: 20, fiber: 0, metal: 10, stone: 10 },
-    { subTab: 'LAND', kind: 'company_fortress',name: 'Fortress',     symbol: '\uD83C\uDFF0', color: '#4a3060', wood: 40, fiber: 0, metal: 20, stone: 20 },
-    { subTab: 'LAND', kind: 'claim_flag',      name: 'Claim Flag',   symbol: '\uD83C\uDFF3', color: '#c0a020', wood: 5,  fiber: 5, metal: 0,  stone: 0 },
+    // LAND — costs must match LAND_BUILD_PANEL_ENTRIES in UIManager.ts and SCHEMATIC_COST in structures.c
+    { subTab: 'LAND', kind: 'wooden_floor',    name: 'Wooden Floor', symbol: '\u229f',       color: '#8b6914', wood:  40, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'wall',            name: 'Wall',         symbol: '\u258b',       color: '#7a6030', wood:  20, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'door_frame',      name: 'Door Frame',   symbol: '\u2293',       color: '#6a5028', wood:  20, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'door',            name: 'Door',         symbol: '\uD83D\uDEAA', color: '#7a5838', wood:   8, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'wood_ceiling',    name: 'Wood Ceiling', symbol: '\u229e',       color: '#7a5c2a', wood:  25, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'workbench',       name: 'Workbench',    symbol: '\u2692',       color: '#6a4a20', wood:  12, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'shipyard',        name: 'Shipyard',     symbol: '\u26F5',       color: '#1e6080', wood: 250, fiber: 0, metal:  0, stone: 100 },
+    { subTab: 'LAND', kind: 'cannon',          name: 'Cannon',       symbol: '\u26AB',       color: '#444444', wood:  15, fiber: 0, metal: 25, stone:   0 },
+    { subTab: 'LAND', kind: 'flag_fort',       name: 'Flag Fort',    symbol: '\u2302',       color: '#5a5848', wood: 300, fiber: 0, metal:  0, stone: 200 },
+    { subTab: 'LAND', kind: 'company_fortress',name: 'Fortress',     symbol: '\uD83C\uDFF0', color: '#4a3060', wood: 300, fiber: 0, metal:  0, stone: 200 },
+    { subTab: 'LAND', kind: 'claim_flag',      name: 'Claim Flag',   symbol: '\uD83C\uDFF3', color: '#c0a020', wood:   5, fiber: 5, metal:  0, stone:   0 },
     // SHIP — symbols & colours match BUILD_PANEL_ENTRIES in UIManager
     { subTab: 'SHIP', kind: 'plank',       name: 'Plank',       symbol: 'P',      color: '#b8832b', wood: 10, fiber: 0,  metal: 0, stone: 0 },
     { subTab: 'SHIP', kind: 'deck',        name: 'Deck',        symbol: '\u229F', color: '#8b5e3c', wood: 15, fiber: 0,  metal: 0, stone: 0 },
