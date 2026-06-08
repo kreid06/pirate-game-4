@@ -5069,16 +5069,18 @@ export class ClientApplication {
       const sl = this.renderSystem.getHoveredPlankSlot();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendPlacePlank(sl.ship.id, sl.sectionName, sl.segmentIndex, this._buildResourceSource);
-      console.log(`🏗️ [SHIP BUILD] Placed plank on ship ${sl.ship.id} — consumed resources (${this._buildResourceSource})`);
+      const plankBp = this.uiManager.playerMenu.getVariantForKind('plank') ?? undefined;
+      this.networkManager.sendPlacePlank(sl.ship.id, sl.sectionName, sl.segmentIndex, this._buildResourceSource, plankBp);
+      console.log(`🏗️ [SHIP BUILD] Placed plank on ship ${sl.ship.id} — consumed resources (${this._buildResourceSource})${plankBp !== undefined ? ` bp_index=${plankBp}` : ''}`);
       return;
     }
     if (kind === 'deck') {
       const sl = this.renderSystem.getHoveredDeckSlot();
       if (!sl) return;
       if (!this._consumeShipBuildResources(kind)) return;
-      this.networkManager.sendPlaceDeck(sl.deckLevel, this._buildResourceSource);
-      console.log(`🏗️ [SHIP BUILD] Placed deck (level ${sl.deckLevel}) — consumed resources (${this._buildResourceSource})`);
+      const deckBp = this.uiManager.playerMenu.getVariantForKind('deck') ?? undefined;
+      this.networkManager.sendPlaceDeck(sl.deckLevel, this._buildResourceSource, deckBp);
+      console.log(`🏗️ [SHIP BUILD] Placed deck (level ${sl.deckLevel}) — consumed resources (${this._buildResourceSource})${deckBp !== undefined ? ` bp_index=${deckBp}` : ''}`);
       return;
     }
     if (kind === 'helm') {
@@ -5930,10 +5932,8 @@ export class ClientApplication {
         }
 
         case '/': {
-          // Open command console if nothing else is open
-          if (!this.uiManager.isAnyMenuOpen()
-            && !this.buildMenuOpen
-            && !this.explicitBuildMode) {
+          // Open command console — allowed from any state including build mode
+          if (!this.uiManager.isAnyMenuOpen()) {
             this.commandConsole.open();
             e.preventDefault();
           }

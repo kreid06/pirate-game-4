@@ -402,6 +402,7 @@ interface PlacePlankMessage extends NetworkMessage {
   sectionName: string;
   segmentIndex: number;
   resource_source?: 'pack' | 'ship' | 'auto';
+  bp_index?: number;
 }
 
 interface PlaceCannonMessage extends NetworkMessage {
@@ -447,6 +448,7 @@ interface PlaceDeckMessage extends NetworkMessage {
   timestamp: number;
   deck_level?: number;
   resource_source?: 'pack' | 'ship' | 'auto';
+  bp_index?: number;
 }
 
 interface PlaceRampMessage extends NetworkMessage {
@@ -1714,9 +1716,11 @@ export class NetworkManager {
    * Request the server to place a plank in a missing hull slot.
    * Server picks the first destroyed plank (100-109) and restores it, consuming 1 ITEM_PLANK.
    */
-  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex, resource_source: resourceSource });
+    const msg: PlacePlankMessage = { type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex, resource_source: resourceSource };
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
   }
 
   /**
@@ -2005,9 +2009,11 @@ export class NetworkManager {
    * Request the server to place a missing deck module on the player's ship.
    * Consumes 1 ITEM_DECK from the player's inventory.
    */
-  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now(), deck_level: deckLevel, resource_source: resourceSource });
+    const msg: PlaceDeckMessage = { type: MessageType.PLACE_DECK, timestamp: Date.now(), deck_level: deckLevel, resource_source: resourceSource };
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
   }
 
   /**

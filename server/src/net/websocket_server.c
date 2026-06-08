@@ -6273,6 +6273,26 @@ int websocket_server_update(struct Sim* sim) {
                                                 if (_ship_only)       res_consume_ship(_res_ship, MODULE_TYPE_DECK);
                                                 else if (_pack_only)  res_consume(player, MODULE_TYPE_DECK);
                                                 else                  res_consume_combined(player, _res_ship, MODULE_TYPE_DECK);
+                                                /* Apply quality blueprint if the player chose a variant */
+                                                {
+                                                    const char *_pbp = strstr(payload, "\"bp_index\":");
+                                                    int _bpi = -1;
+                                                    if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+                                                    if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+                                                        PlayerBlueprint *_bp = &player->schematics[_bpi];
+                                                        if (_bp->item == (uint8_t)ITEM_DECK && _bp->crafts_remaining > 0) {
+                                                            module_apply_quality(&sim_ship->modules[sim_ship->module_count - 1], &_bp->quality);
+                                                            if (simple && simple->module_count > 0)
+                                                                simple->modules[simple->module_count - 1] = sim_ship->modules[sim_ship->module_count - 1];
+                                                            if (--_bp->crafts_remaining == 0) {
+                                                                player->schematics[_bpi] = player->schematics[--player->schematic_count];
+                                                                memset(&player->schematics[player->schematic_count], 0, sizeof(PlayerBlueprint));
+                                                            }
+                                                            log_info("🔨 Player %u applied deck blueprint (bp_index=%d, crafts_left=%u)",
+                                                                     player->player_id, _bpi, _bp->crafts_remaining);
+                                                        }
+                                                    }
+                                                }
                                                 log_info("🔨 Player %u placed deck (level %u) on ship %u",
                                                          player->player_id, (unsigned)req_deck_lvl, sim_ship->id);
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_placed\"}");
@@ -7038,6 +7058,26 @@ int websocket_server_update(struct Sim* sim) {
                                                 if (_ship_only)       res_consume_ship(_res_ship, MODULE_TYPE_PLANK);
                                                 else if (_pack_only)  res_consume(player, MODULE_TYPE_PLANK);
                                                 else                  res_consume_combined(player, _res_ship, MODULE_TYPE_PLANK);
+                                                /* Apply quality blueprint if the player chose a variant */
+                                                {
+                                                    const char *_pbp = strstr(payload, "\"bp_index\":");
+                                                    int _bpi = -1;
+                                                    if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+                                                    if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+                                                        PlayerBlueprint *_bp = &player->schematics[_bpi];
+                                                        if (_bp->item == (uint8_t)ITEM_PLANK && _bp->crafts_remaining > 0) {
+                                                            /* Apply quality to both sim and simple ship layers */
+                                                            module_apply_quality(&sim_ship->modules[sim_ship->module_count - 1], &_bp->quality);
+                                                            simple_ship->modules[simple_ship->module_count - 1] = sim_ship->modules[sim_ship->module_count - 1];
+                                                            if (--_bp->crafts_remaining == 0) {
+                                                                player->schematics[_bpi] = player->schematics[--player->schematic_count];
+                                                                memset(&player->schematics[player->schematic_count], 0, sizeof(PlayerBlueprint));
+                                                            }
+                                                            log_info("🔨 Player %u applied plank blueprint (bp_index=%d, crafts_left=%u)",
+                                                                     player->player_id, _bpi, _bp->crafts_remaining);
+                                                        }
+                                                    }
+                                                }
                                                 log_info("🔨 Player %u placed plank %u (seq=%u slot=%d) on ship %u",
                                                          player->player_id, plank_id, ship_seq, missing_idx, sim_ship->id);
                                                 snprintf(response, sizeof(response),

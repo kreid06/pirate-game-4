@@ -886,8 +886,10 @@ int admin_api_islands(struct HttpResponse* resp) {
         if (ii > 0)
             ISL_APPEND(",");
 
-        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\"",
-            isl->id, isl->x, isl->y, isl->preset);
+        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\",\"rotation_deg\":%.1f",
+            isl->id, isl->x, isl->y, isl->preset, isl->rotation_deg);
+        if (isl->template_name[0] != '\0')
+            ISL_APPEND(",\"template\":\"%s\"", isl->template_name);
 
         if (isl->vertex_count > 0) {
             /* Polygon island — emit shape vertices as local offsets from centre */
@@ -1144,19 +1146,18 @@ int admin_api_islands_reposition(struct HttpResponse *resp, const char *body, si
         return -1;
     }
 
-    /* Apply the requested position changes */
+    /* Apply the requested position/rotation changes */
     int updates = 0;
     int count = (int)json_object_array_length(arr);
     for (int i = 0; i < count; i++) {
         struct json_object *entry = json_object_array_get_idx(arr, i);
-        struct json_object *id_j = NULL, *x_j = NULL, *y_j = NULL;
-        json_object_object_get_ex(entry, "id", &id_j);
-        json_object_object_get_ex(entry, "x",  &x_j);
-        json_object_object_get_ex(entry, "y",  &y_j);
-        if (!id_j || !x_j || !y_j) continue;
+        struct json_object *id_j = NULL, *x_j = NULL, *y_j = NULL, *rot_j = NULL;
+        json_object_object_get_ex(entry, "id",           &id_j);
+        json_object_object_get_ex(entry, "x",            &x_j);
+        json_object_object_get_ex(entry, "y",            &y_j);
+        json_object_object_get_ex(entry, "rotation_deg", &rot_j);
+        if (!id_j) continue;
         int target_id = json_object_get_int(id_j);
-        double nx = json_object_get_double(x_j);
-        double ny = json_object_get_double(y_j);
 
         int n = (int)json_object_array_length(islands_arr);
         for (int k = 0; k < n; k++) {
@@ -1165,14 +1166,25 @@ int admin_api_islands_reposition(struct HttpResponse *resp, const char *body, si
             json_object_object_get_ex(isle, "id", &isle_id);
             if (!isle_id || json_object_get_int(isle_id) != target_id) continue;
 
-            /* Update or create the "centre" object */
-            struct json_object *centre = NULL;
-            if (!json_object_object_get_ex(isle, "centre", &centre)) {
-                centre = json_object_new_object();
-                json_object_object_add(isle, "centre", centre);
+            /* Update centre position (x, y) if provided */
+            if (x_j && y_j) {
+                double nx = json_object_get_double(x_j);
+                double ny = json_object_get_double(y_j);
+                struct json_object *centre = NULL;
+                if (!json_object_object_get_ex(isle, "centre", &centre)) {
+                    centre = json_object_new_object();
+                    json_object_object_add(isle, "centre", centre);
+                }
+                json_object_object_add(centre, "x", json_object_new_double(nx));
+                json_object_object_add(centre, "y", json_object_new_double(ny));
             }
-            json_object_object_add(centre, "x", json_object_new_double(nx));
-            json_object_object_add(centre, "y", json_object_new_double(ny));
+
+            /* Update rotation_deg if provided */
+            if (rot_j) {
+                double new_rot = fmod(json_object_get_double(rot_j) + 360.0, 360.0);
+                json_object_object_add(isle, "rotation_deg", json_object_new_double(new_rot));
+            }
+
             updates++;
             break;
         }

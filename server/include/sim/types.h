@@ -19,7 +19,7 @@
 #define MODULES_REQUIRED   (MODULE_HULL_LEFT | MODULE_HULL_RIGHT | MODULE_DECK)
 
 // Maximum entity counts
-#define MAX_SHIPS 150
+#define MAX_SHIPS 200
 #define MAX_PLAYERS 100
 #define MAX_PROJECTILES 500
 

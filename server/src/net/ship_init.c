@@ -690,7 +690,7 @@ uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
 
 /* ── Ghost ship auto-spawner / AI culling ──────────────────────────────────── */
 /* Max simultaneous ghost ships in the world */
-#define GHOST_MAX_POPULATION       100
+#define GHOST_MAX_POPULATION       150
 /* Minimum distance from any island edge (client px) for a valid spawn point */
 #define GHOST_MIN_ISLAND_DIST      2500.0f
 /* AI skipped if no player is within this distance. */

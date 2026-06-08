@@ -11,6 +11,8 @@ interface IslandApiData {
   cx: number;
   cy: number;
   preset: string;
+  template?: string;
+  rotation_deg?: number;
   beachRadius?: number;
   grassRadius?: number;
   outerVerts?: { x: number; y: number }[];
@@ -20,6 +22,9 @@ interface IslandApiData {
 interface IslandState extends IslandApiData {
   editX: number;
   editY: number;
+  editRotDeg: number;          // current editor rotation
+  templateVerts?: { x: number; y: number }[]; // un-rotated outer verts
+  templateShallow?: { x: number; y: number }[]; // un-rotated shallow verts
   dirty: boolean;
 }
 
@@ -57,9 +62,10 @@ let scale   = 1;
 // ── Drag / rotate state ───────────────────────────────────────────────────────
 
 let isPanning        = false;
-let isDraggingIsland = false;
-let isDraggingSpawn  = false;
-let isRotatingSpawn  = false;
+let isDraggingIsland  = false;
+let isRotatingIsland  = false;
+let isDraggingSpawn   = false;
+let isRotatingSpawn   = false;
 
 let dragIslandId: number | null = null;
 let dragSpawnId:  number | null = null;
@@ -91,6 +97,7 @@ const selIslandId   = document.getElementById('sel-island-id')!;
 const selIslandX    = document.getElementById('sel-island-x')!;
 const selIslandY    = document.getElementById('sel-island-y')!;
 const selIslandTmpl = document.getElementById('sel-island-tmpl')!;
+const selIslandRot  = document.getElementById('sel-island-rot') as HTMLInputElement;
 const spawnList     = document.getElementById('spawn-list')!;
 const spawnDetail   = document.getElementById('spawn-detail') as HTMLElement;
 const selSpawnId    = document.getElementById('sel-spawn-id')!;
@@ -128,6 +135,38 @@ function setStatus(msg: string) { statusBar.textContent = msg; }
 
 function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 
+// ── Rotation math ────────────────────────────────────────────────────────────
+
+function rotateVerts(verts: { x: number; y: number }[], deg: number): { x: number; y: number }[] {
+  const rad = deg * (Math.PI / 180);
+  const c = Math.cos(rad), s = Math.sin(rad);
+  return verts.map(v => ({ x: v.x * c - v.y * s, y: v.x * s + v.y * c }));
+}
+
+/** Given already-rotated vertices and the rotation that was applied, recover template verts. */
+function unrotateVerts(verts: { x: number; y: number }[], deg: number): { x: number; y: number }[] {
+  return rotateVerts(verts, -deg);
+}
+
+/** Build IslandState template vertices from the API response. */
+function buildIslandState(d: IslandApiData, old?: IslandState): IslandState {
+  const loadedRot = d.rotation_deg ?? 0;
+
+  // Template verts = un-rotate the API (already-rotated) verts back to 0°
+  const templateVerts   = d.outerVerts   ? unrotateVerts(d.outerVerts,   loadedRot) : undefined;
+  const templateShallow = d.shallowVerts ? unrotateVerts(d.shallowVerts, loadedRot) : undefined;
+
+  return {
+    ...d,
+    editX:          old?.dirty ? old.editX    : d.cx,
+    editY:          old?.dirty ? old.editY    : d.cy,
+    editRotDeg:     old?.dirty ? old.editRotDeg : loadedRot,
+    templateVerts,
+    templateShallow,
+    dirty: old?.dirty ?? false,
+  };
+}
+
 // ── Colours ───────────────────────────────────────────────────────────────────
 
 const ISLAND_COLORS = [
@@ -151,10 +190,7 @@ async function fetchIslands(): Promise<void> {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json() as { islands: IslandApiData[] };
     const prev = new Map(islands.map(i => [i.id, i]));
-    islands = data.islands.map(d => {
-      const old = prev.get(d.id);
-      return { ...d, editX: old?.dirty ? old.editX : d.cx, editY: old?.dirty ? old.editY : d.cy, dirty: old?.dirty ?? false };
-    });
+    islands = data.islands.map(d => buildIslandState(d, prev.get(d.id)));
     renderIslandList();
     setStatus(`Loaded ${islands.length} island(s)`);
   } catch (e) { setStatus(`Island fetch failed: ${e}`); }
@@ -200,7 +236,7 @@ async function refreshAll(): Promise<void> {
 
 async function saveIslandPositions(): Promise<void> {
   const payload = islands.filter(i => i.dirty)
-    .map(i => ({ id: i.id, x: Math.round(i.editX), y: Math.round(i.editY) }));
+    .map(i => ({ id: i.id, x: Math.round(i.editX), y: Math.round(i.editY), rotation_deg: Math.round(i.editRotDeg) }));
   if (!payload.length) { showToast('No island changes', ''); return; }
   try {
     const r = await fetch(`${serverUrl()}/api/islands/reposition`, {
@@ -314,13 +350,31 @@ function spawnHandlePos(sp: SpawnPoint): [number, number] {
   return [cx + Math.cos(rad) * handleR, cy + Math.sin(rad) * handleR];
 }
 
+/** Canvas-space position of the island rotation handle (a dot above the centre). */
+function islandHandlePos(isl: IslandState): [number, number] {
+  const [cx, cy] = worldToCanvas(isl.editX, isl.editY);
+  // Handle sits on a ring at max(island_radius, 40 canvas px), at the current rotation angle
+  let worldR = isl.templateVerts ? estimatePolyRadius(isl.templateVerts) : (isl.grassRadius ?? isl.beachRadius ?? 2500);
+  const screenR = Math.max(40, worldR * scale * 1.1);
+  const rad = isl.editRotDeg * (Math.PI / 180);
+  return [cx + Math.cos(rad) * screenR, cy + Math.sin(rad) * screenR];
+}
+
+function hitTestIslandHandle(cx: number, cy: number): IslandState | null {
+  if (selectedIslandId === null) return null;
+  const isl = islands.find(i => i.id === selectedIslandId);
+  if (!isl || !isl.templateVerts?.length) return null; // rotation only for polygon islands
+  const [hx, hy] = islandHandlePos(isl);
+  return Math.hypot(cx - hx, cy - hy) < 14 ? isl : null;
+}
+
 function hitTestIsland(cx: number, cy: number): IslandState | null {
   let best: IslandState | null = null, bestDist = Infinity;
   for (const isl of islands) {
     const [icx, icy] = worldToCanvas(isl.editX, isl.editY);
     const dist = Math.hypot(cx - icx, cy - icy);
     let screenR = 20;
-    if (isl.outerVerts?.length) screenR = Math.max(20, estimatePolyRadius(isl.outerVerts) * scale * 0.5);
+    if (isl.templateVerts?.length) screenR = Math.max(20, estimatePolyRadius(isl.templateVerts) * scale * 0.5);
     else screenR = Math.max(20, (isl.grassRadius ?? isl.beachRadius ?? 2500) * scale);
     if (dist < screenR && dist < bestDist) { best = isl; bestDist = dist; }
   }
@@ -377,7 +431,18 @@ function updateIslandDetail(): void {
   selIslandId.textContent   = String(isl.id);
   selIslandX.textContent    = Math.round(isl.editX).toString();
   selIslandY.textContent    = Math.round(isl.editY).toString();
-  selIslandTmpl.textContent = (isl as any).template ?? isl.preset;
+  selIslandTmpl.textContent = isl.template ?? isl.preset;
+  selIslandRot.value        = String(Math.round(isl.editRotDeg));
+}
+
+function applyIslandRot(): void {
+  const isl = islands.find(i => i.id === selectedIslandId);
+  if (!isl) return;
+  const newRot = ((parseInt(selIslandRot.value, 10) || 0) % 360 + 360) % 360;
+  isl.editRotDeg = newRot;
+  isl.dirty      = true;
+  selIslandRot.value = String(newRot);
+  renderIslandList(); draw();
 }
 
 // ── Spawn point sidebar ───────────────────────────────────────────────────────
@@ -427,10 +492,10 @@ function draw(): void {
   if (showGrid) drawGrid(W, H);
 
   for (const sp of spawnPoints) drawSpawnOccupancyRing(sp);
-  for (const isl of islands)     drawIsland(isl);
+  for (const isl of islands)     drawIsland(isl); // rotation handle drawn inside drawIsland for selected
   for (const sp of spawnPoints)  drawSpawnPoint(sp);
 
-  // Rotation handle for selected spawn
+  // Spawn rotation handle
   if (selectedSpawnId !== null && !isDraggingIsland) {
     const sp = spawnPoints.find(p => p.id === selectedSpawnId);
     if (sp) drawRotationHandle(sp);
@@ -490,30 +555,43 @@ function chooseGridStep(): number {
 function drawIsland(isl: IslandState): void {
   const [cx, cy] = worldToCanvas(isl.editX, isl.editY);
   const sel = isl.id === selectedIslandId;
+
+  // Build display verts: rotate template verts by editRotDeg
+  const displayOuter   = isl.templateVerts   ? rotateVerts(isl.templateVerts,   isl.editRotDeg) : null;
+  const displayShallow = isl.templateShallow ? rotateVerts(isl.templateShallow, isl.editRotDeg) : null;
+
   ctx.save();
 
-  if (isl.outerVerts && isl.outerVerts.length > 2) {
-    const screenR = estimatePolyRadius(isl.outerVerts) * scale;
-    if (isl.shallowVerts && isl.shallowVerts.length > 2) {
+  if (displayOuter && displayOuter.length > 2) {
+    const screenR = estimatePolyRadius(displayOuter) * scale;
+
+    if (displayShallow && displayShallow.length > 2) {
       ctx.beginPath();
-      isl.shallowVerts.forEach((v, i) => i === 0 ? ctx.moveTo(cx + v.x * scale, cy + v.y * scale) : ctx.lineTo(cx + v.x * scale, cy + v.y * scale));
+      displayShallow.forEach((v, i) => i === 0 ? ctx.moveTo(cx + v.x * scale, cy + v.y * scale) : ctx.lineTo(cx + v.x * scale, cy + v.y * scale));
       ctx.closePath(); ctx.fillStyle = 'rgba(30,100,160,0.35)'; ctx.fill();
     }
+
     ctx.beginPath();
-    isl.outerVerts.forEach((v, i) => i === 0 ? ctx.moveTo(cx + v.x * scale, cy + v.y * scale) : ctx.lineTo(cx + v.x * scale, cy + v.y * scale));
+    displayOuter.forEach((v, i) => i === 0 ? ctx.moveTo(cx + v.x * scale, cy + v.y * scale) : ctx.lineTo(cx + v.x * scale, cy + v.y * scale));
     ctx.closePath();
     ctx.fillStyle   = sel ? '#5bcf8a' : islandColor(isl.id);
     ctx.fill();
     ctx.strokeStyle = isl.dirty ? '#f5c842' : (sel ? '#fff' : 'rgba(255,255,255,0.4)');
     ctx.lineWidth   = sel ? 2 : 1;
     ctx.stroke();
+
     ctx.beginPath(); ctx.arc(cx, cy, Math.max(3, screenR * 0.04), 0, Math.PI * 2);
     ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,0.5)'; ctx.fill();
+
     if (screenR > 20) {
       ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,0.7)';
       ctx.font = `bold ${Math.max(10, Math.min(14, screenR * 0.1))}px monospace`;
       ctx.textAlign = 'center'; ctx.fillText(`${isl.id}`, cx, cy + 4);
     }
+
+    // Rotation handle for selected polygon islands
+    if (sel) drawIslandRotHandle(isl);
+
   } else {
     const r  = (isl.grassRadius ?? isl.beachRadius ?? 2500) * scale;
     const sr = (isl.beachRadius ?? 2500) * scale * 1.4;
@@ -528,6 +606,29 @@ function drawIsland(isl: IslandState): void {
       ctx.textAlign = 'center'; ctx.fillText(`${isl.id}`, cx, cy + 4);
     }
   }
+
+  ctx.restore();
+}
+
+function drawIslandRotHandle(isl: IslandState): void {
+  const [hx, hy] = islandHandlePos(isl);
+  const [cx, cy] = worldToCanvas(isl.editX, isl.editY);
+
+  ctx.save();
+  // Line from centre to handle
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(hx, hy);
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1;
+  ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+
+  // Handle circle
+  ctx.beginPath(); ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fill();
+  ctx.strokeStyle = '#ffffff'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // Small arc icon inside handle
+  ctx.beginPath(); ctx.arc(hx, hy, 4, 0, Math.PI * 1.5);
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+
   ctx.restore();
 }
 
@@ -703,6 +804,14 @@ canvas.addEventListener('mousedown', (e) => {
   }
 
   if (mode === 'move-island' && e.button === 0) {
+    // Rotation handle takes priority over drag
+    const rotHit = hitTestIslandHandle(cx, cy);
+    if (rotHit) {
+      isRotatingIsland = true;
+      dragIslandId     = rotHit.id;
+      canvas.style.cursor = 'ew-resize';
+      return;
+    }
     const hit = hitTestIsland(cx, cy);
     if (hit) {
       isDraggingIsland = true;
@@ -732,6 +841,21 @@ canvas.addEventListener('mousemove', (e) => {
   const [wx, wy] = canvasToWorld(cx, cy);
   mouseWorldX = wx; mouseWorldY = wy;
   coordsDisplay.textContent = `World: (${Math.round(wx)}, ${Math.round(wy)})`;
+
+  // Rotating island
+  if (isRotatingIsland && dragIslandId !== null) {
+    const isl = islands.find(i => i.id === dragIslandId);
+    if (isl) {
+      const [icx, icy] = worldToCanvas(isl.editX, isl.editY);
+      const ang = Math.atan2(cy - icy, cx - icx) * (180 / Math.PI);
+      isl.editRotDeg = ((ang % 360) + 360) % 360;
+      isl.dirty      = true;
+      updateIslandDetail();
+      renderIslandList();
+      draw();
+    }
+    return;
+  }
 
   // Rotating spawn point
   if (isRotatingSpawn && dragSpawnId !== null) {
@@ -782,7 +906,9 @@ canvas.addEventListener('mousemove', (e) => {
 
   // Cursor hints
   if (mode === 'move-island') {
-    canvas.style.cursor = hitTestIsland(cx, cy) ? 'grab' : 'default';
+    if (hitTestIslandHandle(cx, cy))      canvas.style.cursor = 'ew-resize';
+    else if (hitTestIsland(cx, cy))       canvas.style.cursor = 'grab';
+    else                                  canvas.style.cursor = 'default';
   } else if (mode === 'spawn-point') {
     if (hitTestSpawnHandle(cx, cy))       canvas.style.cursor = 'ew-resize';
     else if (hitTestSpawnCenter(cx, cy))  canvas.style.cursor = selectedSpawnId === hitTestSpawnCenter(cx, cy)?.id ? 'move' : 'pointer';
@@ -794,6 +920,7 @@ canvas.addEventListener('mousemove', (e) => {
 canvas.addEventListener('mouseup', () => {
   if (isDraggingSpawn)  { isDraggingSpawn  = false; dragSpawnId  = null; canvas.style.cursor = 'crosshair'; }
   if (isRotatingSpawn)  { isRotatingSpawn  = false; dragSpawnId  = null; canvas.style.cursor = 'crosshair'; }
+  if (isRotatingIsland) { isRotatingIsland = false; dragIslandId = null; canvas.style.cursor = 'default'; }
   if (isDraggingIsland) { isDraggingIsland = false; dragIslandId = null; canvas.classList.remove('cursor-move'); canvas.style.cursor = 'grab'; }
   if (isPanning)        { isPanning = false; canvas.classList.remove('cursor-grab'); canvas.style.cursor = mode === 'spawn-point' ? 'crosshair' : 'default'; }
 });
@@ -807,7 +934,7 @@ canvas.addEventListener('mouseleave', () => {
 
 const MODE_HINTS: Record<EditorMode, string> = {
   'view':        'Left-drag to pan · Scroll to zoom',
-  'move-island': 'Drag an island to move it',
+  'move-island': 'Drag island to move · Drag ↻ handle to rotate (polygon islands)',
   'spawn-point': 'Click open water to place · Click point to select · Drag to move · Drag ↻ handle to rotate',
 };
 
@@ -826,8 +953,9 @@ document.getElementById('btn-refresh')!.addEventListener('click',  refreshAll);
 document.getElementById('btn-fit')!.addEventListener('click',      fitAll);
 document.getElementById('btn-zoom-in')!.addEventListener('click',  () => zoomAtPoint(canvas.width / 2, canvas.height / 2, 1.5));
 document.getElementById('btn-zoom-out')!.addEventListener('click', () => zoomAtPoint(canvas.width / 2, canvas.height / 2, 1 / 1.5));
-document.getElementById('btn-save-islands')!.addEventListener('click', saveIslandPositions);
-document.getElementById('btn-save-spawns')!.addEventListener('click',  saveSpawnPoints);
+document.getElementById('btn-save-islands')!.addEventListener('click',      saveIslandPositions);
+document.getElementById('btn-save-spawns')!.addEventListener('click',       saveSpawnPoints);
+document.getElementById('btn-apply-island-rot')!.addEventListener('click',  applyIslandRot);
 document.getElementById('btn-apply-spawn')!.addEventListener('click',  applySpawnEdit);
 document.getElementById('btn-delete-spawn')!.addEventListener('click', () => { if (selectedSpawnId !== null) deleteSpawn(selectedSpawnId); });
 document.getElementById('chk-grid')!.addEventListener('change', e => { showGrid = (e.target as HTMLInputElement).checked; draw(); });
