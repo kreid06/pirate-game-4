@@ -241,6 +241,9 @@ void tick_npc_agents(float dt) {
             case NPC_ROLE_RIGGER: {
                 // Set sail openness and angle to the ship's desired values
                 if (module->type_id == MODULE_TYPE_MAST) {
+                    /* Player directly mounted to this mast takes over as rigger —
+                     * skip NPC sail update so they don't fight each other. */
+                    if (module->state_bits & MODULE_STATE_OCCUPIED) break;
                     uint8_t target_openness = ship->desired_sail_openness;
                     module->data.mast.openness = target_openness;
                     if (target_openness > 0)
@@ -326,6 +329,9 @@ void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
     /* Swivels are smaller — NPC stands slightly closer to the pivot */
     const float CANNON_MOUNT_DIST = (cannon->type_id == MODULE_TYPE_SWIVEL) ? 18.0f : 25.0f;
     npc->assigned_weapon_id = cannon_id;
+    /* Cannons are always on a specific deck (0=lower, 1=upper), never deck-independent.
+     * Use deck_id directly if it's 0 or 1; legacy saves that stored 0xFF default to top deck. */
+    npc->deck_level = (cannon->deck_id <= 1) ? cannon->deck_id : 1;
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;
@@ -439,6 +445,7 @@ void assign_weapon_group_crew(SimpleShip* ship) {
             WorldNpc* npc = &world_npcs[ni];
             if (!npc->active || npc->ship_id != ship->ship_id) continue;
             if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
+            if (npc->task_locked) continue; /* locked NPCs stay pinned to their current post */
             if (npc->assigned_weapon_id != 0) {
                 /* Only pull from a cannon whose NEEDED has expired */
                 ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);
@@ -554,6 +561,7 @@ void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
             uint32_t cid = sorted_ids[c];
             ShipModule* cmod = find_module_on_ship(ship, cid);
             if (!cmod || !(cmod->state_bits & MODULE_STATE_NEEDED)) continue;
+            if (cmod->player_mounted_id != 0) continue; /* player already on this cannon */
             /* Already assigned to this one? Stay */
             if (cid == npc->assigned_weapon_id) { best_id = cid; best_diff = sorted_diff[c]; break; }
             /* Check nobody else is already covering it */

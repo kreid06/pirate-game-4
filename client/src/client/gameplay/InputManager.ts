@@ -88,6 +88,7 @@ export class InputManager {
   private readonly MOVEMENT_HEARTBEAT_INTERVAL = 150;
   
   // Event callbacks
+  public altKeyHeld: boolean = false;
   public onInputFrame: ((inputFrame: InputFrame) => void) | null = null;
   
   // HYBRID PROTOCOL: Callbacks for state changes
@@ -115,6 +116,10 @@ export class InputManager {
   public onGroupAssign: (() => void) | null = null;
   /** Ctrl+Digit while hovering a cannon — assign it directly to the given group index. */
   public onGroupAssignTo: ((group: number) => void) | null = null;
+  /** R key at helm — toggle gunports open/closed for the active weapon group(s). */
+  public onGroupGunportToggle: ((groupIndices: number[]) => void) | null = null;
+  /** Ctrl+right-click while an NPC is hovered — cycle that NPC's command state. */
+  public onNpcStateCycle: (() => void) | null = null;
   /** Right-click intercepted by UI (e.g. cycling weapon group mode on hotbar). Returns true if consumed. */
   public onUIRightClick: ((x: number, y: number) => boolean) | null = null;
   /** Right-click on world while on helm in targetfire mode — world position to lock onto. */
@@ -125,6 +130,8 @@ export class InputManager {
   public onAimEnd: (() => void) | null = null;
   /** Called at the very start of any right-click (button 2 down). Return true to consume the event and skip all other right-click handling. */
   public onBeforeRightClick: (() => boolean) | null = null;
+  /** Called before any mouse-down is processed (any button). Return true to suppress all input logic for that click (e.g. when a radial menu is open). */
+  public onBeforeMouseInput: (() => boolean) | null = null;
   /** Called at the very start of any left-click (button 0 down, after UI/shift/ctrl checks).
    *  Return true to consume the event — fires onActionEvent('attack') then skips all other handling. */
   public onBeforeLeftClick: (() => boolean) | null = null;
@@ -135,6 +142,8 @@ export class InputManager {
   // Build mode — set when a buildable item (e.g. plank) is in the active hotbar slot
   public buildMode: boolean = false;
   public onBuildPlace: ((worldPos: Vec2) => void) | null = null;
+  /** Returns true when a permanent gunport cannon snap is hovered — allows click-to-place even outside build mode. */
+  public checkGunportSnap: (() => boolean) | null = null;
 
   // Explicit build mode (toggled with B key — independent of hotbar items)
   public explicitBuildMode: boolean = false;
@@ -144,14 +153,30 @@ export class InputManager {
   public onCombatModeToggle: (() => void) | null = null;
   public onToggleAllLadders: (() => void) | null = null;
   public onBuildRotate: ((deltaDeg: number) => void) | null = null;
+  /** Called when T is pressed while placing a wall — toggles the wall/door-frame variant. */
+  public onBuildVariantToggle: (() => void) | null = null;
   /** Called when R is pressed while hovering a damaged mast (not in explicit build mode). */
   public onRepairSail: (() => void) | null = null;
+  /** Called when E/Q is pressed in ramp or hatch build mode to cycle the facing by 90°. dir=+1 (E) or -1 (Q). */
+  public onCycleRampFacing: ((dir: 1 | -1) => void) | null = null;
+  /** Called when R is pressed in ship build mode to toggle resource source (pack ↔ ship). */
+  public onToggleBuildResourceSource: (() => void) | null = null;
+  /** Called on every R press (any context) — used to pop up the resource panel. */
+  public onShowResourcePanel: (() => void) | null = null;
+  /** Called when R is pressed while mounted at a cannon that is next to a gunport. */
+  public onToggleGunportAtCannon: (() => void) | null = null;
+  /** Set to true by ClientApplication when ramp build mode is active. */
+  public inRampBuildMode: boolean = false;
+  /** Set to true by ClientApplication when hatch cover build mode is active. */
+  public inHatchBuildMode: boolean = false;
 
   // Build menu (B key — open panel + ghost placement system)
   /** True while the build menu panel is open. Affects right-click and other input. */
   public buildMenuOpen: boolean = false;
-  /** Right-click while build menu is open — fires with world position. */
+  /** Right-click while build menu or island build mode is active — fires with world position. */
   public onBuildRightClick: ((worldPos: Vec2) => void) | null = null;
+  /** Enter key while in island build mode — confirm all pending land ghosts. */
+  public onBuildConfirm: (() => void) | null = null;
 
   // Camera zoom callback
   public onZoom: ((factor: number, screenPoint: Vec2) => void) | null = null;
@@ -188,6 +213,11 @@ export class InputManager {
    * refill without instantly draining again.
    */
   private sprintLocked: boolean = false;
+  /**
+   * Current player carry-weight ratio (carried_kg / capacity_kg, 0–1+).
+   * Sprint is disabled when this is ≥ 0.85, matching server behaviour.
+   */
+  private carryRatio: number = 0;
   private lastSentRotation: number = 0;
   private readonly ROTATION_THRESHOLD = 0.0524; // 3 degrees in radians
   
@@ -214,6 +244,10 @@ export class InputManager {
    */
   public isCtrlHeld(): boolean {
     return this.inputState.pressedKeys.has('ControlLeft') || this.inputState.pressedKeys.has('ControlRight');
+  }
+
+  public isAltHeld(): boolean {
+    return this.inputState.pressedKeys.has('AltLeft') || this.inputState.pressedKeys.has('AltRight');
   }
   private currentSailOpenness: number = 100; // Start at 100% (full sails)
   private currentSailAngle: number = 0; // Start at 0 degrees
@@ -392,7 +426,11 @@ export class InputManager {
     }
 
     // If mounted to cannon/mast/swivel, handle interact-to-dismount only
+    // Mast also gets sail-angle controls (Shift+A/D) — same override as cannon aiming.
     if (this.mountKind === 'cannon' || this.mountKind === 'mast' || this.mountKind === 'swivel') {
+      if (this.mountKind === 'mast') {
+        this.handleShipControls();
+      }
       if (this.isActionActive('interact') && this.canInteract()) {
         this.lastInteractionTime = Date.now();
         if (this.onActionEvent) this.onActionEvent('dismount');
@@ -410,7 +448,11 @@ export class InputManager {
     // Auto-clear the sprint lock as soon as Shift is released, so the next
     // Shift press can sprint again (assuming there is stamina available).
     if (!shiftHeld && this.sprintLocked) this.sprintLocked = false;
-    const isSprinting = shiftHeld && this.isActionActive('move_forward') && !this.sprintLocked;
+    // Carry-weight gate: server only grants sprint speed when carry_ratio < 0.85.
+    // Match here so the client doesn't predict sprint or drain server-side stamina
+    // for a sprint that has no effect.
+    const carryAllowsSprint = this.carryRatio < 0.85;
+    const isSprinting = shiftHeld && this.isActionActive('move_forward') && !this.sprintLocked && carryAllowsSprint;
     const movementChanged = !currentMovement.equals(this.previousMovementState);
     const sprintChanged = isSprinting !== this.previousSprintState;
     if (movementChanged || sprintChanged) {
@@ -497,13 +539,23 @@ export class InputManager {
 
   /**
    * Notify the input manager of the player's current stamina. When stamina
-   * reaches zero, sprint is locked out until Shift is released and re-pressed
-   * so the bar can refill without instantly draining again.
+   * reaches zero, sprint is locked out. The lock auto-clears when stamina
+   * regens back to ≥ 85% of max (or immediately when Shift is released).
    */
-  setPlayerStamina(stamina: number): void {
+  setPlayerStamina(stamina: number, maxStamina: number): void {
     if (stamina <= 0 && this.isShiftHeld()) {
       this.sprintLocked = true;
+    } else if (this.sprintLocked && stamina >= maxStamina * 0.85) {
+      this.sprintLocked = false;
     }
+  }
+
+  /**
+   * Notify the input manager of the player's current carry-weight ratio.
+   * Sprint is gated to match server behaviour: only allowed when ratio < 0.85.
+   */
+  setPlayerCarryRatio(ratio: number): void {
+    this.carryRatio = ratio;
   }
   
   /**
@@ -577,7 +629,7 @@ export class InputManager {
   private islandCannonFacingAngle: number = 0;
   private islandCannonDesiredAimAngle: number = 0;
 
-  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number): void {
+  setMountState(mounted: boolean, shipId?: number, moduleKind: string = 'none', moduleId?: number, initialSailOpenness?: number, initialAimAngle?: number, islandCannonFacingAngle?: number, initialSailAngle?: number): void {
     this.mountKind = mounted ? (moduleKind.toLowerCase() as 'helm' | 'cannon' | 'mast' | 'swivel') : 'none';
     this.currentShipId = shipId !== undefined ? shipId : null;
     this.mountedCannonModuleId = (mounted && (moduleKind.toLowerCase() === 'cannon' || moduleKind.toLowerCase() === 'swivel') && moduleId != null) ? moduleId : null;
@@ -601,13 +653,14 @@ export class InputManager {
         const seeded = initialSailOpenness ?? 100;
         this.currentSailOpenness = seeded;
         this.lastSailOpenness    = seeded;
-        this.currentSailAngle = 0;
-        this.lastSailAngle = 0;
+        const seededAngle = initialSailAngle !== undefined ? initialSailAngle : 0;
+        this.currentSailAngle = seededAngle;
+        this.lastSailAngle = seededAngle;
         this.lastRudderState = { left: false, right: false, backward: false };
         this.lastSailOpennessChangeTime = 0;
         this.lastSailAngleChangeTime = 0;
         this.activeAmmoGroup = 'cannon';
-        console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}% on mount`);
+        console.log(`⛵ [INPUT] Seeded sail openness to ${seeded}%, angle to ${seededAngle}° on mount`);
       } else if (this.mountKind === 'swivel') {
         // Swivel uses its own ammo types (10=grapeshot, 11=liquid flame, 12=canister shot)
         this.selectedAmmoType = 10;
@@ -766,16 +819,13 @@ export class InputManager {
     let aimAngle: number;
     if (isIslandCannon) {
       aimAngle = aimAngleWorld;
-      // Apply ±30° arc limit around the cannon's facing direction (same as ship cannons)
-      const AIM_RANGE   = 30 * Math.PI / 180;
-      const RESET_RANGE = 45 * Math.PI / 180;
-      let offset = aimAngle - this.islandCannonFacingAngle;
-      // Normalize offset to [-π, π]
+      // Clamp to arc limit — cursor past lateral edge stays at the edge,
+      // never recenters to facing direction.
+      const AIM_RANGE = 30 * Math.PI / 180;
       const TWO_PI2 = 2 * Math.PI;
+      let offset = aimAngle - this.islandCannonFacingAngle;
       offset -= TWO_PI2 * Math.floor((offset + Math.PI) / TWO_PI2);
-      if (Math.abs(offset) > RESET_RANGE) {
-        offset = 0;
-      } else if (Math.abs(offset) > AIM_RANGE) {
+      if (Math.abs(offset) > AIM_RANGE) {
         offset = offset > 0 ? AIM_RANGE : -AIM_RANGE;
       }
       aimAngle = this.islandCannonFacingAngle + offset;
@@ -1124,8 +1174,8 @@ export class InputManager {
     }
     
     // Sprint action (Shift + forward key) — suppressed when out of stamina
-    // until Shift is released and re-pressed.
-    if (this.isShiftHeld() && this.isActionActive('move_forward') && !this.sprintLocked) {
+    // until Shift is released and re-pressed, and when carrying ≥ 85 % of capacity.
+    if (this.isShiftHeld() && this.isActionActive('move_forward') && !this.sprintLocked && this.carryRatio < 0.85) {
       actions |= PlayerActions.SPRINT;
     }
     
@@ -1191,6 +1241,7 @@ export class InputManager {
   // Event handlers
   
   private onKeyDown(event: KeyboardEvent): void {
+    if (event.key === 'Alt') { this.altKeyHeld = true; event.preventDefault(); }
     this.inputState.pressedKeys.add(event.code);
     
     // Update action mappings
@@ -1228,6 +1279,13 @@ export class InputManager {
         if (this.onBuildModeToggle) this.onBuildModeToggle();
         event.preventDefault();
         break;
+      case 'Enter':
+        // Confirm all pending land structure ghosts (island build mode)
+        if (this.islandBuildMode && this.onBuildConfirm) {
+          this.onBuildConfirm();
+          event.preventDefault();
+        }
+        break;
       case 'KeyZ':
         if (!event.repeat) {
           if (this.onCombatModeToggle) this.onCombatModeToggle();
@@ -1235,10 +1293,19 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyR':
-        // In explicit build mode, plan mode, or island build mode: rotate the placement ghost.
+        // Always pop up the resource panel on R
+        this.onShowResourcePanel?.();
+        // In ship build mode: toggle build resource source (pack ↔ ship).
+        // Mounted at cannon: toggle gunport at that position.
         // Otherwise: repair sail fibers on the hovered damaged mast.
-        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
-          this.onBuildRotate(15);
+        if ((this.explicitBuildMode || this.buildMenuOpen) && this.onToggleBuildResourceSource) {
+          this.onToggleBuildResourceSource();
+          event.preventDefault();
+        } else if (this.mountKind === 'cannon' && this.onToggleGunportAtCannon) {
+          this.onToggleGunportAtCannon();
+          event.preventDefault();
+        } else if (this.mountKind === 'helm' && this.activeWeaponGroups.size > 0 && this.onGroupGunportToggle) {
+          this.onGroupGunportToggle([...this.activeWeaponGroups]);
           event.preventDefault();
         } else if (!this.explicitBuildMode && !this.buildMenuOpen && !this.islandBuildMode && this.onRepairSail) {
           this.onRepairSail();
@@ -1321,9 +1388,36 @@ export class InputManager {
         event.preventDefault();
         break;
       case 'KeyQ':
-        // In build mode or island build mode: rotate ghost left; otherwise no-op
-        if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+        // Ramp/hatch build mode: rotate 90° counter-clockwise; otherwise free-rotate -15°
+        if ((this.inRampBuildMode || this.inHatchBuildMode) && this.onCycleRampFacing) {
+          this.onCycleRampFacing(-1);
+          event.preventDefault();
+        } else if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
           this.onBuildRotate(-15);
+          event.preventDefault();
+        }
+        break;
+      case 'KeyE':
+        // Ramp/hatch build mode: rotate 90° clockwise; otherwise free-rotate +15°
+        if ((this.inRampBuildMode || this.inHatchBuildMode) && this.onCycleRampFacing) {
+          this.onCycleRampFacing(1);
+          // Suppress interact so the same keypress doesn't also trigger an interaction
+          for (const m of this.actionMappings) {
+            if (m.action === 'interact' || m.action === 'ship_interact') m.pressed = false;
+          }
+          event.preventDefault();
+        } else if ((this.explicitBuildMode || this.buildMenuOpen || this.islandBuildMode) && this.onBuildRotate) {
+          this.onBuildRotate(15);
+          for (const m of this.actionMappings) {
+            if (m.action === 'interact' || m.action === 'ship_interact') m.pressed = false;
+          }
+          event.preventDefault();
+        }
+        break;
+      case 'KeyT':
+        // While placing a land structure, T toggles the wall ⇄ door-frame variant.
+        if (this.islandBuildMode && this.onBuildVariantToggle) {
+          this.onBuildVariantToggle();
           event.preventDefault();
         }
         break;
@@ -1331,7 +1425,7 @@ export class InputManager {
       case 'Digit6': case 'Digit7': case 'Digit8': case 'Digit9':
         if (this.mountKind === 'helm') {
           const digit = parseInt(event.code.replace('Digit', ''));
-          const groupIdx = digit; // Key 1→G1, Key 2→G2, …, Key 9→G9
+          const groupIdx = digit - 1; // Key 1→G0 (Port), Key 2→G1, …, Key 9→G8
           if (this.isCtrlHeld()) {
             // Ctrl+Digit: assign hovered cannon to this group without changing selection
             if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
@@ -1349,6 +1443,9 @@ export class InputManager {
             // Force next handleCannonAiming() to re-send aim with updated group list
             // even if the mouse hasn't moved, so the server learns about the new selection.
             this.lastSentCannonAimAngle = Infinity;
+            // Reset double-click timer so the first fire click after switching groups
+            // is never misread as a double-click (which fires ALL cannons).
+            this.lastLeftClickTime = 0;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();
@@ -1358,7 +1455,7 @@ export class InputManager {
         break;
       case 'Digit0':
         if (this.mountKind === 'helm') {
-          const groupIdx = 0; // Key 0→G0
+          const groupIdx = 9; // Key 0→G9 (rightmost slot)
           if (this.isCtrlHeld()) {
             // Ctrl+0: assign hovered cannon to group 9 without changing selection
             if (this.onGroupAssignTo) this.onGroupAssignTo(groupIdx);
@@ -1374,6 +1471,9 @@ export class InputManager {
               this.activeWeaponGroup = groupIdx;
             }
             this.lastSentCannonAimAngle = Infinity;
+            // Reset double-click timer so the first fire click after switching groups
+            // is never misread as a double-click (which fires ALL cannons).
+            this.lastLeftClickTime = 0;
             if (this.onWeaponGroupSelect) this.onWeaponGroupSelect(this.activeWeaponGroup);
           }
           event.preventDefault();
@@ -1385,6 +1485,7 @@ export class InputManager {
   }
   
   private onKeyUp(event: KeyboardEvent): void {
+    if (event.key === 'Alt') this.altKeyHeld = false;
     this.inputState.pressedKeys.delete(event.code);
     
     // Update action mappings
@@ -1454,6 +1555,8 @@ export class InputManager {
   
   private onMouseDown(event: MouseEvent): void {
     event.preventDefault();
+    // Allow external code (e.g. radial menu) to consume mouse-down events entirely.
+    if (this.onBeforeMouseInput && this.onBeforeMouseInput()) return;
     
     if (event.button === 0) { // Left mouse button
       // Free camera mode: left-drag pans (or Shift+left-drag rotates); skip all game logic
@@ -1479,9 +1582,10 @@ export class InputManager {
       }
 
       this.inputState.leftMouseDown = true;
-      
-      if (this.buildMode) {
-        // Build mode: left click places a building item (e.g. plank) at cursor
+
+      if (this.buildMode || (this.checkGunportSnap && this.checkGunportSnap())) {
+        // Build mode: left click places a building item (e.g. plank) at cursor.
+        // Also fires when a permanent gunport cannon snap is hovered (even without build mode).
         if (this.onBuildPlace) {
           this.onBuildPlace(this.inputState.mouseWorldPosition);
         }
@@ -1493,17 +1597,19 @@ export class InputManager {
       const isDoubleClick = timeSinceLastClick < this.DOUBLE_CLICK_THRESHOLD;
 
       // Shift+left-click is handled at the top of onMouseDown — unreachable here
-      if (this.isCtrlHeld()) {
-        // Ctrl+click while mounted: toggle cannon group membership
+
+      // Move To mode takes priority over everything — works with or without Ctrl held
+      if (this.onBeforeLeftClick && this.onBeforeLeftClick()) {
+        // Intercept hook consumed the click (e.g. Move To mode) — emit attack and skip cannon fire
+        if (this.onActionEvent) this.onActionEvent('attack', this.inputState.mouseWorldPosition);
+      } else if (this.isCtrlHeld()) {
+        // Ctrl+click: NPC command radial or cannon group assignment
         if (this.onGroupAssign) this.onGroupAssign();
       } else if (this.mountKind === 'none') {
         // Walking: left-click = attack toward mouse
         if (this.onActionEvent) {
           this.onActionEvent('attack', this.inputState.mouseWorldPosition);
         }
-      } else if (this.onBeforeLeftClick && this.onBeforeLeftClick()) {
-        // Intercept hook consumed the click (e.g. Move To mode) — emit attack and skip cannon fire
-        if (this.onActionEvent) this.onActionEvent('attack', this.inputState.mouseWorldPosition);
       } else {
         // Mounted to helm, cannon, or swivel: fire weapon(s)
         // Flame mode: ammo_type 11 (liquid flame) always streams regardless of activeAmmoGroup toggle
@@ -1520,10 +1626,15 @@ export class InputManager {
             }, 100);
           }
         } else if (isDoubleClick) {
-          console.log('💥💥 Double-click: Fire ALL cannons!');
-          if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
-          // Cannon will reload into the pending ammo type
-          this.loadedAmmoType = this.selectedAmmoType;
+          // Guard: at helm with no weapon groups selected, double-click should not fire
+          // all manned cannons ship-wide — that was unintended.
+          const helmNoGroups = this.mountKind === 'helm' && this.activeWeaponGroups.size === 0;
+          if (!helmNoGroups) {
+            console.log('💥💥 Double-click: Fire ALL in selected group(s)!');
+            if (this.onCannonFire) this.onCannonFire(undefined, true, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
+            // Cannon will reload into the pending ammo type
+            this.loadedAmmoType = this.selectedAmmoType;
+          }
         } else {
           console.log('💥 Single-click: Fire aimed cannons');
           if (this.onCannonFire) this.onCannonFire(undefined, false, this.loadedAmmoType, this.mountKind === 'helm' ? this.activeWeaponGroup : undefined, this.mountKind === 'helm' ? this.activeWeaponGroups : undefined);
@@ -1551,13 +1662,15 @@ export class InputManager {
 
     } else if (event.button === 2) { // Right mouse button
       if (this.onBeforeRightClick && this.onBeforeRightClick()) return;
-      // Ctrl+right-click: toggle cannon group membership (same as Ctrl+left-click)
+      // Ctrl+right-click: cycle NPC command state if NPC hovered, else group-assign
       if (this.isCtrlHeld()) {
-        if (this.onGroupAssign) this.onGroupAssign();
+        if (this.onNpcStateCycle) this.onNpcStateCycle();
         return;
       }
-      // Build menu: right-click fires ghost-cancel / ghost-remove callback
-      if (this.buildMenuOpen && this.onBuildRightClick) {
+      // Build menu or island build mode: right-click fires ghost-cancel / ghost-remove callback
+      // UI gets first chance (e.g. hotbar slot clear) — only fall through if not consumed.
+      if ((this.buildMenuOpen || this.islandBuildMode) && this.onBuildRightClick) {
+        if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;
         this.onBuildRightClick(this.inputState.mouseWorldPosition);
       } else {
         if (this.onUIRightClick && this.onUIRightClick(event.offsetX, event.offsetY)) return;

@@ -1,3 +1,7 @@
+
+
+
+
 /**
  * Client Application - Main Client Coordinator
  * 
@@ -29,10 +33,15 @@ import { UIManager } from './ui/UIManager.js';
 import { MENU_ID } from './ui/UIManager.js';
 import { RadialMenu, type RadialOption } from './ui/RadialMenu.js';
 import { CraftingMenu } from './ui/CraftingMenu.js';
+import { ChestMenu } from './ui/ChestMenu.js';
+import { LandChestMenu } from './ui/LandChestMenu.js';
 import { ShipyardMenu } from './ui/ShipyardMenu.js';
 import { ShipRenameDialog } from './ui/ShipRenameDialog.js';
+import { GroupRenameDialog } from './ui/GroupRenameDialog.js';
+import { ConfirmDialog }    from './ui/ConfirmDialog.js';
 import { PauseMenu, GameSettings } from './ui/PauseMenu.js';
 import { CommandConsole } from './ui/CommandConsole.js';
+import { ChatBox } from './ui/ChatBox.js';
 import { IslandEditor } from './gfx/IslandEditor.js';
 import { logout } from './auth/AuthService.js';
 
@@ -41,12 +50,14 @@ import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
-import { GhostPlacement, GhostModuleKind } from '../sim/Types.js';
-import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS } from '../sim/Inventory.js';
+import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
+import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS, computeInventoryWeight } from '../sim/Inventory.js';
+import { tierName, itemDisplayName } from '../sim/Quality.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
+import { BRIGANTINE_LOWER_DECK_MODULE_ID, BRIGANTINE_UPPER_DECK_MODULE_ID } from '../common/ShipDefinitions.js';
 
 /**
  * Application lifecycle states
@@ -64,6 +75,40 @@ export enum ClientState {
  * Main client application class
  */
 export class ClientApplication {
+
+      /**
+       * Register network event handlers for plan placement confirmation/failure.
+       * Should be called after networkManager is initialized.
+       */
+      private _registerNetworkPlanHandlers() {
+        if (!this.networkManager) return;
+        // Placement failed: show warning, keep plan ghost
+        this.networkManager.onPlacementFailed = (
+          reason: string, x: number, y: number, structureType: string, blockerId: number | null
+        ) => {
+          const ghost = this.landGhostEntries.find(g => g.kind === structureType && Math.abs(g.worldPos.x - x) < 2 && Math.abs(g.worldPos.y - y) < 2);
+          if (ghost && this.renderSystem && this.inputManager) {
+            this.renderSystem.flashCancel?.(this.inputManager.getMouseScreenPosition?.());
+            console.warn(`❌ [PLAN] Placement failed: ${structureType} @ (${x}, ${y}): ${reason}`);
+          }
+        };
+        // Placement confirmed: remove ghost plan
+        this.networkManager.onStructurePlaced = (s: any) => {
+          // Add the placed structure to the render system (authoritative confirmation)
+          if (s.id) this._structureCompanyMap?.set(s.id, s.companyId ?? 0);
+          this.renderSystem?.addPlacedStructure(s);
+          // Remove the matching ghost plan entry now that server confirmed placement
+          this.landGhostEntries = this.landGhostEntries.filter(g => {
+            if (g.kind === s.type && Math.abs(g.worldPos.x - s.x) < 2 && Math.abs(g.worldPos.y - s.y) < 2) {
+              return false;
+            }
+            return true;
+          });
+          this.renderSystem?.setLandGhostPlacements?.(this.landGhostEntries);
+          this.uiManager?.setLandGhostCounts?.(this._computeLandGhostCounts?.());
+        };
+      }
+
   private canvas: HTMLCanvasElement;
   /** Separate WebGL2 canvas stacked behind the main 2D canvas. Null if WebGL2 is disabled/unavailable. */
   private _glCanvas: HTMLCanvasElement | null = null;
@@ -152,10 +197,35 @@ export class ClientApplication {
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
+  /** Which resource pool to draw from when placing ship modules: 'ship' = ship chest, 'pack' = player pack. */
+  private _buildResourceSource: 'pack' | 'ship' | 'auto' = 'auto';
+  /** Ship Plan Menu selection — only set by clicking a row in the left Plan Menu panel.
+   *  Kept separate from pendingGhostKind (hotbar) so the two are mutually exclusive,
+   *  mirroring how island uses pendingLandBuildKind vs buildSchematicKind. */
+  private shipPlanMenuKind: GhostModuleKind | null = null;
+
+  // Land build mode — B key while off-ship opens land structure panel
+  private landBuildMenuOpen = false;
+  /** Plan Menu selection — the structure kind the player is planning to place as a ghost marker. */
+  private pendingLandBuildKind: string | null = null;
+  /** Build Schematic Hotbar selection — the structure kind selected for triggering construction. */
+  private buildSchematicKind: string | null = null;
+  /**
+   * Wall placement variant. A single Wall build entry can be placed as either a solid
+   * 'wall' or an open 'door_frame'. Pressing T while placing a wall toggles between them.
+   * The menu/hotbar kind stays 'wall'; this override only affects the rendered preview
+   * and the structure_type string sent to the server.
+   */
+  private wallVariant: 'wall' | 'door_frame' = 'wall';
+  /** Planned land structure ghosts — click places, Enter confirms all to server. */
+  private landGhostEntries: (LandGhostPlacement & { buildAction: () => void })[] = [];
+
+  /** Last known resource pool values — used to detect gains and flash the resource panel. */
+  private _prevResources = { wood: 0, fiber: 0, metal: 0, stone: 0 };
 
   // Weapon control groups — 10 user-defined groups (0–9), persistent per session
   private controlGroups: Map<number, WeaponGroupState> = new Map(
-    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1 }])
+    Array.from({ length: 10 }, (_, i) => [i, { cannonIds: [], mode: 'haltfire' as WeaponGroupMode, targetId: -1, gunportsOpen: false, name: ['Port','Starboard','Stern','Bow','','','','','',''][i] }])
   );
   /**
    * Ship ID received from the server's player_boarded or module_interact_success message.
@@ -207,12 +277,16 @@ export class ClientApplication {
   private _ladderHoldIsExtended = false;
   /** True if player was on the ladder's ship when E was pressed. */
   private _ladderHoldOnShip = false;
-  /** What kind of module the current E-hold targets: 'ladder' | 'mount' | 'npc' | 'structure' | null */
-  private _interactKind: 'ladder' | 'mount' | 'npc' | 'structure' | null = null;
+  /** What kind of module the current E-hold targets: 'ladder' | 'module' | 'mount' | 'npc' | 'structure' | null */
+  private _interactKind: 'ladder' | 'module' | 'mount' | 'npc' | 'structure' | null = null;
+  /** Cannon ID for the weapon-group sub-radial opened after selecting "Weapon Group" from the mount radial. */
+  private _weaponGroupSubMenuCannonId: number | null = null;
+  /** Selected radial option snapshotted by a left-click on the open radial; consumed by the next E keyup. */
+  private _radialClickSelected: string | null = null;
   /** Placed-structure id locked in at E-keydown for the structure interact path. */
   private _hoveredStructureId: number | null = null;
   /** Type of the locked-in structure ('wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door'). */
-  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | null = null;
+  private _hoveredStructureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | 'chest' | 'bed' | null = null;
   /** True when the E-hold was started while the player was already mounted (dismount path). */
   private _ladderHoldWasMounted = false;
   /** Ship ID that owns the locked-in module (for keyup range validation). */
@@ -223,20 +297,32 @@ export class ClientApplication {
   private _holdEDropTimer = -1;
   /** NPC id for the pending "Move To" targeting mode (ctrl+click → Move To → click module). */
   private _moveToNpcId: number | null = null;
+  /** Multiple NPCs selected via Ctrl+drag box — all move together on next click. */
+  private _selectedNpcIds: number[] = [];
+  /** NPC IDs whose command-ignore flag is set (client-side only).  Ctrl+right-click toggles. */
+  private _npcIgnoreSet = new Set<number>();
   /** Screen-space position to flash once the server confirms (or rejects) a goto-module command. */
   private _pendingModuleFlashPos: Vec2 | null = null;
   /** Generic radial action menu instance (rendered by RenderSystem). */
   private _radialMenu = new RadialMenu();
   /** Crafting panel opened when the player presses E near a workbench. */
   private craftingMenu = new CraftingMenu();
+  private chestMenu    = new ChestMenu();
+  private landChestMenu = new LandChestMenu();
   /** Ship construction panel opened when the player presses E at a shipyard. */
   private shipyardMenu = new ShipyardMenu();
   /** Custom rename dialog — replaces window.prompt() for ship naming. */
   private renameDialog!: ShipRenameDialog;
+  /** Custom rename dialog for weapon groups. */
+  private groupRenameDialog!: GroupRenameDialog;
+  /** Generic confirm dialog — replaces window.confirm() calls. */
+  private confirmDialog = new ConfirmDialog();
   /** Pause overlay — opened by Escape / ` / P when no other menu is up. */
   private pauseMenu = new PauseMenu();
   /** Terminal command bar — opened by / when no other menu is up. */
   private commandConsole = new CommandConsole();
+  /** In-game chat window — opened by T. */
+  private chatBox = new ChatBox();
   /** Dev tool for editing island polygon layers — opened via /islandEditor. */
   private islandEditor: IslandEditor | null = null;
   /** True when the player's active slot is wooden_floor or workbench on an island. */
@@ -284,6 +370,9 @@ export class ClientApplication {
     this._loadingShownAt = Date.now();
 
     console.log(`🎮 Client initialized with ${config.prediction.clientTickRate}Hz tick rate`);
+
+    // Register network event handlers after networkManager is set up (if available)
+    setTimeout(() => this._registerNetworkPlanHandlers(), 0);
   }
 
   /** Advance the loading overlay to the given step index (0–3) and update the progress bar. */
@@ -359,10 +448,29 @@ export class ClientApplication {
       await this.renderSystem.initialize();
       this.renderSystem.setRadialMenu(this._radialMenu);
 
+      // Mirror deck-level transitions to the server so its per-deck collision
+      // filter (lower deck = only masts block movement) stays in sync.
+      this.renderSystem.onDeckLevelChange = (deckLevel: number) => {
+        this.networkManager.sendPlayerSetDeck(deckLevel);
+      };
+
       // Initialize rename dialog (needs canvas to position the HTML input overlay)
       this.renameDialog = new ShipRenameDialog(this.canvas);
       this.renameDialog.onConfirm = (shipId, name) => {
         this.networkManager.sendRenameShip(shipId, name);
+      };
+
+      // Group rename dialog
+      this.groupRenameDialog = new GroupRenameDialog(this.canvas);
+      this.groupRenameDialog.onConfirm = (groupIndex, name) => {
+        const myShipId = (() => {
+          const ws = this.authoritativeWorldState;
+          const pid = this.networkManager.getAssignedPlayerId();
+          return ws?.players.find(p => p.id === pid)?.carrierId ?? 0;
+        })();
+        if (myShipId) this.networkManager.sendRenameWeaponGroup(myShipId, groupIndex, name);
+        const grp = this.controlGroups.get(groupIndex);
+        if (grp) grp.name = name;
       };
 
       // Initialize WebGL2 world renderer (dual-canvas setup)
@@ -572,7 +680,7 @@ export class ClientApplication {
         if (sinkingShip) {
           const dynCompanies = ws?.companies ?? [];
           const shipDisplayName = (s: Ship) =>
-            s.shipName || 'Brigantine';
+            s.shipType === 99 ? `Ghost Ship - Level ${s.npcLevel ?? 1}` : (s.shipName || 'Brigantine');
           const sinkLabel  = shipDisplayName(sinkingShip);
           const isOwnShip  = myPlayer?.carrierId === shipId;
           if (isOwnShip) {
@@ -584,7 +692,7 @@ export class ClientApplication {
             this.renderSystem.showAnnouncement(msg, 'ship_sink', 4.0);
           } else {
             const myShip  = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer!.carrierId) : null;
-            const myLabel = myShip ? shipDisplayName(myShip) : 'Our ship';
+            const myLabel = myShip ? `Your ${shipDisplayName(myShip)}` : 'Your ship';
             this.renderSystem.showAnnouncement(`${myLabel} sunk ${sinkLabel}`, 'ship_sink', 4.0);
           }
         }
@@ -654,6 +762,8 @@ export class ClientApplication {
           const npc = ws.npcs.find(n => n.id === npcId);
           if (npc) npc.companyId = 0; // COMPANY_UNCLAIMED
         }
+        // Clear any client-side ignore state for this NPC
+        this._npcIgnoreSet.delete(npcId);
         console.log(`⚓ NPC ${npcId} unclaimed`);
       };
 
@@ -681,6 +791,7 @@ export class ClientApplication {
         const _me0 = _id0 !== null && _ws0 ? _ws0.players.find(p => p.id === _id0) : null;
         if (success) {
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, `+${wood} wood`, '#c8a060');
+          this.uiManager?.flashResourceRow?.('wood', 'up');
         } else if (reason === 'no_stamina') {
           if (_me0) this.renderSystem.spawnResourcePickup(_me0.position, 'Out of stamina!', '#e05050');
         }
@@ -695,6 +806,8 @@ export class ClientApplication {
             this.renderSystem.spawnResourcePickup(_me1.position, `+${fiber} fiber`, '#60c870');
             if (wood) this.renderSystem.spawnResourcePickup(_me1.position.add(Vec2.from(0, -20)), `+${wood} wood`, '#c8a060');
           }
+          this.uiManager?.flashResourceRow?.('fiber', 'up');
+          if (wood) this.uiManager?.flashResourceRow?.('wood', 'up');
         } else if (reason === 'no_stamina') {
           if (_me1) this.renderSystem.spawnResourcePickup(_me1.position, 'Out of stamina!', '#e05050');
         }
@@ -706,6 +819,7 @@ export class ClientApplication {
         const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
           if (me) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
+          this.uiManager?.flashResourceRow?.('metal', 'up');
         } else if (reason === 'no_stamina') {
           if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
@@ -717,6 +831,7 @@ export class ClientApplication {
         const _me3 = _id3 !== null && _ws3 ? _ws3.players.find(p => p.id === _id3) : null;
         if (success) {
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, `+${stone} stone`, '#b0b8c0');
+          this.uiManager?.flashResourceRow?.('stone', 'up');
         } else if (reason === 'no_stamina') {
           if (_me3) this.renderSystem.spawnResourcePickup(_me3.position, 'Out of stamina!', '#e05050');
         }
@@ -727,8 +842,8 @@ export class ClientApplication {
         const myId = this.networkManager.getAssignedPlayerId();
         const me = myId !== null && ws ? ws.players.find(p => p.id === myId) : null;
         if (success) {
-          if (me && metal > 0) this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff');
-          if (me && stone > 0) this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a');
+          if (me && metal > 0) { this.renderSystem.spawnResourcePickup(me.position, `+${metal} metal`, '#a0d8ff'); this.uiManager?.flashResourceRow?.('metal', 'up'); }
+          if (me && stone > 0) { this.renderSystem.spawnResourcePickup(me.position, `+${stone} stone`, '#c8b89a'); this.uiManager?.flashResourceRow?.('stone', 'up'); }
         } else if (reason === 'no_stamina') {
           if (me) this.renderSystem.spawnResourcePickup(me.position, 'Out of stamina!', '#e05050');
         }
@@ -764,6 +879,8 @@ export class ClientApplication {
             mode: g.mode as WeaponGroupMode,
             cannonIds: g.cannonIds,
             targetId: g.targetShipId,
+            gunportsOpen: g.gunportsOpen ?? false,
+            name: g.name ?? '',
           });
         }
 
@@ -786,6 +903,37 @@ export class ClientApplication {
         }
       };
 
+      // Gunport state changed (toggled open/closed) — update local ship module data
+      this.networkManager.onGunportState = (shipId, gunportId, isOpen, mass) => {
+        const ws = this.authoritativeWorldState;
+        const ship = ws?.ships.find(s => s.id === shipId);
+        if (!ship) return;
+        const mod = ship.modules.find(m => m.id === gunportId);
+        if (mod?.moduleData?.kind === 'gunport') {
+          (mod.moduleData as any).isOpen = isOpen;
+        }
+        if (mass !== undefined) ship.mass = mass;
+        // Also update predicted world state if present
+        const pws = this.predictedWorldState;
+        const pship = pws?.ships.find(s => s.id === shipId);
+        const pmod = pship?.modules.find(m => m.id === gunportId);
+        if (pmod?.moduleData?.kind === 'gunport') {
+          (pmod.moduleData as any).isOpen = isOpen;
+        }
+        if (mass !== undefined && pship) pship.mass = mass;
+        // Trigger cannon slide animation (out when opening, in when closing)
+        this.renderSystem.triggerGunportAnimation(gunportId, isOpen);
+      };
+
+      // Gunport blocked notification — show a UI hint
+      this.networkManager.onGunportBlocked = (_cannonId, _gunportId) => {
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const ws = this.predictedWorldState || this.authoritativeWorldState;
+        const player = assignedId !== null ? ws?.players.find(p => p.id === assignedId) : ws?.players[0];
+        const pos = player?.position ?? Vec2.from(0, 0);
+        this.renderSystem.spawnResourcePickup(pos, 'Open gunport first!', '#ffaa44');
+      };
+
       // Initialize Prediction Engine
       this.predictionEngine = new PredictionEngine(this.config.prediction);
       this.shipPredictor = new ShipPredictor();
@@ -796,9 +944,11 @@ export class ClientApplication {
       
       // HYBRID PROTOCOL: Wire up state change callbacks
       this.inputManager.onMovementStateChange = (movement, isMoving, isSprinting) => {
+        if (this.uiManager?.isAnyMenuOpen()) return;
         this.networkManager.sendMovementState(movement, isMoving, isSprinting);
       };
       this.inputManager.onRotationUpdate = (rotation) => {
+        if (this.uiManager?.isAnyMenuOpen()) return;
         this.networkManager.sendRotationUpdate(rotation);
       };
       this.inputManager.onActionEvent = (action, target) => {
@@ -845,6 +995,35 @@ export class ClientApplication {
           return;
         }
 
+        // ── Multi-NPC box-select move ──
+        if (action === 'attack' && this._selectedNpcIds.length > 0) {
+          const ids = [...this._selectedNpcIds];
+          this._selectedNpcIds = [];
+          this.renderSystem.selectedNpcIds = new Set();
+          this.renderSystem.clearMoveToHint();
+          const flashPos = this.inputManager.getMouseScreenPosition();
+          if (!target) { this.renderSystem.flashCancel(flashPos); return; }
+
+          const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const targetShip = ws ? this.findShipAtWorldPos(target, ws) : null;
+          const shipId = targetShip?.id ?? 0;
+
+          const spread = ids.length > 1 ? Math.min(20 * (ids.length - 1), 80) : 0;
+          for (let i = 0; i < ids.length; i++) {
+            const angle = (2 * Math.PI * i) / ids.length;
+            this.networkManager.sendNpcMoveToPos(ids[i],
+              target.x + Math.cos(angle) * spread,
+              target.y + Math.sin(angle) * spread, shipId);
+          }
+          this.renderSystem.flashInteract(flashPos);
+          if (shipId) {
+            console.log(`⚓ ${ids.length} NPCs → ship ${shipId} @ (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+          } else {
+            console.log(`🌊 ${ids.length} NPCs → world (${target.x.toFixed(0)}, ${target.y.toFixed(0)})`);
+          }
+          return;
+        }
+
         // Hammer tool: left-click on hovered module while holding hammer → minigame
         if (action === 'attack') {
           const playerId = this.networkManager.getAssignedPlayerId();
@@ -865,7 +1044,14 @@ export class ClientApplication {
                 const sin = Math.sin(-playerShip.rotation);
                 const localClick = Vec2.from(dx * cos - dy * sin, dx * sin + dy * cos);
                 if (PolygonUtils.pointInPolygon(localClick, playerShip.hull, 8)) {
-                  const repairable = playerShip.modules.filter(m => m.kind === 'plank' || m.kind === 'deck');
+                  const playerDeckLevel = this.renderSystem.playerDeckLevel;
+                  const repairable = playerShip.modules.filter(m => {
+                    if (m.kind === 'deck') {
+                      // Only include the deck the player is currently standing on
+                      return m.deckId === playerDeckLevel;
+                    }
+                    return m.kind === 'plank';
+                  });
                   const damaged = repairable.filter(m => {
                     const md = m.moduleData as any;
                     if (!md) return false;
@@ -1021,12 +1207,48 @@ export class ClientApplication {
           // game-loop interact events to prevent mount/other modules firing.
           if (this._suppressLadderInteract) return;
 
-          // Exit build/plan mode on any interaction attempt
-          this.exitAllBuildModes();
-
           const playerId = this.networkManager.getAssignedPlayerId();
           const worldState = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
           const player = playerId !== null ? worldState?.players.find(p => p.id === playerId) : null;
+
+          // ── Ghost plan completion (BEFORE exitAllBuildModes) ──────────────
+          // If the player is on a ship with a nearby ghost plan and has the
+          // required resources, complete the plan without needing to hold an item.
+          if (player && player.carrierId !== 0) {
+            const nearbyGhost = this._getNearbyGhostPlan(player);
+            if (nearbyGhost) {
+              const res  = player.inventory.resources;
+              const cost = nearbyGhost.resourceCost;
+              if (
+                res.wood  >= cost.wood  &&
+                res.fiber >= cost.fiber &&
+                res.metal >= cost.metal &&
+                res.stone >= cost.stone
+              ) {
+                res.wood  -= cost.wood;
+                res.fiber -= cost.fiber;
+                res.metal -= cost.metal;
+                res.stone -= cost.stone;
+                nearbyGhost.buildAction();
+                this.ghostPlacements = this.ghostPlacements.filter(g => g.id !== nearbyGhost.id);
+                this.syncBuildModeState();
+                console.log(`🏗️ [PLAN] Built ${nearbyGhost.kind} — consumed resources`);
+              } else {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+                const need: string[] = [];
+                if (cost.wood  > res.wood)  need.push(`${cost.wood - res.wood}W`);
+                if (cost.fiber > res.fiber) need.push(`${cost.fiber - res.fiber}Fi`);
+                if (cost.metal > res.metal) need.push(`${cost.metal - res.metal}Fe`);
+                if (cost.stone > res.stone) need.push(`${cost.stone - res.stone}St`);
+                console.log(`❌ [PLAN] Need more resources for ${nearbyGhost.kind}: ${need.join(', ')}`);
+              }
+              return;
+            }
+          }
+
+          // While in any build mode, block all normal interactions
+          if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) return;
+
           const activeSlot = player?.inventory?.activeSlot ?? 0;
           const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
 
@@ -1048,11 +1270,10 @@ export class ClientApplication {
             }
           }
 
-          // Demolish mode: on own ship, hovering a non-plank module → hold [E] to demolish
+          // Demolish mode: on own ship, hovering a non-deck module → hold [E] to demolish
           if (player && player.carrierId !== 0) {
             const hoveredDemolish = this.renderSystem.getHoveredModule();
-            if (hoveredDemolish && hoveredDemolish.module.kind !== 'plank' &&
-                hoveredDemolish.module.kind !== 'deck' &&
+            if (hoveredDemolish && hoveredDemolish.module.kind !== 'deck' &&
                 hoveredDemolish.ship.id === player.carrierId) {
               const modLx = hoveredDemolish.module.localPos.x;
               const modLy = hoveredDemolish.module.localPos.y;
@@ -1170,6 +1391,32 @@ export class ClientApplication {
               this.networkManager.sendStructureInteract(hovered.id);
               return;
             }
+            // Bed interaction on island: E on a placed bed sets the respawn point
+            if (hovered?.type === 'bed') {
+              this.networkManager.sendStructureInteract(hovered.id);
+              return;
+            }
+          }
+          // Ship bed: use a bed item while aboard a ship to set ship respawn
+          if (player && player.carrierId !== 0) {
+            const inv = player.inventory;
+            const activeItem = inv?.slots?.[inv.activeSlot ?? 0]?.item;
+            if (activeItem === 'bed') {
+              this.networkManager.sendUseBedOnShip();
+              return;
+            }
+          }
+          // Close land chest menu on E press (toggle off)
+          if (this.landChestMenu.visible) {
+            this.landChestMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            return;
+          }
+          // Close chest menu on E press (toggle off)
+          if (this.chestMenu.visible) {
+            this.chestMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            return;
           }
 
           // Module interaction takes priority over NPC menu
@@ -1308,6 +1555,13 @@ export class ClientApplication {
         this.networkManager.sendSwivelAim(aimAngle);
       };
       this.inputManager.onCannonFire = (cannonIds, fireAll, ammoType, weaponGroup, weaponGroups) => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const myPlayer = assignedId !== null ? ws?.players.find(p => p.id === assignedId) : ws?.players[0];
+        const ship = myPlayer?.carrierId ? ws?.ships.find(s => s.id === myPlayer.carrierId) ?? null : null;
+        // Cannons whose gunport is mid-animation cannot fire until the animation completes
+        const animBlocked = ship ? this.renderSystem.getBlockedGunportCannonIds(ship) : new Set<number>();
+
         // Multi-group fire: fire all cannons in every selected group
         const groups = weaponGroups && weaponGroups.size > 0 ? weaponGroups : (weaponGroup !== undefined && weaponGroup >= 0 ? new Set([weaponGroup]) : null);
         if (groups) {
@@ -1316,7 +1570,17 @@ export class ClientApplication {
           for (const g of groups) {
             const gs = this.controlGroups.get(g);
             if (!gs || gs.cannonIds.length === 0) continue;
-            for (const id of gs.cannonIds) if (!allIds.includes(id)) allIds.push(id);
+            for (const id of gs.cannonIds) {
+              if (allIds.includes(id)) continue;
+              if (animBlocked.has(id)) continue; // gunport mid-animation — wait
+              // From the helm, gunport cannons require an NPC crew member stationed at them
+              const cannonMod = ship?.modules.find(m => m.id === id) ?? null;
+              if (cannonMod && ship && this.renderSystem.isGunportCannon(cannonMod, ship)) {
+                const hasNpc = ws!.npcs.some(n => n.shipId === ship.id && n.assignedWeaponId === id);
+                if (!hasNpc) continue; // no crew assigned — skip until pathfinding brings them here
+              }
+              allIds.push(id);
+            }
             if (gs.mode === 'freefire' || gs.mode === 'targetfire') skipAimCheck = true;
           }
           if (allIds.length > 0) {
@@ -1324,7 +1588,11 @@ export class ClientApplication {
             return;
           }
         }
-        this.networkManager.sendCannonFire(cannonIds, fireAll, ammoType ?? 0);
+        // Direct fire (player physically at the cannon): block only animation, no NPC check
+        const filteredIds = cannonIds?.filter(id => !animBlocked.has(id)) ?? cannonIds;
+        if (!filteredIds || filteredIds.length > 0) {
+          this.networkManager.sendCannonFire(filteredIds, fireAll, ammoType ?? 0);
+        }
       };
       this.inputManager.onForceReload = () => {
         const ammoType = this.inputManager?.selectedAmmoType ?? 0;
@@ -1336,6 +1604,42 @@ export class ClientApplication {
           const sid = this.inputManager.mountedCannonModuleId;
           if (sid !== null) this.renderSystem.updateStructureCannonReload(sid, 3000, ammoType);
         }
+      };
+
+      this.inputManager.onCycleRampFacing = (dir: 1 | -1) => {
+        this.renderSystem.cycleRampFacing(dir);
+      };
+
+      // R key while mounted at a cannon: toggle the gunport at that cannon's position
+      this.inputManager.onToggleGunportAtCannon = () => {
+        const ws = this.authoritativeWorldState || this.predictedWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
+        if (!me || me.carrierId === 0) return;
+        const ship = ws?.ships.find(s => s.id === me.carrierId);
+        if (!ship) return;
+        const cannonId = this.inputManager.mountedCannonModuleId;
+        if (cannonId === null) return;
+        const cannon = ship.modules.find(m => m.id === cannonId);
+        if (!cannon) return;
+        // Find the associated gunport via snap_idx (proximity check is unreliable
+        // because the cannon moves 40px inboard when stowed)
+        const cannonData = cannon.moduleData as { gunportSnapIdx?: number } | undefined;
+        const snapIdx = cannonData?.gunportSnapIdx;
+        if (snapIdx === undefined || snapIdx === 255) { console.log('🔳 No gunport linked to this cannon'); return; }
+        const gp = ship.modules.find(m => {
+          if (m.kind !== 'gunport') return false;
+          const gpData = m.moduleData as { snapIndex?: number } | undefined;
+          return gpData?.snapIndex === snapIdx;
+        });
+        if (!gp) { console.log('🔳 No gunport at this cannon'); return; }
+        this.networkManager.sendToggleGunport(ship.id, gp.id);
+        console.log(`🔳 [GUNPORT] R-key toggle gunport ${gp.id} at cannon ${cannonId}`);
+      };
+
+      // R key at helm: toggle gunports for all cannons in the active weapon group(s)
+      this.inputManager.onGroupGunportToggle = (groupIndices) => {
+        this.networkManager.sendGroupGunportToggle(groupIndices);
       };
 
       // Sail fiber repair: R key while hovering a damaged mast → consume repair kit, restore fibers
@@ -1368,6 +1672,30 @@ export class ClientApplication {
 
       // Hotbar slot selection — update locally for instant UI feedback, then sync server
       this.inputManager.onSlotSelect = (slot) => {
+        // In land build mode, digits 1-8 select the build schematic hotbar slot
+        if (this.uiManager?.inLandBuildMode && slot >= 0 && slot < 8) {
+          const kind = this.uiManager.landHotbarSlots[slot] ?? null;
+          // Toggle: re-clicking the active slot deselects it
+          this.buildSchematicKind = (this.buildSchematicKind === kind) ? null : kind;
+          this.renderSystem.setBuildSchematicKind(this.buildSchematicKind);
+          // Mutual exclusion: selecting a schematic clears the Plan Menu selection.
+          if (this.buildSchematicKind !== null) {
+            this.pendingLandBuildKind = null;
+            this.uiManager.clearPlanKind();
+          }
+          this.uiManager.selectedLandKind = this.buildSchematicKind;
+          this.checkBuildMode();
+          return;
+        }
+        // In ship build mode, digits 1-8 select the build schematic hotbar slot
+        // instead of the regular inventory hotbar slot
+        if (this.uiManager?.inShipBuildMode && slot >= 0 && slot < 8) {
+          this.uiManager.buildHotbarActiveSlot = slot;
+          if (this.uiManager.onBuildHotbarSlotChange) {
+            this.uiManager.onBuildHotbarSlotChange(slot, this.uiManager.buildHotbarSlots[slot] ?? null);
+          }
+          return;
+        }
         this.pendingActiveSlot = slot;
         const playerId = this.networkManager.getAssignedPlayerId();
         if (playerId !== null) {
@@ -1388,9 +1716,15 @@ export class ClientApplication {
           }
         }
         // Selecting a hotbar item deselects any build panel ghost kind
-        if (this.pendingGhostKind !== null) {
+        if (this.pendingGhostKind !== null || this.shipPlanMenuKind !== null) {
           this.pendingGhostKind = null;
+          this.shipPlanMenuKind = null;
           this.syncBuildModeState();
+        }
+        // Selecting a hotbar item also clears the land build panel kind (hotbar takes priority)
+        if (this.pendingLandBuildKind !== null) {
+          this.pendingLandBuildKind = null;
+          this.uiManager.setLandBuildMenuState(false, null);
         }
         // Re-evaluate build mode: plank in active slot → build mode on
         this.checkBuildMode();
@@ -1398,12 +1732,153 @@ export class ClientApplication {
 
       // Build placement: left-click in build mode → send place_plank / place_cannon / place_mast / replace_helm
       this.inputManager.onBuildPlace = (worldPos) => {
-        // Island structure placement (wooden floor or workbench)
-        if (this.islandBuildMode) {
+        // Island structure placement — add ghost marker instead of sending immediately
+        // Also enter this branch when a build schematic is active (defensive: islandBuildMode
+        // may not have been re-evaluated yet after a freshly-selected hotbar schematic).
+        if (this.islandBuildMode || this.buildSchematicKind !== null) {
           const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
           const pid = this.networkManager.getAssignedPlayerId();
           const p   = ws?.players.find(pl => pl.id === pid);
-          const kind = p?.inventory?.slots[p.inventory.activeSlot ?? 0]?.item;
+          const hotbarKind = p?.inventory?.slots[p?.inventory?.activeSlot ?? 0]?.item;
+
+          // ── Build Schematic Hotbar placement ─────────────────────────────
+          // If a build schematic is selected in the hotbar AND the cursor is
+          // hovering a matching plan ghost, consume resources and start construction.
+          const hoveredGhost = this.renderSystem.getHoveredLandGhost();
+          if (hoveredGhost && this.buildSchematicKind === hoveredGhost.kind) {
+            const entry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === hoveredGhost.kind);
+            const cost = entry?.cost ?? [];
+
+            // Helper: total of an item — checks inventory.resources for bulk resources, slots for others
+            const RES_KEYS = ['wood', 'fiber', 'metal', 'stone'];
+            const _haveItem = (item: string): number => {
+              const res = (p?.inventory as any)?.resources as Record<string, number> | undefined;
+              if (res && RES_KEYS.includes(item)) return res[item] ?? 0;
+              let total = 0;
+              for (const sl of (p?.inventory?.slots ?? [])) {
+                if (sl && (sl.item as string) === item) total += sl.quantity ?? 0;
+              }
+              return total;
+            };
+
+            // Check resources
+            let affordable = true;
+            const need: string[] = [];
+            for (const ing of cost) {
+              const have = _haveItem(ing.item);
+              if (have < ing.qty) {
+                affordable = false;
+                need.push(`${ing.qty - have}×${ing.item}`);
+              }
+            }
+
+            if (!affordable) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              console.log(`❌ [SCHEMATIC] Need resources: ${need.join(', ')}`);
+              return;
+            }
+
+            // Consume resources from client-predicted inventory
+            if (p) {
+              const res = (p.inventory as any).resources as Record<string, number> | undefined;
+              for (const ing of cost) {
+                if (res && RES_KEYS.includes(ing.item)) {
+                  res[ing.item] = Math.max(0, (res[ing.item] ?? 0) - ing.qty);
+                } else {
+                  let remaining = ing.qty;
+                  for (const sl of p.inventory.slots) {
+                    if (!sl || (sl.item as string) !== ing.item || remaining <= 0) continue;
+                    const take = Math.min(sl.quantity ?? 0, remaining);
+                    sl.quantity = (sl.quantity ?? 0) - take;
+                    if ((sl.quantity ?? 0) <= 0) { (sl as any).item = 'none'; sl.quantity = 0; }
+                    remaining -= take;
+                    if (remaining <= 0) break;
+                  }
+                }
+              }
+            }
+
+            // Send placement (starts at 10% HP), but do NOT remove the ghost plan yet
+            const gKind = hoveredGhost.kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            this.networkManager.sendPlaceStructure(gKind, hoveredGhost.worldPos.x, hoveredGhost.worldPos.y, hoveredGhost.rotation, true);
+            // Removal of the ghost plan will happen only on STRUCTURE_PLACED confirmation
+            console.log(`🏗️ [SCHEMATIC] Placed ${gKind} from plan — consumed resources (pending server confirmation)`);
+            return;
+          }
+
+          // ── Build Schematic free placement (no ghost hovered) ────────────────
+          // Schematic selected but cursor is not near a matching ghost plan → perform a
+          // real placement with resource check + consume + under_construction=true flag
+          // (server places structure at 10% HP and regenerates to full over time).
+          if (this.buildSchematicKind !== null) {
+            const sKind = this.buildSchematicKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            const sEntry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === sKind);
+            const sCost  = sEntry?.cost ?? [];
+
+            const sRES_KEYS = ['wood', 'fiber', 'metal', 'stone'];
+            const _haveItem2 = (item: string): number => {
+              const res = (p?.inventory as any)?.resources as Record<string, number> | undefined;
+              if (res && sRES_KEYS.includes(item)) return res[item] ?? 0;
+              let total = 0;
+              for (const sl of (p?.inventory?.slots ?? [])) {
+                if (sl && (sl.item as string) === item) total += sl.quantity ?? 0;
+              }
+              return total;
+            };
+            let sAffordable = true;
+            const sNeed: string[] = [];
+            for (const ing of sCost) {
+              const have = _haveItem2(ing.item);
+              if (have < ing.qty) { sAffordable = false; sNeed.push(`${ing.qty - have}×${ing.item}`); }
+            }
+            if (!sAffordable) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              console.log(`❌ [SCHEMATIC] Need resources: ${sNeed.join(', ')}`);
+              return;
+            }
+
+            if (p) {
+              const sRes = (p.inventory as any).resources as Record<string, number> | undefined;
+              for (const ing of sCost) {
+                if (sRes && sRES_KEYS.includes(ing.item)) {
+                  sRes[ing.item] = Math.max(0, (sRes[ing.item] ?? 0) - ing.qty);
+                } else {
+                  let remaining = ing.qty;
+                  for (const sl of p.inventory.slots) {
+                    if (!sl || (sl.item as string) !== ing.item || remaining <= 0) continue;
+                    const take = Math.min(sl.quantity ?? 0, remaining);
+                    sl.quantity = (sl.quantity ?? 0) - take;
+                    if ((sl.quantity ?? 0) <= 0) { (sl as any).item = 'none'; sl.quantity = 0; }
+                    remaining -= take;
+                    if (remaining <= 0) break;
+                  }
+                }
+              }
+            }
+
+            const sPos = sKind === 'wooden_floor'
+              ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
+              : (sKind === 'wall' || sKind === 'door_frame')
+              ? this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y)
+              : sKind === 'door'
+              ? this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y)
+              : sKind === 'wood_ceiling'
+              ? this.renderSystem.computeSnappedCeilingPos(worldPos.x, worldPos.y)
+              : { x: worldPos.x, y: worldPos.y };
+            const sRot = sKind === 'wooden_floor'
+              ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : (sKind === 'workbench' || sKind === 'shipyard' || sKind === 'cannon') ? this.islandBuildRotationDeg
+              : sKind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
+              : 0;
+            this.networkManager.sendPlaceStructure(this.applyWallVariant(sKind), sPos.x, sPos.y, sRot, true);
+            console.log(`🏗️ [SCHEMATIC] Placed ${this.applyWallVariant(sKind)} @ (${sPos.x.toFixed(0)}, ${sPos.y.toFixed(0)}) rot=${sRot} — consumed resources`);
+            return;
+          }
+
+          // ── Plan Menu placement ──────────────────────────────────────────
+          // Place a ghost plan marker for the selected plan kind (Plan Menu).
+          // Falls back to the equipped hotbar item so holding a land item still works.
+          const kind = this.pendingLandBuildKind ?? hotbarKind;
           if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
@@ -1415,13 +1890,70 @@ export class ClientApplication {
               : kind === 'wood_ceiling'
               ? this.renderSystem.computeSnappedCeilingPos(worldPos.x, worldPos.y)
               : { x: worldPos.x, y: worldPos.y };
-            // Only floors, workbenches, ceilings, and cannons carry rotation
-            const rot = kind === 'wooden_floor'
-              ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') ? this.islandBuildRotationDeg
-              : kind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : 0;
-            this.networkManager.sendPlaceStructure(kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', pos.x, pos.y, rot);
+            // Snap rotation for all structures that have a defined orientation
+            let rot = 0;
+            if (kind === 'wooden_floor') {
+              rot = this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg;
+            } else if (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') {
+              rot = this.islandBuildRotationDeg;
+            } else if (kind === 'wood_ceiling') {
+              rot = this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg;
+            } else if (kind === 'wall' || kind === 'door_frame') {
+              // Snap to the floor edge's rotation
+              // Find the snapped wall position and match the nearest floor's rotation
+              const snapped = this.renderSystem.computeSnappedWallPos(worldPos.x, worldPos.y);
+              // Find the supporting floor at this snapped position
+              const bases = this.renderSystem.getPlacedStructures();
+              let foundRot = this.islandBuildRotationDeg;
+              for (const s of bases) {
+                if (s.type === 'wooden_floor') {
+                  const rad = (s.rotation ?? 0) * Math.PI / 180;
+                  const c = Math.cos(rad), sn = Math.sin(rad);
+                  const EDGES = [
+                    { ldx: 0, ldy: -25 }, { ldx: 0, ldy: 25 },
+                    { ldx: -25, ldy: 0 }, { ldx: 25, ldy: 0 },
+                  ];
+                  for (const e of EDGES) {
+                    const ex = s.x + e.ldx * c - e.ldy * sn;
+                    const ey = s.y + e.ldx * sn + e.ldy * c;
+                    if (Math.abs(snapped.x - ex) < 5 && Math.abs(snapped.y - ey) < 5) {
+                      foundRot = s.rotation ?? 0;
+                    }
+                  }
+                }
+              }
+              rot = foundRot;
+            } else if (kind === 'door') {
+              // Snap to the door_frame's rotation
+              const snapped = this.renderSystem.computeSnappedDoorPos(worldPos.x, worldPos.y);
+              const bases = this.renderSystem.getPlacedStructures();
+              let foundRot = this.islandBuildRotationDeg;
+              for (const s of bases) {
+                if (s.type === 'door_frame' && Math.abs(snapped.x - s.x) < 5 && Math.abs(snapped.y - s.y) < 5) {
+                  foundRot = s.rotation ?? 0;
+                }
+              }
+              rot = foundRot;
+            }
+            const capturedKind = this.applyWallVariant(kind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
+            const capturedPos  = { x: pos.x, y: pos.y };
+            const capturedRot  = rot;
+            // Reject structurally invalid plans (e.g. wall without a floor)
+            if (!this.renderSystem.isValidLandPlanPlacement(capturedKind, capturedPos.x, capturedPos.y)) {
+              console.log(`🚫 [LAND PLAN] Invalid placement: ${capturedKind} @ (${capturedPos.x.toFixed(0)}, ${capturedPos.y.toFixed(0)}) — missing required support structure`);
+              return;
+            }
+            const id = `land-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            this.landGhostEntries.push({
+              id,
+              kind: capturedKind,
+              worldPos: capturedPos,
+              rotation: capturedRot,
+              buildAction: () => this.networkManager.sendPlaceStructure(capturedKind, capturedPos.x, capturedPos.y, capturedRot),
+            });
+            this.renderSystem.setLandGhostPlacements(this.landGhostEntries);
+            this.uiManager.setLandGhostCounts(this._computeLandGhostCounts());
+            console.log(`🏗️ [LAND PLAN] Added ghost #${this.landGhostEntries.length}: ${capturedKind} @ (${capturedPos.x.toFixed(0)}, ${capturedPos.y.toFixed(0)}) rot=${capturedRot}`);
           }
           return;
         }
@@ -1453,15 +1985,82 @@ export class ClientApplication {
         const helmSlot = this.renderSystem.getHoveredHelmSlot();
         if (helmSlot) {
           console.log(`🔧 [BUILD] Replacing helm on ship ${helmSlot.ship.id}`);
-          this.networkManager.sendReplaceHelm(helmSlot.ship.id);
+          this.networkManager.sendReplaceHelm(helmSlot.ship.id, this._buildResourceSource);
           return;
         }
-        // Deck replacement (high priority — only one deck per ship)
+        // Deck placement — lower deck first, upper deck once lower is present
         const deckSlot = this.renderSystem.getHoveredDeckSlot();
         if (deckSlot) {
-          console.log(`🪵 [BUILD] Placing deck on ship ${deckSlot.ship.id}`);
-          this.networkManager.sendPlaceDeck();
+          const lvlName = deckSlot.deckLevel === 0 ? 'lower' : 'upper';
+          console.log(`🪵 [BUILD] Placing ${lvlName} deck on ship ${deckSlot.ship.id}`);
+          this.networkManager.sendPlaceDeck(deckSlot.deckLevel, this._buildResourceSource);
           return;
+        }
+        // Ramp placement — snaps to predefined snap points on the ship
+        const rampSlot = this.renderSystem.getHoveredRampSlot();
+        if (rampSlot) {
+          if (this.renderSystem.isInHatchBuildMode()) {
+            console.log(`🪟 [BUILD] Placing hatch cover at snap ${rampSlot.snapIndex} on ship ${rampSlot.ship.id}`);
+            this.networkManager.sendPlaceHatchCover(rampSlot.ship.id, rampSlot.snapIndex, this._buildResourceSource);
+          } else {
+            const facing = this.renderSystem.getRampFacingRadians();
+            console.log(`🪜 [BUILD] Placing ramp at snap ${rampSlot.snapIndex} (${rampSlot.localPos.x},${rampSlot.localPos.y}) facing ${facing.toFixed(2)}rad on ship ${rampSlot.ship.id}`);
+            this.networkManager.sendPlaceRamp(rampSlot.ship.id, rampSlot.snapIndex, facing, this._buildResourceSource);
+          }
+          return;
+        }
+        // Gunport placement — snaps to predefined positions on the hull planks
+        const gunportSnap = this.renderSystem.getHoveredGunportSnap();
+        if (gunportSnap) {
+          console.log(`🔳 [BUILD] Placing gunport at snap ${gunportSnap.snapIndex} on ship ${gunportSnap.ship.id}`);
+          this.networkManager.sendPlaceGunport(gunportSnap.ship.id, gunportSnap.snapIndex, this._buildResourceSource);
+          return;
+        }
+        // Chest placement — free position on ship deck, cursor world→local transform
+        if (this.renderSystem.isInChestBuildMode()) {
+          const ws2 = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          if (ws2 && worldPos) {
+            let nearestShip2 = null as (typeof ws2.ships[0]) | null;
+            let nearestDist2 = Infinity;
+            for (const s of ws2.ships) {
+              const d = Math.hypot(worldPos.x - s.position.x, worldPos.y - s.position.y);
+              if (d < nearestDist2) { nearestDist2 = d; nearestShip2 = s; }
+            }
+            if (nearestShip2 && nearestDist2 < 300) {
+              const dx2 = worldPos.x - nearestShip2.position.x;
+              const dy2 = worldPos.y - nearestShip2.position.y;
+              const cosR2 = Math.cos(-nearestShip2.rotation);
+              const sinR2 = Math.sin(-nearestShip2.rotation);
+              const lx2   =  dx2 * cosR2 - dy2 * sinR2;
+              const ly2   =  dx2 * sinR2 + dy2 * cosR2;
+              console.log(`📦 [BUILD] Placing chest at (${lx2.toFixed(0)}, ${ly2.toFixed(0)}) on ship ${nearestShip2.id}`);
+              this.networkManager.sendPlaceChestAt(nearestShip2.id, lx2, ly2, 0, this.renderSystem.playerDeckLevel, this._buildResourceSource);
+              return;
+            }
+          }
+        }
+        // Bed placement — free position on ship deck
+        if (this.renderSystem.isInBedBuildMode()) {
+          const ws2 = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+          if (ws2 && worldPos) {
+            let nearestShip2 = null as (typeof ws2.ships[0]) | null;
+            let nearestDist2 = Infinity;
+            for (const s of ws2.ships) {
+              const d = Math.hypot(worldPos.x - s.position.x, worldPos.y - s.position.y);
+              if (d < nearestDist2) { nearestDist2 = d; nearestShip2 = s; }
+            }
+            if (nearestShip2 && nearestDist2 < 300) {
+              const dx2 = worldPos.x - nearestShip2.position.x;
+              const dy2 = worldPos.y - nearestShip2.position.y;
+              const cosR2 = Math.cos(-nearestShip2.rotation);
+              const sinR2 = Math.sin(-nearestShip2.rotation);
+              const lx2   =  dx2 * cosR2 - dy2 * sinR2;
+              const ly2   =  dx2 * sinR2 + dy2 * cosR2;
+              console.log(`🛏️ [BUILD] Placing bed at (${lx2.toFixed(0)}, ${ly2.toFixed(0)}) on ship ${nearestShip2.id}`);
+              this.networkManager.sendPlaceBedAt(nearestShip2.id, lx2, ly2, this.buildRotationDeg * Math.PI / 180, this.renderSystem.playerDeckLevel, this._buildResourceSource);
+              return;
+            }
+          }
         }
         // Mast placement build mode
         const mastSlot = this.renderSystem.getHoveredMastSlot();
@@ -1477,13 +2076,33 @@ export class ClientApplication {
           this.networkManager.sendPlaceCannon(cannonSlot.ship.id);
           return;
         }
+        // Cannon snap to gunport position
+        const gpSnap = this.renderSystem.getHoveredGunportCannonSnap();
+        if (gpSnap) {
+          if (!this._consumeShipBuildResources('cannon')) return;
+          const gp = gpSnap.module;
+          const rot = gp.localPos.y < 0 ? 0 : Math.PI;
+          // Offset cannon 40px toward ship centre (inward from hull at y=±90 → cannon at y=±50)
+          const CANNON_INWARD_OFFSET = 40;
+          const cannonY = gp.localPos.y < 0
+            ? gp.localPos.y + CANNON_INWARD_OFFSET
+            : gp.localPos.y - CANNON_INWARD_OFFSET;
+          const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
+          const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
+          console.log(`🔳 [BUILD] Placing cannon at gunport ${gp.id} snap=${snapIdx ?? 'none'} pos (${gp.localPos.x.toFixed(0)}, ${cannonY.toFixed(0)}) rot=${(rot * 180 / Math.PI).toFixed(0)}°`);
+          this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, 0 /* gunport cannons are always lower deck */, this._buildResourceSource);
+          return;
+        }
         // Plank placement build mode
         const slot = this.renderSystem.getHoveredPlankSlot();
         if (slot) {
           console.log(`🔨 [BUILD] Placing plank in slot ${slot.sectionName}[${slot.segmentIndex}] on ship ${slot.ship.id}`);
-          this.networkManager.sendPlacePlank(slot.ship.id, slot.sectionName, slot.segmentIndex);
+          this.networkManager.sendPlacePlank(slot.ship.id, slot.sectionName, slot.segmentIndex, this._buildResourceSource);
         }
       };
+
+      // Permanent gunport cannon ghosts are always clickable — fire onBuildPlace even outside build mode.
+      this.inputManager.checkGunportSnap = () => this.renderSystem.getHoveredGunportCannonSnap() !== null;
 
       // Build menu toggle (B key) — opens/closes the left-panel build menu.
       // Works anytime the player is on a ship deck.
@@ -1492,31 +2111,38 @@ export class ClientApplication {
         this.combatMode = !this.combatMode;
       };
       this.inputManager.onBuildModeToggle = () => {
-        if (this.buildMenuOpen || this.explicitBuildMode) {
+        if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) {
           // Close everything via the single exit helper
           this.exitAllBuildModes();
           console.log('🏗️ [BUILD MENU] CLOSED');
         } else {
-          // Open — require player to be on a ship
           const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
           const playerId = this.networkManager?.getAssignedPlayerId();
           const player = ws?.players.find(p => p.id === playerId);
-          if (!player?.carrierId) {
-            console.log('🏗️ [BUILD MENU] Cannot open — not on a ship');
-            return;
+          if (player?.carrierId) {
+            // On a ship — open ship ghost build panel; default resource source to 'auto'
+            this.buildMenuOpen = true;
+            this.inputManager.buildMenuOpen = true;
+            this._buildResourceSource = 'auto';
+            this.uiManager.buildResourceSource = 'auto';
+            this.uiManager.buildHotbarActiveSlot = -1;
+            // If a buildable item is in the hotbar, also enter free-placement mode
+            const activeSlot = player.inventory?.activeSlot ?? 0;
+            const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
+            if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
+              this.explicitBuildMode = true;
+              this.buildSelectedItem = activeItem as 'cannon' | 'sail' | 'swivel';
+            }
+            console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
+          } else {
+            // On land — open land structure build panel
+            this.landBuildMenuOpen = true;
+            this.uiManager.setLandBuildMenuState(true, this.pendingLandBuildKind);
+            console.log('🏗️ [LAND BUILD] OPENED');
           }
-          this.buildMenuOpen = true;
-          this.inputManager.buildMenuOpen = true;
-          // If a buildable item is in the hotbar, also enter free-placement mode
-          const activeSlot = player.inventory?.activeSlot ?? 0;
-          const activeItem = player.inventory?.slots[activeSlot]?.item ?? 'none';
-          if (activeItem === 'cannon' || activeItem === 'sail' || activeItem === 'swivel') {
-            this.explicitBuildMode = true;
-            this.buildSelectedItem = activeItem as 'cannon' | 'sail' | 'swivel';
-          }
-          console.log(`🏗️ [BUILD MENU] OPENED${this.explicitBuildMode ? ` (free-place: ${this.buildSelectedItem})` : ' (plan mode)'}`);
         }
         this.syncBuildModeState();
+        this.checkBuildMode();
       };
 
       // Build rotation (R/Q key in build modes)
@@ -1530,11 +2156,38 @@ export class ClientApplication {
         }
       };
 
-      // Right-click in build menu: cancel pending ghost or remove nearest placed ghost
+      this.inputManager.onShowResourcePanel = () => {
+        this.uiManager.flashResourcePanel();
+      };
+
+      // T while placing a wall: toggle between a solid wall and a door frame variant
+      this.inputManager.onBuildVariantToggle = () => {
+        this.toggleWallVariant();
+      };
+
+      // Right-click in build menu or island build mode: cancel ghost or remove nearest
+      this.inputManager.onToggleBuildResourceSource = () => {
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const pid = this.networkManager.getAssignedPlayerId();
+        const player = ws?.players.find(p => p.id === pid);
+        if (!player?.carrierId) return; // only meaningful while on a ship
+        this._buildResourceSource = this._buildResourceSource === 'auto' ? 'ship'
+                                    : this._buildResourceSource === 'ship' ? 'pack' : 'auto';
+        this.uiManager.buildResourceSource = this._buildResourceSource;
+        console.log(`🏗️ [BUILD] Resource source → ${this._buildResourceSource}`);
+      };
+
+      // Right-click in build menu or island build mode: cancel ghost or remove nearest
       this.inputManager.onBuildRightClick = (worldPos: Vec2) => {
-        if (this.pendingGhostKind !== null) {
+        // Island build mode OR plan menu open: remove nearest land ghost plan marker
+        if (this.inputManager.islandBuildMode || this.landBuildMenuOpen) {
+          this.removeNearestLandGhost(worldPos);
+          return;
+        }
+        if (this.pendingGhostKind !== null || this.shipPlanMenuKind !== null) {
           // Cancel the ghost currently attached to the cursor
           this.pendingGhostKind = null;
+          this.shipPlanMenuKind = null;
           this.syncBuildModeState();
           console.log('🏗️ [GHOST] Cancelled pending ghost');
         } else {
@@ -1542,7 +2195,12 @@ export class ClientApplication {
           this.removeNearestGhost(worldPos);
         }
       };
-      
+
+      // Enter key in island build mode: confirm all land ghost plans and send to server
+      this.inputManager.onBuildConfirm = () => {
+        if (this.landGhostEntries.length > 0) this.confirmAllLandGhosts();
+      };
+
       // Set up scroll-wheel zoom — accumulate into _userZoomMul so AOI base zoom
       // remains separate and the two combine correctly. We update only targetZoom
       // here; the per-frame lerp (see updateCamera) smoothly animates camera.zoom
@@ -1582,12 +2240,16 @@ export class ClientApplication {
       // Let UI panels (e.g. manning priority panel) consume clicks before game logic
       this.inputManager.onUIClick = (x, y) => {
         // Rename dialog is topmost — check first
+        if (this.confirmDialog.handleClick(x, y)) return true;
+        if (this.groupRenameDialog?.handleClick(x, y)) return true;
         if (this.renameDialog?.handleClick(x, y)) return true;
         if (this.shipyardMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         const _wsClick = this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
         const _pidClick = this.networkManager.getAssignedPlayerId();
         const _invClick = _wsClick?.players.find(p => p.id === _pidClick)?.inventory ?? null;
         if (this.craftingMenu.handleClick(x, y, this.canvas.width, this.canvas.height, _invClick)) return true;
+        if (this.chestMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
+        if (this.landChestMenu.handleClick(x, y, this.canvas.width, this.canvas.height)) return true;
         if (this.uiManager?.handleClick(x, y)) return true;
         return false;
       };
@@ -1595,90 +2257,63 @@ export class ClientApplication {
       // Forward mouse-move/up to world map for drag-pan
       this.inputManager.onUIMouseMove = (x, y) => {
         if (this.craftingMenu.visible) this.craftingMenu.handleMouseMove(x, y);
+        if (this.landChestMenu.visible) this.landChestMenu.handleMouseMove(x, y);
+        if (this.chestMenu.visible) this.chestMenu.handleMouseMove(x, y);
         this.uiManager?.handleWorldMapMouseMove(x, y);
       };
       this.inputManager.onUIMouseUp = (x, y) => {
+        this.chestMenu.handleMouseUp(x, y);
+        this.landChestMenu.handleMouseUp(x, y, this.canvas.width, this.canvas.height);
         this.uiManager?.handleWorldMapMouseUp(x, y);
       };
       // Forward wheel to world map zoom (returns true when map is visible)
       this.inputManager.onUIWheel = (deltaY, x, y) => {
         if (this.craftingMenu.visible) return this.craftingMenu.handleWheel(deltaY);
+        if (this.chestMenu.visible) return true; // consume wheel so camera doesn't zoom
+        if (this.landChestMenu.visible) return true; // consume wheel so camera doesn't zoom
         return this.uiManager?.handleWorldMapWheel(deltaY, x, y) ?? false;
       };
 
       // Ctrl+left-click: assign/remove cannon from the active weapon group
-      //   — but if an NPC is hovered, open an NPC command radial instead
+      //   — but if an NPC is hovered, enter Move To mode directly
+      //   — if nothing is hovered, start a box-select drag
       this.inputManager.onGroupAssign = () => {
-        // ── Ctrl+click on an NPC → command radial ───────────────────────────
+        // ── Ctrl+click on an NPC → enter Move To mode immediately ───────────
         const hovNpcCtrl = this.renderSystem.getHoveredNpc();
         if (hovNpcCtrl) {
           const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
           const myId = this.networkManager.getAssignedPlayerId();
           const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
           const myCompany = me?.companyId ?? 0;
-          const myIdCtrl = myId;
-          // Only command your own crew (for COMPANY_SOLO NPCs check ownerId)
           const isMyNpcCtrl = hovNpcCtrl.companyId !== COMPANY_UNCLAIMED && (
             hovNpcCtrl.companyId === COMPANY_SOLO
-              ? hovNpcCtrl.ownerId === myIdCtrl
+              ? hovNpcCtrl.ownerId === myId
               : hovNpcCtrl.companyId === myCompany && myCompany !== 0
           );
           if (!isMyNpcCtrl) return;
 
-          // Build radial options
-          const cmdOpts: Array<{ id: string; label: string }> = [];
-          if (hovNpcCtrl.assignedWeaponId !== 0) {
-            // At a module — show lock toggle
-            cmdOpts.push(hovNpcCtrl.locked
-              ? { id: 'unlock', label: '🔓 Unlock' }
-              : { id: 'lock',   label: '🔒 Lock at Post' });
-          }
-          cmdOpts.push({ id: 'move_to', label: '📍 Move To...' });
-
-          if (cmdOpts.length === 1 && cmdOpts[0].id === 'move_to') {
-            // Only one option — execute immediately
-            this._moveToNpcId = hovNpcCtrl.id;
-            this.renderSystem.setMoveToSourceNpc(hovNpcCtrl.id);
-            this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
-            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          // Ignored NPCs cannot be moved
+          if (this._npcIgnoreSet.has(hovNpcCtrl.id)) {
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            console.log(`⛔ NPC ${hovNpcCtrl.id} (${hovNpcCtrl.name}) ignores commands`);
             return;
           }
 
-          const mp = this.inputManager.getMouseScreenPosition();
-          this._radialMenu.open(mp.x, mp.y, cmdOpts);
-
-          // Wait for the next pointerup / mouseup to resolve the selection
-          const onUp = () => {
-            window.removeEventListener('pointerup', onUp);
-            const selected = this._radialMenu.getHoveredId();
-            this._radialMenu.close();
-            if (!selected) {
-              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
-              return;
-            }
-            const npc = ws?.npcs.find(n => n.id === hovNpcCtrl.id);
-            if (!npc) return;
-            if (selected === 'lock') {
-              this.networkManager.sendNpcLock(npc.id, true);
-              console.log(`🔒 Locking NPC ${npc.id} (${npc.name}) at post`);
-            } else if (selected === 'unlock') {
-              this.networkManager.sendNpcLock(npc.id, false);
-              console.log(`🔓 Unlocking NPC ${npc.id} (${npc.name})`);
-            } else if (selected === 'move_to') {
-              this._moveToNpcId = npc.id;
-              this.renderSystem.setMoveToSourceNpc(npc.id);
-              this.renderSystem.setMoveToHint(`Moving ${npc.name} — click a module, ship, or open water`);
-              console.log(`📍 Move To mode for NPC ${npc.id} (${npc.name})`);
-            }
-          };
-          window.addEventListener('pointerup', onUp);
+          // Enter Move To mode immediately (server clears task_locked on npc_move_to_pos)
+          this._selectedNpcIds = [];
+          this.renderSystem.selectedNpcIds = new Set();
+          this._moveToNpcId = hovNpcCtrl.id;
+          this.renderSystem.setMoveToSourceNpc(hovNpcCtrl.id);
+          this.renderSystem.setMoveToHint(`Moving ${hovNpcCtrl.name} — click a module, ship, or open water`);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           return;
         }
 
         // ── Default: cannon group assignment ────────────────────────────────
         const hovered = this.renderSystem.getHoveredModule();
         if (!hovered) {
-          console.warn(`⚠️ GroupAssign: no module hovered`);
+          // Nothing hovered — start box-select drag
+          this._startBoxSelect();
           return;
         }
         if (hovered.module.kind !== 'cannon' && hovered.module.kind !== 'swivel') {
@@ -1744,12 +2379,61 @@ export class ClientApplication {
       };
 
       // Left-click while mounted: Move To mode takes priority over cannon fire
-      this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null;
+      this.inputManager.onBeforeLeftClick = () => this._moveToNpcId !== null || this._selectedNpcIds.length > 0;
+      // Suppress all InputManager mouse logic while the radial menu is open.
+      this.inputManager.onBeforeMouseInput = () => this._radialMenu.isOpen;
 
-      // Right-click: cancel Move To mode before any other right-click handling
+      // Ctrl+right-click on an NPC: cycle normal → ignore → locked (at module) → normal
+      this.inputManager.onNpcStateCycle = () => {
+        const hovNpc = this.renderSystem.getHoveredNpc();
+        if (!hovNpc) {
+          // No NPC hovered — fall back to group-assign behaviour
+          if (this.inputManager) this.inputManager.onGroupAssign?.();
+          return;
+        }
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? null;
+        const myCompany = me?.companyId ?? 0;
+        const isMine = hovNpc.companyId !== 0 && (
+          hovNpc.companyId === 0 /* COMPANY_SOLO hack */ ? hovNpc.ownerId === myId
+            : hovNpc.companyId === myCompany && myCompany !== 0
+        ) || (hovNpc.ownerId !== 0 && hovNpc.ownerId === myId);
+        if (!isMine) return;
+
+        const isIgnored = this._npcIgnoreSet.has(hovNpc.id);
+        const isLocked  = hovNpc.locked;
+        const atModule  = hovNpc.assignedWeaponId !== 0;
+
+        if (!isIgnored && !isLocked) {
+          // Normal → Ignore commands
+          this._npcIgnoreSet.add(hovNpc.id);
+          console.log(`🚫 NPC ${hovNpc.id} (${hovNpc.name}) → ignore commands`);
+        } else if (isIgnored && !isLocked) {
+          if (atModule) {
+            // Ignore → Locked at station
+            this._npcIgnoreSet.delete(hovNpc.id);
+            this.networkManager.sendNpcLock(hovNpc.id, true);
+            console.log(`🔒 NPC ${hovNpc.id} (${hovNpc.name}) → locked at station`);
+          } else {
+            // No module — Ignore → Normal
+            this._npcIgnoreSet.delete(hovNpc.id);
+            console.log(`✅ NPC ${hovNpc.id} (${hovNpc.name}) → normal`);
+          }
+        } else if (isLocked) {
+          // Locked → Normal (unlock; also clear ignore)
+          this.networkManager.sendNpcLock(hovNpc.id, false);
+          this._npcIgnoreSet.delete(hovNpc.id);
+          console.log(`✅ NPC ${hovNpc.id} (${hovNpc.name}) → normal (unlocked)`);
+        }
+      };
+
+      // Right-click: cancel Move To / box-select mode before any other right-click handling
       this.inputManager.onBeforeRightClick = () => {
-        if (this._moveToNpcId !== null) {
+        if (this._moveToNpcId !== null || this._selectedNpcIds.length > 0) {
           this._moveToNpcId = null;
+          this._selectedNpcIds = [];
+          this.renderSystem.selectedNpcIds = new Set();
           this.renderSystem.clearMoveToHint();
           return true; // consume — don't aim, retarget, etc.
         }
@@ -1908,6 +2592,12 @@ export class ClientApplication {
         this.commandConsole.pushResponse(text, success ? 'response' : 'error');
         // Don't auto-open — the player can re-open with / to see the log
       };
+      this.networkManager.onChatMessage = (channel, senderName, text) => {
+        this.chatBox.addMessage(channel as import('./ui/ChatBox.js').ChatChannel, senderName, text);
+      };
+      this.chatBox.onSend = (channel, text) => {
+        this.networkManager.sendChatMessage(channel, text);
+      };
       this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
         // Snap the local player position if it's us being teleported
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
@@ -1921,6 +2611,14 @@ export class ClientApplication {
       
       // Initialize UI System
       this.uiManager = new UIManager(this.canvas, this.config);
+
+      // Exit free-camera mode whenever any menu is opened
+      this.uiManager.onMenuOpen = () => {
+        if (this._freeCameraMode) {
+          this._freeCameraMode = false;
+          this.inputManager.freeCameraMode = false;
+        }
+      };
 
       // Wire crew assignment changes from the manning panel to the server
       this.uiManager.setCrewAssignmentCallback((shipId, assignments) => {
@@ -1944,6 +2642,22 @@ export class ClientApplication {
 
       this.uiManager.setShipRenameRequestCallback((shipId, currentName) => {
         this.renameDialog.open(shipId, currentName);
+      });
+
+      // Wire weapon-group rename rows in the ship settings panel
+      this.uiManager.setGroupRenameCallback((shipId, groupIndex, currentName) => {
+        const grp = this.controlGroups.get(groupIndex);
+        this.groupRenameDialog.open(groupIndex, grp?.name ?? currentName, grp?.name || `G${groupIndex + 1}`);
+      });
+
+      // Wire deck demolish buttons in the ship menu — confirm before sending to server
+      this.uiManager.setShipDemolishDeckCallback((shipId, moduleId, deckLevel) => {
+        const deckName = deckLevel === 1 ? 'Upper' : 'Lower';
+        this.confirmDialog.open(
+          `Demolish ${deckName} Deck?`,
+          `This will destroy all modules on the ${deckName.toLowerCase()} deck. This cannot be undone.`,
+          () => { this.networkManager.sendDemolishModule(shipId, moduleId); },
+        );
       });
 
       // Wire Leave Company button in the company menu — moves player back to Solo
@@ -1977,6 +2691,12 @@ export class ClientApplication {
         this.networkManager.sendPlayerStatUpgrade(stat);
       });
 
+      // Request schematic list when the player menu opens so the Schematics tab
+      // shows the player's current quality blueprints without needing a workbench.
+      this.uiManager.onPlayerMenuOpen = () => {
+        this.networkManager.sendRequestSchematics();
+      };
+
       this.uiManager.onPlayerLevelUp = () => {
         this.networkManager.sendPlayerLevelUp();
       };
@@ -1985,7 +2705,7 @@ export class ClientApplication {
       this.uiManager.syncPlayerLevelUpCallback();
 
       // Wire respawn confirmation: flash white, snap camera, send network request immediately
-      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY) => {
+      this.uiManager.setRespawnConfirmedCallback((shipId, worldX, worldY, islandId, spawnX, spawnY, bedRespawn) => {
         // 1. Hold screen at full white
         this.uiManager.triggerWhiteFlash();
         this.uiManager.closeRespawnScreen();
@@ -1996,7 +2716,7 @@ export class ClientApplication {
         }
 
         // 3. Send network request immediately
-        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId);
+        this.networkManager.sendRespawnRequest(shipId, worldX, worldY, islandId, bedRespawn);
       });
 
       // Hotbar left-click slot selection
@@ -2009,6 +2729,98 @@ export class ClientApplication {
         const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
         const pid = this.networkManager.getAssignedPlayerId();
         return ws?.players.find(p => p.id === pid)?.inventory ?? null;
+      };
+
+      // Supply chest resources for the resource panel.
+      // • On a ship: shows ship chest modules only if at least one chest exists.
+      // • On land: shows nearby land chest (PlacedStructure type='chest') resources.
+      this.uiManager.getShipChestResources = () => {
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        if (!ws) return null;
+        const pid    = this.networkManager.getAssignedPlayerId();
+        const player = ws.players.find(p => p.id === pid);
+
+        // ── Case 1: player is on a ship ──────────────────────────────────
+        if (player?.carrierId) {
+          const ship = ws.ships.find(s => s.id === player.carrierId);
+          if (!ship) return null;
+          if (!ship.modules.some(m => m.kind === 'chest')) return null;
+          const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+          for (const mod of ship.modules) {
+            const data = mod.moduleData;
+            if (data?.kind === 'chest') {
+              totals.wood  += data.wood  ?? 0;
+              totals.fiber += data.fiber ?? 0;
+              totals.metal += data.metal ?? 0;
+              totals.stone += data.stone ?? 0;
+            }
+          }
+          return totals;
+        }
+
+        // ── Case 2: player is on land — aggregate nearby territory chests ─
+        if (player) {
+          const LAND_CHEST_RANGE_SQ = 600 * 600;
+          const structs = this.renderSystem.getPlacedStructures();
+          const totals  = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+          let found = false;
+          for (const s of structs) {
+            if (s.type !== 'chest' || !s.chestResources) continue;
+            const dx = s.x - player.position.x;
+            const dy = s.y - player.position.y;
+            if (dx * dx + dy * dy > LAND_CHEST_RANGE_SQ) continue;
+            found = true;
+            totals.wood  += s.chestResources.wood  ?? 0;
+            totals.fiber += s.chestResources.fiber ?? 0;
+            totals.metal += s.chestResources.metal ?? 0;
+            totals.stone += s.chestResources.stone ?? 0;
+          }
+          return found ? totals : null;
+        }
+
+        return null;
+      };
+
+      // Supply land-chest resources accessible from a nearby shipyard.
+      // Only applies when the player is on a ship within range of a land shipyard.
+      this.uiManager.getShipyardResources = () => {
+        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        if (!ws) return null;
+        const pid    = this.networkManager.getAssignedPlayerId();
+        const player = ws.players.find(p => p.id === pid);
+        if (!player?.carrierId) return null;
+        const ship = ws.ships.find(s => s.id === player.carrierId);
+        if (!ship) return null;
+
+        const YARD_RANGE_SQ = 500 * 500;
+        const structs = this.renderSystem.getPlacedStructures();
+
+        // Find shipyards within range of the ship
+        const nearYards = structs.filter(s => {
+          if (s.type !== 'shipyard') return false;
+          const dx = s.x - ship.position.x;
+          const dy = s.y - ship.position.y;
+          return dx * dx + dy * dy <= YARD_RANGE_SQ;
+        });
+        if (nearYards.length === 0) return null;
+
+        // Aggregate land chest resources near any of those shipyards
+        const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        let found = false;
+        for (const yard of nearYards) {
+          for (const s of structs) {
+            if (s.type !== 'chest' || !s.chestResources) continue;
+            const dx = s.x - yard.x;
+            const dy = s.y - yard.y;
+            if (dx * dx + dy * dy > YARD_RANGE_SQ) continue;
+            found = true;
+            totals.wood  += s.chestResources.wood  ?? 0;
+            totals.fiber += s.chestResources.fiber ?? 0;
+            totals.metal += s.chestResources.metal ?? 0;
+            totals.stone += s.chestResources.stone ?? 0;
+          }
+        }
+        return found ? totals : null;
       };
 
       // Inventory drag-and-drop swap
@@ -2043,6 +2855,11 @@ export class ClientApplication {
         }
         this.networkManager.sendDropItem(fromSlot);
         if (_dropLabel && _dropPos) this.renderSystem.spawnResourcePickup(_dropPos, _dropLabel, '#e07070');
+      };
+
+      // Drop resources by dragging a resource chip outside the panel
+      this.uiManager.playerMenu.onDropResources = (kind, amount) => {
+        this.networkManager.sendDropResources(kind, amount);
       };
 
       // Hand-craft from inventory (no workbench needed)
@@ -2180,7 +2997,7 @@ export class ClientApplication {
                 if (d < bestDist) { bestDist = d; killerShip = s; }
               }
             }
-            const killerName = killerShip ? (killerShip.shipName || 'Brigantine') : null;
+            const killerName = killerShip ? (killerShip.shipType === 99 ? `Ghost Ship - Level ${killerShip.npcLevel ?? 1}` : (killerShip.shipName || 'Brigantine')) : null;
             if (killerName) {
               let targetName: string;
               if (entityType === 'player') {
@@ -2304,6 +3121,7 @@ export class ClientApplication {
       };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
+        const _sdLastHp = this.renderSystem.getPlacedStructureById(id)?.hp ?? 3000;
         this._structureCompanyMap.delete(id);
         this._structureLastDamagedAt.delete(id);
         this.renderSystem.removePlacedStructure(id);
@@ -2315,7 +3133,7 @@ export class ClientApplication {
           const _sdMyComp = _sdMyId !== null ? (_sdWs?.players.find(p => p.id === _sdMyId)?.companyId ?? -1) : -1;
           const _sdTeam: DamageTeam =
             _sdMyComp > 0 && _sdComp === _sdMyComp ? 'enemy' : 'friendly';
-          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, true, _sdTeam);
+          this.renderSystem.spawnDamageNumber(Vec2.from(x, y), _sdLastHp, true, _sdTeam);
         }
       };
       this.networkManager.onStructureCompanyUpdated = (id, companyId) => {
@@ -2338,7 +3156,8 @@ export class ClientApplication {
         const _shMyComp = _shMyId !== null ? (_shWs?.players.find(p => p.id === _shMyId)?.companyId ?? -1) : -1;
         const _shTeam: DamageTeam =
           _shMyComp > 0 && _shComp === _shMyComp ? 'enemy' : 'friendly';
-        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), 25, false, _shTeam);
+        const _shDmg = prev !== null ? Math.max(0, prev.prevHp - hp) : 3000;
+        this.renderSystem.spawnDamageNumber(Vec2.from(x, y), _shDmg || 3000, false, _shTeam);
       };
       this.networkManager.onTreeHit = (x, y) => {
         this.renderSystem.spawnExplosion(Vec2.from(x, y), 0.5);
@@ -2445,9 +3264,11 @@ export class ClientApplication {
           in_water:          'Cannot place in water',
           world_full:        'World structure limit reached',
           missing_item:      'Missing required item',
+          missing_resources: 'Not enough resources',
         };
         const msg = REASONS[reason] ?? `Placement failed (${reason})`;
-        this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, 'info', 2.0);
+        const kind = (reason === 'missing_resources' || reason === 'missing_item') ? 'warning' : 'info';
+        this.renderSystem.showAnnouncement(`\u{1F6A7} ${msg}`, kind, 2.0);
         this.renderSystem.setBlockerStructure(blockerId ?? null, 2000);
       };
       this.networkManager.onDoorToggled = (id, open) => {
@@ -2455,6 +3276,19 @@ export class ClientApplication {
       };
       this.networkManager.onDoorLockToggled = (id, locked, open) => {
         this.renderSystem.updateStructureDoorLocked(id, locked, open);
+      };
+
+      // Bed respawn: store the respawn point so the respawn screen shows it as an option
+      this.networkManager.onBedUsed = (bedId, x, y, shipId) => {
+        this.uiManager.setBedRespawnPoint(bedId, x, y, shipId);
+        const msg = shipId
+          ? '🛏 Bed set on ship — you will respawn here on death'
+          : `🛏 Respawn point set (${Math.round(x ?? 0)}, ${Math.round(y ?? 0)})`;
+        this.chatBox.addMessage('global', '[System]', msg);
+      };
+      this.networkManager.onBedCooldown = (remainingMs) => {
+        const secs = Math.ceil(remainingMs / 1000);
+        this.chatBox.addMessage('global', '[System]', `🛏 Bed cooldown: ${secs}s remaining`);
       };
       this.networkManager.onCraftingOpen = (structureId, structureType) => {
         if (structureType === 'shipyard') {
@@ -2464,6 +3298,32 @@ export class ClientApplication {
         } else {
           this.craftingMenu.open(structureId);
           this.uiManager.setActiveMenuId(MENU_ID.CRAFTING);
+          // Pull the player's schematics so the Schematics tab is populated.
+          this.networkManager.sendRequestSchematics();
+        }
+      };
+
+      this.networkManager.onLandChestState = (structureId, chestRes, playerRes, readOnly) => {
+        this.landChestMenu.updateChestResources(chestRes);
+        if (!this.landChestMenu.visible) {
+          this.landChestMenu.open(structureId, chestRes, readOnly);
+        } else {
+          this.landChestMenu.setReadOnly(readOnly ?? false);
+        }
+        if (playerRes) {
+          this.landChestMenu.updatePlayerResources(playerRes);
+        }
+      };
+
+      this.landChestMenu.onTransfer = (structureId, item, quantity, direction) => {
+        this.networkManager.sendLandChestTransfer(structureId, item, quantity, direction);
+      };
+
+      this.landChestMenu.onDrop = (structureId, item, quantity, fromSide) => {
+        if (fromSide === 'player') {
+          this.networkManager.sendDropResources(item, quantity);
+        } else {
+          this.networkManager.sendLandChestDrop(structureId, item, quantity);
         }
       };
 
@@ -2488,8 +3348,57 @@ export class ClientApplication {
         this.networkManager.sendShipyardAction(this.shipyardMenu.structureId, action, module);
       };
 
+      this.networkManager.onShipyardActionFail = (reason) => {
+        const MSGS: Record<string, string> = {
+          ship_limit:       'World ship limit reached — too many ships active',
+          missing_materials:'Not enough materials',
+          already_building: 'Shipyard already building a ship',
+          no_ship:          'No ship under construction',
+          use_build_mode:   'Use build mode (B) to add modules',
+        };
+        const msg = MSGS[reason] ?? `Shipyard failed (${reason})`;
+        this.renderSystem.showAnnouncement(`⚓ ${msg}`, 'warning', 3.5);
+      };
+
       this.craftingMenu.onCraft = (recipeId) => {
         this.networkManager.sendCraftItem(recipeId);
+      };
+
+      this.craftingMenu.onCraftSchematic = (index) => {
+        this.networkManager.sendCraftBlueprint(index);
+      };
+
+      // Schematic (blueprint) list — populate the Schematics tab in both menus.
+      this.networkManager.onSchematicList = (items) => {
+        this.craftingMenu.setSchematics(items);
+        this.uiManager.playerMenu.setSchematics(items);
+      };
+
+      // Crafting a blueprint succeeded/failed; the server re-sends the schematic
+      // list on success, so just surface a toast here.
+      this.networkManager.onCraftBlueprintResult = (success, _index, reason, item, tier, _craftsRemaining) => {
+        if (success) {
+          this.renderSystem.showAnnouncement(
+            `${tierName(tier)} ${itemDisplayName(item)} crafted!`, 'info', 2.5);
+        } else {
+          const msg: Record<string, string> = {
+            missing_ingredients: 'Not enough materials',
+            inventory_full:      'Inventory is full',
+            not_at_workbench:    'Must be at a workbench',
+            invalid_schematic:   'Schematic no longer available',
+            unknown_item:        'Unknown blueprint item',
+          };
+          this.renderSystem.showAnnouncement(`⚒ ${msg[reason] ?? `Craft failed (${reason})`}`, 'warning', 2.5);
+        }
+      };
+
+      // Salvaged a quality blueprint from a wreck.
+      this.networkManager.onSalvageBlueprint = (item, tier, crafts, _wreckId, _bpRemaining, _lootRemaining) => {
+        this.renderSystem.showAnnouncement(
+          `📜 Salvaged ${tierName(tier)} ${itemDisplayName(item)} blueprint (${crafts} craft${crafts === 1 ? '' : 's'})`,
+          'info', 3.0);
+        // Refresh the Schematics tab if the crafting menu is open.
+        if (this.craftingMenu.visible) this.networkManager.sendRequestSchematics();
       };
 
       this.networkManager.onCraftResult = (success, recipeId, reason) => {
@@ -2639,12 +3548,66 @@ export class ClientApplication {
         // Exit free-placement mode — this is now a ghost-only action
         this.explicitBuildMode = false;
         this.pendingGhostKind = kind;
+        // Mutual exclusion: Plan Menu click clears the build hotbar selection
+        this.shipPlanMenuKind = kind;
+        this.uiManager.buildHotbarActiveSlot = -1;
         this.buildRotationDeg = 0;
         this.syncBuildModeState();
         console.log(`🏗️ [GHOST] Picking up ghost: ${kind} — click on ship to place`);
       };
-      
-      // Initialize Audio System  
+
+      // Land build panel: player selected a land structure type from the Plan Menu
+      this.uiManager.onLandBuildPanelSelect = (kind: string) => {
+        if (!kind) return;
+        this.pendingLandBuildKind = kind;
+        this.wallVariant = 'wall';
+        // Mutual exclusion: selecting a plan clears the Build Schematic Hotbar selection.
+        this.buildSchematicKind = null;
+        this.renderSystem.setBuildSchematicKind(null);
+        this.uiManager.setLandBuildMenuState(this.landBuildMenuOpen, kind);
+        // checkBuildMode will set selectedLandKind = null (buildSchematicKind is now null)
+        this.checkBuildMode();
+        console.log(`🏗️ [PLAN] Selected: ${kind}`);
+      };
+
+      // Build Schematic Hotbar: player clicked a hotbar slot (may deselect if toggled)
+      this.uiManager.onBuildSchematicSelect = (kind: string | null) => {
+        this.buildSchematicKind = kind;
+        this.wallVariant = 'wall';
+        this.renderSystem.setBuildSchematicKind(kind);
+        // Mutual exclusion: selecting a schematic clears the Plan Menu selection.
+        if (kind !== null) {
+          this.pendingLandBuildKind = null;
+          this.uiManager.clearPlanKind();
+        }
+        this.checkBuildMode();
+        console.log(`🏗️ [SCHEMATIC] Hotbar selected: ${kind ?? '(none)'}`);
+      };
+
+      // Build hotbar slot selected (click or 1-8 key in ship build mode)
+      this.uiManager.onBuildHotbarSlotChange = (slot: number, kind: GhostModuleKind | null) => {
+        if (!kind) return;
+        const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const playerId = this.networkManager?.getAssignedPlayerId();
+        const player = ws?.players.find(p => p.id === playerId);
+        if (player && (player.inventory?.activeSlot ?? 255) !== 255) {
+          for (const ws2 of [this.authoritativeWorldState, this.predictedWorldState]) {
+            const p2 = ws2?.players.find(pl => pl.id === playerId);
+            if (p2) p2.inventory.activeSlot = 255;
+          }
+          this.networkManager.sendUnequip();
+        }
+        this.explicitBuildMode = false;
+        this.pendingGhostKind = kind;
+        // Mutual exclusion: hotbar selection clears the Plan Menu selection
+        this.shipPlanMenuKind = null;
+        this.buildRotationDeg = 0;
+        this.syncBuildModeState();
+        this.checkBuildMode();
+        console.log(`🏗️ [BUILD HOTBAR] Slot ${slot + 1} → ${kind}`);
+      };
+
+
       this.audioManager = new AudioManager(this.config.audio);
       await this.audioManager.initialize();
       
@@ -2823,9 +3786,12 @@ export class ClientApplication {
         dt
       );
       
-      // Update camera based on predicted state
+      // Update camera based on interpolated state so it tracks the same smoothed
+      // position that the renderer uses, avoiding the 20 Hz snap from raw server data.
       if (this.predictedWorldState) {
-        this.updateCamera(this.predictedWorldState, dt);
+        const _cameraFollowState =
+          this.predictionEngine.getInterpolatedState(performance.now()) ?? this.predictedWorldState;
+        this.updateCamera(_cameraFollowState, dt);
         
         // Update input manager with current player position and velocity for hybrid protocol
         const assignedPlayerId = this.networkManager.getAssignedPlayerId();
@@ -2836,7 +3802,13 @@ export class ClientApplication {
         if (player) {
           this.inputManager.setPlayerPosition(player.position);
           this.inputManager.setPlayerVelocity(player.velocity); // For stop detection
-          this.inputManager.setPlayerStamina(player.stamina ?? player.maxStamina ?? 100);
+          this.inputManager.setPlayerStamina(player.stamina ?? player.maxStamina ?? 100, player.maxStamina ?? 100);
+          // Mirror server's carry-weight gate for sprint (block at ≥ 85 % capacity).
+          {
+            const carryCap = 300 * (1 + ((player.statWeight ?? 0) as number) * 0.1);
+            const carryKg  = player.inventory ? computeInventoryWeight(player.inventory) : 0;
+            this.inputManager.setPlayerCarryRatio(carryCap > 0 ? carryKg / carryCap : 0);
+          }
           this.renderSystem.playerInteractInfo = {
             worldPos: player.position,
             localPos: player.localPosition ?? null,
@@ -3046,11 +4018,24 @@ export class ClientApplication {
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
       this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
       this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
+      this.renderSystem.npcIgnoreSet = this._npcIgnoreSet;
+      this.renderSystem.selectedNpcIds = new Set(this._selectedNpcIds);
 
       // Resolve local player once — reused by sword equip check, cursor cooldown ring, and UI render.
       const localPlayer = assignedPlayerId !== null
         ? worldToRender.players.find(p => p.id === assignedPlayerId) ?? null
         : null;
+
+      // Detect resource gains and flash the resource panel
+      if (localPlayer) {
+        const res = (localPlayer.inventory as any)?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        const prev = this._prevResources;
+        for (const key of ['wood', 'fiber', 'metal', 'stone'] as const) {
+          if (res[key] > prev[key]) this.uiManager?.flashResourceRow?.(key, 'up');
+          else if (res[key] < prev[key]) this.uiManager?.flashResourceRow?.(key, 'down');
+        }
+        this._prevResources = { wood: res.wood, fiber: res.fiber, metal: res.metal, stone: res.stone };
+      }
 
       // Sword cooldown ring: only visible when sword is the active item and player is unmounted
       const _activeSlot  = localPlayer?.inventory?.activeSlot ?? 0;
@@ -3060,7 +4045,30 @@ export class ClientApplication {
       this.renderSystem.axeEquipped =
         (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe') &&
         !(localPlayer?.isMounted ?? false);
+      this.renderSystem.combatMode = this.combatMode;
       if (this.explicitBuildMode) this.syncBuildModeState();
+
+      // Update ghost affordability every frame so slot tints update immediately.
+      // Covers both build-panel (pendingGhostKind) and hotbar-driven (activeItem) modes.
+      {
+        const _localP = localPlayer;
+        const _activeSlot = _localP?.inventory?.activeSlot ?? 0;
+        const _activeItem = _localP?.inventory?.slots[_activeSlot]?.item ?? 'none';
+        const _ITEM_TO_KIND: Partial<Record<string, GhostModuleKind>> = {
+          plank: 'plank', cannon: 'cannon', sail: 'mast', swivel: 'swivel',
+          helm_kit: 'helm', deck: 'deck', ramp: 'ramp',
+          wood_ceiling: 'hatch_cover', door: 'gunport', resource_chest: 'chest',
+        };
+        const _hoveredGpSnap = this.renderSystem.getHoveredGunportCannonSnap() !== null;
+        const _effectiveKind: GhostModuleKind | null =
+          this.pendingGhostKind ?? (_ITEM_TO_KIND[_activeItem] ?? (_hoveredGpSnap ? 'cannon' : null));
+        const _inAnyShipBuild = (this.buildMenuOpen || this.explicitBuildMode
+          || this.inputManager.buildMode || _hoveredGpSnap) && (_localP?.carrierId ?? 0) !== 0;
+        this.renderSystem.ghostCanAfford =
+          (_inAnyShipBuild && _effectiveKind)
+            ? this._canAffordShipBuild(_effectiveKind)
+            : true;
+      }
 
       // Sync tombstones into the render system on every frame
       this.renderSystem.updateTombstones(worldToRender.tombstones ?? []);
@@ -3080,6 +4088,7 @@ export class ClientApplication {
         const camState = this.camera.getState();
         this.renderSystem.beginGLFrame(camState.position.x, camState.position.y, camState.zoom, this._lastDeltaMs, camState.rotation);
       }
+      this.renderSystem.altKeyHeld = this.inputManager?.altKeyHeld ?? false;
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
       if (this._glRenderer) {
         this.renderSystem.endGLFrame();
@@ -3108,7 +4117,8 @@ export class ClientApplication {
       // Update island build mode overlay state
       if (this.islandBuildMode) {
         const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
-        const islandBuildKind = (localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor') as 'wooden_floor' | 'workbench';
+        const hotbarKind = localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor';
+        const islandBuildKind = this.applyWallVariant(this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
         this.uiManager.setIslandBuildState({
           kind: islandBuildKind,
           tooFar: this.renderSystem.getIslandBuildTooFar(),
@@ -3145,6 +4155,7 @@ export class ClientApplication {
         windAngle: this.networkManager.windAngle,
         debugMode: this.uiManager.isDebugMode,
         combatMode: this.combatMode,
+        altHeld: this.inputManager?.isAltHeld() ?? false,
       });
 
       // Crafting menu (rendered on top of all other UI)
@@ -3156,6 +4167,35 @@ export class ClientApplication {
           localPlayer?.inventory ?? null,
         );
       }
+      // Resource chest inventory panel
+      if (this.chestMenu.visible) {
+        // Keep chest data fresh from the current world state
+        const wsC = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+        const chestShipId  = (this.chestMenu as any)._shipId   as number | undefined;
+        const chestModuleId = (this.chestMenu as any)._moduleId as number | undefined;
+        const chestShip = wsC?.ships.find(s => s.id === chestShipId);
+        const chestMod  = chestShip?.modules.find(m => m.id === chestModuleId);
+        if (chestMod?.moduleData?.kind === 'chest') {
+          this.chestMenu.updateChestData(chestMod.moduleData as import('../sim/modules.js').ChestModuleData);
+        }
+        this.chestMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+          localPlayer?.inventory ?? null,
+        );
+      }
+      // Land chest menu — two-card deposit/withdraw GUI
+      if (this.landChestMenu.visible) {
+        // Sync player pack resources every frame
+        const landRes = (localPlayer?.inventory as any)?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        this.landChestMenu.updatePlayerResources(landRes);
+        this.landChestMenu.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
       // Shipyard construction menu
       if (this.shipyardMenu.visible) {
         this.shipyardMenu.render(
@@ -3164,7 +4204,22 @@ export class ClientApplication {
           this.canvas.height,
         );
       }
+      // Confirm dialog — above all other UI
+      if (this.confirmDialog.visible) {
+        this.confirmDialog.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
       // Rename dialog — topmost overlay
+      if (this.groupRenameDialog?.visible) {
+        this.groupRenameDialog.render(
+          this.renderSystem.getContext(),
+          this.canvas.width,
+          this.canvas.height,
+        );
+      }
       if (this.renameDialog?.visible) {
         this.renameDialog.render(
           this.renderSystem.getContext(),
@@ -3424,6 +4479,8 @@ export class ClientApplication {
   private onInputFrame(inputFrame: InputFrame): void {
     // Don't send input while the player is dead / respawn screen is open.
     if (this.uiManager?.isRespawnScreenVisible()) return;
+    // Don't send input (including rotation) while any menu is open.
+    if (this.uiManager?.isAnyMenuOpen()) return;
     // Send input to server
     this.networkManager.sendInput(inputFrame);
   }
@@ -3554,12 +4611,16 @@ export class ClientApplication {
             }
             // For helm: seed sail openness from the first mast so W works immediately
             let initialSailOpenness: number | undefined;
+            let initialSailAngleDeg: number | undefined;
             if (moduleKind === 'helm') {
               const mast = ship?.modules.find(m => m.kind === 'mast');
               const mastData = mast?.moduleData as any;
               if (typeof mastData?.openness === 'number') initialSailOpenness = mastData.openness;
+              if (typeof mastData?.angle === 'number') {
+                initialSailAngleDeg = Math.max(-60, Math.min(60, Math.round(mastData.angle * 180 / Math.PI)));
+              }
             }
-            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId, initialSailOpenness);
+            this.inputManager.setMountState(true, player.carrierId, moduleKind, player.mountedModuleId, initialSailOpenness, undefined, undefined, initialSailAngleDeg);
             // Zoom out when mounting the helm
             if (moduleKind === 'helm') {
               this.preHelmZoom = this.camera.getState().zoom;
@@ -3666,6 +4727,84 @@ export class ClientApplication {
    * Find the first ship whose hull polygon contains the given world position.
    * Checks ALL ships (including the player’s own) so Move To can target any deck.
    */
+  /**
+   * Start a Ctrl+left-drag box-select.  Tracks mouse movement and, on release,
+   * selects all owned NPCs within the dragged screen rectangle.
+   */
+  private _startBoxSelect(): void {
+    const startPos = this.inputManager.getMouseScreenPosition();
+    let isDragging = false;
+
+    const onMove = (e: MouseEvent) => {
+      const canvasRect = this.canvas.getBoundingClientRect();
+      const sx = e.clientX - canvasRect.left;
+      const sy = e.clientY - canvasRect.top;
+      const dx = sx - startPos.x;
+      const dy = sy - startPos.y;
+      if (!isDragging && dx * dx + dy * dy > 64) isDragging = true;
+      if (isDragging) {
+        this.renderSystem.boxSelectRect = {
+          x1: Math.min(startPos.x, sx),
+          y1: Math.min(startPos.y, sy),
+          x2: Math.max(startPos.x, sx),
+          y2: Math.max(startPos.y, sy),
+        };
+      }
+    };
+
+    const onUp = (e: MouseEvent) => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      const rect = this.renderSystem.boxSelectRect;
+      this.renderSystem.boxSelectRect = null;
+      if (!isDragging || !rect) return;
+
+      const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+      if (!ws) return;
+      const myId = this.networkManager.getAssignedPlayerId();
+      const me = myId !== null ? ws.players.find(p => p.id === myId) : null;
+      const myCompany = me?.companyId ?? 0;
+
+      const selected = ws.npcs.filter(npc => {
+        if (npc.companyId === COMPANY_UNCLAIMED) return false;
+        const isMyNpc = npc.companyId === COMPANY_SOLO
+          ? npc.ownerId === myId
+          : npc.companyId === myCompany && myCompany !== 0;
+        if (!isMyNpc || this._npcIgnoreSet.has(npc.id)) return false;
+
+        let worldPos = npc.position;
+        if (npc.shipId) {
+          const ship = ws.ships.find(s => s.id === npc.shipId);
+          if (ship && npc.localPosition) {
+            const cosR = Math.cos(ship.rotation);
+            const sinR = Math.sin(ship.rotation);
+            worldPos = Vec2.from(
+              ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+              ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
+            );
+          }
+        }
+        const sp = this.camera.worldToScreen(worldPos);
+        return sp.x >= rect.x1 && sp.x <= rect.x2 && sp.y >= rect.y1 && sp.y <= rect.y2;
+      });
+
+      const centre = Vec2.from((rect.x1 + rect.x2) / 2, (rect.y1 + rect.y2) / 2);
+      if (selected.length === 0) {
+        this.renderSystem.flashCancel(centre);
+        return;
+      }
+      this._moveToNpcId = null;
+      this._selectedNpcIds = selected.map(n => n.id);
+      this.renderSystem.selectedNpcIds = new Set(this._selectedNpcIds);
+      const label = selected.length === 1 ? selected[0].name : `${selected.length} crew`;
+      this.renderSystem.setMoveToHint(`Moving ${label} — click destination`);
+      this.renderSystem.flashInteract(centre);
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }
+
   private findShipAtWorldPos(pos: Vec2, worldState: WorldState): Ship | null {
     for (const ship of worldState.ships) {
       if (!ship.hull || ship.hull.length < 3) continue;
@@ -3698,12 +4837,21 @@ export class ClientApplication {
   }
 
   private exitAllBuildModes(): void {
-    if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null) return;
+    if (!this.buildMenuOpen && !this.explicitBuildMode && this.pendingGhostKind === null && !this.landBuildMenuOpen) return;
     this.buildMenuOpen      = false;
     this.inputManager.buildMenuOpen = false;
     this.explicitBuildMode  = false;
     this.pendingGhostKind   = null;
+    this.shipPlanMenuKind   = null;
     this.buildRotationDeg   = 0;
+    this.landBuildMenuOpen  = false;
+    this.pendingLandBuildKind = null;
+    this.buildSchematicKind = null;
+    this.renderSystem.setBuildSchematicKind(null);
+    this.uiManager.setLandBuildMenuState(false, null);
+    // NOTE: landGhostEntries are intentionally kept alive so the plan persists
+    // across panel open/close. They are only cleared by Enter (confirmAllLandGhosts)
+    // or right-click removal.
     this.syncBuildModeState();
     this.checkBuildMode();
     console.log('🏗️ [BUILD] All build/plan modes exited');
@@ -3713,6 +4861,29 @@ export class ClientApplication {
    * Check whether the active hotbar item puts the player in build mode.
    * Plank in active slot → build mode on. Anything else → build mode off.
    */
+  /**
+   * Map a raw land-build kind through the active wall variant. When the kind is a wall
+   * (or door frame), it resolves to whichever variant is currently selected via the T key;
+   * all other kinds pass through unchanged.
+   */
+  private applyWallVariant<T extends string | null>(kind: T): T {
+    return (kind === 'wall' || kind === 'door_frame') ? (this.wallVariant as T) : kind;
+  }
+
+  /** Toggle the active wall placement between a solid wall and a door frame (T key). */
+  private toggleWallVariant(): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager?.getAssignedPlayerId();
+    const player   = ws?.players.find(p => p.id === playerId);
+    const activeSlot = player?.inventory?.activeSlot ?? 0;
+    const activeItem = player?.inventory?.slots[activeSlot]?.item ?? 'none';
+    const base = this.buildSchematicKind ?? this.pendingLandBuildKind ?? activeItem;
+    if (base !== 'wall' && base !== 'door_frame') return;
+    this.wallVariant = this.wallVariant === 'wall' ? 'door_frame' : 'wall';
+    this.checkBuildMode(); // refresh the placement preview immediately
+    console.log(`🧱 Wall variant → ${this.wallVariant}`);
+  }
+
   private checkBuildMode(): void {
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     const playerId = this.networkManager?.getAssignedPlayerId();
@@ -3720,20 +4891,57 @@ export class ClientApplication {
 
     const activeSlot  = player?.inventory?.activeSlot ?? 0;
     const activeItem  = player?.inventory?.slots[activeSlot]?.item ?? 'none';
-    const inBuildMode       = activeItem === 'plank';
-    const inCannonBuildMode  = activeItem === 'cannon';
-    const inMastBuildMode    = activeItem === 'sail';
-    const inSwivelBuildMode  = activeItem === 'swivel';
-    const inHelmBuildMode   = activeItem === 'helm_kit';
-    const inDeckBuildMode   = activeItem === 'deck';
+    const pgk = this.pendingGhostKind; // build-menu ghost kind activates matching snap mode
+    const inBuildMode        = activeItem === 'plank'     || pgk === 'plank';
+    const inCannonBuildMode  = activeItem === 'cannon'    || pgk === 'cannon';
+    const inMastBuildMode    = activeItem === 'sail'      || pgk === 'mast';
+    const inSwivelBuildMode  = activeItem === 'swivel'    || pgk === 'swivel';
+    const inHelmBuildMode    = activeItem === 'helm_kit'  || pgk === 'helm';
+    const inDeckBuildMode    = activeItem === 'deck'      || pgk === 'deck';
+    const inRampBuildMode    = activeItem === 'ramp'      || pgk === 'ramp';
+    // Hatch cover build mode: on-ship + wood_ceiling equipped, OR hatch_cover ghost selected
+    const inHatchBuildMode   = ((player?.carrierId ?? 0) !== 0 && activeItem === 'wood_ceiling') || pgk === 'hatch_cover';
+    // Gunport build mode: on-ship + door item equipped, OR gunport ghost selected
+    const inGunportBuildMode = ((player?.carrierId ?? 0) !== 0 && activeItem === 'door') || pgk === 'gunport';
+    // Chest build mode: resource_chest item equipped while on a ship, OR chest ghost selected
+    const inChestBuildMode   = ((player?.carrierId ?? 0) !== 0 && activeItem === 'resource_chest') || pgk === 'chest';
+    // Bed build mode: bed ghost selected from ship build menu
+    const inBedBuildMode     = pgk === 'bed';
+
+    // Auto-exit land build modes if the player is now on a ship (boarded mid-build)
+    if ((player?.carrierId ?? 0) !== 0 && this.landBuildMenuOpen) {
+      this.landBuildMenuOpen = false;
+      this.pendingLandBuildKind = null;
+      this.uiManager?.setLandBuildMenuState(false, null);
+    }
 
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
-    const inIslandBuildMode = (player?.carrierId === 0) && (activeItem === 'wooden_floor' || activeItem === 'workbench' || activeItem === 'wall' || activeItem === 'door_frame' || activeItem === 'door' || activeItem === 'shipyard' || activeItem === 'wood_ceiling' || activeItem === 'cannon' || activeItem === 'flag_fort' || activeItem === 'company_fortress' || activeItem === 'claim_flag');
-    this.islandBuildMode = inIslandBuildMode && !this.explicitBuildMode;
-    this.inputManager.islandBuildMode = this.islandBuildMode;
+    // Also activated when pendingLandBuildKind is set (via the land build panel)
+    const islandItem = this.pendingLandBuildKind ?? activeItem;
+    const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag']);
+    const inIslandBuildMode = (player?.carrierId === 0) && LAND_BUILDABLE.has(islandItem);
+    // Also active when a build schematic is selected in the hotbar (player may build from plan)
+    const inSchematicBuildMode = (player?.carrierId === 0) && this.buildSchematicKind !== null;
+    this.islandBuildMode = (inIslandBuildMode || inSchematicBuildMode) && !this.explicitBuildMode;
+    // Treat the land build menu as island-build-mode for InputManager so that
+    // right-click, Enter confirm, and rotation keys work even when no hotbar
+    // item is selected (plan menu open, pendingLandBuildKind drives placement).
+    this.inputManager.islandBuildMode = this.islandBuildMode || this.landBuildMenuOpen;
+    // Show the placement ghost preview:
+    //  - plan kind when the Plan Menu item is selected
+    //  - schematic kind when the Build Schematic Hotbar slot is selected (preview follows cursor,
+    //    and snaps onto the matching planned ghost when hovered)
+    const _previewKind = !this.explicitBuildMode
+      ? (inIslandBuildMode ? this.applyWallVariant(islandItem) : (inSchematicBuildMode ? this.applyWallVariant(this.buildSchematicKind!) : null))
+      : null;
     this.renderSystem.setIslandBuildItem(
-      this.islandBuildMode ? (activeItem as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag') : null
+      _previewKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null
     );
+    // Push build schematic kind to render system for ghost hover detection
+    this.renderSystem.setBuildSchematicKind((player?.carrierId === 0) ? this.buildSchematicKind : null);
+    // Also show planned ghosts when holding a hammer on land (repair/inspect flow)
+    const hammerOnLand = activeItem === 'hammer' && (player?.carrierId ?? 0) === 0;
+    this.renderSystem.landBuildModeActive = this.landBuildMenuOpen || this.islandBuildMode || hammerOnLand;
     this.renderSystem.setIslandBuildRotation(this.islandBuildMode ? this.islandBuildRotationDeg : 0);
 
     // Show territory claim overlay when Alt is held OR a territory item is active in the hotbar
@@ -3773,9 +4981,28 @@ export class ClientApplication {
     this.renderSystem.setSwivelBuildMode(!this.explicitBuildMode && inSwivelBuildMode);
     this.renderSystem.setHelmBuildMode(!this.explicitBuildMode && inHelmBuildMode);
     this.renderSystem.setDeckBuildMode(!this.explicitBuildMode && inDeckBuildMode);
+    this.renderSystem.setRampBuildMode(!this.explicitBuildMode && inRampBuildMode);
+    this.renderSystem.setHatchBuildMode(!this.explicitBuildMode && inHatchBuildMode);
+    this.renderSystem.setGunportBuildMode(!this.explicitBuildMode && inGunportBuildMode);
+    this.renderSystem.setChestBuildMode(!this.explicitBuildMode && inChestBuildMode);
+    this.renderSystem.setBedBuildMode(!this.explicitBuildMode && inBedBuildMode);
+    if (this.inputManager) {
+      this.inputManager.inRampBuildMode  = !this.explicitBuildMode && inRampBuildMode;
+      this.inputManager.inHatchBuildMode = !this.explicitBuildMode && inHatchBuildMode;
+    }
     this.inputManager.buildMode = this.explicitBuildMode || this.buildMenuOpen
-      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || this.islandBuildMode
+      || inBuildMode || inCannonBuildMode || inMastBuildMode || inSwivelBuildMode || inHelmBuildMode || inDeckBuildMode || inRampBuildMode || inHatchBuildMode || inGunportBuildMode || inChestBuildMode || inBedBuildMode || this.islandBuildMode
       || (((player?.carrierId ?? 0) !== 0) && activeItem === 'claim_flag');
+
+    // Show build hotbar when: build menu is open or explicit build mode is active
+    if (this.uiManager) {
+      this.uiManager.inShipBuildMode = this.buildMenuOpen || this.explicitBuildMode;
+      this.uiManager.inLandBuildMode = this.landBuildMenuOpen || this.islandBuildMode;
+      // selectedLandKind drives the Build Schematic Hotbar active-slot highlight
+      this.uiManager.selectedLandKind = this.buildSchematicKind;
+    }
+    // Propagate hammer equipped state to render system for repair visuals
+    if (this.renderSystem) this.renderSystem.hammerEquipped = activeItem === 'hammer';
   }
 
   /**
@@ -3806,8 +5033,8 @@ export class ClientApplication {
       } : null
     );
 
-    // Sync ghost placement state
-    this.uiManager?.setBuildMenuState(this.buildMenuOpen, this.ghostPlacements, this.pendingGhostKind);
+    // Sync ghost placement state — Plan Menu highlight uses shipPlanMenuKind (independent from hotbar)
+    this.uiManager?.setBuildMenuState(this.buildMenuOpen, this.ghostPlacements, this.shipPlanMenuKind);
     this.renderSystem?.setBuildMenuOpen(this.buildMenuOpen);
     this.renderSystem?.setGhostPlacements(this.ghostPlacements);
     this.renderSystem?.setPendingGhost(
@@ -3830,6 +5057,109 @@ export class ClientApplication {
    */
   private handleGhostPlace(worldPos: Vec2): void {
     if (!this.pendingGhostKind) return;
+    const kind = this.pendingGhostKind;
+
+    // ── Snap-based module kinds ───────────────────────────────────────────
+    // These read the already-computed hover state from the render system
+    // so the player sees the same highlighted slot they're clicking on.
+    // ── Snap-based kinds: direct placement matching island schematic protocol ──
+    // Resource check + optimistic consume at click time, then send immediately.
+    // No intermediate ghost plan — identical to island schematic click behaviour.
+    if (kind === 'plank') {
+      const sl = this.renderSystem.getHoveredPlankSlot();
+      if (!sl) return;
+      if (!this._consumeShipBuildResources(kind)) return;
+      const plankBp = this.uiManager.playerMenu.getVariantForKind('plank') ?? undefined;
+      this.networkManager.sendPlacePlank(sl.ship.id, sl.sectionName, sl.segmentIndex, this._buildResourceSource, plankBp);
+      console.log(`🏗️ [SHIP BUILD] Placed plank on ship ${sl.ship.id} — consumed resources (${this._buildResourceSource})${plankBp !== undefined ? ` bp_index=${plankBp}` : ''}`);
+      return;
+    }
+    if (kind === 'deck') {
+      const sl = this.renderSystem.getHoveredDeckSlot();
+      if (!sl) return;
+      if (!this._consumeShipBuildResources(kind)) return;
+      const deckBp = this.uiManager.playerMenu.getVariantForKind('deck') ?? undefined;
+      this.networkManager.sendPlaceDeck(sl.deckLevel, this._buildResourceSource, deckBp);
+      console.log(`🏗️ [SHIP BUILD] Placed deck (level ${sl.deckLevel}) — consumed resources (${this._buildResourceSource})${deckBp !== undefined ? ` bp_index=${deckBp}` : ''}`);
+      return;
+    }
+    if (kind === 'helm') {
+      const sl = this.renderSystem.getHoveredHelmSlot();
+      if (!sl) return;
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendReplaceHelm(sl.ship.id, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed helm on ship ${sl.ship.id} — consumed resources (${this._buildResourceSource})`);
+      return;
+    }
+    if (kind === 'ramp') {
+      const sl = this.renderSystem.getHoveredRampSlot();
+      if (!sl) return;
+      if (!this._consumeShipBuildResources(kind)) return;
+      const facing = this.renderSystem.getRampFacingRadians();
+      this.networkManager.sendPlaceRamp(sl.ship.id, sl.snapIndex, facing, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed ramp (snap ${sl.snapIndex}) — consumed resources (${this._buildResourceSource})`);
+      return;
+    }
+    if (kind === 'hatch_cover') {
+      const sl = this.renderSystem.getHoveredRampSlot();
+      if (!sl) return;
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendPlaceHatchCover(sl.ship.id, sl.snapIndex, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed hatch cover (snap ${sl.snapIndex}) — consumed resources (${this._buildResourceSource})`);
+      return;
+    }
+    if (kind === 'gunport') {
+      const sl = this.renderSystem.getHoveredGunportSnap();
+      if (!sl) return;
+      if (!this._consumeShipBuildResources(kind)) return;
+      this.networkManager.sendPlaceGunport(sl.ship.id, sl.snapIndex, this._buildResourceSource);
+      console.log(`🏗️ [SHIP BUILD] Placed gunport (snap ${sl.snapIndex}) — consumed resources (${this._buildResourceSource})`);
+      return;
+    }
+
+    // ── Snap-to-canonical-slot kinds (mast) ────────────────────────────
+    // Mast: check snap-point first — snaps to the 3 canonical mast positions if cursor
+    // is within snap radius. Falls through to free-placement ghost if not near a snap.
+    if (kind === 'mast') {
+      const ms = this.renderSystem.getHoveredMastSlot();
+      if (ms) {
+        if (!this._consumeShipBuildResources('mast')) return;
+        const snapX = RenderSystem.MAST_XS[ms.mastIndex];
+        console.log(`⛵ [SHIP BUILD] Placed mast at snap ${ms.mastIndex} (${snapX.toFixed(0)}, 0) — consumed resources`);
+        this.networkManager.sendPlaceMastAt(ms.ship.id, snapX, 0, this._buildResourceSource,
+          this.uiManager.playerMenu.getVariantForKind('mast') ?? undefined);
+        return;
+      }
+      // No canonical snap nearby — fall through to free-placement ghost below
+    }
+
+    // ── Free-placement module kinds (cannon, mast, swivel, chest) ────────
+    // Cannon: check gunport snap first — snaps to existing unlinked gunport position
+    if (kind === 'cannon') {
+      const gpSnap = this.renderSystem.getHoveredGunportCannonSnap();
+      if (gpSnap) {
+        if (!this._consumeShipBuildResources('cannon')) return;
+        const gp = gpSnap.module;
+        const rot = gp.localPos.y < 0 ? 0 : Math.PI;
+        const cannonY = gp.localPos.y < 0 ? gp.localPos.y + 40 : gp.localPos.y - 40;
+        const gpData = gp.moduleData as import('../sim/modules').GunportModuleData;
+        const snapIdx = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 ? gpData.snapIndex : undefined;
+        console.log(`🔳 [SHIP BUILD] Placed cannon at gunport snap=${snapIdx ?? 'none'} — consumed resources (${this._buildResourceSource})`);
+        this.networkManager.sendPlaceCannonAt(gpSnap.ship.id, gp.localPos.x, cannonY, rot, snapIdx, 0 /* gunport cannons are always lower deck */, this._buildResourceSource,
+          this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
+        return;
+      }
+      // Fixed-position slot ghosts (old helm-offset layout) — snap schematic to slot position
+      const cs = this.renderSystem.getHoveredCannonSlot();
+      if (cs) {
+        if (!this._consumeShipBuildResources('cannon')) return;
+        console.log(`🔳 [SHIP BUILD] Placed cannon at fixed slot ${cs.cannonIndex} (${cs.localX.toFixed(0)}, ${cs.localY.toFixed(0)}) — consumed resources (${this._buildResourceSource})`);
+        this.networkManager.sendPlaceCannonAt(cs.ship.id, cs.localX, cs.localY, cs.rot, undefined, 1, this._buildResourceSource,
+          this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
+        return;
+      }
+    }
+
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     if (!ws) return;
 
@@ -3899,9 +5229,12 @@ export class ClientApplication {
     }
 
     // Geometry-based overlap check against existing ship modules (same logic as real placement)
+    const placeDeck = this.renderSystem.playerDeckLevel;
     const newFp = getModuleFootprint(this.pendingGhostKind as any);
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      if (kind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
+      if (mod.deckId !== 255 && mod.deckId !== placeDeck) continue; // different deck — no collision
       const existFp = getModuleFootprint(mod.kind);
       if (footprintsOverlap(newFp, localX, localY, ghostRotRad, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
         console.log(`❌ [GHOST] Ghost overlaps existing ${mod.kind}`);
@@ -3919,16 +5252,179 @@ export class ClientApplication {
       }
     }
 
+    // Consume resources and place immediately
+    if (!this._consumeShipBuildResources(kind)) return;
+    this._makeBuildAction(kind, nearestShip.id, localX, localY, ghostRotRad)();
+    console.log(`🏗️ [SHIP BUILD] Placed ${kind} at (${localX.toFixed(0)}, ${localY.toFixed(0)}) — consumed resources (${this._buildResourceSource})`);
+  }
+
+  /**
+   * Check and optimistically consume raw resources for a ship module placement.
+   * Mirrors the island schematic resource-check pattern exactly.
+   * Returns true if resources were available and consumed, false (+ flashCancel) if not.
+   */
+  /** Read-only affordability check — same logic as _consumeShipBuildResources but no deduction. */
+  private _canAffordShipBuild(kind: GhostModuleKind): boolean {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager.getAssignedPlayerId();
+    const player = ws?.players.find(p => p.id === playerId);
+    if (!player) return false;
+    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    if (!cost.wood && !cost.fiber && !cost.metal && !cost.stone) return true;
+
+    if (this._buildResourceSource === 'ship' && player.carrierId) {
+      const ship = ws?.ships.find(s => s.id === player.carrierId);
+      if (!ship) return false;
+      const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+      for (const m of ship.modules.filter(mod => mod.moduleData?.kind === 'chest')) {
+        const d = m.moduleData as any;
+        totals.wood  += d.wood  ?? 0; totals.fiber += d.fiber ?? 0;
+        totals.metal += d.metal ?? 0; totals.stone += d.stone ?? 0;
+      }
+      return totals.wood >= cost.wood && totals.fiber >= cost.fiber
+          && totals.metal >= cost.metal && totals.stone >= cost.stone;
+    }
+    // Pack / auto: check player resource pool
+    const res = (player.inventory as any).resources as Record<string, number> | undefined;
+    if (!res) return false;
+    return (res['wood']  ?? 0) >= cost.wood  && (res['fiber'] ?? 0) >= cost.fiber
+        && (res['metal'] ?? 0) >= cost.metal && (res['stone'] ?? 0) >= cost.stone;
+  }
+
+  private _consumeShipBuildResources(kind: GhostModuleKind): boolean {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager.getAssignedPlayerId();
+    const player = ws?.players.find(p => p.id === playerId);
+    if (!player) return false;
+
+    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+
+    if (this._buildResourceSource === 'ship' && player.carrierId) {
+      // ── Ship-chest source: aggregate resources across all chest modules ──
+      const ship = ws?.ships.find(s => s.id === player.carrierId);
+      if (!ship) return false;
+      const chestMods = ship.modules.filter(m => m.moduleData?.kind === 'chest');
+      const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+      for (const m of chestMods) {
+        const d = m.moduleData as any;
+        totals.wood  += d.wood  ?? 0;
+        totals.fiber += d.fiber ?? 0;
+        totals.metal += d.metal ?? 0;
+        totals.stone += d.stone ?? 0;
+      }
+      const needWood  = cost.wood  - totals.wood;
+      const needFiber = cost.fiber - totals.fiber;
+      const needMetal = cost.metal - totals.metal;
+      const needStone = cost.stone - totals.stone;
+      if (needWood > 0 || needFiber > 0 || needMetal > 0 || needStone > 0) {
+        this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        const need: string[] = [];
+        if (needWood  > 0) need.push(`${needWood}×wood`);
+        if (needFiber > 0) need.push(`${needFiber}×fiber`);
+        if (needMetal > 0) need.push(`${needMetal}×metal`);
+        if (needStone > 0) need.push(`${needStone}×stone`);
+        console.log(`❌ [SHIP BUILD] Ship chest needs for ${kind}: ${need.join(', ')}`);
+        return false;
+      }
+      // Optimistic client-side deduction from chest module data
+      let remWood = cost.wood, remFiber = cost.fiber, remMetal = cost.metal, remStone = cost.stone;
+      for (const m of chestMods) {
+        const d = m.moduleData as any;
+        const take = (n: number, have: number) => { const t = Math.min(n, have); return t; };
+        const tw = take(remWood,  d.wood  ?? 0); d.wood  = (d.wood  ?? 0) - tw; remWood  -= tw;
+        const tf = take(remFiber, d.fiber ?? 0); d.fiber = (d.fiber ?? 0) - tf; remFiber -= tf;
+        const tm = take(remMetal, d.metal ?? 0); d.metal = (d.metal ?? 0) - tm; remMetal -= tm;
+        const ts = take(remStone, d.stone ?? 0); d.stone = (d.stone ?? 0) - ts; remStone -= ts;
+        if (!remWood && !remFiber && !remMetal && !remStone) break;
+      }
+      return true;
+    }
+
+    // ── Pack source (default): player's personal resource pool ──
+    const res = (player.inventory as any).resources as Record<string, number> | undefined;
+    if (!res) return false;
+
+    const needWood  = cost.wood  - (res['wood']  ?? 0);
+    const needFiber = cost.fiber - (res['fiber'] ?? 0);
+    const needMetal = cost.metal - (res['metal'] ?? 0);
+    const needStone = cost.stone - (res['stone'] ?? 0);
+
+    if (needWood > 0 || needFiber > 0 || needMetal > 0 || needStone > 0) {
+      this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+      const need: string[] = [];
+      if (needWood  > 0) need.push(`${needWood}×wood`);
+      if (needFiber > 0) need.push(`${needFiber}×fiber`);
+      if (needMetal > 0) need.push(`${needMetal}×metal`);
+      if (needStone > 0) need.push(`${needStone}×stone`);
+      console.log(`❌ [SHIP BUILD] Pack needs for ${kind}: ${need.join(', ')}`);
+      return false;
+    }
+
+    res['wood']  = Math.max(0, (res['wood']  ?? 0) - cost.wood);
+    res['fiber'] = Math.max(0, (res['fiber'] ?? 0) - cost.fiber);
+    res['metal'] = Math.max(0, (res['metal'] ?? 0) - cost.metal);
+    res['stone'] = Math.max(0, (res['stone'] ?? 0) - cost.stone);
+    return true;
+  }
+
+  /** Create a build plan ghost for a snap-based module kind. */
+  private _addSnapGhost(
+    kind: GhostModuleKind, shipId: number, lx: number, ly: number, rot: number,
+    buildAction: () => void,
+  ): void {
     const ghost: GhostPlacement = {
       id: `ghost-${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-      kind: this.pendingGhostKind,
-      shipId: nearestShip.id,
-      localPos: { x: localX, y: localY },
-      localRot: ghostRotRad,
+      kind, shipId,
+      localPos: { x: lx, y: ly },
+      localRot: rot,
+      resourceCost: STRUCTURE_COSTS[kind] ?? { wood: 0, fiber: 0, metal: 0, stone: 0 },
+      buildAction,
     };
     this.ghostPlacements.push(ghost);
     this.syncBuildModeState();
-    console.log(`🏗️ [GHOST] Placed ${this.pendingGhostKind} ghost at (${localX.toFixed(0)}, ${localY.toFixed(0)})`);
+    console.log(`📋 [PLAN] Created ${kind} plan on ship ${shipId}`);
+  }
+
+  /**
+   * Build the network-send closure for a free-placement module.
+   * Captures position/rotation/deckLevel at ghost creation time.
+   */
+  private _makeBuildAction(
+    kind: GhostModuleKind, shipId: number, lx: number, ly: number, rot: number,
+  ): () => void {
+    const src = this._buildResourceSource;
+    switch (kind) {
+      case 'cannon': return () => this.networkManager.sendPlaceCannonAt(shipId, lx, ly, rot, undefined, this.renderSystem.playerDeckLevel, src,
+        this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
+      case 'mast':   return () => this.networkManager.sendPlaceMastAt(shipId, lx, ly, src,
+        this.uiManager.playerMenu.getVariantForKind('mast') ?? undefined);
+      case 'swivel': return () => this.networkManager.sendPlaceSwivelAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src,
+        this.uiManager.playerMenu.getVariantForKind('swivel') ?? undefined);
+      case 'chest':  return () => this.networkManager.sendPlaceChestAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
+      case 'bed':    return () => this.networkManager.sendPlaceBedAt(shipId, lx, ly, rot, this.renderSystem.playerDeckLevel, src);
+      default:       return () => {};
+    }
+  }
+
+  /**
+   * Return the nearest ghost plan within 120 ship-local units of the player,
+   * or null if none is close enough.
+   */
+  private _getNearbyGhostPlan(player: { carrierId: number; localPosition?: { x: number; y: number } | null }): GhostPlacement | null {
+    if (!player.carrierId) return null;
+    for (const g of this.ghostPlacements) {
+      if (g.shipId !== player.carrierId) continue;
+      if (player.localPosition) {
+        const dist = Math.hypot(player.localPosition.x - g.localPos.x, player.localPosition.y - g.localPos.y);
+        if (dist < 120) return g;
+      } else {
+        // No localPosition — player is on the ship, accept any ghost on it
+        return g;
+      }
+    }
+    return null;
   }
 
   /**
@@ -3956,115 +5452,51 @@ export class ClientApplication {
     }
   }
 
+  /** Remove the land ghost closest to worldPos (within 75 world px). */
+  private removeNearestLandGhost(worldPos: Vec2): void {
+    let nearestId: string | null = null;
+    let nearestDist = Infinity;
+    for (const g of this.landGhostEntries) {
+      const dx = worldPos.x - g.worldPos.x;
+      const dy = worldPos.y - g.worldPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < nearestDist) { nearestDist = dist; nearestId = g.id; }
+    }
+    if (nearestId && nearestDist < 75) {
+      this.landGhostEntries = this.landGhostEntries.filter(g => g.id !== nearestId);
+      this.renderSystem.setLandGhostPlacements(this.landGhostEntries);
+      this.uiManager.setLandGhostCounts(this._computeLandGhostCounts());
+      console.log(`🏗️ [LAND PLAN] Removed land ghost`);
+    }
+  }
+
+  /** Send all planned land ghosts to server (staggered), then clear the list. */
+  private confirmAllLandGhosts(): void {
+    const ghosts = [...this.landGhostEntries];
+    this.landGhostEntries = [];
+    this.renderSystem.setLandGhostPlacements([]);
+    this.uiManager.setLandGhostCounts(new Map());
+    ghosts.forEach((g, i) => setTimeout(() => g.buildAction(), i * 50));
+    console.log(`🏗️ [LAND PLAN] Confirmed ${ghosts.length} planned structure(s)`);
+  }
+
+  /** Return a Map<kind, count> of pending land ghost entries per structure type. */
+  private _computeLandGhostCounts(): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const g of this.landGhostEntries) {
+      counts.set(g.kind, (counts.get(g.kind) ?? 0) + 1);
+    }
+    return counts;
+  }
+
+
   /**
-   * When the player has a buildable item in their hotbar (cannon / sail) and
-   * clicks within 80 units of a matching ghost marker, place the real module
-   * at the ghost's stored position/rotation and consume the ghost.
-   * Returns true if a placement was attempted (caller should early-return).
+   * Previously: clicked near ghost with matching hotbar item → build immediately.
+   * Now: ghost plans are completed via E-key + resource check (_getNearbyGhostPlan).
+   * This stub remains so the onBuildPlace call-site compiles; it always returns false.
    */
-  private tryPlaceAtGhost(worldPos: Vec2): boolean {
-    if (this.ghostPlacements.length === 0) return false;
-
-    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
-    if (!ws) return false;
-
-    const playerId = this.networkManager?.getAssignedPlayerId();
-    const player   = ws.players.find(p => p.id === playerId);
-    if (!player) return false;
-    const activeSlot  = player.inventory?.activeSlot ?? 0;
-    const activeItem  = player.inventory?.slots[activeSlot]?.item ?? 'none';
-    const itemToKind: Partial<Record<string, GhostModuleKind>> = {
-      cannon: 'cannon', sail: 'mast', swivel: 'swivel',
-    };
-    const matchKind = itemToKind[activeItem];
-    if (!matchKind) return false;
-
-    // Find the nearest ghost of the matching kind within 80 world units
-    let bestGhost: GhostPlacement | null = null;
-    let bestDist = 80; // snap radius in world units
-    for (const g of this.ghostPlacements) {
-      if (g.kind !== matchKind) continue;
-      const ship = ws.ships.find(s => s.id === g.shipId);
-      if (!ship) continue;
-      const cos = Math.cos(ship.rotation);
-      const sin = Math.sin(ship.rotation);
-      const wx = ship.position.x + g.localPos.x * cos - g.localPos.y * sin;
-      const wy = ship.position.y + g.localPos.x * sin + g.localPos.y * cos;
-      const dist = worldPos.sub(Vec2.from(wx, wy)).length();
-      if (dist < bestDist) { bestDist = dist; bestGhost = g; }
-    }
-    if (!bestGhost) return false;
-
-    const ship = ws.ships.find(s => s.id === bestGhost!.shipId)!;
-    const { x: localX, y: localY } = bestGhost.localPos;
-    const localRot = bestGhost.localRot;
-    const tempId = Date.now() % 100000 + 10000;
-
-    // Overlap check against real modules (exclude the ghost's own footprint since we're consuming it)
-    const newFp = getModuleFootprint(matchKind as any);
-    for (const mod of ship.modules) {
-      if (mod.kind === 'plank' || mod.kind === 'deck') continue;
-      const existFp = getModuleFootprint(mod.kind);
-      if (footprintsOverlap(newFp, localX, localY, localRot, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
-        console.log(`❌ [GHOST SNAP] Placement blocked by existing ${mod.kind}`);
-        return true; // consumed the click, even though blocked
-      }
-    }
-    // Also check OTHER ghosts (not this one)
-    for (const g of this.ghostPlacements) {
-      if (g.id === bestGhost.id) continue;
-      if (g.shipId !== ship.id) continue;
-      const gFp = getModuleFootprint(g.kind as any);
-      if (footprintsOverlap(newFp, localX, localY, localRot, gFp, g.localPos.x, g.localPos.y, g.localRot)) {
-        console.log(`❌ [GHOST SNAP] Placement blocked by ghost ${g.kind}`);
-        return true;
-      }
-    }
-
-    if (matchKind === 'cannon') {
-      console.log(`🔨 [GHOST SNAP] Placing cannon at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
-      const newCannon = ModuleUtils.createDefaultModule(tempId, 'cannon', Vec2.from(localX, localY));
-      newCannon.localRot = localRot;
-      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
-        const s = state?.ships.find(sh => sh.id === ship.id);
-        if (s) s.modules.push(newCannon);
-      }
-      const pending = this.localPendingModules.get(ship.id) ?? [];
-      pending.push({ module: newCannon, expiry: Date.now() + 5000 });
-      this.localPendingModules.set(ship.id, pending);
-      this.networkManager.sendPlaceCannonAt(ship.id, localX, localY, localRot);
-    } else if (matchKind === 'swivel') {
-      console.log(`🔫 [GHOST SNAP] Placing swivel at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${(localRot * 180 / Math.PI).toFixed(0)}°`);
-      const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
-      newSwivel.localRot = localRot;
-      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
-        const s = state?.ships.find(sh => sh.id === ship.id);
-        if (s) s.modules.push(newSwivel);
-      }
-      const pending = this.localPendingModules.get(ship.id) ?? [];
-      pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
-      this.localPendingModules.set(ship.id, pending);
-      this.networkManager.sendPlaceSwivelAt(ship.id, localX, localY, localRot);
-    } else {
-      // mast
-      const mastCount = ship.modules.filter(m => m.kind === 'mast').length;
-      if (mastCount >= 3) { console.log(`❌ [GHOST SNAP] Max sails`); return true; }
-      console.log(`⛵ [GHOST SNAP] Placing mast at ghost pos (${localX.toFixed(0)}, ${localY.toFixed(0)})`);
-      const newMast = ModuleUtils.createDefaultModule(tempId, 'mast', Vec2.from(localX, localY));
-      for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
-        const s = state?.ships.find(sh => sh.id === ship.id);
-        if (s) s.modules.push(newMast);
-      }
-      const pending = this.localPendingModules.get(ship.id) ?? [];
-      pending.push({ module: newMast, expiry: Date.now() + 5000 });
-      this.localPendingModules.set(ship.id, pending);
-      this.networkManager.sendPlaceMastAt(ship.id, localX, localY);
-    }
-
-    // Consume the ghost marker
-    this.ghostPlacements = this.ghostPlacements.filter(g => g.id !== bestGhost!.id);
-    this.syncBuildModeState();
-    return true;
+  private tryPlaceAtGhost(_worldPos: Vec2): boolean {
+    return false;
   }
 
   /**
@@ -4128,8 +5560,11 @@ export class ClientApplication {
     }
 
     const newFp = getModuleFootprint(newKind);
+    const _placeDeck = this.renderSystem.playerDeckLevel;
     for (const mod of nearestShip.modules) {
       if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+      if (newKind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
+      if (mod.deckId !== 255 && mod.deckId !== _placeDeck) continue; // different deck — no collision
       const existingFp = getModuleFootprint(mod.kind);
       if (footprintsOverlap(newFp, localX, localY, rotationRad,
                             existingFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
@@ -4172,6 +5607,7 @@ export class ClientApplication {
       console.log(`🔨 [BUILD] Placing cannon at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
       const newCannon = ModuleUtils.createDefaultModule(tempId, 'cannon', Vec2.from(localX, localY));
       newCannon.localRot = rotationRad;
+      newCannon.deckId = this.renderSystem.playerDeckLevel;
       for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
         const s = state?.ships.find(sh => sh.id === shipRef.id);
         if (s) s.modules.push(newCannon);
@@ -4180,11 +5616,13 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newCannon, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad);
+      this.networkManager.sendPlaceCannonAt(shipRef.id, localX, localY, rotationRad, undefined, this.renderSystem.playerDeckLevel,
+        undefined, this.uiManager.playerMenu.getVariantForKind('cannon') ?? undefined);
     } else if (this.buildSelectedItem === 'swivel') {
       console.log(`🔫 [BUILD] Placing swivel at local (${localX.toFixed(0)}, ${localY.toFixed(0)}) rot=${this.buildRotationDeg}° on ship ${shipRef.id}`);
       const newSwivel = ModuleUtils.createDefaultModule(tempId, 'swivel', Vec2.from(localX, localY));
       newSwivel.localRot = rotationRad;
+      newSwivel.deckId = this.renderSystem.playerDeckLevel;
       for (const state of [this.authoritativeWorldState, this.predictedWorldState, this.demoWorldState]) {
         const s = state?.ships.find(sh => sh.id === shipRef.id);
         if (s) s.modules.push(newSwivel);
@@ -4192,7 +5630,8 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newSwivel, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad);
+      this.networkManager.sendPlaceSwivelAt(shipRef.id, localX, localY, rotationRad, this.renderSystem.playerDeckLevel,
+        undefined, this.uiManager.playerMenu.getVariantForKind('swivel') ?? undefined);
     } else {
       // Sail — constrain to rectangular body of ship (away from bow/stern curves)
       const MAST_X_MIN = -240, MAST_X_MAX = 200;
@@ -4226,7 +5665,8 @@ export class ClientApplication {
       const pending = this.localPendingModules.get(shipRef.id) ?? [];
       pending.push({ module: newMast, expiry: Date.now() + 5000 });
       this.localPendingModules.set(shipRef.id, pending);
-      this.networkManager.sendPlaceMastAt(shipRef.id, localX, localY);
+      this.networkManager.sendPlaceMastAt(shipRef.id, localX, localY,
+        undefined, this.uiManager.playerMenu.getVariantForKind('mast') ?? undefined);
     }
   }
 
@@ -4256,11 +5696,80 @@ export class ClientApplication {
       this._radialMenu.updateMouse(screenX, screenY);
     });
 
-    // Close the radial menu immediately on any mouse click (left or right) so
-    // it can never remain accidentally open after the player clicks away.
+    // Mouse-click handling when the radial menu is open:
+    //   Left-click  → snapshot the hovered option; executed when E is released.
+    //   Right-click → cancel the interaction immediately.
+    // All other game mouse logic is suppressed by onBeforeMouseInput while the radial is open.
     this.canvas.addEventListener('mousedown', (event) => {
       if (this._radialMenu.isOpen && (event.button === 0 || event.button === 2)) {
-        this._radialMenu.close();
+        // ── Weapon Group sub-menu: read selection before closing ─────────────
+        if (this._weaponGroupSubMenuCannonId !== null) {
+          const _wgSelected = this._radialMenu.getHoveredId();
+          this._radialMenu.close();
+          const _wgCannonId = this._weaponGroupSubMenuCannonId;
+          this._weaponGroupSubMenuCannonId = null;
+          if (_wgSelected && _wgSelected.startsWith('wg_toggle_')) {
+            const _wgGroup = parseInt(_wgSelected.replace('wg_toggle_', ''), 10);
+            if (!isNaN(_wgGroup)) {
+              const _wgState = this.controlGroups.get(_wgGroup);
+              if (_wgState) {
+                if (_wgState.cannonIds.includes(_wgCannonId)) {
+                  _wgState.cannonIds = _wgState.cannonIds.filter(id => id !== _wgCannonId);
+                  console.log(`❌ Cannon ${_wgCannonId} removed from group G${_wgGroup}`);
+                } else {
+                  // Remove from any other group first (cannon belongs to at most one group)
+                  for (const [_gi, _s] of this.controlGroups) {
+                    if (_s.cannonIds.includes(_wgCannonId)) {
+                      _s.cannonIds = _s.cannonIds.filter(id => id !== _wgCannonId);
+                      this.networkManager.sendCannonGroupConfig(_gi, _s.mode, _s.cannonIds, _s.targetId > 0 ? _s.targetId : 0);
+                    }
+                  }
+                  _wgState.cannonIds.push(_wgCannonId);
+                  console.log(`🎯 Cannon ${_wgCannonId} → group G${_wgGroup}`);
+                }
+                this.networkManager.sendCannonGroupConfig(_wgGroup, _wgState.mode, _wgState.cannonIds, _wgState.targetId > 0 ? _wgState.targetId : 0);
+                this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              }
+            }
+          }
+          if (this._ladderHoldTimer !== null) {
+            clearTimeout(this._ladderHoldTimer);
+            this._ladderHoldTimer = null;
+            this.renderSystem.stopLadderHoldRing();
+          }
+          return;
+        }
+
+        if (event.button === 2) {
+          // Right-click: cancel — close radial and flash cancel on next E release
+          this._radialMenu.close();
+          this._radialClickSelected = null;
+          this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        } else {
+          const _hovId = this._radialMenu.getHoveredId();
+          // Special case: 'weapon_group' opens its sub-menu immediately rather than
+          // waiting for E release, since the user has already clicked to confirm.
+          if (_hovId === 'weapon_group' && this._ladderHoldModuleId !== null) {
+            const _wgModuleId = this._ladderHoldModuleId;
+            this._radialMenu.close();
+            this._interactKind = null; // E keyup should be a no-op after this
+            this._weaponGroupSubMenuCannonId = _wgModuleId;
+            const _wgMp = this.inputManager.getMouseScreenPosition();
+            const _wgOpts: RadialOption[] = [];
+            for (let _g = 0; _g < 10; _g++) {
+              const _gs = this.controlGroups.get(_g);
+              if (!_gs) continue;
+              const _inGrp = _gs.cannonIds.includes(_wgModuleId);
+              _wgOpts.push({ id: `wg_toggle_${_g}`, label: _inGrp ? `✖ G${_g} Remove` : `+ G${_g} Add`, highlighted: _inGrp });
+            }
+            this._radialMenu.open(_wgMp.x, _wgMp.y, _wgOpts);
+          } else {
+            // Left-click: snapshot the hovered selection; E keyup will execute it
+            this._radialClickSelected = _hovId;
+            this._radialMenu.close();
+          }
+        }
+
         // Cancel the hold timer too if still counting down
         if (this._ladderHoldTimer !== null) {
           clearTimeout(this._ladderHoldTimer);
@@ -4268,6 +5777,15 @@ export class ClientApplication {
           this.renderSystem.stopLadderHoldRing();
         }
       }
+    });
+
+    // Land chest menu: slider drag starts on mousedown
+    this.canvas.addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const rect = this.canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * (this.canvas.width / rect.width);
+      const my = (e.clientY - rect.top)  * (this.canvas.height / rect.height);
+      this.landChestMenu.handleMouseDown(mx, my);
     });
 
     console.log('🖱️ Mouse tracking initialized for directional movement');
@@ -4299,6 +5817,9 @@ export class ClientApplication {
     window.addEventListener('keydown', (e) => {
       // Only handle if not typing in an input field
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      // Confirm dialog intercepts all keys while open
+      if (this.confirmDialog.handleKey(e)) return;
 
       // Route Space / Enter to UIManager for minigame handling first
       if (this.uiManager?.handleKeyDown(e.key)) {
@@ -4336,6 +5857,18 @@ export class ClientApplication {
             e.preventDefault();
             break;
           }
+          if (this.chestMenu.visible) {
+            this.chestMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
+          if (this.landChestMenu.visible) {
+            this.landChestMenu.close();
+            this.uiManager.setActiveMenuId(null);
+            e.preventDefault();
+            break;
+          }
           if (this.shipyardMenu.visible) {
             this.shipyardMenu.close();
             this.uiManager.setActiveMenuId(null);
@@ -4361,9 +5894,11 @@ export class ClientApplication {
             e.preventDefault();
             break;
           }
-          // Cancel "Move To" targeting mode if active
-          if (this._moveToNpcId !== null) {
+          // Cancel "Move To" / box-select targeting mode if active
+          if (this._moveToNpcId !== null || this._selectedNpcIds.length > 0) {
             this._moveToNpcId = null;
+            this._selectedNpcIds = [];
+            this.renderSystem.selectedNpcIds = new Set();
             this.renderSystem.clearMoveToHint();
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
             e.preventDefault();
@@ -4397,11 +5932,29 @@ export class ClientApplication {
         }
 
         case '/': {
-          // Open command console if nothing else is open
-          if (!this.uiManager.isAnyMenuOpen()
-            && !this.buildMenuOpen
-            && !this.explicitBuildMode) {
+          // Open command console — allowed from any state including build mode
+          if (!this.uiManager.isAnyMenuOpen()) {
             this.commandConsole.open();
+            e.preventDefault();
+          }
+          break;
+        }
+
+        case 't':
+        case 'T': {
+          // In deck build mode: cycle between lower/upper deck snap point
+          if (this.renderSystem.isInDeckBuildMode()) {
+            this.renderSystem.cycleDeckLevel();
+            e.preventDefault();
+          }
+          break;
+        }
+        case 'Enter': {
+          // Open chat input
+          if (!this.uiManager.isAnyMenuOpen()
+            && !this.commandConsole.visible
+            && !this.chatBox.isOpen) {
+            this.chatBox.open();
             e.preventDefault();
           }
           break;
@@ -4415,6 +5968,8 @@ export class ClientApplication {
             e.preventDefault();
             break;
           }
+          // Block all interactions while in any build mode
+          if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) break;
           if (e.repeat) {
             // Hold-E: check if we should open the item picker
             if (this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {
@@ -4592,6 +6147,13 @@ export class ClientApplication {
                 wood: 'Wood', plank: 'Plank', stone: 'Stone', metal: 'Metal',
               };
               const _have = (item: string): number => {
+                // Raw materials come from the resource pool, not inventory slots
+                const res = (meE as any).inventory?.resources;
+                if (item === 'wood'  && res) return res.wood  ?? 0;
+                if (item === 'fiber' && res) return res.fiber ?? 0;
+                if (item === 'metal' && res) return res.metal ?? 0;
+                if (item === 'stone' && res) return res.stone ?? 0;
+                // Crafted items (e.g. plank) are in slots
                 const slots = (meE as any).inventory?.slots ?? [];
                 let total = 0;
                 for (const sl of slots) {
@@ -4734,6 +6296,17 @@ export class ClientApplication {
                   if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) cannonOpts.push(r); }
                   this._radialMenu.open(mp2.x, mp2.y, cannonOpts);
                 }, 300);
+              } else if (struct.type === 'chest') {
+                // Chest: tap E = open; hold E = radial with Open + Demolish
+                this._ladderHoldTimer = setTimeout(() => {
+                  this._ladderHoldTimer = null;
+                  this.renderSystem.stopLadderHoldRing();
+                  const mp2 = this.inputManager.getMouseScreenPosition();
+                  const chestOpts: RadialOption[] = [{ id: 'use', label: '📦 Open Chest' }];
+                  if (isOwnCompany) chestOpts.push({ id: 'demolish', label: 'Demolish Chest' });
+                  if (isOwnCompany) { const r = _buildRepairOption(struct); if (r) chestOpts.push(r); }
+                  this._radialMenu.open(mp2.x, mp2.y, chestOpts);
+                }, 400);
               } else {
                 if (isOwnCompany) {
                   this._ladderHoldTimer = setTimeout(() => {
@@ -4747,6 +6320,11 @@ export class ClientApplication {
                       : struct.type === 'door'        ? 'Demolish Door'
                       : struct.type === 'workbench'   ? 'Demolish Workbench'
                       : struct.type === 'shipyard'    ? 'Demolish Shipyard'
+                      : struct.type === 'chest'       ? 'Demolish Chest'
+                      : struct.type === 'claim_flag'  ? 'Remove Claim Flag'
+                      : struct.type === 'flag_fort'   ? 'Demolish Flag Fort'
+                      : struct.type === 'company_fortress' ? 'Demolish Fortress'
+                      : struct.type === 'cannon'      ? 'Demolish Cannon'
                       : 'Demolish Floor';
                     const defOpts: RadialOption[] = [
                       { id: 'demolish', label: _demolishLabel },
@@ -4840,7 +6418,11 @@ export class ClientApplication {
                 if (npcAtGun) {
                   radialOpts.push({ id: 'dismiss_npc', label: `Dismiss ${npcAtGun.name}` });
                 }
+                // Weapon Group assignment shortcut
+                radialOpts.push({ id: 'weapon_group', label: '🎯 Weapon Group' });
               }
+              // Demolish option — always available when on own ship (server validates ownership)
+              radialOpts.push({ id: 'demolish', label: '🪓 Demolish' });
               this._radialMenu.open(mp.x, mp.y, radialOpts);
             }, 300);
             break;
@@ -4867,6 +6449,7 @@ export class ClientApplication {
                   extendedAtPress
                     ? { id: 'retract', label: 'Retract' }
                     : { id: 'extend',  label: 'Extend'  },
+                  { id: 'demolish', label: '🪓 Demolish' },
                 ]);
               } else if (extendedAtPress) {
                 this._radialMenu.open(mp.x, mp.y, [
@@ -4882,6 +6465,71 @@ export class ClientApplication {
             break;
           }
 
+          // Chest: tap E to open inventory panel; hold E for radial with Open/Demolish
+          if (hov.module.kind === 'chest' && meE.carrierId === hov.ship.id) {
+            this._interactKind = 'module';
+            this._suppressLadderInteract = true;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            const chestData = hov.module.moduleData?.kind === 'chest'
+              ? (hov.module.moduleData as import('../sim/modules.js').ChestModuleData)
+              : null;
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: 'open_chest', label: '📦 Open Chest' },
+                { id: 'demolish',   label: '🪓 Demolish Chest' },
+              ]);
+            }, 300);
+            // Tap (fast release < 300 ms) handled in keyup → opens chest immediately
+            (this as any)._pendingChestOpen = {
+              moduleId: hov.module.id,
+              shipId:   hov.ship.id,
+              data:     chestData,
+            };
+            break;
+          }
+
+          // Gunport: tap E to toggle open/close; hold E for radial with Demolish
+          if (hov.module.kind === 'gunport' && meE.carrierId === hov.ship.id) {            this._interactKind = 'module';
+            this._suppressLadderInteract = true;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              const gOpen = hov.module.moduleData?.kind === 'gunport' && (hov.module.moduleData as any).isOpen;
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: gOpen ? 'close_gunport' : 'open_gunport', label: gOpen ? 'Close Port' : 'Open Port' },
+                { id: 'demolish', label: '🪓 Demolish Gunport' },
+              ]);
+            }, 300);
+            break;
+          }
+
+          // Generic module: open Demolish radial when on own ship
+          if (meE.carrierId === hov.ship.id) {
+            const modKindLabel = hov.module.kind.charAt(0).toUpperCase() + hov.module.kind.slice(1);
+            this._interactKind = 'module';
+            this._suppressLadderInteract = true;
+            this._ladderHoldModuleId = hov.module.id;
+            this._ladderHoldShipId = hov.ship.id;
+            this.renderSystem.startLadderHoldRing(this.inputManager.getMouseScreenPosition());
+            this._ladderHoldTimer = setTimeout(() => {
+              this._ladderHoldTimer = null;
+              this.renderSystem.stopLadderHoldRing();
+              const mp = this.inputManager.getMouseScreenPosition();
+              this._radialMenu.open(mp.x, mp.y, [
+                { id: 'demolish', label: `🪓 Demolish ${modKindLabel}` },
+              ]);
+            }, 400);
+            break;
+          }
           console.warn(`🪜 E: hovered module kind '${hov.module.kind}' has no interact handler`);
           break;
         }
@@ -4920,6 +6568,11 @@ export class ClientApplication {
             const myId = this.networkManager.getAssignedPlayerId();
             const me = myId !== null ? ws?.players.find(p => p.id === myId) : null;
             const pos = me?.position ? { x: me.position.x, y: me.position.y } : undefined;
+            // Exit free-camera mode when opening the world map
+            if (this._freeCameraMode) {
+              this._freeCameraMode = false;
+              this.inputManager.freeCameraMode = false;
+            }
             this.uiManager.openWorldMap(pos);
           }
           e.preventDefault();
@@ -5013,6 +6666,16 @@ export class ClientApplication {
       this._ladderHoldShipId = null;
       this._interactKind = null;
       this._ladderHoldWasMounted = false;
+
+      // Helper to resolve the radial selection from either the still-open radial (E-hold
+      // release) or a prior left-click snapshot (_radialClickSelected set in mousedown).
+      const _hasRadialPending = () => this._radialMenu.isOpen || this._radialClickSelected !== null;
+      const _resolveRadialSelected = (): string | null => {
+        if (this._radialMenu.isOpen) return this._radialMenu.getHoveredId();
+        const s = this._radialClickSelected;
+        this._radialClickSelected = null;
+        return s;
+      };
 
       // Range validation: re-check player ↔ module distance at confirmation time.
       // The target was locked in at keydown (hover) so continued hover is NOT required,
@@ -5129,10 +6792,13 @@ export class ClientApplication {
             const loot = wreckStruct?.hp ?? 1;
             this.uiManager.setActiveMenuId(MENU_ID.SALVAGE);
             this.uiManager.salvageMenu.open(structId, loot);
+          } else if (structType === 'chest') {
+            // Tap E on chest = open land chest
+            doUse();
           }
           // Tap E on floor/wall/door_frame = nothing (user must hold to demolish)
-        } else if (this._radialMenu.isOpen) {
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if (selected === 'use')           doUse();
           else if (selected === 'demolish') doDemolish();
@@ -5185,6 +6851,7 @@ export class ClientApplication {
             this.uiManager?.openCrewMenuForNpc(npc);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           } else if (actionId === 'unclaim_npc' && isMyNpc) {
+            this._npcIgnoreSet.delete(npc.id);
             this.networkManager.sendNpcUnclaim(npc.id);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`⚓ Unclaiming NPC ${npc.id} (${npc.name})`);
@@ -5216,9 +6883,9 @@ export class ClientApplication {
           this._ladderHoldTimer = null;
           this.renderSystem.stopLadderHoldRing();
           defaultNpcAction();
-        } else if (this._radialMenu.isOpen) {
-          // Hold released with radial open — execute selected option or cancel
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          // Hold released (or left-click) with radial pending — execute selected option or cancel
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if (selected) { executeNpcAction(selected); }
           else { this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition()); }
@@ -5254,15 +6921,35 @@ export class ClientApplication {
           if (doMountAction()) {
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           }
-        } else if (this._radialMenu.isOpen) {
-          // Hold — execute selected option or cancel if centre dead zone
-          const selected = this._radialMenu.getHoveredId();
+        } else if (_hasRadialPending()) {
+          // Hold (or left-click) — execute selected option or cancel if null/dead-zone
+          const selected = _resolveRadialSelected();
           this._radialMenu.close();
           if (selected === 'dismiss_npc' && moduleId !== null) {
             // Dismiss the NPC currently stationed at this cannon/swivel
+            // Also clear any client-side ignore/lock state for that NPC
+            const _ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+            const _npcAtMod = _ws?.npcs.find(n => n.assignedWeaponId === moduleId);
+            if (_npcAtMod) this._npcIgnoreSet.delete(_npcAtMod.id);
             this.networkManager.sendDismissNpc(moduleId);
             this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
             console.log(`👋 dismiss NPC from module ${moduleId}`);
+          } else if (selected === 'demolish' && moduleId !== null && shipId !== null) {
+            this.networkManager.sendDemolishModule(shipId, moduleId);
+            this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+            console.log(`🪓 [DEMOLISH] module ${moduleId} on ship ${shipId}`);
+          } else if (selected === 'weapon_group' && moduleId !== null) {
+            // Open weapon group sub-menu — closed by mousedown, processed there
+            this._weaponGroupSubMenuCannonId = moduleId;
+            const _wgMp = this.inputManager.getMouseScreenPosition();
+            const _wgOpts: RadialOption[] = [];
+            for (let _g = 0; _g < 10; _g++) {
+              const _gs = this.controlGroups.get(_g);
+              if (!_gs) continue;
+              const _inGrp = _gs.cannonIds.includes(moduleId);
+              _wgOpts.push({ id: `wg_toggle_${_g}`, label: _inGrp ? `✖ G${_g} Remove` : `+ G${_g} Add`, highlighted: _inGrp });
+            }
+            this._radialMenu.open(_wgMp.x, _wgMp.y, _wgOpts);
           } else if (selected) {
             if (doMountAction()) {
               this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
@@ -5271,6 +6958,111 @@ export class ClientApplication {
             }
           } else {
             console.log('🎮 radial: cancelled (centre dead zone)');
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          }
+        }
+        return;
+      }
+
+      // ── GENERIC MODULE (plank / seat / custom / etc.) — Demolish only ───
+      if (interactKind === 'module') {
+        // Check if module is a gunport (handled differently — tap = toggle, hold = radial)
+        const wsGp = this.authoritativeWorldState || this.predictedWorldState;
+        const gpShip = wsGp?.ships.find(s => s.id === shipId);
+        const gpMod = gpShip?.modules.find(m => m.id === moduleId);
+        const isGunportModule = gpMod?.kind === 'gunport';
+        const isChestModule   = gpMod?.kind === 'chest';
+
+        // ── Chest: tap E to open inventory panel ─────────────────────────────
+        if (isChestModule && moduleId !== null && shipId !== null) {
+          const pending = (this as any)._pendingChestOpen as { moduleId: number; shipId: number; data: any } | null;
+          (this as any)._pendingChestOpen = null;
+
+          if (this._ladderHoldTimer !== null) {
+            clearTimeout(this._ladderHoldTimer);
+            this._ladderHoldTimer = null;
+            this.renderSystem.stopLadderHoldRing();
+            // Tap: open chest
+            if (!isInRange()) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              const chestD = pending?.data ?? gpMod?.moduleData ?? null;
+              this.chestMenu.open(moduleId, shipId, chestD as import('../sim/modules.js').ChestModuleData | null);
+              this.uiManager.setActiveMenuId(MENU_ID.CHEST);
+              this.chestMenu.onTransfer = (evt) => {
+                this.networkManager.sendChestTransfer(evt.shipId, evt.moduleId, evt.item, evt.quantity, evt.direction);
+              };
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`📦 [CHEST] Opened chest ${moduleId} on ship ${shipId}`);
+            }
+          } else if (_hasRadialPending()) {
+            const selected = _resolveRadialSelected();
+            this._radialMenu.close();
+            if (selected === 'open_chest') {
+              if (!isInRange()) {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              } else {
+                const chestD = pending?.data ?? gpMod?.moduleData ?? null;
+                this.chestMenu.open(moduleId, shipId, chestD as import('../sim/modules.js').ChestModuleData | null);
+                this.uiManager.setActiveMenuId(MENU_ID.CHEST);
+                this.chestMenu.onTransfer = (evt) => {
+                  this.networkManager.sendChestTransfer(evt.shipId, evt.moduleId, evt.item, evt.quantity, evt.direction);
+                };
+                this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              }
+            } else if (selected === 'demolish' && moduleId !== null && shipId !== null) {
+              if (!isInRange()) {
+                this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+              } else {
+                this.networkManager.sendDemolishModule(shipId, moduleId);
+                this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+                console.log(`🪓 [DEMOLISH] chest ${moduleId} on ship ${shipId}`);
+              }
+            } else {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            }
+          }
+          return;
+        }
+
+        if (this._ladderHoldTimer !== null) {
+          clearTimeout(this._ladderHoldTimer);
+          this._ladderHoldTimer = null;
+          this.renderSystem.stopLadderHoldRing();
+          if (isGunportModule && moduleId !== null && shipId !== null) {
+            // Tap on gunport: toggle it immediately
+            if (!isInRange()) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.networkManager.sendToggleGunport(shipId, moduleId);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🔳 [GUNPORT] Toggle gunport ${moduleId} on ship ${shipId}`);
+            }
+          } else {
+            // Tap: no default action — require hold to confirm demolish
+            this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+          }
+        } else if (_hasRadialPending()) {
+          const selected = _resolveRadialSelected();
+          this._radialMenu.close();
+          if ((selected === 'open_gunport' || selected === 'close_gunport') && moduleId !== null && shipId !== null) {
+            if (!isInRange()) {
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.networkManager.sendToggleGunport(shipId, moduleId);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🔳 [GUNPORT] Toggle gunport ${moduleId} on ship ${shipId}`);
+            }
+          } else if (selected === 'demolish' && moduleId !== null && shipId !== null) {
+            if (!isInRange()) {
+              console.warn('🪓 module demolish cancelled: moved out of range');
+              this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+            } else {
+              this.networkManager.sendDemolishModule(shipId, moduleId);
+              this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+              console.log(`🪓 [DEMOLISH] module ${moduleId} on ship ${shipId}`);
+            }
+          } else {
             this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
           }
         }
@@ -5302,9 +7094,9 @@ export class ClientApplication {
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
           console.log(`🪜 tap: extend ladder ${moduleId}`);
         }
-      } else if (this._radialMenu.isOpen) {
-        // Radial was open — execute selected option or cancel if centre dead zone / out of range
-        const selected = this._radialMenu.getHoveredId();
+      } else if (_hasRadialPending()) {
+        // Radial was open (or left-click snapshot) — execute selected option or cancel
+        const selected = _resolveRadialSelected();
         this._radialMenu.close();
 
         if (!selected || moduleId === null) {
@@ -5328,6 +7120,10 @@ export class ClientApplication {
           // extend always uses toggle_ladder — module_interact on retracted = climb attempt
           this.networkManager.sendToggleLadder(moduleId);
           this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+        } else if (selected === 'demolish' && shipId !== null) {
+          this.networkManager.sendDemolishModule(shipId, moduleId);
+          this.renderSystem.flashInteract(this.inputManager.getMouseScreenPosition());
+          console.log(`🪓 [DEMOLISH] ladder ${moduleId} on ship ${shipId}`);
         } else if (selected?.startsWith('remove_flag_')) {
           // ── Remove claim flag from ship ──────────────────────────────────
           const flagShipId = parseInt(selected.replace('remove_flag_', ''), 10);
@@ -5631,8 +7427,9 @@ export class ClientApplication {
         attrCaps: [50, 35, 35, 50, 25],
       },
       modules: [
-        // Deck — walkable interior polygon inset from hull
-        ModuleUtils.createShipDeckFromPolygon(hull),
+        // Two-deck setup: lower deck (deck_id=0) and upper deck (deck_id=1)
+        ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_LOWER_DECK_MODULE_ID, 0),
+        ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_UPPER_DECK_MODULE_ID, 1),
 
         // Hull planks — 24 segments covering the full hull perimeter
         ...ModuleUtils.createShipPlanksFromSegments(100),
@@ -5672,7 +7469,7 @@ export class ClientApplication {
           rotation: 0,
           radius: PhysicsConfig.PLAYER_RADIUS,
           carrierId: ship.id,
-          deckId: ship.modules[0].id,
+          deckId: 0, // lower deck (deck_index 0)
           onDeck: true,
           isMounted: false,
           companyId: 0,
@@ -5720,6 +7517,12 @@ export class ClientApplication {
         // Seed sail openness for helm so W works on first mount
         moduleKind.toUpperCase() === 'HELM' && worldState
           ? (() => { const mast = worldState.ships.find(s => s.id === shipId)?.modules.find(m => m.kind === 'mast'); return (mast?.moduleData as any)?.openness as number | undefined; })()
+          : undefined,
+        undefined,
+        undefined,
+        // Seed sail angle for helm so rotation controls start correctly
+        moduleKind.toUpperCase() === 'HELM' && worldState
+          ? (() => { const mast = worldState.ships.find(s => s.id === shipId)?.modules.find(m => m.kind === 'mast'); const a = (mast?.moduleData as any)?.angle; return typeof a === 'number' ? Math.max(-60, Math.min(60, Math.round(a * 180 / Math.PI))) : undefined; })()
           : undefined
       );
 

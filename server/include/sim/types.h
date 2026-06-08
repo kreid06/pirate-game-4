@@ -19,7 +19,7 @@
 #define MODULES_REQUIRED   (MODULE_HULL_LEFT | MODULE_HULL_RIGHT | MODULE_DECK)
 
 // Maximum entity counts
-#define MAX_SHIPS 50
+#define MAX_SHIPS 200
 #define MAX_PLAYERS 100
 #define MAX_PROJECTILES 500
 
@@ -41,7 +41,27 @@ typedef uint16_t entity_id;
 #define WATER_DENSITY_Q16 Q16_FROM_FLOAT(1000.0f)  // kg/m³
 #define AIR_DENSITY_Q16 Q16_FROM_FLOAT(1.225f)     // kg/m³
 
-// Ship state
+// ── Multi-deck support ──
+#define MAX_DECKS_PER_SHIP       2
+#define MAX_SNAP_POINTS_PER_DECK 3
+#define MAX_DECK_COLLISION_VERTS 8   // max polygon vertices per deck (brigantine uses 6)
+
+/* Deck geometry uses client-pixel floats (same coordinate space as SimpleShip/WebSocketPlayer).
+ * collision_px[v][0]=x, collision_px[v][1]=y, in client pixels relative to ship centre.
+ * snap_points x/y are also client pixels. */
+typedef struct {
+    uint8_t id;       // 0 = lower, 1 = upper
+    uint8_t z_index;  // render order (lower z drawn first)
+    float   collision_px[MAX_DECK_COLLISION_VERTS][2]; // polygon vertices (client px)
+    uint8_t collision_count;
+    struct {
+        float   x, y;  // client pixels relative to ship centre
+        uint8_t type;  // 0 = ladder, 1 = ramp (future)
+        uint8_t _pad;
+    } snap_points[MAX_SNAP_POINTS_PER_DECK];
+    uint8_t snap_point_count;
+} ShipDeck;
+
 struct Ship {
     entity_id id;
     Vec2Q16 position;        // World position (m)
@@ -51,41 +71,41 @@ struct Ship {
     q16_t mass;             // Ship mass (kg)
     q16_t moment_inertia;   // Rotational inertia (kg⋅m²)
 
-    /* Force accumulators — cleared to zero after each physics integration step.
-     * All systems (input, sail, current, etc.) add to these; update_ship_physics
-     * integrates them once per tick and resets them.  Collisions use impulses
-     * (direct velocity edits) and do NOT write here. */
     Vec2Q16 net_force;   // Accumulated force this tick (N)
     q16_t   net_torque;  // Accumulated torque this tick (N⋅m)
 
     q16_t hull_health;      // Hull integrity
-    
-    // Hull collision shape (local coordinates)
-    Vec2Q16 hull_vertices[64];  // Increased to support detailed brigantine hull (47 vertices)
+
+    // Multi-deck support
+    ShipDeck decks[MAX_DECKS_PER_SHIP];
+    uint8_t deck_count;
+
+    // Hull collision shape (legacy, for compatibility)
+    Vec2Q16 hull_vertices[64];
     uint8_t hull_vertex_count;
-    q16_t bounding_radius;   // For broad-phase collision
-    
+    q16_t bounding_radius;
+
     // Ship modules (cannons, masts, seats, etc.)
     ShipModule modules[MAX_MODULES_PER_SHIP];
     uint8_t module_count;
-    
+
     // Ship control state
-    uint8_t desired_sail_openness;  // Target sail openness (0-100%)
-    float rudder_angle;             // Current rudder angle in degrees (-50 to +50)
-    float target_rudder_angle;      // Target rudder angle from player input (-50 to +50)
-    
+    uint8_t desired_sail_openness;
+    float rudder_angle;
+    float target_rudder_angle;
+
     // Ship state flags
     uint16_t flags;
     uint8_t reserved[1];
 
     // Sinking mechanics
-    // Each missing plank halves the time to sink:
-    //   1 plank missing -> 120s to drain 100 HP -> 0.833 HP/s
-    //   2 planks        ->  60s                 -> 1.667 HP/s
-    //   N planks        ->  (1/1.2) * 2^(N-1) HP/s
-    uint8_t initial_plank_count; // Set once when ship is created (typically 10)
-    uint8_t company_id;           // 0=neutral; set by websocket layer to enable friendly-fire skip
-    uint8_t has_crew;             // 1 if ≥1 player is aboard; updated by websocket layer before each sim step
+    uint8_t initial_plank_count;
+    uint8_t company_id;
+    uint8_t has_crew;
+
+    /* Ghost ship level-scaled max HP (raw int32, NOT Q16).
+     * 0 for normal ships. Set by websocket_server_create_ghost_ship(). */
+    int32_t ghost_max_hull_hp;
 
     /* Ship progression — levelled attributes and XP pool. */
     ShipLevelStats level_stats;
@@ -98,13 +118,14 @@ struct Player {
     Vec2Q16 position;        // World position
     Vec2Q16 velocity;        // Velocity
     Vec2Q16 relative_pos;    // Position relative to ship (when aboard)
+    uint8_t deck_index;      // Which deck the player is on (0 = lower, 1 = upper)
     q16_t radius;           // Collision radius
     q16_t health;           // Player health
     
     // Player state
     uint32_t action_flags;   // Current action bitfield (see PLAYER_ACTION_*)
     uint16_t flags;          // Status flags (see PLAYER_FLAG_*)
-    uint8_t reserved[2];
+    uint8_t reserved[1];
 };
 
 /* Projectile ammo types

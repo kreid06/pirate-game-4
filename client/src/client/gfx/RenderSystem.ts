@@ -1,3 +1,5 @@
+
+
 /**
  * Main Rendering System
  * 
@@ -9,16 +11,30 @@ import { GraphicsConfig } from '../ClientConfig.js';
 import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
-import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint } from '../../sim/modules.js';
+import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company, LandGhostPlacement } from '../../sim/Types.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
+import { tierColor, tierName, statMultLabel } from '../../sim/Quality.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
+
+/**
+ * Returns the spectral glow colour for a ghost ship at the given NPC level (1–60).
+ * Level 1 = cyan (#00eeff), Level 60 = red (#ff2800).
+ * Linear RGB interpolation through teal/green at mid levels.
+ */
+function ghostSpectralColor(level: number, alpha?: number): string {
+  const t = Math.max(0, Math.min(1, ((level ?? 1) - 1) / 59));
+  const r = Math.round(t * 255);
+  const g = Math.round(238 * (1 - t) + 40 * t);
+  const b = Math.round(255 * (1 - t));
+  return alpha != null ? `rgba(${r},${g},${b},${alpha.toFixed(3)})` : `rgb(${r},${g},${b})`;
+}
 
 /** NPC fill colours keyed by assigned task name (matches ManningPriorityPanel task colours). */
 const NPC_TASK_COLORS: Record<string, string> = {
@@ -80,6 +96,12 @@ type RenderIsland = RenderIslandInput & {
  * Main rendering system
  */
 export class RenderSystem {
+    /**
+     * Read-only access to all placed structures (for client-side validation and snapping).
+     */
+    public getPlacedStructures(): readonly PlacedStructure[] {
+      return this.placedStructures;
+    }
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
   private config: GraphicsConfig;
@@ -107,19 +129,38 @@ export class RenderSystem {
   /** Ship (other than the player's own) whose hull the cursor is over. */
   private hoveredShip: Ship | null = null;
 
+  /** Tooltip hover-delay (500 ms) */
+  private _tooltipHoverKey   = '';
+  private _tooltipHoverStart = 0;
+  private _tooltipReady      = false;
+
   /** Timestamp (ms) of the last sword swing, used to draw a cooldown ring. */
   private lastSwordSwingAt: number = 0;
   private swordCooldownMs: number = 800;
   /** Set to true each frame when the local player has the sword as their active item. */
   public swordEquipped: boolean = false;
   public axeEquipped: boolean = false;
+  /** Set each frame when the local player has the hammer as their active item. */
+  public hammerEquipped: boolean = false;
+  /** Suppresses harvest/gather prompts while the player is in combat mode. */
+  public combatMode: boolean = false;
 
   // Build mode state
+  /** Set by ClientApplication each frame: false when the hovered ghost slot can't be afforded. */
+  public ghostCanAfford: boolean = true;
   private buildMode: boolean = false;
   /** Whether cannon replacement build mode is active (cannon item held). */
   private cannonBuildMode: boolean = false;
   /** The cannon slot (index+ship) currently under the cursor in cannon build mode. */
-  private hoveredCannonSlot: { ship: Ship; cannonIndex: number } | null = null;
+  private hoveredCannonSlot: { ship: Ship; cannonIndex: number; localX: number; localY: number; rot: number } | null = null;
+  /** A gunport on the ship that the cursor is over in cannon build mode (snap cannon to this gunport). */
+  private hoveredGunportCannonSnap: { ship: Ship; module: ShipModule } | null = null;
+  /** Per-gunport animation state: gunportId → { targetOpen, startProgress, startTime }. */
+  private gunportAnimations: Map<number, { targetOpen: boolean; startProgress: number; startTime: number }> = new Map();
+  /** Duration of gunport cannon slide animation in milliseconds. */
+  private static readonly GUNPORT_ANIM_MS = 800;
+  /** How far inboard a gunport cannon is rendered when the gunport is closed (pixels). */
+  static readonly GUNPORT_CANNON_INBOARD = 40;
   /** Whether mast replacement build mode is active (sail item held). */
   private mastBuildMode: boolean = false;
   /** The mast slot (mastIndex+ship) currently under the cursor in mast build mode. */
@@ -135,13 +176,43 @@ export class RenderSystem {
   /** Whether deck placement build mode is active (deck item held). */
   private deckBuildMode: boolean = false;
   /** Whether the deck ghost is hovered in deck build mode. */
-  private hoveredDeckSlot: { ship: Ship } | null = null;
+  private hoveredDeckSlot: { ship: Ship; deckLevel: number } | null = null;
+  /** Which deck level the player has manually selected with T (0=lower, 1=upper, -1=auto). */
+  private deckLevelOverride: number = -1;
+  /** Whether ramp placement build mode is active (ramp item held). */
+  private rampBuildMode: boolean = false;
+  private hatchBuildMode: boolean = false;
+  /** Whether gunport placement build mode is active (door item held on ship). */
+  private gunportBuildMode: boolean = false;
+  /** Whether resource chest placement build mode is active (resource_chest item held). */
+  private chestBuildMode: boolean = false;
+  /** Whether bed placement build mode is active (bed ghost selected). */
+  private bedBuildMode: boolean = false;
+  /** The gunport snap index currently hovered in gunport build mode. */
+  private hoveredGunportSnap: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
+  /** The ramp snap point slot currently under the cursor in ramp build mode. */
+  private hoveredRampSlot: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** Set by ClientApplication each frame — true when the local player is holding right-mouse. */
   public playerIsAiming: boolean = false;
   /** Camera mode badge to overlay on screen. 'free' | 'rotate' | null. */
   public cameraMode: 'free' | 'rotate' | null = null;
   /** The assigned local player ID, so guides only draw for that player's cannon. */
   public localPlayerId: number | null = null;
+  /** Ship ID whose upper deck is semi-transparent because the local player is in a hole on the lower deck. */
+  private _lowerDeckShipId: number | null = null;
+  /** Which deck the local player is on: 1 = upper deck (default), 0 = lower deck. */
+  private _playerDeckLevel: number = 1;
+  /**
+   * Smoothed opacity multiplier for upper-deck modules/NPCs when the local player is on the lower deck.
+   * Lerps between 1.0 (on upper deck) and 0.3 (on lower deck) over ~300 ms.
+   */
+  private _upperDeckFade: number = 1.0;
+  /** Optional callback fired whenever _playerDeckLevel changes (so ClientApplication can notify the server). */
+  public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
+  /** Read-only access to the current player deck level for placement decisions. */
+  public get playerDeckLevel(): number { return this._playerDeckLevel; }
+  /** Current ramp facing index in build mode: 0=+x, 1=+y, 2=-x, 3=-y (top/light end direction). */
+  private rampFacing: number = 0;
   /** Player position info used by the hover tooltip to determine interact range. */
   public playerInteractInfo: { worldPos: Vec2; localPos: Vec2 | null; carrierId: number | null } | null = null;
   /** Weapon control groups — set by ClientApplication each frame. Null when not on helm. */
@@ -150,6 +221,14 @@ export class RenderSystem {
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
   public activeWeaponGroups: Set<number> = new Set();
+  /** NPC IDs whose command-ignore flag is set (client-side only).  Used to draw badge + block Move To. */
+  public npcIgnoreSet: Set<number> = new Set();
+  /** Tracks whether the Alt key is currently held — reveals lower-deck NPCs when above deck. */
+  public altKeyHeld: boolean = false;
+  /** NPC IDs selected via Ctrl+drag box — rendered with highlight ring. */
+  public selectedNpcIds: Set<number> = new Set();
+  /** Screen-space rect being dragged for box selection (null when inactive). */
+  public boxSelectRect: { x1: number, y1: number, x2: number, y2: number } | null = null;
   /** Structure ID of the island cannon the local player is currently mounted to (for barrel rendering). */
   public islandCannonId: number | null = null;
   /** Live aim angle (world radians) for the mounted island cannon barrel. Null when not mounted. */
@@ -295,8 +374,8 @@ export class RenderSystem {
   private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
   private _hoveredRock: { wx: number; wy: number } | null = null;
-  /** Boulder node currently under cursor (world coords) — updated each frame in drawIsland. */
-  private _hoveredBoulder: { wx: number; wy: number } | null = null;
+  /** Boulder node currently under cursor (world coords + size) — updated each frame in drawIsland. */
+  private _hoveredBoulder: { wx: number; wy: number; size: number } | null = null;
   /** Boulders pending draw — populated by drawIsland, consumed after tree leaves in renderWorld. */
   private _pendingBoulders: Array<{
     sp: { x: number; y: number };
@@ -304,7 +383,9 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null = null;
+  /** Active Build Schematic Hotbar selection — used to detect ghost plan hover for construction. */
+  private buildSchematicKind: string | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
   private islandBuildRotationDeg = 0;
   private _wallGhostRotRad: number = 0; // rotation (radians) of wall/door ghost, inherited from floor edge
@@ -321,6 +402,14 @@ export class RenderSystem {
   getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
   /** Returns the rotation (deg) inherited from the snap source tile, or null if freely placing. */
   getSnappedBuildRotation(): number | null { return this._snappedBuildRotation; }
+
+  /** ID of the land ghost plan marker the cursor is hovering while a build item is active. */
+  private _hoveredLandGhostId: string | null = null;
+  /** Returns the land ghost plan being hovered while a matching build item is active, or null. */
+  getHoveredLandGhost(): LandGhostPlacement | null {
+    if (!this._hoveredLandGhostId) return null;
+    return this.landGhostPlacements.find(g => g.id === this._hoveredLandGhostId) ?? null;
+  }
   /** Current aim angle relative to ship (from InputManager), used for cannon sector filtering. */
   public playerAimAngleRelative: number = 0;
   /** Currently selected ammo type (0 = cannonball, 1 = bar shot), set each frame by ClientApplication. */
@@ -343,6 +432,8 @@ export class RenderSystem {
   private _smoothSailOpenness: Map<number, number> = new Map();
   /** shipId → smoothed rudder angle (radians) — interpolated every frame toward server value. */
   private _smoothRudderAngles: Map<number, number> = new Map();
+  /** shipId → current sail-fiber alpha, interpolated toward 0.30 when on deck or 1.0 otherwise. */
+  private _sailAlphaByShip: Map<number, number> = new Map();
   /** Timestamp (ms) of the last renderWorld call — used to compute per-frame dt for barrel smoothing. */
   private _lastRenderMs: number = 0;
   /** Last known NPC set — used to detect NPC deaths for kill announcements. */
@@ -1415,11 +1506,337 @@ export class RenderSystem {
   }
 
   /**
+   * Draw the coloured glow highlight on the currently-hovered ship hull.
+   * Uses the same friendly/enemy team-colour palette as the module highlight.
+   * Called unconditionally so the highlight is always immediate.
+   */
+  private drawShipHullHighlight(camera: Camera): void {
+    if (!this.hoveredShip || this.hoveredModule) return;
+    const ship = this.hoveredShip;
+    if (!ship.hull || ship.hull.length < 3) return;
+    const hull        = ship.hull;
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const now         = performance.now();
+    const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+    const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+    type HoverTeam = 'friendly' | 'enemy' | 'alliance';
+    const hoverTeam: HoverTeam = this.isShipFriendly(ship) ? 'friendly' : 'enemy';
+    const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
+      friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+      enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+      alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+    };
+    const pal = HOVER_PALETTE[hoverTeam];
+    const hexToRgba = (hex: string, a: number) => {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    };
+    const buildHullPath = (ctx: CanvasRenderingContext2D) => {
+      ctx.beginPath();
+      ctx.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+      ctx.closePath();
+    };
+
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cameraState.zoom, cameraState.zoom);
+    ctx.rotate(ship.rotation - cameraState.rotation);
+
+    ctx.shadowColor  = pal.glow;
+    ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+    ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
+    ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+    ctx.globalAlpha  = 1;
+    buildHullPath(ctx);
+    ctx.stroke();
+
+    ctx.shadowBlur   = 0;
+    ctx.strokeStyle  = pal.inner;
+    ctx.lineWidth    = 2.5 / cameraState.zoom;
+    ctx.globalAlpha  = glowAlpha;
+    buildHullPath(ctx);
+    ctx.stroke();
+
+    ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+    ctx.fillStyle    = pal.fill;
+    buildHullPath(ctx);
+    ctx.fill();
+
+    ctx.restore();
+  }
+
+  /**
+   * Draw the coloured glow highlight on the currently-hovered ship module.
+   * Called unconditionally every frame so the highlight is always immediate,
+   * independent of the 500 ms tooltip delay.
+   *
+   * Uses the legacy per-kind path geometry (curved planks, cannon w/ rotated
+   * barrel, ladder dims, etc.) inside the unified 3-pass glow design.
+   */
+  private drawModuleHoverHighlight(camera: Camera): void {
+    if (!this.hoveredModule) return;
+    const { ship: modShip, module: mod } = this.hoveredModule;
+    const modData     = (mod as any).moduleData ?? mod;
+    const kind        = (modData.kind ?? mod.kind) as string;
+    const screenPos   = camera.worldToScreen(modShip.position);
+    const cameraState = camera.getState();
+    const now         = performance.now();
+    const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+    const glowAlpha   = 0.6 + 0.4 * glowPulse;
+
+    type HoverTeam = 'friendly' | 'enemy' | 'alliance';
+    const hoverTeam: HoverTeam = this.isShipFriendly(modShip) ? 'friendly' : 'enemy';
+    const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
+      friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+      enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+      alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+    };
+    const pal = HOVER_PALETTE[hoverTeam];
+    const hexToRgba = (hex: string, a: number) => {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    };
+
+    // ── Build the per-kind path(s). May issue multiple sub-paths (e.g. cannon
+    //    base + rotated barrel). The caller wraps this in 3 passes.
+    const isCurvedPlank = kind === 'plank' && modData.isCurved && modData.curveData;
+
+    const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
+      ctx.beginPath();
+      if (isCurvedPlank) {
+        const { start, control, end, t1, t2 } = modData.curveData;
+        const segments = 20;
+        const halfPlankWidth = modData.width / 2;
+        const points: Array<{x: number; y: number}> = [];
+        for (let i = 0; i <= segments; i++) {
+          const t = t1 + (t2 - t1) * (i / segments);
+          points.push(this.getQuadraticPoint(start, control, end, t));
+        }
+        const outer: Array<{x: number; y: number}> = [];
+        const inner: Array<{x: number; y: number}> = [];
+        for (let i = 0; i < points.length; i++) {
+          const pt = points[i];
+          let dx: number, dy: number;
+          if (i === 0) { dx = points[1].x - pt.x; dy = points[1].y - pt.y; }
+          else if (i === points.length - 1) { dx = pt.x - points[i - 1].x; dy = pt.y - points[i - 1].y; }
+          else { dx = points[i + 1].x - points[i - 1].x; dy = points[i + 1].y - points[i - 1].y; }
+          const len = Math.sqrt(dx * dx + dy * dy);
+          if (len > 0) { dx /= len; dy /= len; }
+          const perpX = -dy, perpY = dx;
+          outer.push({ x: pt.x + perpX * halfPlankWidth, y: pt.y + perpY * halfPlankWidth });
+          inner.push({ x: pt.x - perpX * halfPlankWidth, y: pt.y - perpY * halfPlankWidth });
+        }
+        ctx.moveTo(outer[0].x, outer[0].y);
+        for (let i = 1; i < outer.length; i++) ctx.lineTo(outer[i].x, outer[i].y);
+        for (let i = inner.length - 1; i >= 0; i--) ctx.lineTo(inner[i].x, inner[i].y);
+        ctx.closePath();
+        return;
+      }
+      if (kind === 'mast') {
+        ctx.arc(0, 0, modData.radius || 15, 0, Math.PI * 2);
+      } else if (kind === 'helm' || kind === 'steering-wheel') {
+        ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      } else if (kind === 'cannon') {
+        // Base
+        ctx.rect(-15, -10, 30, 20);
+        // Rotated barrel — apply rotation only to the barrel rect
+        const turretAngle = modData.aimDirection ?? 0;
+        ctx.save();
+        ctx.rotate(turretAngle);
+        ctx.rect(-8, -40, 16, 40);
+        ctx.restore();
+      } else if (kind === 'swivel') {
+        ctx.arc(0, 0, 10, 0, Math.PI * 2);
+      } else if (kind === 'ladder') {
+        ctx.rect(-10, -20, 20, 40);
+      } else if (kind === 'plank') {
+        const w = modData.length || 20;
+        const h = modData.width  || 10;
+        ctx.rect(-w / 2, -h / 2, w, h);
+      } else if (kind === 'ramp' || kind === 'hatch_cover') {
+        ctx.rect(-25, -25, 50, 50);
+      } else if (kind === 'gunport') {
+        ctx.rect(-10, -7, 20, 14);
+      } else {
+        ctx.rect(-10, -10, 20, 20);
+      }
+    };
+
+    // ── Set up transform. Curved planks are pre-baked in ship-local space; all
+    //    other kinds use the module's localPos + localRot.
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.rotate(modShip.rotation - cameraState.rotation);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    if (!isCurvedPlank) {
+      this.ctx.translate(mod.localPos.x, mod.localPos.y);
+      this.ctx.rotate((mod as any).localRot ?? 0);
+    }
+
+    // Outer glow pass
+    this.ctx.shadowColor  = pal.glow;
+    this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+    this.ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
+    this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+    this.ctx.globalAlpha  = 1;
+    buildModulePath(this.ctx);
+    this.ctx.stroke();
+
+    // Inner crisp stroke
+    this.ctx.shadowBlur   = 0;
+    this.ctx.strokeStyle  = pal.inner;
+    this.ctx.lineWidth    = 2.5 / cameraState.zoom;
+    this.ctx.globalAlpha  = glowAlpha;
+    buildModulePath(this.ctx);
+    this.ctx.stroke();
+
+    // Translucent fill overlay
+    this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+    this.ctx.fillStyle    = pal.fill;
+    buildModulePath(this.ctx);
+    this.ctx.fill();
+
+    this.ctx.restore();
+
+    // Interact hint: "[E] – Interact" when in range, "Not in Range" when too far
+    if (!this._anyBuildActive) {
+      const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
+      const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
+
+      const pi = this.playerInteractInfo;
+      let inRange = true;
+      if (pi) {
+        const dist = (pi.carrierId === modShip.id && pi.localPos)
+          ? Math.hypot((pi.localPos as any).x - mod.localPos.x, (pi.localPos as any).y - mod.localPos.y)
+          : Math.hypot(pi.worldPos.x - modWorldX, pi.worldPos.y - modWorldY);
+        inRange = dist <= 120;
+      }
+
+      const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
+      const label  = inRange ? '[E] – Interact' : 'Not in Range';
+      const labelX = hintScreen.x;
+      const labelY = hintScreen.y - 42;
+      const tCtx   = this.ctx;
+      tCtx.save();
+      tCtx.font = 'bold 13px Georgia, serif';
+      tCtx.textAlign    = 'center';
+      tCtx.textBaseline = 'middle';
+      const tw      = tCtx.measureText(label).width;
+      const boxH    = 22;
+      const boxTop  = labelY - boxH / 2;
+      const textMid = labelY;
+      tCtx.fillStyle   = inRange ? 'rgba(10,20,30,0.72)'  : 'rgba(20,15,10,0.72)';
+      tCtx.strokeStyle = inRange ? 'rgba(130,105,55,0.8)' : 'rgba(90,70,40,0.55)';
+      tCtx.lineWidth   = 1.5;
+      tCtx.beginPath();
+      tCtx.roundRect(labelX - tw / 2 - 8, boxTop, tw + 16, boxH, 4);
+      tCtx.fill();
+      tCtx.stroke();
+      tCtx.fillStyle = inRange ? '#e8dfc0' : '#888070';
+      tCtx.fillText(label, labelX, textMid);
+      tCtx.restore();
+
+    }
+  }
+
+  /**
+   * Draw small tier-colored gems on cannon/mast/swivel modules that were crafted
+   * from a quality blueprint (qualityTier >= 1). Shows item prestige in-world.
+   */
+  private drawModuleQualityMarkers(worldState: WorldState, camera: Camera): void {
+    const ctx = this.ctx;
+    for (const ship of worldState.ships) {
+      for (const mod of ship.modules) {
+        const qt = mod.qualityTier;
+        if (typeof qt !== 'number' || qt < 1) continue;
+        if (mod.kind !== 'cannon' && mod.kind !== 'mast' && mod.kind !== 'swivel') continue;
+        const rot = ship.rotation;
+        const wx = ship.position.x + mod.localPos.x * Math.cos(rot) - mod.localPos.y * Math.sin(rot);
+        const wy = ship.position.y + mod.localPos.x * Math.sin(rot) + mod.localPos.y * Math.cos(rot);
+        const sp = camera.worldToScreen(Vec2.from(wx, wy));
+        if (sp.x < -20 || sp.x > this.canvas.width + 20 || sp.y < -20 || sp.y > this.canvas.height + 20) continue;
+        const zoom = camera.getState().zoom;
+        const col = tierColor(qt);
+        const r = Math.max(2, 3.5 * zoom);
+        ctx.save();
+        ctx.shadowColor = col;
+        ctx.shadowBlur = Math.max(3, 6 * zoom);
+        ctx.fillStyle = col;
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = Math.max(0.5, 1 * zoom);
+        ctx.beginPath();
+        ctx.moveTo(sp.x, sp.y - r);
+        ctx.lineTo(sp.x + r, sp.y);
+        ctx.lineTo(sp.x, sp.y + r);
+        ctx.lineTo(sp.x - r, sp.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  /**
+   * Draw ⚒ repair icons on all damaged modules of the local player's ship.
+   * Only called when hammerEquipped is true.
+   */
+  private drawHammerRepairOverlays(worldState: WorldState, camera: Camera): void {
+    const localPlayer = this._cachedLocalPlayer;
+    if (!localPlayer || localPlayer.carrierId === 0) return;
+    const playerShip = worldState.ships.find(s => s.id === localPlayer.carrierId);
+    if (!playerShip) return;
+
+    const ctx = this.ctx;
+    const cameraState = camera.getState();
+    const zoom = cameraState.zoom;
+    const shipScreen = camera.worldToScreen(playerShip.position);
+    const shipRot = playerShip.rotation - cameraState.rotation;
+    const now = performance.now();
+    const pulse = 0.7 + 0.3 * Math.sin(now / 400);
+
+    for (const mod of playerShip.modules) {
+      // Skip planks — damage is visible via hull darkening; icons would be too dense
+      if (mod.kind === 'plank') continue;
+      const md = mod.moduleData as any;
+      if (!md) continue;
+      const health = typeof md.health === 'number' ? md.health : (md.maxHealth ?? 1);
+      const maxHealth = (md.maxHealth ?? 1) as number;
+      if (health >= maxHealth * 0.999) continue;
+
+      const lx = mod.localPos.x;
+      const ly = mod.localPos.y;
+      const sx = shipScreen.x + (lx * Math.cos(shipRot) - ly * Math.sin(shipRot)) * zoom;
+      const sy = shipScreen.y + (lx * Math.sin(shipRot) + ly * Math.cos(shipRot)) * zoom;
+
+      ctx.save();
+      ctx.globalAlpha = pulse;
+      ctx.font = `${Math.max(10, Math.round(14 * zoom))}px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#ffaa33';
+      ctx.shadowColor = '#ff8800';
+      ctx.shadowBlur = 4;
+      ctx.fillText('\u2692', sx, sy);
+      ctx.restore();
+    }
+  }
+
+  /**
    * Draw an animated marching-arrow line from the commanded NPC to the mouse cursor.
    * Shown whenever Move To targeting mode is active.
    */
   private drawMoveToArrowLine(worldState: WorldState, camera: Camera): void {
     if (this._moveToSourceNpcId === null || !this.mouseWorldPos) return;
+    const now = performance.now();
 
     // Resolve the NPC's current world position (same logic as drawNpc)
     const npc = worldState.npcs.find(n => n.id === this._moveToSourceNpcId);
@@ -1435,114 +1852,6 @@ export class RenderSystem {
           ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
           ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
         );
-      }
-    }
-
-    // ── Module highlight: coloured glow when cursor hovers a module ──
-    // green = same company, red = enemy, light-blue = alliance (future)
-    const now = performance.now();
-    if (this.hoveredModule) {
-      const { ship: modShip, module: mod } = this.hoveredModule;
-      const screenPos   = camera.worldToScreen(modShip.position);
-      const cameraState = camera.getState();
-      const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
-      const glowAlpha   = 0.6 + 0.4 * glowPulse;
-
-      // Determine team relationship
-      type HoverTeam = 'friendly' | 'enemy' | 'alliance';
-      const hoverTeam: HoverTeam = this.isShipFriendly(modShip) ? 'friendly' : 'enemy';
-      // future: 'alliance' when all-company feature is implemented
-      const HOVER_PALETTE: Record<HoverTeam, { glow: string; inner: string; fill: string }> = {
-        friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
-        enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
-        alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
-      };
-      const pal = HOVER_PALETTE[hoverTeam];
-
-      // Build the module's local-space path for the given kind
-      const buildModulePath = (ctx: CanvasRenderingContext2D): void => {
-        ctx.beginPath();
-        if (mod.kind === 'mast') {
-          ctx.arc(0, 0, (mod as any).radius || 15, 0, Math.PI * 2);
-        } else if (mod.kind === 'helm' || mod.kind === 'steering-wheel') {
-          ctx.arc(0, 0, 8, 0, Math.PI * 2);
-        } else if (mod.kind === 'cannon') {
-          ctx.rect(-15, -10, 30, 20);
-        } else if (mod.kind === 'swivel') {
-          ctx.arc(0, 0, 10, 0, Math.PI * 2);
-        } else if (mod.kind === 'ladder') {
-          ctx.rect(-10, -20, 20, 40);
-        } else if (mod.kind === 'plank') {
-          const w = (mod as any).length || 20;
-          const h = (mod as any).width  || 10;
-          ctx.rect(-w / 2, -h / 2, w, h);
-        } else {
-          ctx.rect(-10, -10, 20, 20);
-        }
-      };
-
-      this.ctx.save();
-      this.ctx.translate(screenPos.x, screenPos.y);
-      this.ctx.rotate(modShip.rotation - cameraState.rotation);
-      this.ctx.scale(cameraState.zoom, cameraState.zoom);
-      this.ctx.translate(mod.localPos.x, mod.localPos.y);
-      this.ctx.rotate((mod as any).localRot ?? 0);
-
-      const hexToRgba = (hex: string, a: number) => {
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
-      };
-
-      // Outer glow pass
-      this.ctx.shadowColor  = pal.glow;
-      this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-      this.ctx.strokeStyle  = hexToRgba(pal.glow, glowAlpha * 0.55);
-      this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
-      this.ctx.globalAlpha  = 1;
-      buildModulePath(this.ctx);
-      this.ctx.stroke();
-
-      // Inner crisp stroke
-      this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = pal.inner;
-      this.ctx.lineWidth    = 2.5 / cameraState.zoom;
-      this.ctx.globalAlpha  = glowAlpha;
-      buildModulePath(this.ctx);
-      this.ctx.stroke();
-
-      // Translucent fill overlay
-      this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
-      this.ctx.fillStyle    = pal.fill;
-      buildModulePath(this.ctx);
-      this.ctx.fill();
-
-      this.ctx.restore();
-
-      // Demolish hint: axe equipped + non-plank module → show "🪓 E – Demolish [kind]"
-      if (this.axeEquipped && mod.kind !== 'plank') {
-        const modWorldX = modShip.position.x + mod.localPos.x * Math.cos(modShip.rotation) - mod.localPos.y * Math.sin(modShip.rotation);
-        const modWorldY = modShip.position.y + mod.localPos.x * Math.sin(modShip.rotation) + mod.localPos.y * Math.cos(modShip.rotation);
-        const hintScreen = camera.worldToScreen(Vec2.from(modWorldX, modWorldY));
-        const label = `🪓 E – Demolish ${mod.kind}`;
-        const labelX = hintScreen.x;
-        const labelY = hintScreen.y - 42;
-        const tCtx = this.ctx;
-        tCtx.save();
-        tCtx.font = 'bold 13px Georgia, serif';
-        tCtx.textAlign = 'center';
-        const tw = tCtx.measureText(label).width;
-        tCtx.fillStyle = 'rgba(30,10,10,0.7)';
-        tCtx.strokeStyle = '#cc2222';
-        tCtx.lineWidth = 1.5;
-        tCtx.beginPath();
-        tCtx.roundRect(labelX - tw / 2 - 8, labelY - 16, tw + 16, 22, 4);
-        tCtx.fill();
-        tCtx.stroke();
-        tCtx.fillStyle = '#ffcccc';
-        tCtx.fillText(label, labelX, labelY);
-        tCtx.restore();
       }
     }
 
@@ -1578,45 +1887,53 @@ export class RenderSystem {
       const screenPos    = camera.worldToScreen(hullHitShip.position);
       const cameraState  = camera.getState();
       const hull         = hullHitShip.hull;
-      // Alternating gold/white glow pulse
       const glowPulse    = 0.55 + 0.45 * Math.sin(now / 160);
       const glowAlpha    = 0.6 + 0.4 * glowPulse;
+
+      type HullTeam = 'friendly' | 'enemy' | 'alliance';
+      const hullTeam: HullTeam = this.isShipFriendly(hullHitShip) ? 'friendly' : 'enemy';
+      const HULL_PALETTE: Record<HullTeam, { glow: string; inner: string; fill: string }> = {
+        friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+        enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+        alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+      };
+      const hPal = HULL_PALETTE[hullTeam];
+      const hToRgba = (hex: string, a: number) => {
+        const r = parseInt(hex.slice(1, 3), 16);
+        const g = parseInt(hex.slice(3, 5), 16);
+        const b = parseInt(hex.slice(5, 7), 16);
+        return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+      };
+      const buildHullPath = (ctx: CanvasRenderingContext2D) => {
+        ctx.beginPath();
+        ctx.moveTo(hull[0].x, hull[0].y);
+        for (let i = 1; i < hull.length; i++) ctx.lineTo(hull[i].x, hull[i].y);
+        ctx.closePath();
+      };
 
       this.ctx.save();
       this.ctx.translate(screenPos.x, screenPos.y);
       this.ctx.scale(cameraState.zoom, cameraState.zoom);
       this.ctx.rotate(hullHitShip.rotation - cameraState.rotation);
 
-      // Outer glow pass  (wider, dimmer)
-      this.ctx.shadowColor  = '#ffe066';
+      this.ctx.shadowColor  = hPal.glow;
       this.ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
-      this.ctx.strokeStyle  = `rgba(255, 220, 60, ${(glowAlpha * 0.55).toFixed(3)})`;
+      this.ctx.strokeStyle  = hToRgba(hPal.glow, glowAlpha * 0.55);
       this.ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
       this.ctx.globalAlpha  = 1;
-      this.ctx.beginPath();
-      this.ctx.moveTo(hull[0].x, hull[0].y);
-      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
-      this.ctx.closePath();
+      buildHullPath(this.ctx);
       this.ctx.stroke();
 
-      // Inner crisp stroke
       this.ctx.shadowBlur   = 0;
-      this.ctx.strokeStyle  = `rgba(255, 240, 130, ${(glowAlpha * 0.9).toFixed(3)})`;
-      this.ctx.lineWidth    = (2.5) / cameraState.zoom;
+      this.ctx.strokeStyle  = hPal.inner;
+      this.ctx.lineWidth    = 2.5 / cameraState.zoom;
       this.ctx.globalAlpha  = glowAlpha;
-      this.ctx.beginPath();
-      this.ctx.moveTo(hull[0].x, hull[0].y);
-      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
-      this.ctx.closePath();
+      buildHullPath(this.ctx);
       this.ctx.stroke();
 
-      // Translucent amber fill overlay
       this.ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
-      this.ctx.fillStyle    = '#ffe066';
-      this.ctx.beginPath();
-      this.ctx.moveTo(hull[0].x, hull[0].y);
-      for (let i = 1; i < hull.length; i++) this.ctx.lineTo(hull[i].x, hull[i].y);
-      this.ctx.closePath();
+      this.ctx.fillStyle    = hPal.fill;
+      buildHullPath(this.ctx);
       this.ctx.fill();
 
       this.ctx.restore();
@@ -1779,6 +2096,160 @@ export class RenderSystem {
     ctx.restore();
   }
 
+  /** Draw the Ctrl+drag box-select rectangle while the player is dragging. */
+  private drawBoxSelectRect(): void {
+    const r = this.boxSelectRect;
+    if (!r) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle   = 'rgba(100,180,255,0.10)';
+    ctx.strokeStyle = 'rgba(100,180,255,0.85)';
+    ctx.lineWidth   = 1.5;
+    ctx.setLineDash([6, 3]);
+    ctx.beginPath();
+    ctx.rect(r.x1, r.y1, r.x2 - r.x1, r.y2 - r.y1);
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  /**
+   * When NPCs are box-selected and the player hovers over a ship hull, draw the same
+   * gold boarding-highlight used by single-NPC Move To.
+   */
+  private drawMultiSelectHoverHighlight(worldState: WorldState, camera: Camera): void {
+    if (this.selectedNpcIds.size === 0 || !this.mouseWorldPos) return;
+
+    const now = performance.now();
+
+    const pointInPoly = (px: number, py: number, poly: Vec2[]): boolean => {
+      let inside = false;
+      for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, yi = poly[i].y;
+        const xj = poly[j].x, yj = poly[j].y;
+        if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi))
+          inside = !inside;
+      }
+      return inside;
+    };
+
+    let hullHitShip: (typeof worldState.ships)[0] | null = null;
+    for (const s of worldState.ships) {
+      if (!s.hull || s.hull.length < 3) continue;
+      const dx  = this.mouseWorldPos.x - s.position.x;
+      const dy  = this.mouseWorldPos.y - s.position.y;
+      const cos = Math.cos(-s.rotation);
+      const sin = Math.sin(-s.rotation);
+      if (pointInPoly(dx * cos - dy * sin, dx * sin + dy * cos, s.hull)) {
+        hullHitShip = s;
+        break;
+      }
+    }
+    if (!hullHitShip) return;
+
+    const screenPos   = camera.worldToScreen(hullHitShip.position);
+    const cameraState = camera.getState();
+    const hull        = hullHitShip.hull!;
+    const glowPulse   = 0.55 + 0.45 * Math.sin(now / 160);
+    const glowAlpha   = 0.6  + 0.4  * glowPulse;
+    const ctx         = this.ctx;
+
+    type MsHullTeam = 'friendly' | 'enemy' | 'alliance';
+    const msHullTeam: MsHullTeam = this.isShipFriendly(hullHitShip) ? 'friendly' : 'enemy';
+    const MS_HULL_PALETTE: Record<MsHullTeam, { glow: string; inner: string; fill: string }> = {
+      friendly: { glow: '#44ff88', inner: '#88ffcc', fill: '#00ff44' },
+      enemy:    { glow: '#ff4444', inner: '#ff9999', fill: '#ff2222' },
+      alliance: { glow: '#66ccff', inner: '#aaeeff', fill: '#44aaff' },
+    };
+    const msPal = MS_HULL_PALETTE[msHullTeam];
+    const msHexToRgba = (hex: string, a: number) => {
+      const r = parseInt(hex.slice(1, 3), 16);
+      const g = parseInt(hex.slice(3, 5), 16);
+      const b = parseInt(hex.slice(5, 7), 16);
+      return `rgba(${r},${g},${b},${a.toFixed(3)})`;
+    };
+    const buildMsHullPath = (c: CanvasRenderingContext2D) => {
+      c.beginPath();
+      c.moveTo(hull[0].x, hull[0].y);
+      for (let i = 1; i < hull.length; i++) c.lineTo(hull[i].x, hull[i].y);
+      c.closePath();
+    };
+
+    ctx.save();
+    ctx.translate(screenPos.x, screenPos.y);
+    ctx.scale(cameraState.zoom, cameraState.zoom);
+    ctx.rotate(hullHitShip.rotation - cameraState.rotation);
+
+    ctx.shadowColor  = msPal.glow;
+    ctx.shadowBlur   = (14 + glowPulse * 6) / cameraState.zoom;
+    ctx.strokeStyle  = msHexToRgba(msPal.glow, glowAlpha * 0.55);
+    ctx.lineWidth    = (5 + glowPulse * 3) / cameraState.zoom;
+    ctx.globalAlpha  = 1;
+    buildMsHullPath(ctx);
+    ctx.stroke();
+
+    ctx.shadowBlur   = 0;
+    ctx.strokeStyle  = msPal.inner;
+    ctx.lineWidth    = 2.5 / cameraState.zoom;
+    ctx.globalAlpha  = glowAlpha;
+    buildMsHullPath(ctx);
+    ctx.stroke();
+
+    ctx.globalAlpha  = 0.08 + 0.06 * glowPulse;
+    ctx.fillStyle    = msPal.fill;
+    buildMsHullPath(ctx);
+    ctx.fill();
+
+    ctx.restore();
+
+    // Pulsing target ring at the mouse cursor (screen-space)
+    const dstScreen  = camera.worldToScreen(this.mouseWorldPos);
+    const ringPulse  = 0.65 + 0.35 * Math.sin(now / 220);
+    ctx.save();
+    ctx.globalAlpha  = 0.85 * ringPulse;
+    ctx.beginPath();
+    ctx.arc(dstScreen.x, dstScreen.y, 10 + (1 - ringPulse) * 4, 0, Math.PI * 2);
+    ctx.strokeStyle  = '#ffe066';
+    ctx.lineWidth    = 2;
+    ctx.stroke();
+    ctx.globalAlpha  = 0.95;
+    ctx.beginPath();
+    ctx.arc(dstScreen.x, dstScreen.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle    = '#fff8a0';
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /** Draw a selection ring around each NPC in selectedNpcIds. Call after NPC rendering. */
+  drawSelectedNpcRings(worldState: WorldState, camera: Camera): void {
+    if (this.selectedNpcIds.size === 0) return;
+    const ctx = this.ctx;
+    for (const npc of worldState.npcs) {
+      if (!this.selectedNpcIds.has(npc.id)) continue;
+      let worldPos = npc.position;
+      if (npc.shipId) {
+        const ship = worldState.ships.find(s => s.id === npc.shipId);
+        if (ship && npc.localPosition) {
+          const cosR = Math.cos(ship.rotation);
+          const sinR = Math.sin(ship.rotation);
+          worldPos = Vec2.from(
+            ship.position.x + npc.localPosition.x * cosR - npc.localPosition.y * sinR,
+            ship.position.y + npc.localPosition.x * sinR + npc.localPosition.y * cosR,
+          );
+        }
+      }
+      const sp = camera.worldToScreen(worldPos);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(100,200,255,0.9)';
+      ctx.lineWidth   = 2.5;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 18, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   /** Called each frame from ClientApplication to keep sword cursor ring in sync. */
   updateSwordCooldownCursor(mouseScreenPos: Vec2 | null, lastAttackMs: number, cooldownMs: number): void {
     this.swordCursorMousePos    = mouseScreenPos;
@@ -1803,6 +2274,42 @@ export class RenderSystem {
     this.swordCooldownMs  = cooldownMs;
   }
   
+  /** Draw a "Not enough resources" badge above the cursor when a ghost slot is hovered but unaffordable. */
+  private drawBuildAffordabilityBadge(camera: Camera): void {
+    if (this.ghostCanAfford || !this._anyBuildActive || !this.mouseWorldPos) return;
+    const hasHover = this.hoveredPlankSlot !== null || this.hoveredDeckSlot !== null
+      || this.hoveredHelmSlot !== null || this.hoveredRampSlot !== null
+      || this.hoveredCannonSlot !== null || this.hoveredMastSlot !== null;
+    if (!hasHover) return;
+    const sp = camera.worldToScreen(this.mouseWorldPos);
+    const label = 'Not enough resources';
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.font = 'bold 13px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const tw = ctx.measureText(label).width;
+    const bx = sp.x, by = sp.y - 52;
+    ctx.fillStyle = 'rgba(30, 8, 8, 0.82)';
+    ctx.strokeStyle = 'rgba(220, 60, 40, 0.90)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(bx - tw / 2 - 8, by - 11, tw + 16, 22, 4);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#ff7060';
+    ctx.fillText(label, bx, by);
+    ctx.restore();
+  }
+
+  /** True whenever any ship or land build mode is active (used to suppress interact prompts). */
+  private get _anyBuildActive(): boolean {
+    return this.buildMenuOpen || this.buildMode || this.cannonBuildMode || this.mastBuildMode
+      || this.swivelBuildMode || this.helmBuildMode || this.deckBuildMode
+      || this.rampBuildMode || this.hatchBuildMode || this.gunportBuildMode
+      || this.landBuildModeActive;
+  }
+
   /**
    * Enable or disable plank build mode
    */
@@ -1817,6 +2324,7 @@ export class RenderSystem {
   setCannonBuildMode(active: boolean): void {
     this.cannonBuildMode = active;
     if (!active) this.hoveredCannonSlot = null;
+    if (!active) this.hoveredGunportCannonSnap = null;
   }
 
   /**
@@ -1891,7 +2399,15 @@ export class RenderSystem {
    */
   setDeckBuildMode(active: boolean): void {
     this.deckBuildMode = active;
-    if (!active) this.hoveredDeckSlot = null;
+    if (!active) {
+      this.hoveredDeckSlot = null;
+      this.deckLevelOverride = -1; // reset selection on exit
+    }
+  }
+
+  /** Cycle the selected deck level between 0 (lower) and 1 (upper). Only meaningful when both levels are missing. */
+  cycleDeckLevel(): void {
+    this.deckLevelOverride = this.deckLevelOverride === 1 ? 0 : 1;
   }
 
   /** Whether deck build mode is currently active */
@@ -1900,8 +2416,81 @@ export class RenderSystem {
   }
 
   /** Get the ship whose deck slot is hovered (only in deck build mode) */
-  getHoveredDeckSlot(): { ship: Ship } | null {
+  getHoveredDeckSlot(): { ship: Ship; deckLevel: number } | null {
     return this.hoveredDeckSlot;
+  }
+
+  /** Enable or disable ramp placement build mode */
+  setRampBuildMode(active: boolean): void {
+    this.rampBuildMode = active;
+    if (!active) this.hoveredRampSlot = null;
+  }
+
+  /** Enable or disable hatch cover placement build mode */
+  setHatchBuildMode(active: boolean): void {
+    this.hatchBuildMode = active;
+    if (!active) this.hoveredRampSlot = null;
+  }
+
+  /** Enable or disable gunport placement build mode */
+  setGunportBuildMode(active: boolean): void {
+    this.gunportBuildMode = active;
+    if (!active) this.hoveredGunportSnap = null;
+  }
+
+  /** Whether gunport build mode is currently active */
+  isInGunportBuildMode(): boolean {
+    return this.gunportBuildMode;
+  }
+
+  /** Get the gunport snap slot currently hovered (only in gunport build mode) */
+  getHoveredGunportSnap(): { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null {
+    return this.hoveredGunportSnap;
+  }
+
+  /** Whether hatch cover build mode is currently active */
+  isInHatchBuildMode(): boolean {
+    return this.hatchBuildMode;
+  }
+
+  /** Activate or deactivate resource chest placement build mode. */
+  setChestBuildMode(active: boolean): void {
+    this.chestBuildMode = active;
+  }
+
+  /** Whether resource chest build mode is currently active */
+  isInChestBuildMode(): boolean {
+    return this.chestBuildMode;
+  }
+
+  /** Activate or deactivate bed placement build mode. */
+  setBedBuildMode(active: boolean): void {
+    this.bedBuildMode = active;
+  }
+
+  /** Whether bed build mode is currently active */
+  isInBedBuildMode(): boolean {
+    return this.bedBuildMode;
+  }
+
+  /** Whether ramp build mode is currently active */
+  isInRampBuildMode(): boolean {
+    return this.rampBuildMode;
+  }
+
+  /** Advance the ramp facing by 90°. dir=+1 (E key, clockwise) or -1 (Q key, counter-clockwise). */
+  cycleRampFacing(dir: 1 | -1 = 1): void {
+    this.rampFacing = ((this.rampFacing + dir) % 4 + 4) % 4;
+  }
+
+  /** Returns the current ramp rotation in radians (0, π/2, π, or 3π/2). */
+  getRampFacingRadians(): number {
+    return this.rampFacing * Math.PI / 2;
+  }
+
+  /** Get the ramp snap slot currently hovered (only in ramp build mode) */
+  getHoveredRampSlot(): { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null {
+    return this.hoveredRampSlot;
   }
 
   // ── Island structure management ────────────────────────────────────────────
@@ -2241,7 +2830,9 @@ export class RenderSystem {
     const prevTargetHp = s.targetHp ?? prevHp;
     s.hp = hp;
     s.maxHp = maxHp;
-    if (typeof targetHp === 'number') s.targetHp = targetHp;
+    // Always sync targetHp — server always sends target_hp in structure_hp_changed.
+    // Leaving a stale targetHp would permanently flag the structure as a schematic.
+    s.targetHp = typeof targetHp === 'number' ? targetHp : undefined;
     return { prevHp, prevTargetHp };
   }
 
@@ -2284,9 +2875,17 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null): void {
     this.islandBuildKind = kind;
   }
+
+  /** Set the active Build Schematic Hotbar kind — used to detect ghost plan hover for construction. */
+  setBuildSchematicKind(kind: string | null): void {
+    this.buildSchematicKind = kind;
+  }
+
+  /** Mirror of ClientApplication.landBuildMenuOpen || islandBuildMode — gates ghost plan visibility. */
+  public landBuildModeActive = false;
 
   /** Set the rotation (degrees) for the island floor/workbench ghost. */
   setIslandBuildRotation(deg: number): void {
@@ -2321,6 +2920,20 @@ export class RenderSystem {
   }
 
   /**
+   * Returns a combined view of placed structures + pending land ghost placements
+   * for snap-point computation. Ghosts are treated as already built so that
+   * successive placements in the same plan snap to each other.
+   */
+  private _snapBases(): { type: string; x: number; y: number; rotation?: number; id: number | string }[] {
+    const out: { type: string; x: number; y: number; rotation?: number; id: number | string }[] = [];
+    for (const s of this.placedStructures) out.push(s);
+    for (const g of this.landGhostPlacements) {
+      out.push({ type: g.kind, x: g.worldPos.x, y: g.worldPos.y, rotation: g.rotation, id: g.id });
+    }
+    return out;
+  }
+
+  /**
    * Compute the snapped world position for a wooden_floor placement at (wx, wy).
    * If the point is within SNAP_R of an unoccupied cardinal neighbour slot of any
    * existing floor, snaps to that slot. Otherwise returns the input unchanged.
@@ -2329,14 +2942,15 @@ export class RenderSystem {
   computeSnappedPos(wx: number, wy: number): { x: number; y: number } {
     const TILE   = 50;
     const SNAP_R = TILE * 0.4; // 20 px — snap pull radius
-    if (this.islandBuildKind !== 'wooden_floor' || this.placedStructures.length === 0) {
+    const bases = this._snapBases();
+    if (this.islandBuildKind !== 'wooden_floor' || bases.length === 0) {
       this._snappedBuildRotation = null;
       return { x: wx, y: wy };
     }
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
     let bestRot: number | null = null;
-    for (const s of this.placedStructures) {
+    for (const s of bases) {
       if (s.type !== 'wooden_floor') continue;
       // Derive the 4 neighbour slots using this tile's own rotation
       const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -2352,7 +2966,7 @@ export class RenderSystem {
         // candidateRad inherits source tile's rotation.
         // Exclude source tile (s) itself — candidate is by construction adjacent/touching it.
         const candidateRad = rad;
-        const alreadyOccupied = this.placedStructures.some(
+        const alreadyOccupied = bases.some(
           f => f.type === 'wooden_floor' && f.id !== s.id &&
                RenderSystem.floorsOverlap(nx, ny, candidateRad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
         );
@@ -2372,10 +2986,11 @@ export class RenderSystem {
   computeSnappedWallPos(wx: number, wy: number): { x: number; y: number } {
     const HALF = 25;
     const SNAP_R = 30;
-    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    const bases = this._snapBases();
+    if (bases.length === 0) return { x: wx, y: wy };
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    for (const s of this.placedStructures) {
+    for (const s of bases) {
       if (s.type !== 'wooden_floor') continue;
       // Rotate the 4 canonical edge-midpoint offsets by this floor's rotation
       const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -2390,7 +3005,7 @@ export class RenderSystem {
       for (const e of EDGES) {
         const nx = s.x + e.ldx * c - e.ldy * sn;
         const ny = s.y + e.ldx * sn + e.ldy * c;
-        const occ = this.placedStructures.some(
+        const occ = bases.some(
           w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
         );
         if (occ) continue;
@@ -2404,12 +3019,13 @@ export class RenderSystem {
   /** Snap a door panel to the nearest unoccupied door_frame position. */
   computeSnappedDoorPos(wx: number, wy: number): { x: number; y: number } {
     const SNAP_R = 30;
-    if (this.placedStructures.length === 0) return { x: wx, y: wy };
+    const bases = this._snapBases();
+    if (bases.length === 0) return { x: wx, y: wy };
     let bestDist2 = SNAP_R * SNAP_R;
     let bestX = wx, bestY = wy;
-    for (const s of this.placedStructures) {
+    for (const s of bases) {
       if (s.type !== 'door_frame') continue;
-      const hasDoor = this.placedStructures.some(
+      const hasDoor = bases.some(
         d => d.type === 'door' && Math.abs(d.x - s.x) < 2 && Math.abs(d.y - s.y) < 2
       );
       if (hasDoor) continue;
@@ -2435,7 +3051,8 @@ export class RenderSystem {
     let bestX = wx, bestY = wy;
     // Candidate set: floor centres that have at least one wall, plus ceiling-adjacent positions
     const candidates: { x: number; y: number; rot: number }[] = [];
-    for (const s of this.placedStructures) {
+    const bases = this._snapBases();
+    for (const s of bases) {
       if (s.type === 'wooden_floor') {
         // Is there a wall at any edge of this floor?
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -2449,7 +3066,7 @@ export class RenderSystem {
         const hasWall = EDGES.some(e => {
           const ex = s.x + e.ldx * c - e.ldy * sn;
           const ey = s.y + e.ldx * sn + e.ldy * c;
-          return this.placedStructures.some(
+          return bases.some(
             w => (w.type === 'wall' || w.type === 'door_frame') &&
                  Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
           );
@@ -2467,7 +3084,7 @@ export class RenderSystem {
         ];
         for (const d of DIRS) {
           const nx = s.x + d.dx, ny = s.y + d.dy;
-          const alreadyOccupied = this.placedStructures.some(
+          const alreadyOccupied = bases.some(
             f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
           );
           if (!alreadyOccupied) candidates.push({ x: nx, y: ny, rot: s.rotation ?? 0 });
@@ -2483,6 +3100,87 @@ export class RenderSystem {
     }
     if (bestDist2 >= SNAP_R * SNAP_R) this._snappedBuildRotation = null;
     return { x: bestX, y: bestY };
+  }
+
+  /**
+   * Returns true if a land-plan ghost placement of `kind` at world position (px, py) is
+   * structurally valid given existing placed structures and pending ghost plans.
+   *
+   * Rules mirror server-side validation:
+   *  - wall / door_frame: must be at a floor edge midpoint
+   *  - workbench / cannon: must be inside a floor tile
+   *  - door: must snap onto an existing door_frame
+   *  - wood_ceiling: must have wall/door_frame at an edge midpoint OR be adjacent to an existing ceiling
+   *  - everything else (wooden_floor, shipyard, …): always valid client-side (server enforces further)
+   */
+  isValidLandPlanPlacement(kind: string, px: number, py: number): boolean {
+    const EDGE_TOL = 5;
+    const HALF = 25;
+    const TILE = 50;
+    const bases = this._snapBases();
+
+    if (kind === 'wall' || kind === 'door_frame') {
+      return bases.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const c = Math.cos(rad), sn = Math.sin(rad);
+        return [
+          { ldx: 0, ldy: -HALF }, { ldx: 0, ldy: HALF },
+          { ldx: -HALF, ldy: 0 }, { ldx: HALF, ldy: 0 },
+        ].some(e => {
+          const ex = s.x + e.ldx * c - e.ldy * sn;
+          const ey = s.y + e.ldx * sn + e.ldy * c;
+          return Math.abs(px - ex) < EDGE_TOL && Math.abs(py - ey) < EDGE_TOL;
+        });
+      });
+    }
+
+    if (kind === 'workbench' || kind === 'cannon') {
+      return bases.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const dx = px - s.x, dy = py - s.y;
+        const lx = dx * Math.cos(-rad) - dy * Math.sin(-rad);
+        const ly = dx * Math.sin(-rad) + dy * Math.cos(-rad);
+        return Math.abs(lx) <= HALF && Math.abs(ly) <= HALF;
+      });
+    }
+
+    if (kind === 'door') {
+      return bases.some(s =>
+        s.type === 'door_frame' &&
+        Math.abs(s.x - px) < EDGE_TOL && Math.abs(s.y - py) < EDGE_TOL
+      );
+    }
+
+    if (kind === 'wood_ceiling') {
+      const crot = (this._snappedBuildRotation ?? 0) * Math.PI / 180;
+      const cc = Math.cos(crot), cs = Math.sin(crot);
+      const EDGES = [
+        { ldx: 0, ldy: -HALF }, { ldx: 0, ldy: HALF },
+        { ldx: -HALF, ldy: 0 }, { ldx: HALF, ldy: 0 },
+      ];
+      // Wall/door_frame at any edge midpoint of this ceiling tile
+      const hasWallAtEdge = EDGES.some(e => {
+        const ex = px + e.ldx * cc - e.ldy * cs;
+        const ey = py + e.ldx * cs + e.ldy * cc;
+        return bases.some(
+          w => (w.type === 'wall' || w.type === 'door_frame') &&
+               Math.abs(w.x - ex) < EDGE_TOL && Math.abs(w.y - ey) < EDGE_TOL
+        );
+      });
+      if (hasWallAtEdge) return true;
+      // Adjacent existing ceiling
+      return bases.some(s => {
+        if (s.type !== 'wood_ceiling') return false;
+        const adx = Math.abs(s.x - px), ady = Math.abs(s.y - py);
+        return (Math.abs(adx - TILE) < EDGE_TOL && ady < EDGE_TOL) ||
+               (Math.abs(ady - TILE) < EDGE_TOL && adx < EDGE_TOL);
+      });
+    }
+
+    // wooden_floor, shipyard, and other types: always valid client-side
+    return true;
   }
 
   /**
@@ -2589,13 +3287,15 @@ export class RenderSystem {
     return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
   }
 
-  getHoveredBoulder(range: number = 50): { wx: number; wy: number } | null {
+  getHoveredBoulder(): { wx: number; wy: number; size: number } | null {
     if (!this._hoveredBoulder) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
+    const BOULDER_HARVEST_RANGE = 50 * 1.40625; // matches server BOULDER_HARVEST_RANGE
+    const effR = BOULDER_HARVEST_RANGE * Math.max(1.0, this._hoveredBoulder.size);
     const dx = this._hoveredBoulder.wx - player.position.x;
     const dy = this._hoveredBoulder.wy - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredBoulder : null;
+    return dx * dx + dy * dy <= effR * effR ? this._hoveredBoulder : null;
   }
 
   // ── Tombstone API ─────────────────────────────────────────────────────────
@@ -2735,7 +3435,7 @@ export class RenderSystem {
       ctx.fillText(timerText, 0, -h - 4 * sz - fontSize - 2 * sz);
 
       /* Interact hint */
-      if (isNear) {
+      if (isNear && !this._anyBuildActive) {
         ctx.font = `${Math.round(9 * sz)}px Georgia, serif`;
         ctx.fillStyle = '#ffffff';
         ctx.fillText('[E] Collect', 0, 14 * sz);
@@ -2883,7 +3583,7 @@ export class RenderSystem {
       }
 
       /* Interact hint */
-      if (isNear) {
+      if (isNear && !this._anyBuildActive) {
         const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
         const fsz = Math.round(9 * sz);
         ctx.font = `${fsz}px Georgia, serif`;
@@ -2910,11 +3610,81 @@ export class RenderSystem {
   /**
    * Get the cannon slot currently under the cursor (only in cannon build mode)
    */
-  getHoveredCannonSlot(): { ship: Ship; cannonIndex: number } | null {
+  getHoveredCannonSlot(): { ship: Ship; cannonIndex: number; localX: number; localY: number; rot: number } | null {
     return this.hoveredCannonSlot;
   }
 
-  /** Whether build mode is currently active */
+  /**
+   * Get the gunport-snapped cannon position under the cursor (only in cannon build mode).
+   * If the cursor is over a gunport that has no cannon yet, returns that gunport module.
+   */
+  getHoveredGunportCannonSnap(): { ship: Ship; module: ShipModule } | null {
+    return this.hoveredGunportCannonSnap;
+  }
+
+  // ── Gunport cannon animation ──────────────────────────────────────────────
+
+  /** Find the gunport module whose position matches a cannon's position (co-located at hull edge). */
+  private findGunportForCannon(cannon: ShipModule, ship: Ship): ShipModule | null {
+    // Match by snap index — the server links cannon to gunport via gunportSnapIdx / snapIndex.
+    // Proximity matching breaks now that the server authoritatively moves the cannon between
+    // stowed (y=±10) and deployed (y=±80) positions, both far from the gunport hull edge (y=±90).
+    const cannonData = cannon.moduleData as import('../../sim/modules').CannonModuleData | undefined;
+    const snapIdx = cannonData?.gunportSnapIdx;
+    if (snapIdx === undefined || snapIdx === 255) return null;
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'gunport') continue;
+      const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData | undefined;
+      if (gpData?.snapIndex === snapIdx) return mod;
+    }
+    return null;
+  }
+
+  /** Compute deploy progress [0-1] for a gunport animation (0=stowed/closed, 1=deployed/open). */
+  private computeGunportProgress(
+    anim: { targetOpen: boolean; startProgress: number; startTime: number },
+    now: number,
+  ): number {
+    const t = Math.min((now - anim.startTime) / RenderSystem.GUNPORT_ANIM_MS, 1.0);
+    const eased = t * t * (3 - 2 * t); // smooth-step
+    return anim.targetOpen
+      ? anim.startProgress + (1 - anim.startProgress) * eased
+      : anim.startProgress * (1 - eased);
+  }
+
+  /** Trigger a cannon slide-out (open) or slide-in (close) animation for a gunport. */
+  triggerGunportAnimation(gunportId: number, isOpen: boolean): void {
+    const existing = this.gunportAnimations.get(gunportId);
+    const now = performance.now();
+    const currentProgress = existing ? this.computeGunportProgress(existing, now) : (isOpen ? 0 : 1);
+    this.gunportAnimations.set(gunportId, { targetOpen: isOpen, startProgress: currentProgress, startTime: now });
+  }
+
+  /** Returns true if a gunport's cannon slide animation is currently in progress. */
+  isGunportAnimating(gunportId: number): boolean {
+    const anim = this.gunportAnimations.get(gunportId);
+    if (!anim) return false;
+    const p = this.computeGunportProgress(anim, performance.now());
+    return p > 0.001 && p < 0.999;
+  }
+
+  /** Returns the set of cannon module IDs whose gunport is currently mid-animation (fire blocked). */
+  getBlockedGunportCannonIds(ship: Ship): Set<number> {
+    const blocked = new Set<number>();
+    for (const cannon of ship.modules) {
+      if (cannon.kind !== 'cannon') continue;
+      const gp = this.findGunportForCannon(cannon, ship);
+      if (gp && this.isGunportAnimating(gp.id)) blocked.add(cannon.id);
+    }
+    return blocked;
+  }
+
+  /** Whether the given cannon has an associated gunport (i.e. it is a gunport cannon). */
+  isGunportCannon(cannon: ShipModule, ship: Ship): boolean {
+    return this.findGunportForCannon(cannon, ship) !== null;
+  }
+
+
   isInBuildMode(): boolean {
     return this.buildMode;
   }
@@ -2926,6 +3696,8 @@ export class RenderSystem {
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostState: { kind: GhostModuleKind; rotDeg: number } | null = null;
   private buildMenuOpen = false;
+  /** Planned land structure ghosts (placed but not yet sent to server). */
+  private landGhostPlacements: LandGhostPlacement[] = [];
 
   /**
    * Set explicit build mode state for ghost preview rendering.
@@ -2938,6 +3710,11 @@ export class RenderSystem {
   /** Update the list of ghost planning markers to render on ships. */
   setGhostPlacements(ghosts: GhostPlacement[]): void {
     this.ghostPlacements = ghosts;
+  }
+
+  /** Update the list of planned land structure ghost markers. */
+  setLandGhostPlacements(ghosts: LandGhostPlacement[]): void {
+    this.landGhostPlacements = ghosts;
   }
 
   /** Track whether the build menu is open so ghost plans are only shown then. */
@@ -3113,12 +3890,35 @@ export class RenderSystem {
           return;
         }
       }
+
+      // --- Pass 1b: gunports take priority over hull planks (lower deck only) ---
+      if (this._playerDeckLevel === 0) {
+        for (const module of ship.modules) {
+          if (module.kind !== 'gunport') continue;
+          const mdx = localX - module.localPos.x;
+          const mdy = localY - module.localPos.y;
+          if (Math.abs(mdx) <= 13 && Math.abs(mdy) <= 7) {
+            this.hoveredModule = { ship, module };
+            return;
+          }
+        }
+      }
       
       // --- Pass 2: everything else (planks, cannons, masts, etc.) ---
       for (const module of ship.modules) {
         // Ladders already checked in pass 1; decks are never interactively highlighted
         const _pass2Kind = module.moduleData?.kind ?? module.kind;
         if (_pass2Kind === 'ladder' || _pass2Kind === 'deck') continue;
+
+        // Gunports are only interactable from the lower deck (deck 0)
+        if (_pass2Kind === 'gunport' && this._playerDeckLevel !== 0) continue;
+        // Planks are interactable from any deck level (build/repair from either deck)
+        // All other modules: block cross-deck interaction (deck-independent modules allowed everywhere)
+        // Exception: during weapon-group overlay mode (Ctrl held), cannons/swivels are
+        // hoverable across decks so the player can assign groups from either deck.
+        const _crossDeckGroupMode = this.showGroupOverlay && (_pass2Kind === 'cannon' || _pass2Kind === 'swivel');
+        if (!_crossDeckGroupMode && _pass2Kind !== 'plank' && _pass2Kind !== 'gunport'
+            && module.deckId !== 255 && module.deckId !== this._playerDeckLevel) continue;
 
         const moduleKind = _pass2Kind;
 
@@ -3155,6 +3955,20 @@ export class RenderSystem {
           // Helm renders as a circle with radius 8
           width = 16;
           height = 16;
+        } else if (moduleKind === 'ramp' || moduleKind === 'hatch_cover') {
+          // Ramp / hatch cover render as a 50×50 square (matches visual footprint)
+          width = 50;
+          height = 50;
+        } else if (moduleKind === 'gunport') {
+          // Gunport only interactable from lower deck; skip on upper deck
+          if (this._playerDeckLevel !== 0) continue;
+          // Gunport renders as a 22×10 rectangle on the hull plank
+          width = 24;
+          height = 14;
+        } else if (moduleKind === 'chest') {
+          // Chest is a 40×28 world-unit box
+          width = 44;
+          height = 32;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -3218,7 +4032,10 @@ export class RenderSystem {
     phase3Alpha: number;
   } {
     const isGhostShipForHP = ship.shipType === SHIP_TYPE_GHOST;
-    const maxHullHP = isGhostShipForHP ? GHOST_MAX_HULL_HP : 100;
+    const ghostNpcLevel = isGhostShipForHP && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+    const maxHullHP = isGhostShipForHP
+      ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLevel - 1) * 9 / 59))
+      : 100;
     // Once the sink animation has started, lock hullPct at 0 so the fade can't reverse
     const rawHullPct = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
     const hullPct = this.sinkTimestamps.has(ship.id) ? 0 : rawHullPct;
@@ -3365,6 +4182,25 @@ export class RenderSystem {
             this._smoothSailOpenness.set(mod.id,  prevOpenness + (targetOpenness - prevOpenness) * alpha);
           }
         }
+
+        // Sail-fiber alpha: fade to 0.30 when local player is on deck, else 1.0
+        {
+          const onDeck = this._cachedLocalPlayer !== null
+            && this._cachedLocalPlayer.carrierId === ship.id
+            && !this._cachedLocalPlayer.isMounted;
+          const targetAlpha = onDeck ? 0.30 : 1.0;
+          const prevAlpha   = this._sailAlphaByShip.get(ship.id) ?? targetAlpha;
+          const FADE_SPEED  = 3.0; // fractions of the gap closed per second
+          const newAlpha    = prevAlpha + (targetAlpha - prevAlpha) * Math.min(1, FADE_SPEED * frameDt);
+          this._sailAlphaByShip.set(ship.id, newAlpha);
+        }
+      }
+
+      // Upper-deck fade: smoothly dim upper-deck modules and NPCs while on the lower deck.
+      {
+        const _udTarget = this._playerDeckLevel === 0 ? 0.3 : 1.0;
+        const _udSpeed  = 4.0; // transition completes in ~300 ms
+        this._upperDeckFade = this._upperDeckFade + (_udTarget - this._upperDeckFade) * Math.min(1, _udSpeed * frameDt);
       }
     }
 
@@ -3391,8 +4227,10 @@ export class RenderSystem {
     // In cannon build mode, detect which missing cannon slot is under the cursor
     if (this.cannonBuildMode) {
       this.detectHoveredCannonSlot(worldState);
+      this.detectHoveredGunportCannonSnap(worldState);
     } else {
       this.hoveredCannonSlot = null;
+      this.hoveredGunportCannonSnap = null;
     }
 
     // In mast build mode, detect which missing mast slot is under the cursor
@@ -3419,11 +4257,27 @@ export class RenderSystem {
       this.hoveredDeckSlot = null;
     }
 
+    // In ramp or hatch build mode, detect which snap point is under the cursor
+    if (this.rampBuildMode || this.hatchBuildMode) {
+      this.detectHoveredRampSlot(worldState);
+    } else {
+      this.hoveredRampSlot = null;
+    }
+
+    // In gunport build mode, detect which gunport snap is under the cursor
+    if (this.gunportBuildMode) {
+      this.detectHoveredGunportSnap(worldState);
+      // detectHoveredGunportCannonSnap is already called above for all build modes
+    } else {
+      this.hoveredGunportSnap = null;
+    }
+
     // Draw background elements
     this.drawWater(camera);
     if (this.config.showGrid) this.drawGrid(camera);
     this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
     this.drawIslandBuildGhost(camera);
+    if (this.landBuildModeActive) this.drawLandGhostPlacements(camera);
     
     // ── Snap scaffolded ships into their shipyard docks ───────────────────────
     // Temporarily override position/rotation so every draw call renders the ship
@@ -3463,18 +4317,22 @@ export class RenderSystem {
     // ── Hover prompts + health bars (always on top) ───────────────────────────
     for (const e of this._pendingAllRes) {
       if (e.res.type === 'wood' && e.isHovered) {
-        if (this._pendingAxeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
-        else                          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        if (!this.combatMode) {
+          if (this._pendingAxeEquipped) this.drawHarvestPrompt(e.sp.x, e.sp.y, zoom, e.inRange);
+          else                          this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need axe)');
+        }
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, (e.res.size ?? 1.0) * 40);
       } else if (e.res.type === 'fiber' && e.isHovered) {
-        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
+        if (!this.combatMode) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Gather Fiber');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 30);
       } else if (e.res.type === 'rock' && e.isHovered) {
-        this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Pick Up');
+        if (!this.combatMode) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Pick Up');
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 28);
       } else if (e.res.type === 'boulder' && e.isHovered) {
-        if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Boulder');
-        else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        if (!this.combatMode) {
+          if (this._pendingPickaxeEquipped) this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, e.inRange, '[E] Mine Boulder');
+          else                              this.drawGatherPrompt(e.sp.x, e.sp.y, zoom, false, '(need pickaxe)');
+        }
         if ((e.res.maxHp ?? 0) > 0) this.drawResourceHealthBar(e.sp.x, e.sp.y, zoom, e.res.hp ?? e.res.maxHp, e.res.maxHp ?? 1, 64);
       }
     }
@@ -3524,6 +4382,22 @@ export class RenderSystem {
     this.drawLadderHoldRing();
     // Move To directive arrow line (above world, below UI menus)
     this.drawMoveToArrowLine(worldState, camera);
+    // Module hover glow (always-on, independent of move-to mode)
+    this.drawModuleHoverHighlight(camera);
+    // Quality-tier gems on cannons/masts/swivels crafted from quality blueprints
+    this.drawModuleQualityMarkers(worldState, camera);
+    // Insufficient-resource badge above cursor in build mode
+    this.drawBuildAffordabilityBadge(camera);
+    // Hammer repair overlays — damaged module icons when hammer is equipped
+    if (this.hammerEquipped) this.drawHammerRepairOverlays(worldState, camera);
+    // Ship hull hover glow (always-on, normal hover)
+    this.drawShipHullHighlight(camera);
+    // Ship hull highlight when multi-select NPCs are pending a destination
+    this.drawMultiSelectHoverHighlight(worldState, camera);
+    // Box-select drag rectangle
+    this.drawBoxSelectRect();
+    // Selection rings for box-selected NPCs
+    this.drawSelectedNpcRings(worldState, camera);
     // Radial action menu (topmost)
     this._radialMenu?.render(this.ctx);
     // Move To targeting hint banner
@@ -3534,10 +4408,26 @@ export class RenderSystem {
       this.drawHoverBoundariesDebug(worldState, camera);
     }
     
-    // Draw hover tooltip (screen space, on top of everything)
+    // Draw hover tooltip (screen space, on top of everything) — 500 ms delay
+    const _curTtKey = this.hoveredModule
+      ? `mod-${(this.hoveredModule.module as { id?: number }).id ?? 0}`
+      : this.hoveredNpc
+      ? `npc-${this.hoveredNpc.id}`
+      : this.hoveredShip
+      ? `ship-${this.hoveredShip.id}`
+      : this._hoveredStructure
+      ? `struct-${this._hoveredStructure.id}`
+      : '';
+    const _nowTt = performance.now();
+    if (_curTtKey !== this._tooltipHoverKey) {
+      this._tooltipHoverKey   = _curTtKey;
+      this._tooltipHoverStart = _nowTt;
+    }
+    this._tooltipReady = _curTtKey !== '' && (_nowTt - this._tooltipHoverStart) >= 500;
     this.drawHoverTooltip(camera);
     this.drawNpcTooltip(camera);
     this.drawShipHullTooltip(camera);
+    this.drawStructureTooltip(camera);
   }
   
   /**
@@ -4093,7 +4983,7 @@ export class RenderSystem {
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
     const HARVEST_RANGE = 50; // base range (px) — matches server HARVEST_RANGE
-    const BOULDER_HARVEST_RANGE = HARVEST_RANGE * 1.25; // 25% larger reach for boulders — matches server BOULDER_HARVEST_RANGE
+    const BOULDER_HARVEST_RANGE = HARVEST_RANGE * 1.40625; // matches server BOULDER_HARVEST_RANGE; scales with node size
     // Effective range per node = HARVEST_RANGE * Math.max(1.0, size) — larger nodes extend reach
     const PLANT_HOVER_SQ = (30 * zoom) * (30 * zoom);
     const ROCK_HOVER_SQ  = (22 * zoom) * (22 * zoom);
@@ -4421,7 +5311,7 @@ export class RenderSystem {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
           const effR = BOULDER_HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(pickaxeEquipped && localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
-          if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon };
+          if (isHovered) this._hoveredBoulder = { wx: wxCanon, wy: wyCanon, size: res.size ?? 1.0 };
         }
         // Smooth leaf-fade alpha: 1.0 (far) → MIN_LEAF_ALPHA (inside LEAF_FADE_INNER)
         const leafAlpha = res.type === 'wood' && localPlayer
@@ -4759,8 +5649,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'shipyard' ? 445 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'shipyard' ? 170 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'shipyard' ? 445 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'shipyard') {
             // For empty shipyard: only highlight the physical U-shaped dock arms,
@@ -4888,9 +5778,10 @@ export class RenderSystem {
       const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
       if (s.type === 'wooden_floor') {
+        const floorTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const floorIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        // Darken the fill as hp drops (up to 50% darker at 0 hp)
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const baseColor = isBlocker ? '#cc3322' : isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
         if (s.rotation) {
@@ -4925,6 +5816,28 @@ export class RenderSystem {
         const stripH = Math.max(2, 3 * zoom);
         ctx.fillStyle = floorCompanyColor;
         ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, stripH);
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && floorIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
+          const flBuildFrac = Math.max(0, Math.min(1, floorTargetHp > 0 ? s.hp / floorTargetHp : 0));
+          const flBarW = sz * 0.7; const flBarH = Math.max(2, 4 * zoom);
+          const flBarX = ssp.x - flBarW / 2; const flBarY = ssp.y - sz / 2 - flBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(flBarX, flBarY, flBarW, flBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(flBarX, flBarY, flBarW * flBuildFrac, flBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, flBarY - 2);
+        }
+        // Repair icon when hammer equipped and floor is actually damaged (not schematic)
+        if (this.hammerEquipped && !floorIsSchematic && hpFrac < 0.999) {
+          ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
         ctx.restore();
       } else if (s.type === 'workbench') {
         // Top-down view: wide rectangular bench filling most of the floor tile
@@ -5005,10 +5918,32 @@ export class RenderSystem {
         ctx.fillRect(bx, by, bw, wbStripH);
         // Damage darkening overlay
         const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const wbDmgDarken = (1 - wbHpFrac) * 0.5;
+        const wbTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const wbIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const wbDmgDarken = Math.max(0, 1 - wbHpFrac) * 0.75;
         if (wbDmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${wbDmgDarken.toFixed(2)})`;
           ctx.fillRect(bx, by, bw, bh);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && wbIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(bx, by, bw, bh);
+          const wbBuildFrac = Math.max(0, Math.min(1, wbTargetHp > 0 ? s.hp / wbTargetHp : 0));
+          const wbBarW = bw * 0.7; const wbBarH = Math.max(2, 4 * zoom);
+          const wbBarX = ssp.x - wbBarW / 2; const wbBarY = by - wbBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(wbBarX, wbBarY, wbBarW, wbBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(wbBarX, wbBarY, wbBarW * wbBuildFrac, wbBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, wbBarY - 2);
+        }
+        // Repair icon for non-schematic damaged workbench when hammer equipped
+        if (this.hammerEquipped && !wbIsSchematic && wbDmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
 
         ctx.restore();
@@ -5024,12 +5959,16 @@ export class RenderSystem {
         const ww = sz;          // long axis (rotated by wallRotRad)
         const wh = sz * THICK;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        // Schematic/repair state detection
+        const targetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const isSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(wallRotRad);
         ctx.translate(-ssp.x, -ssp.y);
+        // Main wall fill
         ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
         ctx.strokeStyle = '#2e1a08';
         ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
@@ -5049,6 +5988,37 @@ export class RenderSystem {
         const stripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = wallCompanyColor;
         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
+        // Schematic/repair overlay and progress bar — only visible when hammer is equipped
+        if (this.hammerEquipped && isSchematic) {
+          // Ghost overlay
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+          // Progress bar (shows build/repair progress)
+          const barW = ww * 0.7;
+          const barH = Math.max(2, 4 * zoom);
+          const barX = ssp.x - barW / 2;
+          const barY = ssp.y - wh / 2 - barH - 2;
+          const buildFrac = Math.max(0, Math.min(1, s.hp / targetHp));
+          ctx.strokeStyle = '#b0e0ff';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+          ctx.fillStyle = '#55ddff';
+          ctx.fillRect(barX, barY, barW * buildFrac, barH);
+          // Repair icon
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, barY - 2);
+        }
+        // Repair icon for non-schematic damaged walls when hammer equipped
+        if (this.hammerEquipped && !isSchematic && dmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
         // Damage darkening
         if (dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
@@ -5067,8 +6037,10 @@ export class RenderSystem {
         const ww = sz;          // long axis
         const wh = sz * THICK;
         const POST = sz * 0.14; // post square size
+        const dfTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const dfIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
@@ -5096,10 +6068,30 @@ export class RenderSystem {
         const dfStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = dfCompanyColor;
         ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
-        if (dmgDarken > 0.01) {
+        if (!dfIsSchematic && dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
           ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
           ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && dfIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, ww, POST);
+          const dfBuildFrac = Math.max(0, Math.min(1, dfTargetHp > 0 ? s.hp / dfTargetHp : 0));
+          const dfBarW = ww * 0.7; const dfBarH = Math.max(2, 4 * zoom);
+          const dfBarX = ssp.x - dfBarW / 2; const dfBarY = ssp.y - POST / 2 - dfBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(dfBarX, dfBarY, dfBarW, dfBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(dfBarX, dfBarY, dfBarW * dfBuildFrac, dfBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, dfBarY - 2);
+        }
+        // Repair icon for non-schematic damaged door frames when hammer equipped
+        if (this.hammerEquipped && !dfIsSchematic && dmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
         ctx.restore();
       } else if (s.type === 'door') {
@@ -5114,8 +6106,10 @@ export class RenderSystem {
         const THICK = 0.18;
         const ww = sz;
         const wh = sz * THICK;
+        const doorTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const doorIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const isOpen = s.doorOpen === true;
 
         ctx.save();
@@ -5157,10 +6151,30 @@ export class RenderSystem {
         const doorStripSz = Math.max(1, 2 * zoom);
         ctx.fillStyle = doorCompanyColor;
         ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
-        // Damage darkening
-        if (!isOpen && dmgDarken > 0.01) {
+        // Damage darkening (skip for schematics)
+        if (!isOpen && !doorIsSchematic && dmgDarken > 0.01) {
           ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
           ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && doorIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
+          const doorBuildFrac = Math.max(0, Math.min(1, doorTargetHp > 0 ? s.hp / doorTargetHp : 0));
+          const doorBarW = ww * 0.7; const doorBarH = Math.max(2, 4 * zoom);
+          const doorBarX = ssp.x - doorBarW / 2; const doorBarY = ssp.y - wh / 2 - doorBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(doorBarX, doorBarY, doorBarW, doorBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(doorBarX, doorBarY, doorBarW * doorBuildFrac, doorBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, doorBarY - 2);
+        }
+        // Repair icon for non-schematic damaged doors when hammer equipped
+        if (this.hammerEquipped && !doorIsSchematic && dmgDarken > 0.01) {
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
         ctx.restore();
       } else if (s.type === 'shipyard') {
@@ -5174,7 +6188,8 @@ export class RenderSystem {
         const hw = totalW / 2, hh = totalH / 2;
         const cx = ssp.x, cy = ssp.y;
         const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const shipyardTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         ctx.save();
         ctx.translate(cx, cy);
         ctx.rotate((s.rotation ?? 0) * Math.PI / 180);
@@ -5383,12 +6398,29 @@ export class RenderSystem {
         ctx.moveTo(-wrsz * 0.1, -wrsz * 0.05);
         ctx.lineTo(-wrsz * 0.1 + wrsz * 0.05, -wrsz * 0.5);
         ctx.stroke();
-        // Salvage indicator: small glint if hp > 0
+        // Salvage indicator: small glint if hp > 0. Colored by the best loot
+        // tier inside the wreck (blueprint quality); falls back to gold.
         if (s.hp > 0) {
-          ctx.fillStyle = 'rgba(255, 220, 80, 0.85)';
-          ctx.beginPath();
-          ctx.arc(0, 0, Math.max(3, 5 * zoom), 0, Math.PI * 2);
-          ctx.fill();
+          const glintColor = typeof s.wreckTier === 'number' && s.wreckTier >= 0
+            ? tierColor(s.wreckTier)
+            : 'rgba(255, 220, 80, 0.85)';
+          const glintRadius = Math.max(3, 5 * zoom);
+          if (typeof s.wreckTier === 'number' && s.wreckTier >= 1) {
+            // Higher tiers get a soft halo to draw the eye.
+            ctx.save();
+            ctx.shadowColor = glintColor;
+            ctx.shadowBlur = Math.max(6, 10 * zoom);
+            ctx.fillStyle = glintColor;
+            ctx.beginPath();
+            ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+          } else {
+            ctx.fillStyle = glintColor;
+            ctx.beginPath();
+            ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
         ctx.globalAlpha = 1;
         ctx.restore();
@@ -5411,7 +6443,8 @@ export class RenderSystem {
         // ── Placed island cannon — same visual as ship cannon ──
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = (1 - hpFrac) * 0.5;
+        const cannonTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const lw = Math.max(0.5, 1.5 * zoom);
 
         // If locally mounted, use the live aim angle for the barrel; otherwise match base rotation.
@@ -5955,8 +6988,124 @@ export class RenderSystem {
         }
 
         ctx.restore();
+      } else if (s.type === 'chest') {
+        // ── Land chest — top-down view: rectangular body with lid strip and latch ──
+        const cw = sz * 0.72;   // chest width
+        const ch = sz * 0.52;   // chest depth
+        const cx2 = ssp.x - cw / 2;
+        const cy2 = ssp.y - ch / 2;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
+        const chestTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const chestIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+
+        ctx.save();
+
+        // Body (bottom half of chest, darker brown)
+        ctx.fillStyle   = isHovered ? '#7a4820' : '#5c3210';
+        ctx.strokeStyle = '#2a1204';
+        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+        ctx.beginPath();
+        ctx.rect(cx2, cy2, cw, ch);
+        ctx.fill();
+        ctx.stroke();
+
+        // Lid strip (top ~35% of the box, lighter tan)
+        const lidH = ch * 0.35;
+        ctx.fillStyle = isHovered ? '#c0813a' : '#a06428';
+        ctx.beginPath();
+        ctx.rect(cx2, cy2, cw, lidH);
+        ctx.fill();
+        // Lid border
+        ctx.strokeStyle = '#2a1204';
+        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
+        ctx.strokeRect(cx2, cy2, cw, lidH);
+
+        // Latch — small rectangle centred on the lid/body seam
+        const ltW = Math.max(2, cw * 0.12);
+        const ltH = Math.max(2, ch * 0.20);
+        const ltX = ssp.x - ltW / 2;
+        const ltY = ssp.y - ch / 2 + lidH - ltH / 2;
+        ctx.fillStyle   = '#d4a040';
+        ctx.strokeStyle = '#7a5010';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        ctx.fillRect(ltX, ltY, ltW, ltH);
+        ctx.strokeRect(ltX, ltY, ltW, ltH);
+
+        // Corner band lines (horizontal stripe across full width, at lid seam)
+        ctx.strokeStyle = 'rgba(40, 20, 8, 0.55)';
+        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
+        const seamY = cy2 + lidH;
+        ctx.beginPath();
+        ctx.moveTo(cx2, seamY);
+        ctx.lineTo(cx2 + cw, seamY);
+        ctx.stroke();
+
+        // Company color strip along the top edge
+        const chestCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
+        const stripH = Math.max(2, 2.5 * zoom);
+        ctx.fillStyle = chestCompanyColor;
+        ctx.fillRect(cx2, cy2, cw, stripH);
+
+        // Damage darkening
+        if (dmgDarken > 0.01) {
+          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+          ctx.fillRect(cx2, cy2, cw, ch);
+        }
+        // Schematic overlay + progress bar when hammer equipped
+        if (this.hammerEquipped && chestIsSchematic) {
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(cx2, cy2, cw, ch);
+          const chBuildFrac = Math.max(0, Math.min(1, chestTargetHp > 0 ? s.hp / chestTargetHp : 0));
+          const chBarW = cw * 0.7; const chBarH = Math.max(2, 4 * zoom);
+          const chBarX = ssp.x - chBarW / 2; const chBarY = cy2 - chBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(chBarX, chBarY, chBarW, chBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(chBarX, chBarY, chBarW * chBuildFrac, chBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', ssp.x, chBarY - 2);
+        }
+        // Repair icon when hammer equipped and chest is damaged (not schematic)
+        if (this.hammerEquipped && !chestIsSchematic && hpFrac < 0.999) {
+          ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
+
+        ctx.restore();
       }
     } // end for sorted
+
+    // ── Quality-tier markers ─────────────────────────────────────────────
+    // Structures crafted from a quality blueprint carry a rolled tier. Draw a
+    // small tier-colored gem above each so the world shows item prestige.
+    for (const s of sorted) {
+      if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
+      if (!this.fogVisibleAt(s.x, s.y)) continue;
+      const gsp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const gsz = Math.max(4, 50 * zoom);
+      if (gsp.x + gsz < 0 || gsp.x - gsz > this.canvas.width ||
+          gsp.y + gsz < 0 || gsp.y - gsz > this.canvas.height) continue;
+      const col = tierColor(s.qualityTier);
+      const r = Math.max(2.5, 4 * zoom);
+      const gy = gsp.y - gsz * 0.5 - r * 1.5;
+      ctx.save();
+      ctx.shadowColor = col;
+      ctx.shadowBlur = Math.max(4, 7 * zoom);
+      ctx.fillStyle = col;
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = Math.max(0.5, 1 * zoom);
+      ctx.beginPath();
+      ctx.moveTo(gsp.x, gy - r);
+      ctx.lineTo(gsp.x + r, gy);
+      ctx.lineTo(gsp.x, gy + r);
+      ctx.lineTo(gsp.x - r, gy);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
 
     if (this._hoveredStructure) {
       const s   = this._hoveredStructure;
@@ -5985,8 +7134,8 @@ export class RenderSystem {
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
       // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -6009,7 +7158,7 @@ export class RenderSystem {
       if (s.type === 'cannon') {
         // Draw highlight matching cannon shape: base rect + barrel rect
         // Base inherits rotRad from ctx.rotate(rotRad) above — correct.
-        const baseW = 30 * zoom, baseH = 20 * zoom, barW = 16 * zoom, barH = 40 * zoom;
+        const baseW = 22 * zoom, baseH = 15 * zoom, barW = 16 * zoom, barH = 40 * zoom;
         ctx.strokeRect(-baseW / 2, -baseH / 2, baseW, baseH);
         // Barrel: must match the actual draw code's barrelRot exactly.
         // Draw code: barrelRot = aimAngle + π/2, applied at translate(ssp) level (no rotRad stacked).
@@ -6075,6 +7224,7 @@ export class RenderSystem {
                  : s.type === 'flag_fort' ? 'Flag Fort'
                  : s.type === 'company_fortress' ? 'Company Fortress'
                  : s.type === 'claim_flag' ? 'Claiming Flag'
+                 : s.type === 'chest' ? 'Chest'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -6109,13 +7259,14 @@ export class RenderSystem {
       ctx.fillText(ownerText, ssp.x, tipY - lineH);
 
       // Interact hint (shifted up one more line)
-      if (inRange) {
+      if (inRange && !this._anyBuildActive) {
         ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
         const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
                            : s.type === 'shipyard' ? 'Hold [E] to build ships'
                            : s.type === 'wreck' ? '[E] to salvage loot'
                            : s.type === 'cannon' ? 'Hold [E] to fire'
+                           : s.type === 'chest' ? '[E] to open'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -6296,8 +7447,8 @@ export class RenderSystem {
           }
 
           const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
-          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
 
           ctx.save();
           ctx.globalAlpha = flashAlpha;
@@ -6328,8 +7479,10 @@ export class RenderSystem {
 
     for (const { s, ssp, sz, isHovered } of this._pendingCeilings) {
       const rotRad = (s.rotation ?? 0) * Math.PI / 180;
+      const targetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+      const isSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
       const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-      const dmgDarken = (1 - hpFrac) * 0.5;
+      const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
       const half = sz / 2;
       const fillCol  = isHovered ? '#c8924a' : '#96642a';
       const stripCol = RenderSystem.structureCompanyColor(s.companyId);
@@ -6405,6 +7558,39 @@ export class RenderSystem {
         ctx.restore();
       }
 
+      // Schematic (under construction / repairing) overlay — drawn on top of
+      // the vis-poly result so transparency still works while building.
+      if (isSchematic) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = 'rgba(120,200,255,0.18)';
+        ctx.fillRect(-half, -half, sz, sz);
+        if (this.hammerEquipped) {
+          const buildFrac = Math.max(0, Math.min(1, targetHp > 0 ? s.hp / targetHp : 0));
+          const barW = sz * 0.7;
+          const barH = Math.max(2, 4 * zoom);
+          const barX = -barW / 2;
+          const barY = -half - barH - 2;
+          ctx.strokeStyle = '#b0e0ff';
+          ctx.lineWidth = 1;
+          ctx.strokeRect(barX, barY, barW, barH);
+          ctx.fillStyle = '#55ddff';
+          ctx.fillRect(barX, barY, barW * buildFrac, barH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'bottom';
+          ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', 0, barY - 2);
+        }
+      } else if (this.hammerEquipped && dmgDarken > 0.01) {
+        // Repair icon for damaged ceilings when hammer equipped
+        ctx.globalAlpha = 1;
+        ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+        ctx.fillText('\u2692', 0, 0);
+      }
+
       ctx.globalAlpha = 1;
       ctx.strokeStyle = '#5a3a12';
       ctx.lineWidth = Math.max(0.5, 1.5 * zoom);
@@ -6417,16 +7603,129 @@ export class RenderSystem {
   }
 
   /** Draw the island structure placement ghost at the cursor position (drawn once, after all islands). */
+  /** Render committed-but-unbuilt land structure ghost plan markers. */
+  private drawLandGhostPlacements(camera: Camera): void {
+    const ghosts = this.landGhostPlacements;
+    if (ghosts.length === 0) return;
+    const ctx = this.ctx;
+    const { zoom, rotation: camRot } = camera.getState();
+    const t = performance.now() / 1000;
+
+    // Approximate bounding half-sizes per structure kind (world pixels)
+    const DIMS: Record<string, [number, number]> = {
+      wooden_floor: [25, 25],
+      wall:         [25,  5],
+      door_frame:   [25,  5],
+      door:         [25,  5],
+      wood_ceiling: [25, 25],
+      workbench:    [22, 17],
+      cannon:       [18, 10],
+      shipyard:     [55, 35],
+      flag_fort:    [20, 20],
+      company_fortress: [30, 30],
+      claim_flag:   [10, 10],
+      chest:        [20, 14],
+    };
+    const DEFAULT_DIMS: [number, number] = [20, 20];
+
+    ghosts.forEach((g, idx) => {
+      const sp = camera.worldToScreen(Vec2.from(g.worldPos.x, g.worldPos.y));
+      const [hw, hh] = DIMS[g.kind] ?? DEFAULT_DIMS;
+      const structRad = g.rotation * Math.PI / 180;
+      const drawRot = structRad - camRot;
+      const isHovered = g.id === this._hoveredLandGhostId;
+
+      // Pulse alpha between 0.55 and 0.85 (faster + brighter when hovered)
+      const pulse = isHovered
+        ? 0.75 + 0.25 * (0.5 + 0.5 * Math.sin(t * 5.0))
+        : 0.55 + 0.30 * (0.5 + 0.5 * Math.sin(t * 2.5 + idx * 0.7));
+
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.scale(zoom, zoom);
+      ctx.rotate(drawRot);
+
+      if (isHovered) {
+        // Bright green glow fill to show this ghost can be built here
+        ctx.fillStyle = `rgba(80, 220, 80, ${pulse * 0.30})`;
+        ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+
+        // Solid green outline
+        ctx.strokeStyle = `rgba(100, 255, 100, ${pulse})`;
+        ctx.lineWidth = 3 / zoom;
+        ctx.setLineDash([]);
+        ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+
+        // Inner shadow for depth
+        ctx.strokeStyle = `rgba(40, 180, 40, ${pulse * 0.5})`;
+        ctx.lineWidth = 1.5 / zoom;
+        ctx.strokeRect(-hw + 3 / zoom, -hh + 3 / zoom, hw * 2 - 6 / zoom, hh * 2 - 6 / zoom);
+      } else {
+        // Blueprint fill — blue
+        ctx.fillStyle = `rgba(40, 100, 220, ${pulse * 0.25})`;
+        ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
+
+        // Dashed blue outline
+        ctx.strokeStyle = `rgba(80, 160, 255, ${pulse})`;
+        ctx.lineWidth = 2 / zoom;
+        ctx.setLineDash([4 / zoom, 3 / zoom]);
+        ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
+        ctx.setLineDash([]);
+      }
+
+      ctx.restore();
+
+      // Number badge (screen-space, no rotation) — green on hover, amber otherwise
+      const badge = isHovered ? '✓' : `${idx + 1}`;
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.font = `bold ${Math.round(11 * zoom)}px monospace`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isHovered ? 'rgba(0,60,0,0.85)' : 'rgba(0,20,80,0.8)';
+      ctx.fillRect(-8 * zoom, -8 * zoom, 16 * zoom, 16 * zoom);
+      ctx.fillStyle = isHovered ? '#88ff88' : '#66aaff';
+      ctx.fillText(badge, 0, 0);
+      ctx.restore();
+    });
+  }
+
   private drawIslandBuildGhost(camera: Camera): void {
     this._islandGhostTooFar    = false;
     this._snappedBuildPos      = null;
     this._snappedBuildRotation = null;
-    if (!this.islandBuildKind || !this.mouseWorldPos) return;
-    const zoom = camera.getState().zoom;
-    const ctx  = this.ctx;
-    const TILE = 50; // world px — floor tile size
+    this._hoveredLandGhostId   = null;
 
-    // Helper: sample bumpy island boundary at an angle (mirrors server island_boundary_r)
+    // ── Build Schematic Hotbar hover detection ─────────────────────────────
+    // When a schematic is selected, find the nearest matching plan ghost within
+    // hover range.  If found: mark it as hovered (green highlight) and store
+    // its position so the placement preview snaps there.  The preview still
+    // renders — it just locks to the ghost rather than free-following the cursor.
+    let _hoverGhostPos: { x: number; y: number; rotation: number } | null = null;
+    if (this.buildSchematicKind && this.mouseWorldPos && this.landGhostPlacements.length > 0) {
+      const HOVER_R = 50;
+      let nearestGhost: LandGhostPlacement | null = null;
+      let nearestDist = HOVER_R;
+      for (const g of this.landGhostPlacements) {
+        if (g.kind !== this.buildSchematicKind) continue;
+        const dx = this.mouseWorldPos.x - g.worldPos.x;
+        const dy = this.mouseWorldPos.y - g.worldPos.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d < nearestDist) { nearestDist = d; nearestGhost = g; }
+      }
+      if (nearestGhost) {
+        this._hoveredLandGhostId   = nearestGhost.id;
+        this._snappedBuildPos      = { x: nearestGhost.worldPos.x, y: nearestGhost.worldPos.y };
+        this._snappedBuildRotation = nearestGhost.rotation;
+        _hoverGhostPos = { x: nearestGhost.worldPos.x, y: nearestGhost.worldPos.y, rotation: nearestGhost.rotation };
+        // Fall through — the placement preview will render snapped to this position.
+      }
+    }
+
+    if (!this.islandBuildKind || !this.mouseWorldPos) return;
+    const ctx  = this.ctx;
+    const zoom = camera.getState().zoom;
+    const TILE = 50; // world px — floor tile size
     const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
       const TWO_PI = Math.PI * 2;
       const n = bumps.length;
@@ -6441,14 +7740,16 @@ export class RenderSystem {
     // ── Snap to adjacent floor neighbour ────────────────────────────────────
     // When cursor is within SNAP_R world px of any unoccupied cardinal neighbour
     // slot of an existing floor, lock the ghost position there.
-    let mx = this.mouseWorldPos.x;
-    let my = this.mouseWorldPos.y;
-    if (this.islandBuildKind === 'wooden_floor' && this.placedStructures.length > 0) {
+    let mx = _hoverGhostPos ? _hoverGhostPos.x : this.mouseWorldPos.x;
+    let my = _hoverGhostPos ? _hoverGhostPos.y : this.mouseWorldPos.y;
+    // Merge placed structures + pending ghost plan so hover snap sees both
+    const bases = this._snapBases();
+    if (this.islandBuildKind === 'wooden_floor' && bases.length > 0) {
       const SNAP_R  = TILE * 0.4; // 20 px — snap pull radius
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
       let bestSnapRot: number | null = null;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type !== 'wooden_floor') continue;
         // Derive the 4 neighbour slots using this tile's own rotation
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -6463,7 +7764,7 @@ export class RenderSystem {
           const nx = s.x + d.dx, ny = s.y + d.dy;
           // Skip neighbour slots occupied by a *different* floor.
           // Source tile (s) is excluded by id — candidate is adjacent/touching it by construction.
-          const blocker = this.placedStructures.find(
+          const blocker = bases.find(
             f => f.type === 'wooden_floor' && f.id !== s.id &&
                  RenderSystem.floorsOverlap(nx, ny, rad, f.x, f.y, (f.rotation ?? 0) * Math.PI / 180)
           );
@@ -6480,14 +7781,14 @@ export class RenderSystem {
       }
       mx = bestX; my = bestY;
       this._snappedBuildRotation = bestSnapRot;
-    } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && this.placedStructures.length > 0) {
+    } else if ((this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame') && bases.length > 0) {
       // Reset rotation so stale value never persists when no snap is found
       this._wallGhostRotRad = 0;
       const HALF = TILE / 2; // 25 px
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type !== 'wooden_floor') continue;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
         const c = Math.cos(rad), sn = Math.sin(rad);
@@ -6501,7 +7802,7 @@ export class RenderSystem {
         for (const e of EDGES) {
           const nx = s.x + e.ldx * c - e.ldy * sn;
           const ny = s.y + e.ldx * sn + e.ldy * c;
-          const occ = this.placedStructures.some(
+          const occ = bases.some(
             w => (w.type === 'wall' || w.type === 'door_frame') && Math.abs(w.x - nx) < 2 && Math.abs(w.y - ny) < 2
           );
           if (occ) continue;
@@ -6514,14 +7815,14 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
-    } else if (this.islandBuildKind === 'door' && this.placedStructures.length > 0) {
+    } else if (this.islandBuildKind === 'door' && bases.length > 0) {
       // Snap to unoccupied door_frame positions
       const SNAP_R = TILE * 0.6;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type !== 'door_frame') continue;
-        const hasDoor = this.placedStructures.some(
+        const hasDoor = bases.some(
           d => d.type === 'door' && Math.abs(d.x - s.x) < 2 && Math.abs(d.y - s.y) < 2
         );
         if (hasDoor) continue;
@@ -6537,14 +7838,14 @@ export class RenderSystem {
         }
       }
       mx = bestX; my = bestY;
-    } else if (this.islandBuildKind === 'wood_ceiling' && this.placedStructures.length > 0) {
+    } else if (this.islandBuildKind === 'wood_ceiling' && bases.length > 0) {
       // Snap ceiling to: (1) floor centres with a wall at edge, or (2) adjacent ceiling positions
       const SNAP_R = TILE * 0.7;
       let bestDist2 = SNAP_R * SNAP_R;
       let bestX = mx, bestY = my;
       let bestRot: number | null = null;
       const HALF = TILE / 2;
-      for (const s of this.placedStructures) {
+      for (const s of bases) {
         if (s.type === 'wooden_floor') {
           // Only a valid start position if it has a wall at one of its edges
           const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -6558,13 +7859,13 @@ export class RenderSystem {
           const hasWall = EDGES.some(e => {
             const ex = s.x + e.ldx * c - e.ldy * sn;
             const ey = s.y + e.ldx * sn + e.ldy * c;
-            return this.placedStructures.some(
+            return bases.some(
               w => (w.type === 'wall' || w.type === 'door_frame') &&
                    Math.abs(w.x - ex) < 3 && Math.abs(w.y - ey) < 3
             );
           });
           if (!hasWall) continue;
-          const alreadyCeiling = this.placedStructures.some(
+          const alreadyCeiling = bases.some(
             f => f.type === 'wood_ceiling' && Math.abs(f.x - s.x) < 3 && Math.abs(f.y - s.y) < 3
           );
           if (alreadyCeiling) continue;
@@ -6581,7 +7882,7 @@ export class RenderSystem {
           ];
           for (const d of DIRS) {
             const nx = s.x + d.dx, ny = s.y + d.dy;
-            const occ = this.placedStructures.some(
+            const occ = bases.some(
               f => f.type === 'wood_ceiling' && Math.abs(f.x - nx) < 3 && Math.abs(f.y - ny) < 3
             );
             if (occ) continue;
@@ -6867,7 +8168,7 @@ export class RenderSystem {
       }
     }
 
-    // Workbench needs a floor tile whose AABB contains the cursor point
+    // Workbench/cannon needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
     if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
       noFloor = !this.placedStructures.some(s => {
@@ -7033,7 +8334,7 @@ export class RenderSystem {
     // claim what they hold. Mirrors server's slice_already_owned check.
     const cfSliceAlreadyOwned  = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && cfInEnemyClaim && inMyDominantArea;
 
-    // Workbench on enemy floor: a floor exists under cursor but belongs to a different company
+    // Workbench/cannon on enemy floor: a floor exists under cursor but belongs to a different company
     const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
       !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
@@ -7349,6 +8650,50 @@ export class RenderSystem {
       ctx.fill();
       ctx.stroke();
       ctx.setLineDash([]);
+    } else if (this.islandBuildKind === 'flag_fort') {
+      // Ghost shaped like a flag fort: stone square base with battlements on top edge
+      const ts = sz * 0.9;
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Base square
+      ctx.fillRect(msp.x - ts / 2, msp.y - ts / 2, ts, ts);
+      ctx.strokeRect(msp.x - ts / 2, msp.y - ts / 2, ts, ts);
+      // Battlements — 3 merlons along top edge
+      const mw = ts * 0.22, mh = ts * 0.22;
+      ctx.setLineDash([]);
+      for (let m = -1; m <= 1; m++) {
+        const bx = msp.x + m * ts * 0.3 - mw / 2;
+        const by = msp.y - ts / 2 - mh;
+        ctx.fillRect(bx, by, mw, mh);
+        ctx.strokeRect(bx, by, mw, mh);
+      }
+      // Flag pole
+      ctx.beginPath();
+      ctx.moveTo(msp.x + ts * 0.08, msp.y - ts / 2);
+      ctx.lineTo(msp.x + ts * 0.08, msp.y - ts / 2 - ts * 0.75);
+      ctx.stroke();
+      // Flag pennant
+      ctx.beginPath();
+      ctx.moveTo(msp.x + ts * 0.08, msp.y - ts / 2 - ts * 0.75);
+      ctx.lineTo(msp.x + ts * 0.08 + ts * 0.4, msp.y - ts / 2 - ts * 0.55);
+      ctx.lineTo(msp.x + ts * 0.08, msp.y - ts / 2 - ts * 0.35);
+      ctx.closePath();
+      ctx.fill();
+    } else if (this.islandBuildKind === 'chest') {
+      // Ghost shaped like a wooden chest (lid + base + latch)
+      const bw = sz * 0.80, bh = sz * 0.56;
+      const lidH = bh * 0.40;
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      // Base body
+      ctx.fillRect(msp.x - bw / 2, msp.y - bh / 2 + lidH, bw, bh - lidH);
+      ctx.strokeRect(msp.x - bw / 2, msp.y - bh / 2 + lidH, bw, bh - lidH);
+      // Lid
+      ctx.fillRect(msp.x - bw / 2, msp.y - bh / 2, bw, lidH + 2);
+      ctx.strokeRect(msp.x - bw / 2, msp.y - bh / 2, bw, lidH + 2);
+      ctx.setLineDash([]);
+      // Latch
+      const latchW = bw * 0.20, latchH = bh * 0.22;
+      ctx.fillRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
+      ctx.strokeRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
     } else {
       ctx.beginPath();
       ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
@@ -7357,8 +8702,11 @@ export class RenderSystem {
       ctx.setLineDash([]);
     }
 
-    // Label above the ghost
-    const labelY = msp.y - ghostH / 2 - 6;
+    // Label above the ghost — for flag_fort and chest, account for their actual top extent
+    const labelTopOffset = this.islandBuildKind === 'flag_fort' ? sz * 0.9 * 0.5 + sz * 0.9 * 0.22 + 6
+                         : this.islandBuildKind === 'chest' ? sz * 0.56 / 2 + 6
+                         : ghostH / 2 + 6;
+    const labelY = msp.y - labelTopOffset;
     ctx.globalAlpha = 1;
     ctx.font = `bold ${Math.max(10, Math.round(12 * zoom))}px Georgia, serif`;
     ctx.textAlign    = 'center';
@@ -7416,6 +8764,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'flag_fort' ? 'Flag Fort'
                   : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
                   : this.islandBuildKind === 'claim_flag' ? 'Claim Flag — Contested Area'
+                  : this.islandBuildKind === 'chest' ? 'Chest'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
@@ -7587,10 +8936,88 @@ export class RenderSystem {
     // 6: sail fibers
     // 7: sail masts
     
+    // Deck-level state machine: fall through empty holes, climb back up via ramp modules
+    this._lowerDeckShipId = null;
+    {
+      const _prevDeckLevel = this._playerDeckLevel;
+      const _lp = renderPlayers.find(p => p.id === this.localPlayerId);
+      if (_lp && _lp.carrierId !== 0) {
+        const _cs = renderShips.find(s => s.id === _lp.carrierId);
+        if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1)) {
+          // Player ship-local position
+          const _dx = _lp.position.x - _cs.position.x;
+          const _dy = _lp.position.y - _cs.position.y;
+          const _cos = Math.cos(-_cs.rotation);
+          const _sin = Math.sin(-_cs.rotation);
+          const _lx = _dx * _cos - _dy * _sin;
+          const _ly = _dx * _sin + _dy * _cos;
+
+          // Detection radius around each snap-point (px in ship-local).
+          // Matches the ramp's visual footprint (±25) so the transition fires
+          // exactly when the player enters the rendered ramp tile.
+          // Both fall and climb use the same zone for consistent behaviour.
+          const _ZONE = 20;
+
+          if (this._playerDeckLevel === 1) {
+            // Upper deck — fall through empty holes, or enter a ramp from its top (light) face
+            const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
+              const drx = _lx - sp.x, dry = _ly - sp.y;
+              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              // Hatch cover blocks any fall-through
+              const hatchMod = _cs.modules.find(
+                m => m.kind === 'hatch_cover' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+              );
+              if (hatchMod) return false;
+              const rampMod = _cs.modules.find(
+                m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+              );
+              if (!rampMod) return true; // empty hole — always fall
+              // With ramp: only descend from the top/light face (ramp-local x > 0)
+              const rlx = drx * Math.cos(-rampMod.localRot) - dry * Math.sin(-rampMod.localRot);
+              return rlx > 0;
+            });
+            if (falling) this._playerDeckLevel = 0;
+          }
+
+          if (this._playerDeckLevel === 0) {
+            // Lower deck — climb back up via the bottom/dark face of a ramp
+            const climbing = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
+              const drx = _lx - sp.x, dry = _ly - sp.y;
+              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              const rampMod = _cs.modules.find(
+                m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+              );
+              if (!rampMod) return false;
+              // Only climb from the bottom/dark face (ramp-local x < 0)
+              const rlx = drx * Math.cos(-rampMod.localRot) - dry * Math.sin(-rampMod.localRot);
+              return rlx < 0;
+            });
+            if (climbing) {
+              this._playerDeckLevel = 1;
+            } else {
+              this._lowerDeckShipId = _cs.id;
+            }
+          }
+        } else {
+          // No upper deck on this ship — reset to surface
+          this._playerDeckLevel = 1;
+        }
+      } else {
+        // Not on a ship — reset to surface
+        this._playerDeckLevel = 1;
+      }
+
+      // Notify server when the level changed (so per-deck collision filter stays in sync)
+      if (this._playerDeckLevel !== _prevDeckLevel && this.onDeckLevelChange) {
+        this.onDeckLevelChange(this._playerDeckLevel);
+      }
+    }
+
     // Queue ship wakes + hulls (layer 1)
     for (const ship of renderShips) {
       this.queueRenderItem(1, 'ship-wake', () => this.drawShipWake(ship, camera), -2);
       this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
+      this.queueRenderItem(1, `lower-deck-floor-${ship.id}`, () => this.drawLowerDeckFloor(ship, camera), 1);
       // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
       if (ship.shipType === SHIP_TYPE_GHOST) {
         this.queueRenderItem(1, `ghost-fog-${ship.id}`, () => this.drawGhostFogAura(ship, camera), -1);
@@ -7599,6 +9026,19 @@ export class RenderSystem {
       const scaffold = this._scaffoldedShips.get(ship.id);
       if (scaffold) {
         this.queueRenderItem(1, `scaffold-vis-${ship.id}`, () => this.drawScaffoldingVisuals(ship, scaffold, camera), 1);
+      }
+      // Gunport doors: layer 1 priority 4 (above lower-deck cannons at prio 3).
+      // Only queued when the player is on this ship's lower deck — the upper-deck
+      // cover at layer 2 hides them from any other viewpoint.
+      if (this._lowerDeckShipId === ship.id) {
+        this.queueRenderItem(1, `gunports-${ship.id}`, () => this.drawGunportOverlays(ship, camera), 4);
+      }
+      // Upper-deck cover: solid hull fill at layer 2 — paints over lower-deck cannons,
+      // gunports, and any other layer-1 content so nothing bleeds through plank gaps.
+      if (ship.shipType !== SHIP_TYPE_GHOST
+          && ship.modules.some(m => m.kind === 'deck' && m.deckId === 1)
+          && this._lowerDeckShipId !== ship.id) {
+        this.queueRenderItem(2, `upper-deck-cover-${ship.id}`, () => this.drawUpperDeckCover(ship, camera));
       }
     }
     
@@ -7610,10 +9050,29 @@ export class RenderSystem {
       const isLocal = player.id === this.localPlayerId;
       // Also render above planks when on a scaffolded ship (building in shipyard) even without explicit build mode
       const onScaffoldedShip = isLocal && player.carrierId !== 0 && this._scaffoldedShips.has(player.carrierId);
+      const onLowerDeck = isLocal && this._lowerDeckShipId !== null;
       if (isLocal && (inBuildMode || onScaffoldedShip)) {
         this.queueRenderItem(3, 'players', () => this.drawPlayer(player, worldState, camera), 5);
+      } else if (onLowerDeck) {
+        // Player is on the lower deck — render below planks, clipped to hull polygon
+        const _cs = renderShips.find(s => s.id === this._lowerDeckShipId);
+        if (_cs) {
+          this.queueRenderItem(1, 'players', () => this._drawPlayerWithHullClip(player, _cs, worldState, camera), 2);
+        } else {
+          this.queueRenderItem(1, 'players', () => this.drawPlayer(player, worldState, camera), 2);
+        }
       } else {
-        this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+        // Deck-aware layering: lower deck → layer 1 (under planks); upper deck → layer 4 (above planks)
+        // For local player use _playerDeckLevel; for others use deckId. Off-ship (swimming) use layer 2.
+        const _onShip = player.carrierId !== 0;
+        const _deckLevel = isLocal ? this._playerDeckLevel : (player.deckId ?? 1);
+        if (_onShip && _deckLevel === 0) {
+          this.queueRenderItem(1, 'players', () => this.drawPlayer(player, worldState, camera), 2);
+        } else if (_onShip) {
+          this.queueRenderItem(4, 'players', () => this.drawPlayer(player, worldState, camera), 2);
+        } else {
+          this.queueRenderItem(2, 'players', () => this.drawPlayer(player, worldState, camera));
+        }
       }
     }
     
@@ -7637,12 +9096,16 @@ export class RenderSystem {
 
     // Plank status icons — missing (red ✕) and leaking (water waves) — layer 3 priority 2
     for (const ship of renderShips) {
-      this.queueRenderItem(3, 'plank-status', () => this.drawPlankStatusIcons(ship, camera), 2);
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(3, 'plank-status', _da(() => this.drawPlankStatusIcons(ship, camera)), 2);
     }
 
     // Burning module fire overlays — drawn above module graphics
     for (const ship of renderShips) {
-      this.queueRenderItem(4, `fire-modules-${ship.id}`, () => this.drawBurningModules(ship, camera), 5);
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(4, `fire-modules-${ship.id}`, _da(() => this.drawBurningModules(ship, camera)), 5);
     }
 
     // Ghost placement plan markers — visible in build menu mode, B-key mode, or hotbar build mode
@@ -7656,10 +9119,11 @@ export class RenderSystem {
       }
     }
 
-    // In cannon build mode, overlay ghost cannons at destroyed slots (layer 4, after real cannons)
+    // Gunport cannon ghosts and fixed broadside slot ghosts — only shown in cannon build mode.
     if (this.cannonBuildMode) {
       for (const ship of worldState.ships) {
-        this.queueRenderItem(4, 'cannon-ghosts', () => this.drawMissingCannonGhosts(ship, camera), 1);
+        this.queueRenderItem(4, `cannon-ghosts-gp-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera, true), 1);
+        this.queueRenderItem(4, `cannon-ghosts-${ship.id}`, () => this.drawMissingCannonGhosts(ship, camera), 1);
       }
     }
 
@@ -7683,22 +9147,61 @@ export class RenderSystem {
         this.queueRenderItem(3, 'deck-ghost', () => this.drawMissingDeckGhost(ship, camera), 0);
       }
     }
-    
-    // Queue cannons, swivel guns, and steering wheels (layers 4-6)
+
+    // In ramp or hatch build mode, overlay ghost outlines at snap points (layer 3)
+    if (this.rampBuildMode || this.hatchBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(3, `ramp-ghost-${ship.id}`, () => this.drawRampSnapGhosts(ship, camera), 0);
+      }
+    }
+
+    // In gunport build mode, overlay ghost outlines at gunport snap points (layer 3)
+    if (this.gunportBuildMode) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(3, `gunport-ghost-${ship.id}`, () => this.drawGunportSnapGhosts(ship, camera), 0);
+      }
+    }
+
+    // In chest build mode, overlay a ghost chest at the cursor position on each ship (layer 4)
+    if (this.chestBuildMode && this.mouseWorldPos) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `chest-ghost-${ship.id}`, () => this.drawChestGhostOnShip(ship, camera), 0);
+      }
+    }
+
+    // In bed build mode, overlay a ghost bed at the cursor position on each ship (layer 4)
+    if (this.bedBuildMode && this.mouseWorldPos) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `bed-ghost-${ship.id}`, () => this.drawBedGhostOnShip(ship, camera), 0);
+      }
+    }
+
     for (const ship of renderShips) {
-      this.queueRenderItem(4, 'cannons', () => this.drawShipCannons(ship, camera));
-      this.queueRenderItem(4, 'swivel-guns', () => this.drawShipSwivelGuns(ship, camera));
-      this.queueRenderItem(4, 'cannon-aim-guides', () => this.drawCannonAimGuides(ship, worldState, camera), 1);
-      this.queueRenderItem(4, 'swivel-aim-guides', () => this.drawSwivelAimGuide(ship, worldState, camera), 1);
-      this.queueRenderItem(4, 'rudder', () => this.drawShipRudder(ship, camera));
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
+      // Lower-deck modules (deckId=0): hull-clipped at layer 1 so they render below planks.
+      // Full opacity — the planks at layer 3 cover them naturally when the player is on the upper deck.
+      this.queueRenderItem(1, `cannons-lower-${ship.id}`,  () => this.drawShipCannons(ship, camera, 0), 3);
+      this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
+      this.queueRenderItem(1, `chests-lower-${ship.id}`,   () => this.drawShipChests(ship, camera, 0), 3);
+      this.queueRenderItem(1, `beds-lower-${ship.id}`,     () => this.drawShipBeds(ship, camera, 0), 3);
+      // Upper-deck + deck-independent modules at their normal layers.
+      this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
+      this.queueRenderItem(4, `swivel-guns-upper-${ship.id}`, _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
+      this.queueRenderItem(4, `cannon-aim-guides-${ship.id}`, _da(() => this.drawCannonAimGuides(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, `swivel-aim-guides-${ship.id}`, _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
+      this.queueRenderItem(4, `chests-upper-${ship.id}`, _da(() => this.drawShipChests(ship, camera, 1)));
+      this.queueRenderItem(4, `beds-upper-${ship.id}`, _da(() => this.drawShipBeds(ship, camera, 1)));
+      this.queueRenderItem(4, `rudder-${ship.id}`, _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
+        // Always render at full opacity so active groups remain visible from the steering wheel.
         this.queueRenderItem(5, `cannon-groups-${ship.id}`, () => this.drawCannonGroupOverlay(ship, camera));
       }
       // Reload indicators always drawn above group overlay (layer 6)
-      this.queueRenderItem(6, `cannon-reload-${ship.id}`, () => this.drawCannonReloadIndicators(ship, camera));
-      this.queueRenderItem(5, 'steering-wheels', () => this.drawShipSteeringWheels(ship, camera));
-      this.queueRenderItem(5, 'ladders', () => this.drawShipLadders(ship, camera));
-      this.queueRenderItem(5, 'sail-ropes', () => this.drawShipSailRopes(ship, camera));
+      this.queueRenderItem(6, `cannon-reload-${ship.id}`, _da(() => this.drawCannonReloadIndicators(ship, camera)));
+      this.queueRenderItem(5, `steering-wheels-${ship.id}`, _da(() => this.drawShipSteeringWheels(ship, camera)));
+      this.queueRenderItem(5, `ladders-${ship.id}`, _da(() => this.drawShipLadders(ship, camera)));
+      this.queueRenderItem(5, `sail-ropes-${ship.id}`, _da(() => this.drawShipSailRopes(ship, camera)));
     }
 
     // Island cannon trajectory guide (same layer as ship cannon aim guides)
@@ -7708,7 +9211,9 @@ export class RenderSystem {
     
     // Queue sail fibers (layer 6)
     for (const ship of renderShips) {
-      this.queueRenderItem(6, 'sail-fibers', () => this.drawShipSailFibers(ship, camera));
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(6, 'sail-fibers', _da(() => this.drawShipSailFibers(ship, camera)));
     }
 
     // Queue island cannon reload indicators at layer 6 — same z-level as ship cannon reload
@@ -7718,7 +9223,9 @@ export class RenderSystem {
 
     // Queue sail masts (layer 7)
     for (const ship of renderShips) {
-      this.queueRenderItem(7, 'sail-masts', () => this.drawShipSailMasts(ship, camera));
+      const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
+        ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
+      this.queueRenderItem(7, 'sail-masts', _da(() => this.drawShipSailMasts(ship, camera)));
     }
     
     // Queue cannonballs (layer 8 - on top of everything)
@@ -7777,12 +9284,8 @@ export class RenderSystem {
         if (hitStructure || hitTree) {
           const intensity = hitStructure ? 0.6 : 0.5;
           this.particleSystem.createExplosion(Vec2.from(last.x, last.y), intensity);
-          if (hitStructure) {
-            const _csComp = (hitStructure as any).companyId as number ?? -1;
-            const _csTeam: DamageTeam =
-              this._localCompanyId > 0 && _csComp === this._localCompanyId ? 'enemy' : 'friendly';
-            this.spawnDamageNumber(Vec2.from(last.x, last.y), 25, false, _csTeam);
-          }
+          // Damage number omitted — the authoritative value arrives via onStructureHpChanged
+          // and will be shown immediately with the real hp-delta.
         } else if (!overShip && (last.ammoType === 0 || last.ammoType === 1)) {
           // Check if over island land → dirt splash; otherwise water splash
           let overLand = false;
@@ -7868,17 +9371,33 @@ export class RenderSystem {
       }
     }
 
-    // Queue NPCs (layer 2 - same as players)
+    // Queue NPCs — deck-aware layering: lower deck (0) → layer 1 (under planks), upper deck → layer 4 (above planks)
     for (const npc of (worldState.npcs || [])) {
       const _npcShip = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
       const _npcCheckPos = _npcShip?.position ?? npc.position;
       if (!this.fogVisibleAt(_npcCheckPos.x, _npcCheckPos.y)) continue;
-      this.queueRenderItem(2, 'npcs', () => this.drawNpc(npc, worldState, camera));
+      if (npc.shipId && npc.deckLevel === 0) {
+        // Lower-deck NPC: render at layer 1 (below planks) so they're visible from the lower
+        // deck and naturally hidden from above by the upper-deck cover at layer 2.
+        // Alt-held ghost rendering at layer 4 lets you see them from above in dim form.
+        this.queueRenderItem(1, `npc-lower-${npc.id}`, () => this.drawNpc(npc, worldState, camera), 2);
+        if (this.altKeyHeld) {
+          this.queueRenderItem(4, `npc-lower-ghost-${npc.id}`, () => {
+            this.ctx.save(); this.ctx.globalAlpha *= 0.35; this.drawNpc(npc, worldState, camera); this.ctx.restore();
+          }, 2);
+        }
+      } else {
+        this.queueRenderItem(4, `npc-upper-${npc.id}`, () => this.drawNpc(npc, worldState, camera), 2);
+      }
     }
 
-    // Queue ship ammo labels (layer 9 - HUD overlay above all ship elements)
+    // Queue ship ammo labels and name labels (layer 9 - HUD overlay above all ship elements)
     for (const ship of renderShips) {
       this.queueRenderItem(9, 'ship-ammo-hud', () => this.drawShipAmmoLabel(ship, camera));
+      // Name label: show for ghost ships (level badge) and named player ships, but not own ship
+      if (ship.id !== _localCarrierId && (ship.shipType === SHIP_TYPE_GHOST || ship.shipName)) {
+        this.queueRenderItem(9, `ship-name-${ship.id}`, () => this.drawShipNameLabel(ship, camera));
+      }
       if (ship.claimFlag) {
         this.queueRenderItem(9, `ship-flag-${ship.id}`, () => this.drawShipClaimFlag(ship, camera));
       }
@@ -8364,7 +9883,8 @@ export class RenderSystem {
     if (phase1Alpha <= 0) return; // fully faded — nothing to draw
     
     this.ctx.save();
-    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? this._upperDeckFade : 1.0;
+    if (phase1Alpha * _deckAlpha < 1) this.ctx.globalAlpha = phase1Alpha * _deckAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -8374,18 +9894,32 @@ export class RenderSystem {
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     
     this.ctx.strokeStyle = '#8B4513'; // Brown
-    this.ctx.fillStyle = '#DEB887'; // BurlyWood
+    // Upper deck (deckId=1) is lighter; lower deck only is a darker warm wood
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    this.ctx.fillStyle = hasUpperDeck ? '#DEB887' : '#A87040'; // BurlyWood : darker lower-deck wood
 
     // Ghost ship: dark spectral hull with cyan edge glow
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    // Aggro: ghost has a non-ghost, non-sinking ship within attack range
+    const GHOST_ATTACK_RANGE_PX = 2400;
+    const isGhostAggro = isGhost && (this._cachedWorldShips ?? []).some(s =>
+      s.id !== ship.id && s.shipType !== SHIP_TYPE_GHOST && s.hullHealth > 0 &&
+      (s.position.x - ship.position.x) ** 2 + (s.position.y - ship.position.y) ** 2
+        < GHOST_ATTACK_RANGE_PX * GHOST_ATTACK_RANGE_PX
+    );
+    // Pulse timer: 0-1 oscillation for the aggro glow
+    const aggroPulse = isGhostAggro ? 0.65 + 0.35 * Math.sin(performance.now() / 220) : 1;
     // Enemy ship: different non-zero company to the local player
     const isEnemyShip = !isGhost && this._localCompanyId !== 0
       && ship.companyId !== 0 && ship.companyId !== this._localCompanyId;
     if (isGhost) {
-      this.ctx.fillStyle   = '#0f0f1a';
+      this.ctx.fillStyle   = isGhostAggro ? '#1a0000' : '#0f0f1a';
       this.ctx.strokeStyle = '#0a0a16';
-      this.ctx.shadowColor  = '#00eeff';
-      this.ctx.shadowBlur   = 12 / cameraState.zoom;
+      const glowColor = isGhostAggro
+        ? `rgba(255,30,0,${(0.7 * aggroPulse).toFixed(3)})`
+        : ghostSpectralColor(ship.npcLevel ?? 1);
+      this.ctx.shadowColor  = glowColor;
+      this.ctx.shadowBlur   = (isGhostAggro ? 18 : 12) / cameraState.zoom;
     }
 
     this.ctx.lineWidth = 2 / cameraState.zoom;
@@ -8433,28 +9967,78 @@ export class RenderSystem {
 
       // Darken hull fill colour to reflect deck damage (mirrors plank darkenByDamage).
       if (!isGhost && hasDeck) {
-        const deckMod = ship.modules.find(m => m.kind === 'deck');
-        const dmd = deckMod?.moduleData as any;
+        const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                     ?? ship.modules.find(m => m.kind === 'deck');
+        const baseHullColor = hasUpperDeck ? '#DEB887' : '#A87040';
+        const dmd = topDeck?.moduleData as any;
         if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
           const deckHealthRatio = Math.max(0, dmd.health / dmd.maxHealth);
-          this.ctx.fillStyle = this.darkenByDamage('#DEB887', deckHealthRatio);
+          this.ctx.fillStyle = this.darkenByDamage(baseHullColor, deckHealthRatio);
         }
       }
 
+      // Hull fill — punch real transparent holes at deck openings when upper deck present
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
-      this.ctx.fill();
+      if (!isGhost && hasUpperDeck) {
+        // Add hole sub-paths; evenodd rule makes overlapping areas transparent
+        for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+          this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+        }
+        this.ctx.fill('evenodd');
+        // Re-build hull-only path for stroke so hole rects aren't outlined
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+      } else {
+        this.ctx.fill();
+      }
       this.ctx.stroke();
 
-      // Ghost ships: add a second thin cyan edge stroke for the spectral glow outline
+      // Plank-line grain on the upper deck — mirrors the lower-deck design, retains BurlyWood colour
+      if (!isGhost && hasDeck) {
+        this.ctx.save();
+        this.ctx.beginPath();
+        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+        this.ctx.closePath();
+        if (hasUpperDeck) {
+          for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+            this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+          }
+          this.ctx.clip('evenodd');
+        } else {
+          this.ctx.clip();
+        }
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const v of ship.hull) {
+          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        }
+        this.ctx.strokeStyle = hasUpperDeck ? '#b8824a' : '#7a4f28';
+        this.ctx.lineWidth = 1 / cameraState.zoom;
+        for (let y = minY + 12; y < maxY; y += 12) {
+          this.ctx.beginPath();
+          this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
+          this.ctx.stroke();
+        }
+        this.ctx.restore();
+      }
+
+      // Ghost ships: add a second thin edge stroke for the spectral glow outline (level-tinted)
       if (isGhost) {
-        const healthMult = Math.max(0.2, ship.hullHealth / GHOST_MAX_HULL_HP);
+        const ghostNpcLvl2 = ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+        const ghostLvlMaxHP2 = Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl2 - 1) * 9 / 59));
+        const healthMult = Math.max(0.2, ship.hullHealth / ghostLvlMaxHP2);
         const sinkMult   = phase1Alpha < 1 ? phase1Alpha : 1;
         this.ctx.shadowBlur   = 0;
-        this.ctx.strokeStyle  = `rgba(0,230,255,${0.55 * sinkMult * healthMult})`;
-        this.ctx.lineWidth    = 1.5 / cameraState.zoom;
+        this.ctx.strokeStyle  = isGhostAggro
+          ? `rgba(255,40,0,${(0.75 * aggroPulse * sinkMult * healthMult).toFixed(3)})`
+          : ghostSpectralColor(ghostNpcLvl2, 0.55 * sinkMult * healthMult);
+        this.ctx.lineWidth    = (isGhostAggro ? 2.0 : 1.5) / cameraState.zoom;
         this.ctx.beginPath();
         this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
         for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
@@ -8464,14 +10048,17 @@ export class RenderSystem {
 
       // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
       // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / GHOST_MAX_HULL_HP) - 0.25) / 0.75 : 0;
+      const ghostNpcLvl3 = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+      const ghostLvlMaxHP3 = isGhost ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl3 - 1) * 9 / 59)) : GHOST_MAX_HULL_HP;
+      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / ghostLvlMaxHP3) - 0.25) / 0.75 : 0;
       if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
         if (isGhost) {
-          // Ghost dissolve: cyan/teal mist, starts from 75% HP
+          // Ghost dissolve: level-tinted mist, starts from 75% HP
           const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
+          const ghostMistClr = ghostSpectralColor(ship.npcLevel ?? 1);
           this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
-          this.ctx.fillStyle = '#00eeff';
-          this.ctx.shadowColor = '#00eeff';
+          this.ctx.fillStyle = ghostMistClr;
+          this.ctx.shadowColor = ghostMistClr;
           this.ctx.shadowBlur  = 16 / cameraState.zoom;
         } else {
           this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
@@ -8598,7 +10185,8 @@ export class RenderSystem {
     // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
     const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
     const baseAlpha = isGhostShip ? Math.min(phase1Alpha, 0.45) * ghostHealthFade : phase1Alpha;
-    if (baseAlpha < 1) this.ctx.globalAlpha = baseAlpha;
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? this._upperDeckFade : 1.0;
+    if (baseAlpha * _deckAlpha < 1) this.ctx.globalAlpha = baseAlpha * _deckAlpha;
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -8609,6 +10197,25 @@ export class RenderSystem {
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
     const shipHasDeck = ship.modules.some(m => m.kind === 'deck');
+    const shipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    // Lower-deck-only planks are a darker warm wood; upper deck uses the standard lighter tone
+    const plankBaseColor  = shipHasUpperDeck ? '#8B7355' : '#6B5232';
+    const plankStrokeBase = shipHasUpperDeck ? '#4A3020' : '#3A2010';
+
+    // Clip to hull shape minus deck holes so planks don't draw over transparent openings.
+    // Use a nested save/restore so the clip is released before gunport overlays are drawn
+    // (open door panels extend 14px outside the hull and must not be clipped).
+    this.ctx.save();
+    if (shipHasUpperDeck && ship.hull.length >= 3) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+      this.ctx.clip('evenodd');
+    }
 
     if (!shipHasDeck) {
       // ── Skeleton mode: fill hull sections (between ribs/keel/hull-edge)
@@ -8638,7 +10245,8 @@ export class RenderSystem {
         }
       }
 
-      this.ctx.restore();
+      this.ctx.restore(); // inner - hull clip
+      this.ctx.restore(); // outer - ship transform
       return;
     }
 
@@ -8662,13 +10270,13 @@ export class RenderSystem {
       // Ghost planks: dark semi-transparent with cyan tinge; pulsed by health
       const fillColor   = isGhostShip
         ? this.darkenByDamage('#1a2a3a', healthRatio)
-        : this.darkenByDamage('#8B7355', healthRatio);
+        : this.darkenByDamage(plankBaseColor, healthRatio);
       const strokeColor = isGhostShip
         ? this.darkenByDamage('#003055', healthRatio)
-        : this.darkenByDamage('#4A3020', healthRatio);
+        : this.darkenByDamage(plankStrokeBase, healthRatio);
 
       if (isGhostShip) {
-        this.ctx.shadowColor = '#00eeff';
+        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1);
         this.ctx.shadowBlur  = 3;
       }
       this.ctx.fillStyle = fillColor;
@@ -8746,7 +10354,9 @@ export class RenderSystem {
         this.ctx.restore();
       }
     }
-    
+    // Release hull clip.
+    this.ctx.restore();
+
     this.ctx.restore();
   }
 
@@ -8827,9 +10437,10 @@ export class RenderSystem {
         this.hoveredPlankSlot?.sectionName === seg.sectionName &&
         this.hoveredPlankSlot?.segmentIndex === seg.index;
 
-      const fillColor  = isHovered ? 'rgba(0, 230, 80, 0.70)' : 'rgba(0, 180, 60, 0.35)';
-      const strokeColor = isHovered ? '#00ff55' : '#00cc44';
-      const lineWidth  = isHovered ? 2.5 : 1.5;
+      const _canAfford = !isHovered || this.ghostCanAfford;
+      const fillColor   = isHovered ? (_canAfford ? 'rgba(0, 230, 80, 0.70)' : 'rgba(230, 60, 40, 0.70)') : 'rgba(0, 180, 60, 0.35)';
+      const strokeColor = isHovered ? (_canAfford ? '#00ff55' : '#ff3333') : '#00cc44';
+      const lineWidth   = isHovered ? 2.5 : 1.5;
 
       this.ctx.fillStyle   = fillColor;
       this.ctx.strokeStyle = strokeColor;
@@ -9130,6 +10741,9 @@ export class RenderSystem {
     // Scaffolded ships under construction — suppress plank status icons
     if (this._scaffoldedShips.has(ship.id)) return;
 
+    // Ghost ships have no planks or decks — skip all status icons
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
+
     // Only show for own company or neutral ships — hide from enemies
     const isEnemy = this._localCompanyId !== 0 && ship.companyId !== 0
       && ship.companyId !== this._localCompanyId;
@@ -9196,16 +10810,42 @@ export class RenderSystem {
     }
 
     // ── DECK status ──────────────────────────────────────────────────────────
-    const deckMod = ship.modules.find(m => m.kind === 'deck');
-    if (!deckMod) {
+    const upperDeckMod = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1);
+    const lowerDeckMod = ship.modules.find(m => m.kind === 'deck' && m.deckId === 0);
+    const anyDeckMod   = upperDeckMod ?? lowerDeckMod;
+    if (!anyDeckMod) {
       // No deck present — draw a persistent orange warning at ship center
       this.drawMissingDeckIcon(0, 0, 22);
+    } else if (upperDeckMod) {
+      // Upper deck installed — show upper bar and a lower deck bar (depleted if absent)
+      const udmd = upperDeckMod.moduleData as any;
+      if (udmd && typeof udmd.health === 'number' && typeof udmd.maxHealth === 'number'
+          && udmd.maxHealth > 0
+          && (udmd.health < udmd.maxHealth || (udmd.targetHealth != null && udmd.targetHealth < udmd.maxHealth))) {
+        const uTarget = udmd.targetHealth != null ? udmd.targetHealth / udmd.maxHealth : 1;
+        this.drawDeckHealthBar(0, -5, udmd.health / udmd.maxHealth, uTarget);
+      }
+      // Lower deck bar: show actual health or 0 (depleted) if lower deck missing
+      if (lowerDeckMod) {
+        const ldmd = lowerDeckMod.moduleData as any;
+        if (ldmd && typeof ldmd.health === 'number' && typeof ldmd.maxHealth === 'number'
+            && ldmd.maxHealth > 0
+            && (ldmd.health < ldmd.maxHealth || (ldmd.targetHealth != null && ldmd.targetHealth < ldmd.maxHealth))) {
+          const lTarget = ldmd.targetHealth != null ? ldmd.targetHealth / ldmd.maxHealth : 1;
+          this.drawDeckHealthBar(0, 5, ldmd.health / ldmd.maxHealth, lTarget);
+        }
+      } else {
+        // No lower deck — show it as fully depleted
+        this.drawDeckHealthBar(0, 5, 0);
+      }
     } else {
-      // Deck present but damaged — draw a health bar at ship center
-      const dmd = deckMod.moduleData as any;
+      // Only lower deck present — show its bar at centre
+      const dmd = lowerDeckMod!.moduleData as any;
       if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number'
-          && dmd.maxHealth > 0 && dmd.health < dmd.maxHealth) {
-        this.drawDeckHealthBar(0, 0, dmd.health / dmd.maxHealth);
+          && dmd.maxHealth > 0
+          && (dmd.health < dmd.maxHealth || (dmd.targetHealth != null && dmd.targetHealth < dmd.maxHealth))) {
+        const dTarget = dmd.targetHealth != null ? dmd.targetHealth / dmd.maxHealth : 1;
+        this.drawDeckHealthBar(0, 0, dmd.health / dmd.maxHealth, dTarget);
       }
     }
 
@@ -9244,8 +10884,9 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
-  /** Small horizontal health bar drawn at ship-local (cx, cy) for the deck module. */
-  private drawDeckHealthBar(cx: number, cy: number, fraction: number): void {
+  /** Small horizontal health bar drawn at ship-local (cx, cy) for the deck module.
+   *  @param targetFraction  repair ceiling (target_health / max_health); default 1 = full. */
+  private drawDeckHealthBar(cx: number, cy: number, fraction: number, targetFraction = 1): void {
     const barW = 44;
     const barH = 6;
     const x0 = cx - barW / 2;
@@ -9260,13 +10901,34 @@ export class RenderSystem {
     this.ctx.roundRect(x0 - 1, y0 - 1, barW + 2, barH + 2, 3);
     this.ctx.fill();
 
+    // Amber fill up to repair ceiling (only if ceiling is below max)
+    const clampedTarget = Math.max(0, Math.min(1, targetFraction));
+    if (clampedTarget < 0.999) {
+      this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
+      this.ctx.beginPath();
+      this.ctx.roundRect(x0, y0, Math.max(2, barW * clampedTarget), barH, 2);
+      this.ctx.fill();
+    }
+
     // Filled portion — gradient from orange (low) to green (full)
-    const r = Math.round(255 * (1 - fraction));
-    const g = Math.round(200 * fraction);
+    const clampedFrac = Math.max(0, Math.min(1, fraction));
+    const r = Math.round(255 * (1 - clampedFrac));
+    const g = Math.round(200 * clampedFrac);
     this.ctx.fillStyle = `rgb(${r},${g},30)`;
     this.ctx.beginPath();
-    this.ctx.roundRect(x0, y0, Math.max(2, barW * fraction), barH, 2);
+    this.ctx.roundRect(x0, y0, Math.max(2, barW * clampedFrac), barH, 2);
     this.ctx.fill();
+
+    // Tick mark at repair ceiling (amber line, only if ceiling is below max)
+    if (clampedTarget < 0.999) {
+      const tx = x0 + barW * clampedTarget;
+      this.ctx.strokeStyle = 'rgba(255,200,60,0.9)';
+      this.ctx.lineWidth = 1.2;
+      this.ctx.beginPath();
+      this.ctx.moveTo(tx, y0 - 1);
+      this.ctx.lineTo(tx, y0 + barH + 1);
+      this.ctx.stroke();
+    }
 
     // Border
     this.ctx.strokeStyle = 'rgba(255,255,255,0.3)';
@@ -9432,6 +11094,7 @@ export class RenderSystem {
   private detectHoveredCannonSlot(worldState: WorldState): void {
     this.hoveredCannonSlot = null;
     if (!this.mouseWorldPos) return;
+    if (this._playerDeckLevel !== 1) return; // fixed cannon slots are upper-deck (deck_id=1)
 
     for (const ship of worldState.ships) {
       const helm = ship.modules.find(m => m.kind === 'helm');
@@ -9457,7 +11120,50 @@ export class RenderSystem {
         const ddx = localX - cx;
         const ddy = localY - cy;
         if (Math.sqrt(ddx * ddx + ddy * ddy) <= 22) {
-          this.hoveredCannonSlot = { ship, cannonIndex: i };
+          const rot = i < 3 ? Math.PI : 0;
+          this.hoveredCannonSlot = { ship, cannonIndex: i, localX: cx, localY: cy, rot };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * In cannon build mode: check whether the cursor is over a gunport that has no cannon yet.
+   * If so, snap to that gunport position so the player can place a cannon there.
+   */
+  private detectHoveredGunportCannonSnap(worldState: WorldState): void {
+    this.hoveredGunportCannonSnap = null;
+    if (!this.mouseWorldPos) return;
+
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      // Gunport cannon ghosts are on the lower deck (deck 0).
+      // Show when player is on deck 0 OR when the ship has no upper deck (single-deck ships
+      // keep _playerDeckLevel=1 because the deck-level update only runs when an upper deck exists).
+      const _shipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+      if (this._playerDeckLevel !== 0 && _shipHasUpperDeck) continue;
+      for (const mod of ship.modules) {
+        if (mod.kind !== 'gunport') continue;
+        // Skip if a cannon is already linked to this gunport's snap index
+        const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
+        const hasCannon = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 && ship.modules.some(
+          m => m.kind === 'cannon'
+            && (m.moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx === gpData.snapIndex,
+        );
+        if (hasCannon) continue;
+
+        const stowedY = mod.localPos.y + (mod.localPos.y < 0 ? 40 : -40);
+        const ddx = localX - mod.localPos.x;
+        const ddy = localY - stowedY;
+        if (Math.abs(ddx) <= 20 && Math.abs(ddy) <= 20) {
+          this.hoveredGunportCannonSnap = { ship, module: mod };
           return;
         }
       }
@@ -9466,8 +11172,10 @@ export class RenderSystem {
 
   /**
    * Draw ghost outlines at missing cannon positions (cannon build mode).
+   * @param gunportOnly When true, skip the fixed-position helm-offset slots and only draw
+   *   ghost cannons at gunport snap positions (used in gunport build mode preview).
    */
-  private drawMissingCannonGhosts(ship: Ship, camera: Camera): void {
+  private drawMissingCannonGhosts(ship: Ship, camera: Camera, gunportOnly = false): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
     const helm = ship.modules.find(m => m.kind === 'helm');
@@ -9486,7 +11194,8 @@ export class RenderSystem {
 
     const lw = 1.5 / cameraState.zoom;
 
-    for (let i = 0; i < 6; i++) {
+    // Fixed 6 broadside slots are on deck_id=1 (upper deck) — only show when on upper deck
+    if (!gunportOnly && this._playerDeckLevel === 1) for (let i = 0; i < 6; i++) {
       if (presentIds.has(base + 1 + i)) continue;
 
       const cx = RenderSystem.CANNON_XS[i % 3];
@@ -9500,13 +11209,14 @@ export class RenderSystem {
       this.ctx.translate(cx, cy);
       this.ctx.rotate(rot);
 
+      const _cannonCanAfford = !isHovered || this.ghostCanAfford;
       // Ghost cannon base rect — unified green palette
-      this.ctx.strokeStyle = isHovered ? '#66ee99' : 'rgba(80,210,130,0.65)';
-      this.ctx.fillStyle   = isHovered ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
+      this.ctx.strokeStyle = isHovered ? (_cannonCanAfford ? '#66ee99' : '#ff4444') : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHovered ? (_cannonCanAfford ? 'rgba(40,160,80,0.45)' : 'rgba(200,40,40,0.45)') : 'rgba(40,130,70,0.20)';
       this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
       this.ctx.setLineDash(isHovered ? [] : [4, 3]);
       this.ctx.beginPath();
-      this.ctx.rect(-15, -10, 30, 20);
+      this.ctx.rect(-11, -7.5, 22, 15); // base (matches actual cannon 22×15)
       this.ctx.fill();
       this.ctx.stroke();
       this.ctx.setLineDash([]);
@@ -9516,7 +11226,7 @@ export class RenderSystem {
       this.ctx.fillStyle   = 'transparent';
       this.ctx.lineWidth   = lw;
       this.ctx.beginPath();
-      this.ctx.rect(-8, -40, 16, 40);
+      this.ctx.rect(-8, -40, 16, 40); // barrel (matches actual cannon 16×40)
       this.ctx.stroke();
 
       // Hovered: bright highlight circle
@@ -9531,11 +11241,77 @@ export class RenderSystem {
       this.ctx.restore();
     }
 
+    // ── Ghost cannons at gunport positions (no cannon installed yet) ──────
+    // Show when player is on deck 0, OR when the ship has no upper deck (single-deck ships
+    // have _playerDeckLevel=1 since the level detector only activates with an upper deck).
+    const gpHalfWGhost = 11; // match visual gpHalfW
+    const _gpShipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    if (this._playerDeckLevel === 0 || !_gpShipHasUpperDeck) for (const mod of ship.modules) {
+      if (mod.kind !== 'gunport') continue;
+      // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
+      // because the cannon is now far from the gunport hull edge when stowed/deployed).
+      const gpData = mod.moduleData as import('../../sim/modules').GunportModuleData;
+      const hasCannon = gpData.snapIndex >= 0 && gpData.snapIndex <= 11 && ship.modules.some(
+        m => m.kind === 'cannon'
+          && (m.moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx === gpData.snapIndex,
+      );
+      if (hasCannon) continue;
+
+      const isHoveredGp = this.hoveredGunportCannonSnap?.module === mod;
+      // Rotation: starboard (y < 0) rot=0 → barrel points -y (outward); port (y > 0) rot=π → barrel points +y (outward)
+      const rot = mod.localPos.y < 0 ? 0 : Math.PI;
+      // Stowed position: 40px inboard of hull edge (gpY=-90 → ghostY=-50, gpY=+90 → ghostY=+50)
+      const ghostStowedY = mod.localPos.y + (mod.localPos.y < 0 ? 40 : -40);
+
+      this.ctx.save();
+      this.ctx.translate(mod.localPos.x, ghostStowedY);
+      this.ctx.rotate(rot);
+
+      const _gpCanAfford = !isHoveredGp || this.ghostCanAfford;
+      // Base rect
+      this.ctx.strokeStyle = isHoveredGp ? (_gpCanAfford ? '#66ee99' : '#ff4444') : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHoveredGp ? (_gpCanAfford ? 'rgba(40,160,80,0.45)' : 'rgba(200,40,40,0.45)') : 'rgba(40,130,70,0.20)';
+      this.ctx.lineWidth   = isHoveredGp ? lw * 2 : lw;
+      this.ctx.setLineDash(isHoveredGp ? [] : [4, 3]);
+      this.ctx.beginPath();
+      this.ctx.rect(-gpHalfWGhost, -7.5, gpHalfWGhost * 2, 15);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      // Barrel stub (pointing outward — negative y = outward when rot=π, positive y when rot=0)
+      this.ctx.strokeStyle = isHoveredGp ? '#99ffbb' : 'rgba(80,200,120,0.45)';
+      this.ctx.fillStyle   = 'transparent';
+      this.ctx.lineWidth   = lw;
+      this.ctx.beginPath();
+      this.ctx.rect(-6, -36, 12, 36);
+      this.ctx.stroke();
+
+      if (isHoveredGp) {
+        this.ctx.strokeStyle = '#88ff99';
+        this.ctx.lineWidth = lw * 1.5;
+        this.ctx.beginPath();
+        this.ctx.arc(0, 0, 20, 0, Math.PI * 2);
+        this.ctx.stroke();
+        // Label
+        this.ctx.rotate(-rot); // unrotate for text
+        const fontSize = Math.max(5, Math.round(7 / cameraState.zoom));
+        this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+        this.ctx.fillStyle = '#ffffffcc';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = mod.localPos.y < 0 ? 'bottom' : 'top';
+        const labelY = mod.localPos.y < 0 ? -18 : 18;
+        this.ctx.fillText('Place Cannon', 0, labelY);
+      }
+
+      this.ctx.restore();
+    }
+
     this.ctx.restore();
   }
 
   // Mast layout: mast_xs[3] = {165, -35, -235}, all at y=0
-  private static readonly MAST_XS = [165, -35, -235];
+  static readonly MAST_XS = [165, -35, -235];
   // Helm position: x=-90, y=0
   private static readonly HELM_X = -90;
 
@@ -9675,11 +11451,12 @@ export class RenderSystem {
       const isHovered = this.hoveredMastSlot?.ship === ship &&
                         this.hoveredMastSlot?.mastIndex === i;
 
+      const _mastCanAfford = !isHovered || this.ghostCanAfford;
       // Ghost mast circle — unified green palette (matches plan ghost markers)
       this.ctx.beginPath();
       this.ctx.arc(mx, 0, 14, 0, Math.PI * 2);
-      this.ctx.fillStyle   = isHovered ? 'rgba(40,160,80,0.45)' : 'rgba(40,130,70,0.20)';
-      this.ctx.strokeStyle = isHovered ? '#66ee99' : 'rgba(80,210,130,0.65)';
+      this.ctx.fillStyle   = isHovered ? (_mastCanAfford ? 'rgba(40,160,80,0.45)' : 'rgba(200,40,40,0.45)') : 'rgba(40,130,70,0.20)';
+      this.ctx.strokeStyle = isHovered ? (_mastCanAfford ? '#66ee99' : '#ff4444') : 'rgba(80,210,130,0.65)';
       this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
       this.ctx.setLineDash(isHovered ? [] : [4, 3]);
       this.ctx.fill();
@@ -9754,8 +11531,18 @@ export class RenderSystem {
     if (!this.mouseWorldPos) return;
 
     for (const ship of worldState.ships) {
-      const deckPresent = ship.modules.some(m => m.kind === 'deck');
-      if (deckPresent) continue;
+      if (ship.shipType === SHIP_TYPE_GHOST) continue; // ghost ships have no deck
+      const decks = ship.modules.filter(m => m.kind === 'deck');
+      const hasLower = decks.some(m => m.deckId === 0);
+      const hasUpper = decks.some(m => m.deckId === 1);
+      if (hasLower && hasUpper) continue; // both present — nothing to place
+
+      // Always respect the T-key override; default to lower (0) first.
+      const selectedLevel = this.deckLevelOverride >= 0 ? this.deckLevelOverride : 0;
+
+      // Only register a hover slot if the selected level is actually missing
+      const selectedIsMissing = selectedLevel === 0 ? !hasLower : !hasUpper;
+      if (!selectedIsMissing) continue;
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -9766,89 +11553,791 @@ export class RenderSystem {
 
       // Hit-test against the ship's walkable deck area (slightly inset from full hull)
       if (Math.abs(localX) <= 280 && Math.abs(localY) <= 75) {
-        this.hoveredDeckSlot = { ship };
+        this.hoveredDeckSlot = { ship, deckLevel: selectedLevel };
         return;
       }
     }
   }
 
   /**
-   * Draw a ghost deck outline when the deck module is missing (deck build mode).
+   * Draw ghost deck outlines for any missing deck levels (deck build mode).
+   * Lower deck (deckId=0) uses brown/wood tones; upper deck (deckId=1) uses
+   * amber/gold tones with a dashed border to distinguish the two layers.
    */
   private drawMissingDeckGhost(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (ship.shipType === SHIP_TYPE_GHOST) return; // ghost ships have no deck to place
 
-    const deckPresent = ship.modules.some(m => m.kind === 'deck');
-    if (deckPresent) return;
+    const decks    = ship.modules.filter(m => m.kind === 'deck');
+    const hasLower = decks.some(m => m.deckId === 0);
+    const hasUpper = decks.some(m => m.deckId === 1);
+    if (hasLower && hasUpper) return; // both present — nothing to draw
+
+    // Determine which deck level is currently selected via T-key override
+    const selectedLevel = this.deckLevelOverride >= 0 ? this.deckLevelOverride : 0;
+    // If the selected level is already present, flip to the missing one
+    const bothMissing = !hasLower && !hasUpper;
+    const displayLevel = bothMissing
+      ? selectedLevel
+      : (!hasLower ? 0 : 1);
 
     this.ctx.save();
-    const screenPos = camera.worldToScreen(ship.position);
+    const screenPos  = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
     const lw = 1.5 / cameraState.zoom;
-    const isHovered = this.hoveredDeckSlot?.ship === ship;
+    const w  = 480, h = 120, r = 12;
+    const x  = -240, y = -60;
 
-    // Deck ghost: rounded rectangle covering walkable area
-    const w = 480; // half-width total
-    const h = 120; // half-height total
-    const r = 12;  // corner radius
-    const x = -240;
-    const y = -60;
+    const drawLevel = (deckLevel: number, isPresent: boolean): void => {
+      if (isPresent) return;
+      const isHovered = this.hoveredDeckSlot?.ship === ship
+                     && this.hoveredDeckSlot?.deckLevel === deckLevel;
+      const isUpper   = deckLevel === 1;
 
-    this.ctx.beginPath();
-    this.ctx.moveTo(x + r, y);
-    this.ctx.lineTo(x + w - r, y);
-    this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
-    this.ctx.lineTo(x + w, y + h - r);
-    this.ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
-    this.ctx.lineTo(x + r, y + h);
-    this.ctx.quadraticCurveTo(x, y + h, x, y + h - r);
-    this.ctx.lineTo(x, y + r);
-    this.ctx.quadraticCurveTo(x, y, x + r, y);
-    this.ctx.closePath();
+      // Color palette: lower=wood-brown, upper=amber-gold
+      const _deckCanAfford = !isHovered || this.ghostCanAfford;
+      const fillBase    = isUpper ? 'rgba(180,150,40,0.14)' : 'rgba(140,80,30,0.12)';
+      const fillHover   = _deckCanAfford ? (isUpper ? 'rgba(200,165,45,0.32)' : 'rgba(180,110,40,0.30)') : 'rgba(200,40,40,0.32)';
+      const strokeBase  = isUpper ? 'rgba(210,175,55,0.65)' : 'rgba(200,120,50,0.55)';
+      const strokeHover = _deckCanAfford ? (isUpper ? '#ddcc33' : '#dd8833') : '#cc2222';
+      const plankBase   = isUpper ? 'rgba(200,170,60,0.28)' : 'rgba(180,110,50,0.25)';
+      const plankHover  = _deckCanAfford ? (isUpper ? 'rgba(210,185,80,0.50)' : 'rgba(220,150,80,0.45)') : 'rgba(220,60,60,0.50)';
+      const ringCol     = _deckCanAfford ? (isUpper ? '#ffee77' : '#ffbb66') : '#ff4444';
+      const labelCol    = isHovered ? (_deckCanAfford ? '#ffffff' : '#ffaaaa')
+                                    : (isUpper ? 'rgba(220,200,100,0.70)' : 'rgba(200,150,80,0.65)');
 
-    this.ctx.fillStyle   = isHovered ? 'rgba(180,110,40,0.30)' : 'rgba(140,80,30,0.12)';
-    this.ctx.strokeStyle = isHovered ? '#dd8833' : 'rgba(200,120,50,0.55)';
-    this.ctx.lineWidth   = isHovered ? lw * 2 : lw;
-    this.ctx.fill();
-    this.ctx.stroke();
-
-    // Draw deck plank lines for visual clarity
-    this.ctx.strokeStyle = isHovered ? 'rgba(220,150,80,0.45)' : 'rgba(180,110,50,0.25)';
-    this.ctx.lineWidth   = lw * 0.8;
-    const plankSpacing = 20;
-    for (let py2 = y + plankSpacing; py2 < y + h; py2 += plankSpacing) {
+      // Rounded-rect path
       this.ctx.beginPath();
-      this.ctx.moveTo(x + 2, py2);
-      this.ctx.lineTo(x + w - 2, py2);
-      this.ctx.stroke();
-    }
-
-    if (isHovered) {
-      // Outer highlight ring
-      this.ctx.beginPath();
-      this.ctx.moveTo(x + r - 6, y - 6);
-      this.ctx.lineTo(x + w - r + 6, y - 6);
-      this.ctx.quadraticCurveTo(x + w + 6, y - 6, x + w + 6, y + r - 6);
-      this.ctx.lineTo(x + w + 6, y + h - r + 6);
-      this.ctx.quadraticCurveTo(x + w + 6, y + h + 6, x + w - r + 6, y + h + 6);
-      this.ctx.lineTo(x + r - 6, y + h + 6);
-      this.ctx.quadraticCurveTo(x - 6, y + h + 6, x - 6, y + h - r + 6);
-      this.ctx.lineTo(x - 6, y + r - 6);
-      this.ctx.quadraticCurveTo(x - 6, y - 6, x + r - 6, y - 6);
+      this.ctx.moveTo(x + r, y);
+      this.ctx.lineTo(x + w - r, y);
+      this.ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      this.ctx.lineTo(x + w, y + h - r);
+      this.ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      this.ctx.lineTo(x + r, y + h);
+      this.ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      this.ctx.lineTo(x, y + r);
+      this.ctx.quadraticCurveTo(x, y, x + r, y);
       this.ctx.closePath();
-      this.ctx.strokeStyle = '#ffbb66';
-      this.ctx.lineWidth   = lw * 1.5;
+
+      this.ctx.fillStyle   = isHovered ? fillHover   : fillBase;
+      this.ctx.strokeStyle = isHovered ? strokeHover : strokeBase;
+      this.ctx.lineWidth   = isHovered ? lw * 2      : lw;
+      if (isUpper) this.ctx.setLineDash([6 / cameraState.zoom, 4 / cameraState.zoom]);
+      this.ctx.fill();
       this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      // Plank lines
+      this.ctx.strokeStyle = isHovered ? plankHover : plankBase;
+      this.ctx.lineWidth   = lw * 0.8;
+      const plankSpacing = 20;
+      for (let py2 = y + plankSpacing; py2 < y + h; py2 += plankSpacing) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(x + 2, py2);
+        this.ctx.lineTo(x + w - 2, py2);
+        this.ctx.stroke();
+      }
+
+      // Centred label
+      const fontSize = Math.max(9, Math.round(11 / cameraState.zoom));
+      this.ctx.font          = `bold ${fontSize}px Georgia, serif`;
+      this.ctx.fillStyle     = labelCol;
+      this.ctx.textAlign     = 'center';
+      this.ctx.textBaseline  = 'middle';
+      const deckName = deckLevel === 0 ? '[ LOWER DECK ]' : '[ UPPER DECK ]';
+      // When both decks are missing show a T-cycle hint alongside the label
+      const cycleHint = bothMissing ? '  [T]' : '';
+      this.ctx.fillText(deckName + cycleHint, 0, 0);
+
+      // Hover: outer glow ring
+      if (isHovered) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(x + r - 6, y - 6);
+        this.ctx.lineTo(x + w - r + 6, y - 6);
+        this.ctx.quadraticCurveTo(x + w + 6, y - 6, x + w + 6, y + r - 6);
+        this.ctx.lineTo(x + w + 6, y + h - r + 6);
+        this.ctx.quadraticCurveTo(x + w + 6, y + h + 6, x + w - r + 6, y + h + 6);
+        this.ctx.lineTo(x + r - 6, y + h + 6);
+        this.ctx.quadraticCurveTo(x - 6, y + h + 6, x - 6, y + h - r + 6);
+        this.ctx.lineTo(x - 6, y + r - 6);
+        this.ctx.quadraticCurveTo(x - 6, y - 6, x + r - 6, y - 6);
+        this.ctx.closePath();
+        this.ctx.strokeStyle = ringCol;
+        this.ctx.lineWidth   = lw * 1.5;
+        this.ctx.stroke();
+      }
+    };
+
+    // Only draw the currently-selected deck level, not both simultaneously.
+    // When both are missing, T cycles which one is shown.
+    drawLevel(displayLevel, displayLevel === 0 ? hasLower : hasUpper);
+
+    this.ctx.restore();
+  }
+
+  // Ramp snap point positions on the brigantine (ship-local x, y=0)
+  private static readonly RAMP_SNAP_POINTS: { x: number; y: number }[] = [
+    { x: 220, y: 0 },   // forward ramp (near bow quarter)
+    { x: -140, y: 0 },  // aft ramp (near stern quarter)
+  ];
+
+  /**
+   * Detect which ramp snap point the cursor is nearest to (within hover radius).
+   * Skips snap points that already have a ramp module.
+   */
+  private detectHoveredRampSlot(worldState: WorldState): void {
+    this.hoveredRampSlot = null;
+    if (!this.mouseWorldPos) return;
+
+    const HALF = 25; // ramp is a 50×50 square (±25 in each axis)
+
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < RenderSystem.RAMP_SNAP_POINTS.length; i++) {
+        const sp = RenderSystem.RAMP_SNAP_POINTS[i];
+        // Skip snap points already occupied by a ramp or hatch cover module
+        const occupied = ship.modules.some(
+          m => (m.kind === 'ramp' || m.kind === 'hatch_cover')
+            && Math.abs(m.localPos.x - sp.x) < 20
+            && Math.abs(m.localPos.y - sp.y) < 20
+        );
+        if (occupied) continue;
+
+        if (Math.abs(localX - sp.x) <= HALF && Math.abs(localY - sp.y) <= HALF) {
+          this.hoveredRampSlot = { ship, snapIndex: i, localPos: sp };
+          return;
+        }
+      }
+    }
+  }
+
+  /**
+   * Draw deck holes at the ramp snap points on the top deck (deckId=1).
+   * Holes are always open when the top deck is present.
+   * - No ramp placed: dark empty shaft opening
+   * - Ramp placed:    dark hole with horizontal step lines
+   */
+
+  /**
+   * Draw a player sprite clipped to the ship hull polygon.
+   * Used when the player is on the lower deck so they can't visually overflow the hull boundary.
+   */
+  private _drawPlayerWithHullClip(player: Player, ship: Ship, worldState: WorldState, camera: Camera): void {
+    const screenPos = camera.worldToScreen(ship.position);
+    const camState  = camera.getState();
+    const angle     = ship.rotation - camState.rotation;
+    const cos       = Math.cos(angle);
+    const sin       = Math.sin(angle);
+    const zoom      = camState.zoom;
+
+    this.ctx.save();
+    if (ship.hull.length >= 3) {
+      this.ctx.beginPath();
+      for (let i = 0; i < ship.hull.length; i++) {
+        const sx = screenPos.x + (ship.hull[i].x * cos - ship.hull[i].y * sin) * zoom;
+        const sy = screenPos.y + (ship.hull[i].x * sin + ship.hull[i].y * cos) * zoom;
+        if (i === 0) this.ctx.moveTo(sx, sy);
+        else         this.ctx.lineTo(sx, sy);
+      }
+      this.ctx.closePath();
+      this.ctx.clip();
+    }
+    this.drawPlayer(player, worldState, camera);
+    this.ctx.restore();
+  }
+
+  /**
+   * Apply a screen-space hull clip and invoke fn() inside it.
+   * Used to render lower-deck modules clipped to the ship hull at layer 1.
+   */
+  private _withShipHullClip(ship: Ship, camera: Camera, fn: () => void): void {
+    if (ship.hull.length < 3) { fn(); return; }
+    const screenPos = camera.worldToScreen(ship.position);
+    const camState  = camera.getState();
+    const angle     = ship.rotation - camState.rotation;
+    const cos       = Math.cos(angle);
+    const sin       = Math.sin(angle);
+    const zoom      = camState.zoom;
+    this.ctx.save();
+    this.ctx.beginPath();
+    for (let i = 0; i < ship.hull.length; i++) {
+      const sx = screenPos.x + (ship.hull[i].x * cos - ship.hull[i].y * sin) * zoom;
+      const sy = screenPos.y + (ship.hull[i].x * sin + ship.hull[i].y * cos) * zoom;
+      if (i === 0) this.ctx.moveTo(sx, sy);
+      else         this.ctx.lineTo(sx, sy);
+    }
+    this.ctx.closePath();
+    this.ctx.clip();
+    fn();
+    this.ctx.restore();
+  }
+
+  /**
+   * Runs at layer 1, sub-priority 1 — after hull fill, before planks.
+   * If the lower deck is missing, renders a dark void so the gap reads as depth.
+   */
+  private drawLowerDeckFloor(ship: Ship, camera: Camera): void {
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    if (!hasUpperDeck) return;
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const isPlayerBelow = this._lowerDeckShipId === ship.id;
+    const hasLowerDeck  = ship.modules.some(m => m.kind === 'deck' && m.deckId === 0);
+
+    this.ctx.save();
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1 / cameraState.zoom;
+
+    const drawRampVisual = (sp: { x: number; y: number }, localRot: number) => {
+      this.drawRampVisualAt(sp, localRot, lw, 1.0);
+    };
+
+    if (isPlayerBelow && ship.hull.length >= 3) {
+      // Player is on lower deck — render full hull-clipped floor then ramps on top
+      this.ctx.save();
+      this.ctx.beginPath();
+      for (let i = 0; i < ship.hull.length; i++) {
+        if (i === 0) this.ctx.moveTo(ship.hull[i].x, ship.hull[i].y);
+        else         this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      }
+      this.ctx.closePath();
+      this.ctx.clip();
+
+      if (hasLowerDeck) {
+        this.ctx.fillStyle = '#5c3d1e';
+        this.ctx.fill();
+
+        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+        for (const v of ship.hull) {
+          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+        }
+        this.ctx.strokeStyle = '#3d2610';
+        this.ctx.lineWidth = lw;
+        for (let y = minY + 12; y < maxY; y += 12) {
+          this.ctx.beginPath();
+          this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
+          this.ctx.stroke();
+        }
+      } else {
+        this.ctx.fillStyle = '#1a0e06';
+        this.ctx.fill();
+      }
+      this.ctx.restore();
+
+      // Draw placed ramps over the floor (outside the hull clip)
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        const rampMod = ship.modules.find(
+          m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+        );
+        if (rampMod) drawRampVisual(sp, rampMod.localRot);
+      }
+    } else {
+      // Normal (above-deck) view: only draw inside the 50×50 hole squares
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        const rx = sp.x - 25, ry = sp.y - 25;
+        const rampMod = ship.modules.find(
+          m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+        );
+        const hatchMod = ship.modules.find(
+          m => m.kind === 'hatch_cover' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
+        );
+
+        if (rampMod) {
+          drawRampVisual(sp, rampMod.localRot);
+        } else if (hatchMod) {
+          // Solid sealed hatch — looks like regular deck planking
+          this.drawHatchCoverAt(sp, lw);
+        } else if (hasLowerDeck) {
+          this.ctx.fillStyle = '#5c3d1e';
+          this.ctx.fillRect(rx, ry, 50, 50);
+          this.ctx.strokeStyle = '#3d2610';
+          this.ctx.lineWidth = lw;
+          for (let p = 1; p < 5; p++) {
+            const yy = ry + (p / 5) * 50;
+            this.ctx.beginPath();
+            this.ctx.moveTo(rx, yy); this.ctx.lineTo(rx + 50, yy);
+            this.ctx.stroke();
+          }
+          this.ctx.strokeStyle = '#3d2608';
+          this.ctx.lineWidth = lw * 2;
+          this.ctx.strokeRect(rx, ry, 50, 50);
+        } else {
+          const grad = this.ctx.createLinearGradient(rx, ry, rx, ry + 50);
+          grad.addColorStop(0, '#1a0e06');
+          grad.addColorStop(1, '#2d1a0a');
+          this.ctx.fillStyle = grad;
+          this.ctx.fillRect(rx, ry, 50, 50);
+          this.ctx.strokeStyle = '#3d2608';
+          this.ctx.lineWidth = lw * 2;
+          this.ctx.strokeRect(rx, ry, 50, 50);
+        }
+      }
     }
 
     this.ctx.restore();
   }
 
-  private drawShipCannons(ship: Ship, camera: Camera): void {
+  /**
+   * Solid upper-deck cover drawn at layer 2.
+   * Fills the hull polygon (with ramp/hatch holes) with the deck surface colour so that
+   * lower-deck cannons, gunports, and other layer-1 content are fully hidden when the
+   * player is not below deck — even through gaps between individual plank boards.
+   */
+  private drawUpperDeckCover(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    if (ship.hull.length < 3) return;
+
+    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.save();
+    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Match the deck-damage-darkened hull colour used in drawShipHull
+    let fillColor = '#DEB887'; // BurlyWood — upper deck
+    const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                 ?? ship.modules.find(m => m.kind === 'deck');
+    const dmd = topDeck?.moduleData as any;
+    if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+      fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
+    }
+    this.ctx.fillStyle = fillColor;
+
+    // Fill hull polygon, punching transparent holes at ramp/hatch snap points
+    this.ctx.beginPath();
+    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    this.ctx.closePath();
+    for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+      this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+    }
+    this.ctx.fill('evenodd');
+
+    // Plank-line grain — mirrors drawShipHull, retains BurlyWood colour
+    {
+      this.ctx.save();
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+      this.ctx.clip('evenodd');
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const v of ship.hull) {
+        if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+        if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+      }
+      this.ctx.strokeStyle = '#b8824a';
+      this.ctx.lineWidth = 1 / cameraState.zoom;
+      for (let y = minY + 12; y < maxY; y += 12) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
+        this.ctx.stroke();
+      }
+      this.ctx.restore();
+    }
+
+    // Flood tint overlay (mirrors drawShipHull)
+    if (floodTint > 0) {
+      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+      this.ctx.fillStyle = '#1a6eb5';
+      this.ctx.beginPath();
+      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      this.ctx.closePath();
+      this.ctx.fill();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw gunport door overlays for a ship.
+   * Queued at layer 1 priority 4 — only when the local player is on this ship's lower deck.
+   * The upper-deck cover at layer 2 hides them from any other viewpoint (option B).
+   */
+  private drawGunportOverlays(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+
+    this.ctx.save();
+    if (phase1Alpha < 1) this.ctx.globalAlpha = phase1Alpha;
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const gpHalfW = 11;
+    const gpHalfH = 5;
+    const doorExt = 14;
+
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'gunport') continue;
+      if (mod.moduleData?.kind !== 'gunport') continue;
+      const gx = mod.localPos.x;
+      const gy = mod.localPos.y;
+      const isOpen = (mod.moduleData as any).isOpen ?? false;
+      this.ctx.save();
+      this.ctx.translate(gx, gy);
+      if (isOpen) {
+        // Dark hole
+        this.ctx.fillStyle = '#0e0808';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+        this.ctx.lineWidth = 0.8;
+        this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        // Door panel swung outward (outside hull, so not covered by layer-2 fill)
+        const outDir = gy < 0 ? -1 : 1;
+        const hingeY = outDir * gpHalfH;
+        const panelY = outDir < 0 ? hingeY - doorExt : hingeY;
+        this.ctx.fillStyle = '#7a5c2a';
+        this.ctx.fillRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
+        this.ctx.strokeStyle = '#4a3010';
+        this.ctx.lineWidth = 0.8;
+        this.ctx.strokeRect(-gpHalfW, panelY, gpHalfW * 2, doorExt);
+        this.ctx.globalAlpha = 0.25;
+        this.ctx.strokeStyle = '#3a2010';
+        this.ctx.lineWidth = 0.6;
+        this.ctx.beginPath();
+        this.ctx.moveTo(0, panelY + 2); this.ctx.lineTo(0, panelY + doorExt - 2);
+        this.ctx.stroke();
+        this.ctx.globalAlpha = 1.0;
+      } else {
+        // Closed door cover
+        this.ctx.fillStyle = '#6a4828';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = '#3a2010';
+        this.ctx.lineWidth = 0.8;
+        this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.beginPath();
+        this.ctx.moveTo(-gpHalfW, 0); this.ctx.lineTo(gpHalfW, 0);
+        this.ctx.stroke();
+      }
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Shared ramp visual — draws a placed ramp (or preview) in its own rotated frame.
+   * Caller must have already applied ship-local transform.
+   * −x end (ramp-local) = top/light (upper-deck entry face).
+   * +x end = bottom/dark (lower-deck climbable face).
+   */
+  private drawRampVisualAt(
+    sp: { x: number; y: number },
+    localRot: number,
+    lw: number,
+    alpha: number = 1.0,
+  ): void {
+    this.ctx.save();
+    this.ctx.translate(sp.x, sp.y);
+    this.ctx.rotate(localRot);
+    if (alpha !== 1.0) this.ctx.globalAlpha *= alpha;
+
+    const grad = this.ctx.createLinearGradient(-25, 0, 25, 0);
+    grad.addColorStop(0, '#b07d42');
+    grad.addColorStop(1, '#2e1a08');
+    this.ctx.fillStyle = grad;
+    this.ctx.fillRect(-25, -25, 50, 50);
+
+    const numSteps = 6;
+    for (let s = 0; s < numSteps; s++) {
+      const t  = (s + 0.5) / numSteps;
+      const sx = -25 + t * 50;
+      this.ctx.strokeStyle = `rgba(0,0,0,${(0.30 + t * 0.40).toFixed(2)})`;
+      this.ctx.lineWidth   = lw * 1.5;
+      this.ctx.beginPath();
+      this.ctx.moveTo(sx, -25);
+      this.ctx.lineTo(sx, 25);
+      this.ctx.stroke();
+    }
+
+    this.ctx.strokeStyle = '#5a3210';
+    this.ctx.lineWidth   = lw * 2;
+    this.ctx.strokeRect(-25, -25, 50, 50);
+
+    this.ctx.strokeStyle = 'rgba(220,160,80,0.65)';
+    this.ctx.lineWidth   = lw * 2.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(-25, -25);
+    this.ctx.lineTo(-25, 25);
+    this.ctx.stroke();
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw a placed hatch cover at a snap point — looks like sealed deck planking.
+   * Caller must have already applied ship-local transform.
+   */
+  private drawHatchCoverAt(
+    sp: { x: number; y: number },
+    lw: number,
+    alpha: number = 1.0,
+  ): void {
+    this.ctx.save();
+    this.ctx.translate(sp.x, sp.y);
+    if (alpha !== 1.0) this.ctx.globalAlpha *= alpha;
+
+    // Solid plank fill — same warm wood tone as the deck surface
+    this.ctx.fillStyle = '#7a5230';
+    this.ctx.fillRect(-25, -25, 50, 50);
+
+    // Horizontal plank lines
+    this.ctx.strokeStyle = 'rgba(0,0,0,0.28)';
+    this.ctx.lineWidth   = lw * 1.2;
+    for (let p = 1; p < 5; p++) {
+      const yy = -25 + (p / 5) * 50;
+      this.ctx.beginPath();
+      this.ctx.moveTo(-25, yy);
+      this.ctx.lineTo(25, yy);
+      this.ctx.stroke();
+    }
+
+    // Border — slightly lighter to differentiate from regular floor
+    this.ctx.strokeStyle = '#c89050';
+    this.ctx.lineWidth   = lw * 2.5;
+    this.ctx.strokeRect(-25, -25, 50, 50);
+
+    // Small "X" latch indicator in the centre
+    this.ctx.strokeStyle = 'rgba(200,140,60,0.80)';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.moveTo(-8, -8); this.ctx.lineTo(8, 8);
+    this.ctx.moveTo(8, -8);  this.ctx.lineTo(-8, 8);
+    this.ctx.stroke();
+
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw ghost ramp outlines at all available snap points on a ship (ramp build mode).
+   * Shows a gradient preview matching the current rampFacing — light (top) to dark (bottom).
+   * When in hatch build mode, shows a hatch cover preview instead.
+   */
+  private drawRampSnapGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    this.ctx.save();
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+    const facingAngle = this.rampFacing * Math.PI / 2;
+    const isHatchMode = this.hatchBuildMode;
+
+    for (let i = 0; i < RenderSystem.RAMP_SNAP_POINTS.length; i++) {
+      const sp = RenderSystem.RAMP_SNAP_POINTS[i];
+
+      // Skip occupied snap points (ramp or hatch cover)
+      const occupied = ship.modules.some(
+        m => (m.kind === 'ramp' || m.kind === 'hatch_cover')
+          && Math.abs(m.localPos.x - sp.x) < 20
+          && Math.abs(m.localPos.y - sp.y) < 20
+      );
+      if (occupied) continue;
+
+      const isHovered = this.hoveredRampSlot?.ship === ship
+                     && this.hoveredRampSlot?.snapIndex === i;
+
+      if (isHatchMode) {
+        // Hatch cover ghost
+        if (isHovered) {
+          this.drawHatchCoverAt(sp, lw, 1.0);
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.strokeStyle = '#ffee88';
+          this.ctx.lineWidth   = lw * 1.5;
+          this.ctx.strokeRect(-31, -31, 62, 62);
+          const fontSize = Math.max(7, Math.round(9 / cameraState.zoom));
+          this.ctx.font         = `bold ${fontSize}px Georgia, serif`;
+          this.ctx.fillStyle    = '#ffffffcc';
+          this.ctx.textAlign    = 'center';
+          this.ctx.textBaseline = 'bottom';
+          this.ctx.fillText('Hatch cover', 0, -34);
+          this.ctx.restore();
+        } else {
+          this.drawHatchCoverAt(sp, lw, 0.30);
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.strokeStyle = 'rgba(200,150,60,0.60)';
+          this.ctx.lineWidth   = lw;
+          this.ctx.setLineDash([5 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.strokeRect(-25, -25, 50, 50);
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+        }
+      } else {
+        // Ramp ghost
+        if (isHovered) {
+          // Hovered: draw the exact same visual as a placed ramp so the
+          // highlight footprint matches the eventual placement 1:1.
+          this.drawRampVisualAt(sp, facingAngle, lw, 1.0);
+
+          // Add an outer glow ring + rotate hint, positioned relative to the
+          // unrotated snap point so it always sits around the 50×50 footprint.
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.rotate(facingAngle);
+          this.ctx.strokeStyle = '#ffee88';
+          this.ctx.lineWidth   = lw * 1.5;
+          this.ctx.strokeRect(-31, -31, 62, 62);
+
+          const fontSize = Math.max(7, Math.round(9 / cameraState.zoom));
+          this.ctx.font         = `bold ${fontSize}px Georgia, serif`;
+          this.ctx.fillStyle    = '#ffffffcc';
+          this.ctx.textAlign    = 'center';
+          this.ctx.textBaseline = 'bottom';
+          this.ctx.fillText('R: rotate', 0, -34);
+          this.ctx.restore();
+        } else {
+          // Unhovered: faded preview using the same visual at reduced opacity,
+          // plus a dashed outline so empty slots are still legible.
+          this.drawRampVisualAt(sp, facingAngle, lw, 0.30);
+
+          this.ctx.save();
+          this.ctx.translate(sp.x, sp.y);
+          this.ctx.rotate(facingAngle);
+          this.ctx.strokeStyle = 'rgba(200,150,60,0.60)';
+          this.ctx.lineWidth   = lw;
+          this.ctx.setLineDash([5 / cameraState.zoom, 3 / cameraState.zoom]);
+          this.ctx.strokeRect(-25, -25, 50, 50);
+          this.ctx.setLineDash([]);
+          this.ctx.restore();
+        }
+      }
+    }
+
+    this.ctx.restore();
+  }
+
+  private detectHoveredGunportSnap(worldState: WorldState): void {
+    this.hoveredGunportSnap = null;
+    if (!this.mouseWorldPos) return;
+
+    const HALF_W = 14; // horizontal tolerance (~half the gunport spacing)
+    const HALF_H = 12; // vertical tolerance (stays on plank)
+
+    for (const ship of worldState.ships) {
+      const dx = this.mouseWorldPos.x - ship.position.x;
+      const dy = this.mouseWorldPos.y - ship.position.y;
+      const cos = Math.cos(-ship.rotation);
+      const sin = Math.sin(-ship.rotation);
+      const localX = dx * cos - dy * sin;
+      const localY = dx * sin + dy * cos;
+
+      for (let i = 0; i < GUNPORT_SNAP_POINTS.length; i++) {
+        const sp = GUNPORT_SNAP_POINTS[i];
+        // Skip occupied snap points
+        const occupied = ship.modules.some(
+          m => m.kind === 'gunport'
+            && Math.abs(m.localPos.x - sp.x) < 15
+            && Math.abs(m.localPos.y - sp.y) < 12
+        );
+        if (occupied) continue;
+
+        if (Math.abs(localX - sp.x) <= HALF_W && Math.abs(localY - sp.y) <= HALF_H) {
+          this.hoveredGunportSnap = { ship, snapIndex: i, localPos: { x: sp.x, y: sp.y } };
+          return;
+        }
+      }
+    }
+  }
+
+  private drawGunportSnapGhosts(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    this.ctx.save();
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    const lw = 1.5 / cameraState.zoom;
+    const gpHalfW = 11;
+    const gpHalfH = 5;
+
+    for (let i = 0; i < GUNPORT_SNAP_POINTS.length; i++) {
+      const sp = GUNPORT_SNAP_POINTS[i];
+      const occupied = ship.modules.some(
+        m => m.kind === 'gunport'
+          && Math.abs(m.localPos.x - sp.x) < 15
+          && Math.abs(m.localPos.y - sp.y) < 12
+      );
+      if (occupied) continue;
+
+      const isHovered = this.hoveredGunportSnap?.ship === ship
+                     && this.hoveredGunportSnap?.snapIndex === i;
+
+      this.ctx.save();
+      this.ctx.translate(sp.x, sp.y);
+
+      if (isHovered) {
+        // Bright ghost — show the closed cover preview
+        this.ctx.fillStyle = 'rgba(160,120,60,0.85)';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = '#ffee88';
+        this.ctx.lineWidth = lw * 1.5;
+        this.ctx.strokeRect(-gpHalfW - 2, -gpHalfH - 2, (gpHalfW + 2) * 2, (gpHalfH + 2) * 2);
+        // Label
+        const fontSize = Math.max(5, Math.round(7 / cameraState.zoom));
+        this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+        this.ctx.fillStyle = '#ffffffcc';
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = sp.side === 'starboard' ? 'bottom' : 'top';
+        this.ctx.fillText('Gunport', 0, sp.side === 'starboard' ? -gpHalfH - 4 : gpHalfH + 4);
+      } else {
+        // Dim ghost
+        this.ctx.fillStyle = 'rgba(120,80,40,0.35)';
+        this.ctx.fillRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.strokeStyle = 'rgba(200,150,60,0.50)';
+        this.ctx.lineWidth = lw;
+        this.ctx.setLineDash([3 / cameraState.zoom, 2 / cameraState.zoom]);
+        this.ctx.strokeRect(-gpHalfW, -gpHalfH, gpHalfW * 2, gpHalfH * 2);
+        this.ctx.setLineDash([]);
+      }
+
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  private drawShipCannons(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
       return;
@@ -9867,8 +12356,13 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     
-    // Find all cannon modules
-    const cannons = ship.modules.filter(m => m.kind === 'cannon');
+    // Find all cannon modules, filtered by deck if requested.
+    // deckFilter=0 → lower deck only; deckFilter=1 → upper deck + deck-independent (255).
+    const cannons = ship.modules.filter(m => m.kind === 'cannon' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      /* deckFilter === 1 */ m.deckId === 1 || m.deckId === 255
+    ));
     
     const isPhantomBrig = ship.shipType === SHIP_TYPE_GHOST;
 
@@ -9888,34 +12382,58 @@ export class RenderSystem {
       // Save context for this cannon
       this.ctx.save();
       
+      // Deck-based opacity: fade cannons on decks above the player's current deck.
+      // Decks below (or same) render at full opacity — render order handles occlusion.
+      if (cannon.deckId !== 255 && cannon.deckId > this._playerDeckLevel) {
+        this.ctx.globalAlpha = 0.35;
+      }
+
+      // Gunport-associated cannons slide outward when the gunport opens
+      let renderY = y;
+      const assocGunport = this.findGunportForCannon(cannon, ship);
+      if (assocGunport) {
+        // Use gunport position as the reference so the animation is independent of
+        // whatever local_pos the server assigns the cannon (deployed vs stowed).
+        const gpY = assocGunport.localPos.y;  // ±90 (hull edge)
+        // Stowed:   cannon 40 px inboard of hull edge → centre at ∓50
+        // Deployed: cannon base (outboard face) flush with hull inner surface → centre at ∓80
+        const stowedY   = gpY + (gpY < 0 ?  40 : -40);  // -90+40=-50 stbd, +90-40=+50 port
+        const deployedY = gpY + (gpY < 0 ?  10 : -10);  // -90+10=-80 stbd, +90-10=+80 port
+        const anim = this.gunportAnimations.get(assocGunport.id);
+        const isOpen = (assocGunport.moduleData as any)?.isOpen ?? false;
+        const progress = anim ? this.computeGunportProgress(anim, performance.now()) : (isOpen ? 1 : 0);
+        renderY = stowedY + (deployedY - stowedY) * progress;
+      }
+
       // Move to cannon position and apply module rotation
-      this.ctx.translate(x, y);
+      this.ctx.translate(x, renderY);
       this.ctx.rotate(localRot);
       
       const lineWidth = 1 / cameraState.zoom;
 
       if (isPhantomBrig) {
-        // ── Phantom Brig spectral cannon ────────────────────────────────────
+        // ── Phantom Brig spectral cannon (level-tinted) ────────────────────
         const t = performance.now() / 1000;
         const pulse = 0.55 + 0.45 * Math.sin(t * 2.2 + x * 0.05 + y * 0.05);
         const glowAlpha = 0.5 + 0.5 * pulse;
+        const cannonGlowClr = ghostSpectralColor(ship.npcLevel ?? 1);
 
-        // Void-dark base with cyan glow
-        this.ctx.shadowColor = `rgba(0,220,190,${glowAlpha * 0.9})`;
+        // Void-dark base with level-tinted glow
+        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha * 0.9);
         this.ctx.shadowBlur = 10 / cameraState.zoom;
         this.ctx.fillStyle = '#060f0d';
-        this.ctx.strokeStyle = `rgba(0,200,180,${glowAlpha})`;
+        this.ctx.strokeStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
         this.ctx.lineWidth = lineWidth * 1.5;
-        this.ctx.fillRect(-15, -10, 30, 20);
-        this.ctx.strokeRect(-15, -10, 30, 20);
+        this.ctx.fillRect(-11, -7.5, 22, 15);
+        this.ctx.strokeRect(-11, -7.5, 22, 15);
 
         // Spectral barrel
         this.ctx.save();
         this.ctx.rotate(turretAngle);
-        this.ctx.shadowColor = `rgba(0,240,200,${glowAlpha})`;
+        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
         this.ctx.shadowBlur = 8 / cameraState.zoom;
         this.ctx.fillStyle = `rgba(0,30,25,${0.85 + 0.15 * pulse})`;
-        this.ctx.strokeStyle = `rgba(0,210,185,${glowAlpha})`;
+        this.ctx.strokeStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
         this.ctx.lineWidth = lineWidth * 1.5;
         this.ctx.beginPath();
         this.ctx.moveTo(-6, 0);
@@ -9928,9 +12446,10 @@ export class RenderSystem {
         // Muzzle glow ring
         this.ctx.beginPath();
         this.ctx.arc(0, -42, 5, 0, Math.PI * 2);
-        this.ctx.fillStyle = `rgba(0,220,190,${glowAlpha * 0.6})`;
+        this.ctx.fillStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha * 0.6);
         this.ctx.shadowBlur = 12 / cameraState.zoom;
         this.ctx.fill();
+        void cannonGlowClr; // suppress unused-var lint
         this.ctx.restore();
 
         this.ctx.shadowColor = 'transparent';
@@ -9940,8 +12459,8 @@ export class RenderSystem {
       this.ctx.fillStyle = this.darkenByDamage('#8B4513', cannonHealthRatio);
       this.ctx.strokeStyle = '#000000';
       this.ctx.lineWidth = lineWidth;
-      this.ctx.fillRect(-15, -10, 30, 20);
-      this.ctx.strokeRect(-15, -10, 30, 20);
+      this.ctx.fillRect(-11, -7.5, 22, 15);
+      this.ctx.strokeRect(-11, -7.5, 22, 15);
 
       // Save context to apply turret rotation
       this.ctx.save();
@@ -9980,7 +12499,7 @@ export class RenderSystem {
    * Draw swivel guns — small, fast-reload anti-personnel weapons on ship edges.
    * Visual: circular pivot base + short rotating barrel.
    */
-  private drawShipSwivelGuns(ship: Ship, camera: Camera): void {
+  private drawShipSwivelGuns(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     if (!camera.isWorldPositionVisible(ship.position, 200)) return;
 
     const { phase2Alpha } = this.computeSinkState(ship);
@@ -9996,7 +12515,11 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    const swivels = ship.modules.filter(m => m.kind === 'swivel');
+    const swivels = ship.modules.filter(m => m.kind === 'swivel' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      /* deckFilter === 1 */ m.deckId === 1 || m.deckId === 255
+    ));
 
     for (const swivel of swivels) {
       // Use moduleData if present; fall back to safe defaults so newly-placed swivels always render
@@ -12126,9 +14649,15 @@ export class RenderSystem {
     if (localPlayer.mountedModuleId != null) {
       const mountedMod = ship.modules.find(m => m.id === localPlayer.mountedModuleId);
       if (mountedMod?.kind === 'cannon') {
-        // Mounted directly on a cannon — show just that one at full opacity (unless reloading)
+        // Mounted directly on a cannon — show just that one at full opacity (unless reloading
+        // or the cannon's gunport plank exists and is closed).
         const isReloading = ((mountedMod.moduleData as { stateBits?: number } | undefined)?.stateBits ?? 0) & 16;
-        if (!isReloading) cannonsToShow = [{ module: mountedMod, alpha: 1 }];
+        if (!isReloading) {
+          const gp = this.findGunportForCannon(mountedMod, ship);
+          const gpData = gp?.moduleData as import('../../sim/modules').GunportModuleData | undefined;
+          const gunportBlocked = gp !== null && gpData != null && !gpData.isOpen;
+          if (!gunportBlocked) cannonsToShow = [{ module: mountedMod, alpha: 1 }];
+        }
       } else if (mountedMod?.kind === 'helm' || mountedMod?.kind === 'steering-wheel') {
         // On the helm — show trajectory guides based on each cannon's angular rotation limit.
         // Matches the server formula: desired_offset = aim - localRot + π/2
@@ -12157,6 +14686,16 @@ export class RenderSystem {
           if (m.kind !== 'cannon' && m.kind !== 'swivel') continue;
           // Only show trajectory for weapons in an active weapon group
           if (!activeCannonIds.has(m.id)) continue;
+          // Gunport check: if this cannon is linked to a gunport plank that exists
+          // and is closed, hide the trajectory (mirrors server fire-block logic).
+          // If the plank is destroyed (findGunportForCannon returns null) we allow it.
+          if (m.kind === 'cannon') {
+            const gp = this.findGunportForCannon(m, ship);
+            if (gp !== null) {
+              const gpData = gp.moduleData as import('../../sim/modules').GunportModuleData | undefined;
+              if (gpData && !gpData.isOpen) continue;
+            }
+          }
           // Angular offset from cannon's natural axis (server convention)
           let offset = aim - (m.localRot || 0) + Math.PI / 2;
           // Normalize to [-π, π]
@@ -12561,6 +15100,289 @@ export class RenderSystem {
     this.ctx.restore();
   }
   
+  // ── Resource chest rendering ────────────────────────────────────────────────
+
+  /**
+   * Draw all resource chest modules on a ship.
+   * Chests are classic wooden box shapes (40×28 world units) with a golden latch.
+   */
+  private drawShipChests(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const chests = ship.modules.filter(m => m.kind === 'chest' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      /* deckFilter === 1 */ m.deckId === 1 || m.deckId === 255
+    ));
+    if (chests.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const chest of chests) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === chest.id;
+      const chestHp    = (chest.moduleData as any)?.health    ?? 5000;
+      const chestMaxHp = (chest.moduleData as any)?.maxHealth ?? 5000;
+      const hpFrac = chestMaxHp > 0 ? Math.min(1, chestHp / chestMaxHp) : 1;
+      this.ctx.save();
+      this.ctx.translate(chest.localPos.x, chest.localPos.y);
+      this.ctx.rotate(chest.localRot);
+      this._drawChestShape(lw, 1.0, isHovered, ship.companyId ?? 0, hpFrac);
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /** Draw all bed modules on a ship. */
+  private drawShipBeds(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+    const beds = ship.modules.filter(m => m.kind === 'bed' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      m.deckId === 1 || m.deckId === 255
+    ));
+    if (beds.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const bed of beds) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === bed.id;
+      this.ctx.save();
+      this.ctx.translate(bed.localPos.x, bed.localPos.y);
+      this.ctx.rotate(bed.localRot);
+      // Bed frame
+      this.ctx.fillStyle   = isHovered ? '#6a3090' : '#3d1f60';
+      this.ctx.strokeStyle = '#aa77dd';
+      this.ctx.lineWidth   = lw * 1.5;
+      this.ctx.beginPath();
+      this.ctx.roundRect(-22, -12, 44, 24, 3);
+      this.ctx.fill();
+      this.ctx.stroke();
+      // Pillow
+      this.ctx.fillStyle = '#c8a0e8';
+      this.ctx.beginPath();
+      this.ctx.roundRect(-20, -10, 14, 20, 2);
+      this.ctx.fill();
+      // Blanket
+      this.ctx.fillStyle = '#7755aa';
+      this.ctx.beginPath();
+      this.ctx.rect(-3, -10, 24, 20);
+      this.ctx.fill();
+      // Hover hint
+      if (isHovered) {
+        this.ctx.fillStyle = '#cc99ff';
+        this.ctx.font = `bold ${9 / zoom}px Georgia, serif`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('[E] Set Respawn', 0, -15);
+      }
+      this.ctx.restore();
+    }
+    this.ctx.restore();
+  }
+
+  /**
+   * Draw a ghost chest following the player's cursor when in chest build mode.
+   * The ghost is placed in the ship-local coordinate frame of the nearest ship.
+   */
+  private drawChestGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+
+    // Only show ghost when cursor is within ship bounds (~150 units radius)
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this.ctx.globalAlpha *= alpha;
+
+    // Ghost tint
+    this.ctx.save();
+    this._drawChestShape(lw, alpha);
+    // Blue-green ghost tint overlay
+    this.ctx.fillStyle = 'rgba(40, 160, 120, 0.30)';
+    this.ctx.strokeStyle = '#55ddbb';
+    this.ctx.lineWidth = lw * 1.5;
+    this.ctx.setLineDash([3 / zoom, 2 / zoom]);
+    this.ctx.beginPath();
+    this.ctx.roundRect(-20, -14, 40, 28, 3);
+    this.ctx.fill();
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+    this.ctx.restore();
+
+    // Placement hint text
+    this.ctx.fillStyle = '#88eedd';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Chest', 0, -18);
+
+    this.ctx.restore();
+  }
+
+  /** Draw a ghost bed following the cursor when in bed build mode. */
+  private drawBedGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this.ctx.globalAlpha *= alpha;
+
+    // Bed frame
+    this.ctx.fillStyle   = 'rgba(70,45,100,0.7)';
+    this.ctx.strokeStyle = '#aa88dd';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.setLineDash([3 / zoom, 2 / zoom]);
+    this.ctx.beginPath();
+    this.ctx.roundRect(-22, -12, 44, 24, 3);
+    this.ctx.fill();
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+    // Pillow
+    this.ctx.fillStyle = 'rgba(190,160,220,0.6)';
+    this.ctx.beginPath();
+    this.ctx.roundRect(-20, -10, 14, 20, 2);
+    this.ctx.fill();
+    // Label
+    this.ctx.fillStyle = '#cc99ff';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Bed', 0, -16);
+    this.ctx.restore();
+  }
+
+  /** Core chest shape drawing routine (origin = chest centre, 40×28 world units).
+   *  Matches the island chest visual: body, lid strip, latch, company strip, hover tint. */
+  private _drawChestShape(lw: number, _alpha: number, isHovered = false, companyId = 0, hpFrac = 1): void {
+    const bw = 22, bh = 16;
+    const bx = -bw / 2, by = -bh / 2;
+    const lidH = bh * 0.35;
+
+    // Body (bottom portion, darker brown)
+    this.ctx.fillStyle   = isHovered ? '#7a4820' : '#5c3210';
+    this.ctx.strokeStyle = '#2a1204';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.rect(bx, by, bw, bh);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    // Lid strip (top ~35% of box, lighter tan)
+    this.ctx.fillStyle = isHovered ? '#c0813a' : '#a06428';
+    this.ctx.beginPath();
+    this.ctx.rect(bx, by, bw, lidH);
+    this.ctx.fill();
+    this.ctx.strokeStyle = '#2a1204';
+    this.ctx.lineWidth   = lw;
+    this.ctx.strokeRect(bx, by, bw, lidH);
+
+    // Latch — centred on lid/body seam
+    const ltW = Math.max(2, bw * 0.12);
+    const ltH = Math.max(2, bh * 0.20);
+    const ltX = -ltW / 2;
+    const ltY = by + lidH - ltH / 2;
+    this.ctx.fillStyle   = '#d4a040';
+    this.ctx.strokeStyle = '#7a5010';
+    this.ctx.lineWidth   = lw * 0.8;
+    this.ctx.fillRect(ltX, ltY, ltW, ltH);
+    this.ctx.strokeRect(ltX, ltY, ltW, ltH);
+
+    // Seam line
+    this.ctx.strokeStyle = 'rgba(40,20,8,0.55)';
+    this.ctx.lineWidth   = lw * 0.8;
+    const seamY = by + lidH;
+    this.ctx.beginPath();
+    this.ctx.moveTo(bx, seamY);
+    this.ctx.lineTo(bx + bw, seamY);
+    this.ctx.stroke();
+
+    // Company colour strip along the top edge
+    const companyColors: Record<number, string> = { 0: '#aaaaaa', 1: '#ddaa44', 2: '#ff6644', 3: '#4488ff' };
+    const stripColor = companyColors[companyId] ?? '#aaaaaa';
+    const stripH = Math.max(1.5, 2.5 * lw);
+    this.ctx.fillStyle = stripColor;
+    this.ctx.fillRect(bx, by, bw, stripH);
+
+    // Damage darkening
+    const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
+    if (dmgDarken > 0.01) {
+      this.ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+      this.ctx.fillRect(bx, by, bw, bh);
+    }
+  }
+
+  /** Simple point-in-polygon test (ray casting) for hull vertices. */
+  private _isPointInHull(px: number, py: number, hull: Array<{x:number;y:number}>): boolean {
+    let inside = false;
+    for (let i = 0, j = hull.length - 1; i < hull.length; j = i++) {
+      const xi = hull[i].x, yi = hull[i].y;
+      const xj = hull[j].x, yj = hull[j].y;
+      if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
   private drawShipLadders(ship: Ship, camera: Camera): void {
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, 200)) {
@@ -12744,6 +15566,21 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(ship.position);
     const cs        = camera.getState();
     const t         = performance.now() / 1000;
+    const lvl       = ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+    // Lerp factor 0→1 from level 1→60
+    const lt        = Math.max(0, Math.min(1, (lvl - 1) / 59));
+    // Inner mist: cyan (180,240,255) → pale red (255,140,100)
+    const mi_r = Math.round(180 + lt * 75);
+    const mi_g = Math.round(240 - lt * 100);
+    const mi_b = Math.round(255 - lt * 155);
+    // Mid mist: cyan (100,200,240) → orange-red (220,60,40)
+    const mm_r = Math.round(100 + lt * 120);
+    const mm_g = Math.round(200 - lt * 140);
+    const mm_b = Math.round(240 - lt * 200);
+    // Wake: cyan (120,220,255) → red-orange (255,80,40)
+    const wk_r = Math.round(120 + lt * 135);
+    const wk_g = Math.round(220 - lt * 140);
+    const wk_b = Math.round(255 - lt * 215);
 
     ctx.save();
     ctx.globalAlpha = phase1Alpha;
@@ -12769,9 +15606,9 @@ export class RenderSystem {
       const alpha = 0.08 + 0.08 * Math.sin(t * 0.9 + i * 0.8);
 
       const grd = ctx.createRadialGradient(mp.x, mp.y + drift, 2, mp.x, mp.y + drift, mp.r);
-      grd.addColorStop(0,   `rgba(180,240,255,${alpha.toFixed(3)})`);
-      grd.addColorStop(0.4, `rgba(100,200,240,${(alpha * 0.55).toFixed(3)})`);
-      grd.addColorStop(1,   'rgba(0,150,200,0)');
+      grd.addColorStop(0,   `rgba(${mi_r},${mi_g},${mi_b},${alpha.toFixed(3)})`);
+      grd.addColorStop(0.4, `rgba(${mm_r},${mm_g},${mm_b},${(alpha * 0.55).toFixed(3)})`);
+      grd.addColorStop(1,   'rgba(0,0,0,0)');
 
       ctx.fillStyle = grd;
       ctx.beginPath();
@@ -12779,15 +15616,15 @@ export class RenderSystem {
       ctx.fill();
     }
 
-    // Trailing mist wake — cyan wisps stretching behind the stern
+    // Trailing mist wake — level-tinted wisps stretching behind the stern
     for (let i = 0; i < 4; i++) {
       const wx    = -350 - i * 60;
       const wdrift = Math.sin(t * 0.6 + i * 2.0) * 12;
       const alpha  = Math.max(0, 0.12 - i * 0.025) * (0.5 + 0.5 * Math.sin(t * 0.5 + i));
 
       const wgrd = ctx.createRadialGradient(wx, wdrift, 0, wx, wdrift, 30 + i * 10);
-      wgrd.addColorStop(0,   `rgba(120,220,255,${alpha.toFixed(3)})`);
-      wgrd.addColorStop(1,   'rgba(0,120,180,0)');
+      wgrd.addColorStop(0,   `rgba(${wk_r},${wk_g},${wk_b},${alpha.toFixed(3)})`);
+      wgrd.addColorStop(1,   'rgba(0,0,0,0)');
 
       ctx.fillStyle = wgrd;
       ctx.beginPath();
@@ -13093,11 +15930,10 @@ export class RenderSystem {
     if (phase3Alpha <= 0) return;
 
     // Fade sails when the local player is walking on this ship's deck so they
-    // don't obstruct the view of modules/NPCs below them.
-    const _localOnDeck = this._cachedLocalPlayer !== null
-      && this._cachedLocalPlayer.carrierId === ship.id
-      && !this._cachedLocalPlayer.isMounted;
-    const sailAlpha = _localOnDeck ? 0.30 * phase3Alpha : phase3Alpha;
+    // don't obstruct the view of modules/NPCs below them.  The alpha is
+    // smoothly interpolated each frame (see _sailAlphaByShip in renderWorld).
+    const smoothedAlpha = this._sailAlphaByShip.get(ship.id) ?? 1.0;
+    const sailAlpha = smoothedAlpha * phase3Alpha;
 
     this.ctx.save();
     this.ctx.globalAlpha = sailAlpha;
@@ -13449,6 +16285,65 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
+  private drawShipNameLabel(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, 200)) return;
+
+    const isGhostShipLabel = ship.shipType === SHIP_TYPE_GHOST;
+    const ghostLvl = isGhostShipLabel ? (ship.npcLevel ?? 1) : 0;
+
+    const name = isGhostShipLabel ? `Ghost Ship - Level ${ghostLvl}` : ship.shipName;
+    const level = isGhostShipLabel ? undefined : ship.levelStats?.shipLevel;
+    if (!name && level === undefined) return;
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const zoom = camera.getState().zoom;
+
+    // Place below the hull — 110px below ship center in world-scaled screen space
+    const labelY = screenPos.y + 110 * zoom;
+
+    this.ctx.save();
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'middle';
+
+    const fontSize = Math.max(10, 12 * zoom);
+    const pad = 5;
+
+    // Build the two lines
+    const nameLine = name || '';
+    const levelLine = level !== undefined ? `Lv. ${level}` : '';
+
+    // Measure both lines so the pill fits the widest
+    this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+    const nameMetrics  = nameLine  ? this.ctx.measureText(nameLine)  : null;
+    const levelMetrics = levelLine ? this.ctx.measureText(levelLine) : null;
+    const lineH = fontSize + 4;
+    const totalLines = (nameLine ? 1 : 0) + (levelLine ? 1 : 0);
+    const pillW = Math.max(nameMetrics?.width ?? 0, levelMetrics?.width ?? 0) + pad * 2;
+    const pillH = lineH * totalLines + pad;
+
+    // Dark pill background
+    this.ctx.fillStyle = 'rgba(0,0,0,0.60)';
+    this.ctx.beginPath();
+    this.ctx.roundRect(screenPos.x - pillW / 2, labelY - pad / 2, pillW, pillH, 5);
+    this.ctx.fill();
+
+    let curY = labelY + lineH / 2 - (totalLines === 2 ? lineH / 2 : 0);
+
+    if (nameLine) {
+      this.ctx.font = `bold ${fontSize}px Georgia, serif`;
+      this.ctx.fillStyle = isGhostShipLabel ? ghostSpectralColor(ghostLvl, 0.95) : '#f0e0b0';
+      this.ctx.fillText(nameLine, screenPos.x, curY);
+      curY += lineH;
+    }
+    if (levelLine) {
+      this.ctx.font = `${fontSize * 0.85}px Georgia, serif`;
+      this.ctx.fillStyle = '#88ccff';
+      this.ctx.fillText(levelLine, screenPos.x, curY);
+    }
+
+    this.ctx.restore();
+  }
+
   private drawShipClaimFlag(ship: Ship, camera: Camera): void {
     const cf = ship.claimFlag;
     if (!cf) return;
@@ -13616,7 +16511,13 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(player.position);
     const cameraState = camera.getState();
     const scaledRadius = player.radius * cameraState.zoom;
-    
+
+    // Fade out other players on a different deck level than the local player
+    const _isOtherPlayer = player.id !== this.localPlayerId;
+    const _playerDeckAlpha = (_isOtherPlayer && player.deckId !== this._playerDeckLevel) ? 0.25 : 1.0;
+    this.ctx.save();
+    this.ctx.globalAlpha = _playerDeckAlpha;
+
     // Draw player circle
     // Color: Green if on deck, Blue if mounted, Red if swimming
     // Enemy-company players are always tinted red regardless of mount state.
@@ -13736,6 +16637,8 @@ export class RenderSystem {
       this.ctx.fillStyle = '#ffffff';
       this.ctx.fillText(player.name, screenPos.x, nameY);
     }
+
+    this.ctx.restore();
   }
   
   private drawCannonball(cannonball: Cannonball, camera: Camera, worldState?: WorldState): void {
@@ -13746,9 +16649,9 @@ export class RenderSystem {
     const now       = performance.now();
 
     // Determine if this projectile was fired from a ghost ship
-    const firedFromGhost = worldState
-      ? (worldState.ships.find(s => s.id === cannonball.firedFrom)?.shipType === SHIP_TYPE_GHOST)
-      : false;
+    const firingShip    = worldState ? worldState.ships.find(s => s.id === cannonball.firedFrom) : null;
+    const firedFromGhost = firingShip?.shipType === SHIP_TYPE_GHOST;
+    const ghostProjLevel = firedFromGhost ? (firingShip?.npcLevel ?? 1) : 1;
 
     // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
     if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
@@ -13765,9 +16668,9 @@ export class RenderSystem {
           const alpha  = ease * (isBarShot ? 0.32 : 0.72);
           const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * zoom);
           const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
-          // Ghost: spectral green-cyan trail; normal: light grey smoke
+          // Ghost: spectral level-tinted trail; normal: light grey smoke
           this.ctx.globalAlpha = alpha;
-          this.ctx.fillStyle   = firedFromGhost ? '#00ff88' : '#c8c8c8';
+          this.ctx.fillStyle   = firedFromGhost ? ghostSpectralColor(ghostProjLevel) : '#c8c8c8';
           this.ctx.beginPath();
           this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
           this.ctx.fill();
@@ -13776,7 +16679,7 @@ export class RenderSystem {
             const coreAlpha  = (0.35 - age) / 0.35 * 0.55;
             const coreRadius = radius * 0.45;
             this.ctx.globalAlpha = coreAlpha;
-            this.ctx.fillStyle   = firedFromGhost ? '#00ddaa' : '#3a3a3a';
+            this.ctx.fillStyle   = firedFromGhost ? ghostSpectralColor(ghostProjLevel, 0.85) : '#3a3a3a';
             this.ctx.beginPath();
             this.ctx.arc(sp.x, sp.y, coreRadius, 0, Math.PI * 2);
             this.ctx.fill();
@@ -13983,21 +16886,21 @@ export class RenderSystem {
       // ── Cannonball (default) ───────────────────────────────────────────────
       const scaledRadius = cannonball.radius * zoom;
       if (firedFromGhost) {
-        // Ghost projectile: glowing green-cyan ball
+        // Ghost projectile: glowing level-tinted spectral ball
         const t = performance.now() / 1000;
         const flicker = 0.85 + 0.15 * Math.sin(t * 12 + cannonball.id * 2.3);
         const r = Math.max(3, scaledRadius * 1.4);
         // Outer glow
         const grd = this.ctx.createRadialGradient(screenPos.x, screenPos.y, 0, screenPos.x, screenPos.y, r * 2.5);
-        grd.addColorStop(0,   `rgba(0,255,160,${(0.65 * flicker).toFixed(3)})`);
-        grd.addColorStop(0.4, `rgba(0,200,120,${(0.35 * flicker).toFixed(3)})`);
-        grd.addColorStop(1,   'rgba(0,100,80,0)');
+        grd.addColorStop(0,   ghostSpectralColor(ghostProjLevel, 0.65 * flicker));
+        grd.addColorStop(0.4, ghostSpectralColor(ghostProjLevel, 0.35 * flicker));
+        grd.addColorStop(1,   'rgba(0,0,0,0)');
         this.ctx.fillStyle = grd;
         this.ctx.beginPath();
         this.ctx.arc(screenPos.x, screenPos.y, r * 2.5, 0, Math.PI * 2);
         this.ctx.fill();
         // Ball core
-        this.ctx.fillStyle = `rgba(0,255,180,${flicker.toFixed(3)})`;
+        this.ctx.fillStyle = ghostSpectralColor(ghostProjLevel, flicker);
         this.ctx.beginPath();
         this.ctx.arc(screenPos.x, screenPos.y, r, 0, Math.PI * 2);
         this.ctx.fill();
@@ -14054,7 +16957,13 @@ export class RenderSystem {
     const worldRotation = npc.rotation + (ship ? ship.rotation : 0);
 
     this.ctx.save();
-    this.ctx.globalAlpha = isMoving ? 0.7 : 1.0;
+    // Fade out upper-deck NPCs when the player is on the lower deck (and vice versa).
+    // Lower-deck NPCs (deckLevel=0) are queued at layer 1 so they render under planks —
+    // no alpha reduction needed there; the planks/cover provide natural occlusion from above.
+    // Upper-deck NPCs (deckLevel=1) queued at layer 4 are dimmed when player is on lower deck.
+    const _diffDeck = npc.deckLevel !== 255 && npc.deckLevel !== this._playerDeckLevel;
+    const _npcDeckAlpha = (_diffDeck && npc.deckLevel === 1) ? this._upperDeckFade : 1.0;
+    this.ctx.globalAlpha = (isMoving ? 0.7 : 1.0) * _npcDeckAlpha;
 
     // Colour NPC by company then task assignment (darkened via globalAlpha when moving)
     const npcTask = this.npcTaskMap.get(npc.id) ?? 'Idle';
@@ -14110,6 +17019,8 @@ export class RenderSystem {
     // (Role/state/weapon debug info is in the hover debug HUD instead.)
     const _showName = this.hoveredNpc?.id === npc.id
       || (this._showNpcNames && !_npcIsEnemy && !_npcIsNeutral);
+    // Show state badges when Ctrl is held (showGroupOverlay) or when the name is visible
+    const _showBadges = this.showGroupOverlay || _showName;
     if (_showName) {
       const fontSize = Math.max(10, Math.min(14, 12 * cameraState.zoom));
       this.ctx.font = `${fontSize}px Georgia, serif`;
@@ -14121,19 +17032,28 @@ export class RenderSystem {
       this.ctx.fillRect(screenPos.x - tw / 2 - 3, nameY - fontSize, tw + 6, fontSize + 2);
       this.ctx.fillStyle = '#ffe066';
       this.ctx.fillText(npc.name, screenPos.x, nameY);
+    }
 
-      // Lock badge — small padlock icon above the NPC when task_locked
+    if (_showBadges) {
+      const badgeSize = Math.max(8, Math.min(12, 10 * cameraState.zoom));
+      const lx = screenPos.x + radius - 2;
+      let badgeY = screenPos.y - radius - badgeSize;
+
+      this.ctx.textAlign = 'center';
+      this.ctx.textBaseline = 'bottom';
+      this.ctx.font = `bold ${badgeSize + 2}px Georgia, serif`;
+
+      // Locked-at-station badge
       if (npc.locked) {
-        const lockSize = Math.max(8, Math.min(12, 10 * cameraState.zoom));
-        const lx = screenPos.x + radius - 2;
-        const ly = screenPos.y - radius - lockSize;
         this.ctx.fillStyle = '#ffdd00';
-        this.ctx.strokeStyle = '#222';
-        this.ctx.lineWidth = 1;
-        this.ctx.font = `bold ${lockSize + 2}px Georgia, serif`;
-        this.ctx.textAlign = 'center';
-        this.ctx.textBaseline = 'bottom';
-        this.ctx.fillText('🔒', lx, ly);
+        this.ctx.fillText('🔒', lx, badgeY);
+        badgeY -= badgeSize + 2;
+      }
+
+      // Ignore-commands badge (client-side flag)
+      if (this.npcIgnoreSet.has(npc.id)) {
+        this.ctx.fillStyle = '#ff5544';
+        this.ctx.fillText('🚫', lx, badgeY);
       }
     }
   }
@@ -14179,7 +17099,8 @@ export class RenderSystem {
       rows.push({ label: 'Mod ID',    value: String(module.id) });
       rows.push({ label: 'Ship ID',   value: String(ship.id) });
       rows.push({ label: 'Kind',      value: kind });
-      rows.push({ label: 'Deck',      value: String(module.deckId) });
+      const deckVal = module.deckId === 0xFF ? 'none' : module.deckId === 0 ? '0 (lower)' : module.deckId === 1 ? '1 (upper)' : String(module.deckId);
+      rows.push({ label: 'Deck',      value: deckVal });
       rows.push({ label: 'LocalPos',  value: `(${module.localPos.x.toFixed(0)}, ${module.localPos.y.toFixed(0)})` });
       if (module.occupiedBy !== null) rows.push({ label: 'OccupiedBy', value: String(module.occupiedBy), color: '#ffee88' });
       if (md) {
@@ -14231,12 +17152,23 @@ export class RenderSystem {
 
     } else if (this.hoveredShip) {
       const ship = this.hoveredShip;
-      title = `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
-      accentColor = '#ff8844';
-      rows.push({ label: 'ID',       value: String(ship.id) });
+      const _isGhostDbg = ship.shipType === SHIP_TYPE_GHOST;
+      const _ghostLvlDbg = _isGhostDbg ? (ship.npcLevel ?? 1) : 0;
+      title = _isGhostDbg
+        ? `👻 GHOST · Lv.${_ghostLvlDbg} #${ship.id}`
+        : `⚓ SHIP · ${ship.shipName || '#' + ship.id}`;
+      accentColor = _isGhostDbg ? '#00eeff' : '#ff8844';
+      const spd = Math.hypot(ship.velocity.x, ship.velocity.y);
+      rows.push({ label: 'ID',       value: `${ship.id}  ${spd.toFixed(1)} px/s` });
       rows.push({ label: 'Company',  value: coName(ship.companyId), color: coColor(ship.companyId) });
-      const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
-      rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });
+      if (_isGhostDbg) {
+        const _ghostMaxHp = Math.round(60000 * (1 + (_ghostLvlDbg - 1) * 9 / 59));
+        const _hullPct = Math.max(0, Math.min(1, ship.hullHealth / _ghostMaxHp));
+        rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(0)} / ${_ghostMaxHp.toLocaleString()}`, bar: _hullPct, barColor: hpColor(_hullPct) });
+      } else {
+        const hullPct = Math.max(0, Math.min(1, ship.hullHealth / 100));
+        rows.push({ label: 'Hull', value: `${ship.hullHealth.toFixed(1)}%`, bar: hullPct, barColor: hpColor(hullPct) });
+      }
       rows.push({ label: 'Rotation', value: fmtRad(ship.rotation) });
       rows.push({ label: 'AngVel',   value: `${ship.angularVelocity.toFixed(3)} r/s` });
       rows.push({ label: 'Velocity', value: `(${ship.velocity.x.toFixed(1)}, ${ship.velocity.y.toFixed(1)})` });
@@ -14870,6 +17802,7 @@ export class RenderSystem {
     if (!this.hoveredShip || !this.mouseWorldPos) return;
     // Don't overlap module or NPC tooltips
     if (this.hoveredModule || this.hoveredNpc) return;
+    if (!this._tooltipReady) return;
 
     const ship = this.hoveredShip;
     const COMPANY_NAMES: Record<number, string> = {
@@ -14882,24 +17815,29 @@ export class RenderSystem {
     const companyName = COMPANY_NAMES[ship.companyId]
       ?? this._cachedCompanies.find(c => c.id === ship.companyId)?.name
       ?? `#${ship.companyId}`;
-    const shipTitle   = ship.shipType === SHIP_TYPE_GHOST
-      ? 'Phantom Brig'
+    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+    const ghostLevel = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : (isGhost ? 1 : 0);
+    const shipTitle   = isGhost
+      ? `Ghost Ship - Level ${ghostLevel}`
       : ship.shipName
         ? ship.shipName
         : `${companyName} Brigantine`;
 
-    // Deck module health for the tooltip bar
-    const deckModTip = ship.modules.find(m => m.kind === 'deck');
+    // Deck module health for the tooltip bar — not shown for ghost ships (they have no deck)
+    const deckModTip = !isGhost ? ship.modules.find(m => m.kind === 'deck') : undefined;
     const dmdTip = deckModTip?.moduleData as any;
     const deckHp       = dmdTip?.health    ?? 0;
     const deckMaxHp    = dmdTip?.maxHealth ?? 10000;
     const deckTargetHp = dmdTip?.targetHealth ?? deckHp;
 
-    const isGhost = ship.shipType === SHIP_TYPE_GHOST;
-    const maxHullHP = isGhost ? GHOST_MAX_HULL_HP : 100;
+    // Ghost HP scales with level: 60000 × (1 + (level-1) × 9/59)
+    const ghostMaxHullHP = isGhost
+      ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostLevel - 1) * 9 / 59))
+      : GHOST_MAX_HULL_HP;
+    const maxHullHP = isGhost ? ghostMaxHullHP : 100;
     const hullPct  = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
     const hullText = isGhost
-      ? `Hull: ${ship.hullHealth.toFixed(0)} / ${GHOST_MAX_HULL_HP.toLocaleString()}`
+      ? `Hull: ${ship.hullHealth.toFixed(0)} / ${ghostMaxHullHP.toLocaleString()}`
       : `Hull: ${ship.hullHealth.toFixed(0)}%`;
     const deckText = deckModTip
       ? `Deck: ${Math.round(deckHp)} / ${Math.round(deckTargetHp)} / ${Math.round(deckMaxHp)}`
@@ -14917,10 +17855,14 @@ export class RenderSystem {
     this.ctx.textAlign    = 'left';
     this.ctx.textBaseline = 'top';
 
-    const lines    = [shipTitle, `Company: ${companyName}`, hullText, deckText];
+    // Ghost ships only show title + company + hull; non-ghost ships also show deck
+    const lines    = isGhost
+      ? [shipTitle, `Company: ${companyName}`, hullText]
+      : [shipTitle, `Company: ${companyName}`, hullText, deckText];
     const barRowH  = barH + 6;
+    const numBars  = isGhost ? 1 : 2; // hull bar only for ghosts, hull + deck for others
     let boxW = Math.max(barW + padding * 2, ...lines.map(l => this.ctx.measureText(l).width + padding * 2));
-    let boxH = lines.length * lineH + barRowH * 2 + padding * 2; // hull bar + deck bar
+    let boxH = lines.length * lineH + barRowH * numBars + padding * 2;
 
     let tx = screenPos.x + 15;
     let ty = screenPos.y + 15;
@@ -14929,7 +17871,7 @@ export class RenderSystem {
 
     // Background
     this.ctx.fillStyle   = 'rgba(12,16,28,0.95)';
-    this.ctx.strokeStyle = '#cc6633';
+    this.ctx.strokeStyle = isGhost ? ghostSpectralColor(ghostLevel, 0.8) : '#cc6633';
     this.ctx.lineWidth   = 1.5;
     this.ctx.beginPath();
     (this.ctx as any).roundRect(tx, ty, boxW, boxH, 4);
@@ -14938,8 +17880,8 @@ export class RenderSystem {
 
     let cy = ty + padding;
 
-    // Ship title (gold)
-    this.ctx.fillStyle = '#ffe066';
+    // Ship title
+    this.ctx.fillStyle = isGhost ? ghostSpectralColor(ghostLevel, 0.95) : '#ffe066';
     this.ctx.font = '14px Georgia, serif';
     this.ctx.fillText(shipTitle, tx + padding, cy);  cy += lineH;
 
@@ -14957,7 +17899,9 @@ export class RenderSystem {
     // Hull bar
     this.ctx.fillStyle = '#333';
     this.ctx.fillRect(bx, cy, bw, barH);
-    const hullColor = hullPct > 0.6 ? '#44cc66' : hullPct > 0.3 ? '#ffaa44' : '#ff5544';
+    const hullColor = isGhost
+      ? ghostSpectralColor(ghostLevel, 0.6 + 0.4 * hullPct)
+      : (hullPct > 0.6 ? '#44cc66' : hullPct > 0.3 ? '#ffaa44' : '#ff5544');
     this.ctx.fillStyle = hullColor;
     this.ctx.fillRect(bx, cy, Math.round(bw * hullPct), barH);
     this.ctx.strokeStyle = '#556';
@@ -14965,34 +17909,37 @@ export class RenderSystem {
     this.ctx.strokeRect(bx, cy, bw, barH);
     cy += barH + 6;
 
-    // Deck HP label  (format: current / target / max)
-    this.ctx.fillStyle = '#ccc';
-    this.ctx.font = '12px Georgia, serif';
-    this.ctx.fillText(deckText, bx, cy);  cy += lineH;
-    // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
-    this.ctx.fillStyle = '#333';
-    this.ctx.fillRect(bx, cy, bw, barH);
-    // Target HP marker (dimmer fill up to target ceiling)
-    if (deckTargetPct < 1) {
-      this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
-      this.ctx.fillRect(bx, cy, Math.round(bw * deckTargetPct), barH);
+    // Deck section — only for non-ghost ships
+    if (!isGhost) {
+      // Deck HP label  (format: current / target / max)
+      this.ctx.fillStyle = '#ccc';
+      this.ctx.font = '12px Georgia, serif';
+      this.ctx.fillText(deckText, bx, cy);  cy += lineH;
+      // Plank bar: grey background, amber target-HP marker, green/amber/red current-HP fill
+      this.ctx.fillStyle = '#333';
+      this.ctx.fillRect(bx, cy, bw, barH);
+      // Target HP marker (dimmer fill up to target ceiling)
+      if (deckTargetPct < 1) {
+        this.ctx.fillStyle = 'rgba(200,160,60,0.35)';
+        this.ctx.fillRect(bx, cy, Math.round(bw * deckTargetPct), barH);
+      }
+      const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
+      this.ctx.fillStyle = deckColor;
+      this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
+      // Target HP tick mark
+      if (deckTargetPct < 1) {
+        const tx2 = bx + Math.round(bw * deckTargetPct);
+        this.ctx.strokeStyle = '#c8a03c';
+        this.ctx.lineWidth = 1.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(tx2, cy - 1);
+        this.ctx.lineTo(tx2, cy + barH + 1);
+        this.ctx.stroke();
+      }
+      this.ctx.strokeStyle = '#556';
+      this.ctx.lineWidth = 0.8;
+      this.ctx.strokeRect(bx, cy, bw, barH);
     }
-    const deckColor = deckPct > 0.6 ? '#44cc66' : deckPct > 0.3 ? '#ffaa44' : '#ff5544';
-    this.ctx.fillStyle = deckColor;
-    this.ctx.fillRect(bx, cy, Math.round(bw * deckPct), barH);
-    // Target HP tick mark
-    if (deckTargetPct < 1) {
-      const tx2 = bx + Math.round(bw * deckTargetPct);
-      this.ctx.strokeStyle = '#c8a03c';
-      this.ctx.lineWidth = 1.5;
-      this.ctx.beginPath();
-      this.ctx.moveTo(tx2, cy - 1);
-      this.ctx.lineTo(tx2, cy + barH + 1);
-      this.ctx.stroke();
-    }
-    this.ctx.strokeStyle = '#556';
-    this.ctx.lineWidth = 0.8;
-    this.ctx.strokeRect(bx, cy, bw, barH);
   }
 
   /**
@@ -15003,6 +17950,7 @@ export class RenderSystem {
     if (!this.hoveredNpc || !this.mouseWorldPos) return;
     // Skip if a module tooltip is already showing (avoid overlap)
     if (this.hoveredModule) return;
+    if (!this._tooltipReady) return;
 
     const npc = this.hoveredNpc;
     const ROLE_NAMES: Record<number, string> = {
@@ -15040,8 +17988,10 @@ export class RenderSystem {
       ownerName = ownerPlayer?.name ?? `Player #${npc.ownerId}`;
     }
 
-    const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}`;
-    const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}`;
+    const ignoreFlag  = this.npcIgnoreSet.has(npc.id) ? '  🚫' : '';
+    const titleText   = `${npc.name}  Lv.${npc.npcLevel}${npc.locked ? '  🔒' : ''}${ignoreFlag}`;
+    const _deckLabel  = npc.shipId ? (npc.deckLevel === 0 ? 'Deck: Lower' : 'Deck: Upper') : '';
+    const subText     = `${ROLE_NAMES[npc.role] ?? 'Sailor'}  –  ${STATE_NAMES[npc.state] ?? 'Idle'}${_deckLabel ? `  –  ${_deckLabel}` : ''}`;
     const companyLabel = COMPANY_NAMES[npc.companyId]
       ?? this._cachedCompanies.find(c => c.id === npc.companyId)?.name
       ?? `#${npc.companyId}`;
@@ -15126,10 +18076,230 @@ export class RenderSystem {
   }
 
   /**
+   * Draw card-style hover tooltip for a hovered island structure.
+   * Mirrors the module tooltip design: left accent bar, HP bar, stats.
+   */
+  private drawStructureTooltip(camera: Camera): void {
+    if (!this._hoveredStructure || !this.mouseWorldPos) return;
+    // Module / NPC tooltips take higher priority
+    if (this.hoveredModule || this.hoveredNpc) return;
+    if (!this._tooltipReady) return;
+
+    const s = this._hoveredStructure;
+    const ctx = this.ctx;
+    const cw  = this.canvas.width;
+    const ch  = this.canvas.height;
+
+    // ── Per-type visual identity ─────────────────────────────────────────
+    type StructMeta = { name: string; color: string; border: string; desc: string };
+    const TYPE_META: Record<string, StructMeta> = {
+      wooden_floor:     { name: 'Wooden Floor',      color: '#7a4f28', border: '#bb8855', desc: 'Foundation tile. Provides a stable surface for structures.' },
+      workbench:        { name: 'Workbench',          color: '#9a6a28', border: '#dda850', desc: 'Crafting station. Used to create items and equipment.' },
+      wall:             { name: 'Wooden Wall',        color: '#7a4f28', border: '#bb8855', desc: 'Structural wall. Protects against cannon fire and intruders.' },
+      door_frame:       { name: 'Door Frame',         color: '#9a6a28', border: '#ccaa55', desc: 'Frame for mounting a door. Can be reinforced.' },
+      door:             { name: 'Door',               color: '#9a6a28', border: '#ccaa55', desc: 'Lockable entry point. Open or close to control access.' },
+      wood_ceiling:     { name: 'Ceiling',            color: '#6b4520', border: '#a07040', desc: 'Overhead covering. Provides shelter and structural integrity.' },
+      shipyard:         { name: 'Shipyard',           color: '#2a5a88', border: '#5599cc', desc: 'Dock for constructing and repairing ships.' },
+      cannon:           { name: 'Island Cannon',      color: '#882222', border: '#cc4433', desc: 'Stationary cannon emplacement. Fires at enemy ships.' },
+      flag_fort:        { name: 'Flag Fort',          color: '#886622', border: '#ddaa33', desc: 'Territory anchor. Claims surrounding land for your company.' },
+      company_fortress: { name: 'Company Fortress',   color: '#553388', border: '#9966cc', desc: 'Whole-island territorial stronghold.' },
+      claim_flag:       { name: 'Claim Flag',         color: '#228866', border: '#44bb88', desc: 'Active territory dispute flag.' },
+      wreck:            { name: 'Wreck',              color: '#555566', border: '#888899', desc: 'Salvageable ship wreckage.' },
+    };
+    const meta: StructMeta = TYPE_META[s.type] ?? { name: s.type, color: '#555566', border: '#8888aa', desc: '' };
+
+    // ── Company name helper ───────────────────────────────────────────────
+    const COMPANY_NAMES_MAP: Record<number, string> = {
+      [COMPANY_UNCLAIMED]: 'Unclaimed',
+      [COMPANY_SOLO]:      'Solo',
+      [COMPANY_PIRATES]:   'Pirates',
+      [COMPANY_NAVY]:      'Navy',
+      [COMPANY_GHOST]:     'Ghost Ships',
+    };
+    const companyName = COMPANY_NAMES_MAP[s.companyId]
+      ?? this._cachedCompanies.find(c => c.id === s.companyId)?.name
+      ?? (s.companyId > 0 ? `Company #${s.companyId}` : 'Unclaimed');
+    const isFriendly = this._localCompanyId > 0 && s.companyId === this._localCompanyId;
+    const companyColor = isFriendly ? '#44ff88' : s.companyId === 0 ? '#aaaaaa' : '#ff8866';
+
+    // ── HP values ────────────────────────────────────────────────────────
+    const hp       = s.hp;
+    const maxHp    = s.maxHp;
+    const targetHp = s.targetHp ?? maxHp;
+    const hpPct       = maxHp    > 0 ? hp / maxHp    : 1;
+    const targetPct   = maxHp    > 0 ? targetHp / maxHp : 1;
+    const hpColor = (p: number) => p > 0.6 ? '#44cc66' : p > 0.3 ? '#ffaa22' : '#ff4444';
+
+    // ── Stat lines ───────────────────────────────────────────────────────
+    type StatLine = { label: string; value: string; color?: string };
+    const stats: StatLine[] = [];
+
+    stats.push({ label: 'Company', value: companyName, color: companyColor });
+    if (s.placerName) stats.push({ label: 'Built by', value: s.placerName, color: '#cccccc' });
+
+    const hpLabel = targetHp < maxHp
+      ? `${hp.toLocaleString()} / ${targetHp.toLocaleString()} / ${maxHp.toLocaleString()}`
+      : `${hp.toLocaleString()} / ${maxHp.toLocaleString()}`;
+    stats.push({ label: 'HP', value: hpLabel, color: hpColor(hpPct) });
+
+    if (s.type === 'door') {
+      stats.push({ label: 'State',  value: s.doorOpen ? 'Open' : 'Closed',      color: s.doorOpen ? '#88ee88' : '#ee8844' });
+      if (s.doorLocked !== undefined)
+        stats.push({ label: 'Lock',   value: s.doorLocked ? 'Locked' : 'Unlocked', color: s.doorLocked ? '#ff6644' : '#44dd88' });
+    }
+    if (s.type === 'cannon') {
+      const reloadReady = !s.cannonReloadMs || s.cannonReloadMs <= 0;
+      stats.push({ label: 'Reload', value: reloadReady ? 'Ready' : `${((s.cannonReloadMs ?? 0) / 1000).toFixed(1)}s`, color: reloadReady ? '#44cc66' : '#ffaa44' });
+    }
+    if (s.type === 'shipyard' && s.construction) {
+      const c = s.construction;
+      const placed = c.modulesPlaced.length;
+      stats.push({ label: 'Constructing', value: `${placed} modules placed`, color: '#44aaff' });
+    }
+    if ((s.type === 'flag_fort' || s.type === 'company_fortress') && s.claimPhase !== undefined) {
+      const PHASES: Record<number, string> = { 0: 'Claiming', 1: 'Building', 2: 'Active', 3: 'Demolishing' };
+      stats.push({ label: 'Phase', value: PHASES[s.claimPhase] ?? String(s.claimPhase), color: '#aaddff' });
+    }
+    if (s.fortressContested || (s.claimPhase !== undefined && s.type === 'flag_fort' && s.dominators && s.dominators.length > 0)) {
+      stats.push({ label: 'Status', value: 'CONTESTED', color: '#ff4444' });
+    }
+    if (hp < targetHp && targetHp > 0) {
+      stats.push({ label: 'Repairing', value: `→ ${targetHp.toLocaleString()}`, color: '#88ccff' });
+    }
+
+    // ── Layout ───────────────────────────────────────────────────────────
+    const PAD    = 10;
+    const W      = 240;
+    const LINE   = 16;
+    const NAME_H = 18;
+
+    ctx.font = '12px Georgia, serif';
+    const wrapText = (text: string, maxW: number): string[] => {
+      const words = text.split(' ');
+      const ls: string[] = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? `${cur} ${w}` : w;
+        if (ctx.measureText(test).width > maxW && cur) { ls.push(cur); cur = w; }
+        else cur = test;
+      }
+      if (cur) ls.push(cur);
+      return ls;
+    };
+    const descLines = meta.desc ? wrapText(meta.desc, W - PAD * 2 - 4) : [];
+
+    const totalH = PAD + NAME_H + 4
+      + (descLines.length > 0 ? descLines.length * LINE + 6 : 0)
+      + stats.length * LINE + (stats.length > 0 ? 6 : 0)
+      + LINE * 2 + 4   // HP bar row
+      + PAD;
+
+    const screenPos = camera.worldToScreen(this.mouseWorldPos);
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + W      > cw) tx = screenPos.x - W      - 15;
+    if (ty + totalH > ch) ty = screenPos.y - totalH - 15;
+    tx = Math.max(4, tx);
+    ty = Math.max(4, ty);
+
+    // ── Draw card ────────────────────────────────────────────────────────
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = meta.border;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left accent bar
+    ctx.fillStyle = meta.color;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, 4, totalH, [6, 0, 0, 6]);
+    ctx.fill();
+
+    let cy = ty + PAD;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    // Name
+    ctx.font      = 'bold 14px Georgia, serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(meta.name, tx + PAD + 4, cy);
+    cy += NAME_H + 4;
+
+    // Description
+    if (descLines.length > 0) {
+      ctx.font      = '12px Georgia, serif';
+      ctx.fillStyle = '#aaaaaa';
+      for (const line of descLines) { ctx.fillText(line, tx + PAD + 4, cy); cy += LINE; }
+      cy += 6;
+    }
+
+    // Stats (label left, value right)
+    ctx.font = '12px Georgia, serif';
+    for (const st of stats) {
+      if (st.label === 'HP') continue; // HP drawn as bar below
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#888888';
+      ctx.fillText(st.label, tx + PAD + 4, cy);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = st.color ?? '#cccccc';
+      ctx.fillText(st.value, tx + W - PAD - 4, cy);
+      cy += LINE;
+    }
+    if (stats.length > 0) cy += 6;
+
+    // HP bar
+    const barH = 8;
+    const bx   = tx + PAD + 4;
+    const bw   = W - PAD * 2 - 4;
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#888888';
+    ctx.fillText('HP', bx, cy);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = hpColor(hpPct);
+    const hpStat = stats.find(r => r.label === 'HP');
+    if (hpStat) ctx.fillText(hpStat.value, tx + W - PAD - 4, cy);
+    cy += LINE;
+
+    // Bar background
+    ctx.fillStyle = '#2a2a2a';
+    ctx.fillRect(bx, cy, bw, barH);
+    // Target HP dimmer band (repair ceiling)
+    if (targetPct < 1) {
+      ctx.fillStyle = 'rgba(200,160,60,0.3)';
+      ctx.fillRect(bx, cy, Math.round(bw * targetPct), barH);
+    }
+    // Current HP fill
+    ctx.fillStyle = hpColor(hpPct);
+    ctx.fillRect(bx, cy, Math.round(bw * hpPct), barH);
+    // Target HP tick mark
+    if (targetPct < 1 && targetPct > 0) {
+      const tx2 = bx + Math.round(bw * targetPct);
+      ctx.strokeStyle = '#c8a03c';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(tx2, cy - 1);
+      ctx.lineTo(tx2, cy + barH + 1);
+      ctx.stroke();
+    }
+    ctx.strokeStyle = '#444455';
+    ctx.lineWidth   = 0.8;
+    ctx.strokeRect(bx, cy, bw, barH);
+
+    ctx.restore();
+  }
+
+  /**
    * Draw hover tooltip for modules
    */
   private drawHoverTooltip(camera: Camera): void {
     if (!this.hoveredModule || !this.mouseWorldPos) return;
+    if (!this._tooltipReady) return;
     
     const { ship, module } = this.hoveredModule;
     const moduleData = module.moduleData;
@@ -15139,12 +18309,36 @@ export class RenderSystem {
     // Convert mouse world position to screen position for tooltip
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
     
-    // Build tooltip text lines
-    const lines: string[] = [];
-    lines.push(`Type: ${moduleData.kind.toUpperCase()}`);
-    lines.push(`ID: ${module.id}`);
-    
-    // Quality helper: map material to quality tier
+    // ── Card-style tooltip (matches item tooltip design) ─────────────────
+    const ctx = this.ctx;
+    const cw  = this.canvas.width;
+    const ch  = this.canvas.height;
+
+    // Per-kind visual identity
+    const KIND_META: Record<string, { name: string; color: string; border: string; desc: string }> = {
+      'cannon':         { name: 'Cannon',       color: '#cc3322', border: '#ff6644', desc: 'Heavy siege weapon. Fires iron shot across open water.' },
+      'swivel':         { name: 'Swivel Gun',    color: '#cc3322', border: '#ff8855', desc: 'Light deck-mounted gun. Ideal for close-quarters and crew suppression.' },
+      'mast':           { name: 'Mast',          color: '#336688', border: '#66aacc', desc: 'Drives the ship using wind. Sail state and openness affect speed.' },
+      'helm':           { name: 'Helm',          color: '#886622', border: '#ddaa44', desc: 'Controls ship heading. Turn rate and responsiveness govern handling.' },
+      'steering-wheel': { name: 'Helm',          color: '#886622', border: '#ddaa44', desc: 'Controls ship heading. Turn rate and responsiveness govern handling.' },
+      'plank':          { name: 'Hull Plank',    color: '#664422', border: '#aa7744', desc: 'Structural hull plank. Protects against water ingress and cannon fire.' },
+      'deck':           { name: 'Deck',          color: '#445544', border: '#778877', desc: 'Provides a stable surface for crew and cargo.' },
+      'ladder':         { name: 'Ladder',        color: '#334455', border: '#5577aa', desc: 'Allows crew to move between deck levels.' },
+      'seat':           { name: 'Seat',          color: '#553344', border: '#886677', desc: 'Resting position for crew members.' },
+      'custom':         { name: 'Custom Module', color: '#444455', border: '#7777aa', desc: 'A custom-built module with unique properties.' },
+      'chest':          { name: 'Chest',          color: '#886622', border: '#d4a040', desc: 'Stores raw resources. Contents add weight to the ship.' },
+    };
+    const meta = KIND_META[moduleData.kind] ?? { name: moduleData.kind, color: '#555566', border: '#8888aa', desc: '' };
+
+    // Quality tier — overrides name colour, accent bar and border when present
+    const qt        = module.qualityTier;
+    const hasQuality = typeof qt === 'number' && qt >= 1;
+    const qCol      = hasQuality ? tierColor(qt!) : null;
+    const qName     = hasQuality ? tierName(qt!)  : null;
+    const accentCol = qCol ?? meta.color;
+    const borderCol = qCol ?? meta.border;
+
+    // Quality helper
     const qualityFromMaterial = (mat: string): string => {
       switch (mat) {
         case 'iron':  return 'Uncommon';
@@ -15153,247 +18347,240 @@ export class RenderSystem {
       }
     };
 
-    // Add type-specific info
+    // Stat lines
+    type StatLine = { label: string; value: string; color?: string };
+    const stats: StatLine[] = [];
+
     if (moduleData.kind === 'plank') {
-      const hp = Math.round(moduleData.health);
+      const hp    = Math.round(moduleData.health);
       const maxHp = moduleData.maxHealth ?? 10000;
-      lines.push(`Health: ${hp} / ${maxHp}`);
-      lines.push(`Quality: ${qualityFromMaterial(moduleData.material)}`);
-      if (moduleData.sectionName) {
-        lines.push(`Section: ${moduleData.sectionName}`);
-      }
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+      if (moduleData.sectionName) stats.push({ label: 'Section', value: moduleData.sectionName });
     } else if (moduleData.kind === 'cannon') {
-      const hp = Math.round(moduleData.health);
-      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 8000);
+      const hp    = Math.round(moduleData.health);
       const maxHp = (moduleData as any).maxHealth ?? 8000;
-      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
-      lines.push(`Dmg: 3000`);
-      lines.push(`Reload: ${(moduleData as any).reloadTime ?? 3.0}s`);
-      lines.push(`Quality: Common`);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Base Damage',  value: '3000' });
+      stats.push({ label: 'Reload',  value: `${(moduleData as any).reloadTime ?? 3.0}s` });
+      if (!hasQuality) stats.push({ label: 'Quality', value: 'Common' });
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
-      const hp = Math.round((moduleData as any).health ?? 10000);
-      const tgt = Math.round((moduleData as any).targetHealth ?? (moduleData as any).maxHealth ?? 10000);
+      const hp    = Math.round((moduleData as any).health ?? 10000);
       const maxHp = (moduleData as any).maxHealth ?? 10000;
-      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
-      lines.push(`Turn Rate: ${moduleData.maxTurnRate.toFixed(2)}`);
-      lines.push(`Responsiveness: ${(moduleData.responsiveness * 100).toFixed(0)}%`);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health',         value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Turn Rate',      value: moduleData.maxTurnRate.toFixed(2) });
+      stats.push({ label: 'Responsiveness', value: `${(moduleData.responsiveness * 100).toFixed(0)}%` });
     } else if (moduleData.kind === 'mast') {
-      // Guard against Q16 fixed-point blowup from server (Q16 max for 15000 ≈ 983 million)
-      const Q16_THRESHOLD = 100_000;
-      const rawHp  = moduleData.health ?? 15000;
-      const rawTgt = (moduleData as any).targetHealth ?? moduleData.maxHealth ?? 15000;
+      const Q16   = 100_000;
+      const rawHp = moduleData.health ?? 15000;
       const rawMax = moduleData.maxHealth ?? 15000;
-      const hp    = Math.round(rawHp  > Q16_THRESHOLD ? rawHp  / 65536 : rawHp);
-      const tgt   = Math.round(rawTgt > Q16_THRESHOLD ? rawTgt / 65536 : rawTgt);
-      const maxHp = Math.round(rawMax > Q16_THRESHOLD ? rawMax / 65536 : rawMax);
-      lines.push(`Health: ${hp} / ${tgt} / ${maxHp}`);
-      // Guard against 0/0 fiber health on freshly placed masts
+      const hp    = Math.round(rawHp  > Q16 ? rawHp  / 65536 : rawHp);
+      const maxHp = Math.round(rawMax > Q16 ? rawMax / 65536 : rawMax);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
       const rawFh    = moduleData.fiberHealth    ?? 15000;
       const rawFhMax = moduleData.fiberMaxHealth ?? 15000;
-      const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16_THRESHOLD ? rawFh    / 65536 : rawFh);
-      const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16_THRESHOLD ? rawFhMax / 65536 : rawFhMax);
+      const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16 ? rawFh    / 65536 : rawFh);
+      const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16 ? rawFhMax / 65536 : rawFhMax);
       const fhPct = fhMax > 0 ? Math.round((fh / fhMax) * 100) : 100;
-      lines.push(`Sail Fibers: ${fh} / ${fhMax} (${fhPct}%)`);
-      lines.push(`Sail State: ${moduleData.sailState.toUpperCase()}`);
-      lines.push(`Openness: ${moduleData.openness.toFixed(0)}%`);
-      lines.push(`Wind Efficiency: ${(moduleData.windEfficiency * 100).toFixed(0)}%`);
+      stats.push({ label: 'Sail Fibers',    value: `${fh} / ${fhMax} (${fhPct}%)`, color: fhPct > 60 ? '#44cc66' : fhPct > 30 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Sail State',     value: moduleData.sailState.toUpperCase() });
+      stats.push({ label: 'Openness',       value: `${moduleData.openness.toFixed(0)}%` });
+      stats.push({ label: 'Wind Eff.',      value: `${(moduleData.windEfficiency * 100).toFixed(0)}%` });
+    } else if (moduleData.kind === 'chest') {
+      const hp    = Math.round((moduleData as any).health    ?? 5000);
+      const maxHp = Math.round((moduleData as any).maxHealth ?? 5000);
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+      stats.push({ label: 'Wood',        value: String(moduleData.wood) });
+      stats.push({ label: 'Fiber',       value: String(moduleData.fiber) });
+      stats.push({ label: 'Metal',       value: String(moduleData.metal) });
+      stats.push({ label: 'Stone',       value: String(moduleData.stone) });
     }
-    
-    // Add interaction hint
-    lines.push('');
+
+    // Deck assignment — shown for interactive modules (not layout-only planks / decks)
+    if (moduleData.kind !== 'plank' && moduleData.kind !== 'deck') {
+      const _deckVal = module.deckId === 255 ? 'Any'
+                     : module.deckId === 0    ? 'Lower'
+                     :                          'Upper';
+      stats.push({ label: 'Deck', value: `${_deckVal} (${module.deckId === 255 ? '—' : module.deckId})` });
+    }
+
+    // Quality bonuses — shown when the module was crafted from a quality blueprint
+    if (hasQuality) {
+      const qwRaw = module.qualityWeaponDmgQ8;
+      const qsRaw = module.qualitySailEffQ8;
+      if (typeof qwRaw === 'number' && qwRaw > 0) {
+        const lbl = statMultLabel(qwRaw);
+        if (lbl) stats.push({ label: 'Damage Bonus', value: lbl, color: qCol! });
+      }
+      if (typeof qsRaw === 'number' && qsRaw > 0) {
+        const lbl = statMultLabel(qsRaw);
+        if (lbl) stats.push({ label: 'Sail Bonus', value: lbl, color: qCol! });
+      }
+    }
+
+    // Weight
+    const MODULE_KG: Record<string, number> = {
+      'cannon': 100, 'swivel': 180, 'mast': 150, 'helm': 20, 'steering-wheel': 20,
+      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50,
+    };
+    let weightKg = MODULE_KG[moduleData.kind] ?? 50;
+    if (moduleData.kind === 'chest') {
+      weightKg = 40
+        + moduleData.wood        * 0.5
+        + moduleData.fiber       * 0.1
+        + moduleData.metal       * 1.0
+        + moduleData.stone       * 0.75;
+    }
+    // Cannon weight is dynamic: 40 kg when stowed (gunport closed), 100 kg when deployed (gunport open / no gunport)
+    if (moduleData.kind === 'cannon') {
+      const snapIdx = (moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx;
+      if (snapIdx !== undefined && snapIdx !== 255) {
+        const gp = ship.modules.find(m => m.moduleData?.kind === 'gunport'
+          && (m.moduleData as import('../../sim/modules').GunportModuleData).snapIndex === snapIdx);
+        const gpOpen = gp ? !!(gp.moduleData as import('../../sim/modules').GunportModuleData).isOpen : true;
+        weightKg = gpOpen ? 100 : 40;
+      }
+    }
+
+    // Interact range
     const MAX_INTERACT_DIST = 50;
     let interactLabel = '[E] Interact';
     if (this.playerInteractInfo) {
       const { worldPos, localPos, carrierId } = this.playerInteractInfo;
       const cos = Math.cos(ship.rotation);
       const sin = Math.sin(ship.rotation);
-      const modWorldX = ship.position.x + (module.localPos.x * cos - module.localPos.y * sin);
-      const modWorldY = ship.position.y + (module.localPos.x * sin + module.localPos.y * cos);
+      const mwx = ship.position.x + (module.localPos.x * cos - module.localPos.y * sin);
+      const mwy = ship.position.y + (module.localPos.x * sin + module.localPos.y * cos);
       let dist: number;
       if (carrierId === ship.id && localPos) {
         dist = localPos.sub(module.localPos).length();
       } else {
-        dist = worldPos.sub(Vec2.from(modWorldX, modWorldY)).length();
+        dist = worldPos.sub(Vec2.from(mwx, mwy)).length();
       }
-      interactLabel = dist <= MAX_INTERACT_DIST ? '[E] Interact' : 'Not in Range';
+      const baseLabel = moduleData.kind === 'chest' ? '[E] to open' : '[E] Interact';
+      interactLabel = dist <= MAX_INTERACT_DIST ? baseLabel : 'Not in Range';
+    } else if (moduleData.kind === 'chest') {
+      interactLabel = '[E] to open';
     }
-    lines.push(interactLabel);
-    
-    // Measure text dimensions
-    this.ctx.font = '14px Georgia, serif';
-    this.ctx.textAlign = 'left';
-    this.ctx.textBaseline = 'top';
-    
-    let maxWidth = 0;
-    for (const line of lines) {
-      const metrics = this.ctx.measureText(line);
-      maxWidth = Math.max(maxWidth, metrics.width);
-    }
-    
-    const padding = 10;
-    const lineHeight = 18;
-    const boxWidth = maxWidth + padding * 2;
-    const boxHeight = lines.length * lineHeight + padding * 2;
-    
-    // Position tooltip near mouse, but keep it on screen
-    let tooltipX = screenPos.x + 15;
-    let tooltipY = screenPos.y + 15;
-    
-    // Keep tooltip on screen
-    if (tooltipX + boxWidth > this.canvas.width) {
-      tooltipX = screenPos.x - boxWidth - 15;
-    }
-    if (tooltipY + boxHeight > this.canvas.height) {
-      tooltipY = screenPos.y - boxHeight - 15;
-    }
-    
-    // Draw tooltip background
-    this.ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
-    this.ctx.strokeStyle = '#ffaa00';
-    this.ctx.lineWidth = 2;
-    this.ctx.fillRect(tooltipX, tooltipY, boxWidth, boxHeight);
-    this.ctx.strokeRect(tooltipX, tooltipY, boxWidth, boxHeight);
-    
-    // Draw tooltip text
-    this.ctx.fillStyle = '#ffffff';
-    for (let i = 0; i < lines.length; i++) {
-      const textY = tooltipY + padding + i * lineHeight;
-      this.ctx.fillText(lines[i], tooltipX + padding, textY);
-    }
-    
-    // Draw team-coloured highlight outline around the hovered module
-    const _htColor = this.isShipFriendly(ship) ? '#44ff88' : '#ff4444';
-    const _htCamRot = camera.getState().rotation;
-    this.ctx.save();
-    
-    // Check if it's a curved plank (needs special handling)
-    if (moduleData.kind === 'plank' && moduleData.isCurved && moduleData.curveData) {
-      // For curved planks, draw directly in ship-local coordinates
-      // Transform to ship's coordinate system only
-      this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation - _htCamRot);
-      this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
-      
-      // Draw curved plank highlight
-      this.ctx.strokeStyle = _htColor;
-      this.ctx.lineWidth = 3 / camera.getState().zoom;
-      this.ctx.beginPath();
-      
-      const { start, control, end, t1, t2 } = moduleData.curveData;
-      const segments = 20;
-      const halfPlankWidth = moduleData.width / 2;
-      
-      // Sample points along the curve
-      const points: Array<{x: number, y: number}> = [];
-      for (let i = 0; i <= segments; i++) {
-        const t = t1 + (t2 - t1) * (i / segments);
-        const pt = this.getQuadraticPoint(start, control, end, t);
-        points.push(pt);
+
+    // ── Layout ───────────────────────────────────────────────────────────
+    const PAD    = 10;
+    const W      = 230;
+    const LINE   = 16;
+    const NAME_H = 18;
+
+    const wrapText = (text: string, maxW: number): string[] => {
+      ctx.font = '12px Georgia, serif';
+      const words = text.split(' ');
+      const ls: string[] = [];
+      let cur = '';
+      for (const w of words) {
+        const test = cur ? `${cur} ${w}` : w;
+        if (ctx.measureText(test).width > maxW && cur) { ls.push(cur); cur = w; }
+        else cur = test;
       }
-      
-      // Calculate perpendicular offsets for width
-      const outerPoints: Array<{x: number, y: number}> = [];
-      const innerPoints: Array<{x: number, y: number}> = [];
-      
-      for (let i = 0; i < points.length; i++) {
-        const pt = points[i];
-        
-        // Calculate tangent direction
-        let dx: number, dy: number;
-        if (i === 0) {
-          dx = points[1].x - pt.x;
-          dy = points[1].y - pt.y;
-        } else if (i === points.length - 1) {
-          dx = pt.x - points[i - 1].x;
-          dy = pt.y - points[i - 1].y;
-        } else {
-          dx = points[i + 1].x - points[i - 1].x;
-          dy = points[i + 1].y - points[i - 1].y;
-        }
-        
-        // Normalize and get perpendicular
-        const len = Math.sqrt(dx * dx + dy * dy);
-        if (len > 0) {
-          dx /= len;
-          dy /= len;
-        }
-        
-        const perpX = -dy;
-        const perpY = dx;
-        
-        outerPoints.push({
-          x: pt.x + perpX * halfPlankWidth,
-          y: pt.y + perpY * halfPlankWidth
-        });
-        
-        innerPoints.push({
-          x: pt.x - perpX * halfPlankWidth,
-          y: pt.y - perpY * halfPlankWidth
-        });
-      }
-      
-      // Draw the outline
-      this.ctx.moveTo(outerPoints[0].x, outerPoints[0].y);
-      for (let i = 1; i < outerPoints.length; i++) {
-        this.ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
-      }
-      for (let i = innerPoints.length - 1; i >= 0; i--) {
-        this.ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
-      }
-      this.ctx.closePath();
-      this.ctx.stroke();
-    } else {
-      // For straight planks and other modules, use full transform
-      // Transform to ship's coordinate system
-      this.ctx.translate(camera.worldToScreen(ship.position).x, camera.worldToScreen(ship.position).y);
-      this.ctx.rotate(ship.rotation - _htCamRot);
-      this.ctx.scale(camera.getState().zoom, camera.getState().zoom);
-      
-      // Transform to module's local position and rotation
-      this.ctx.translate(module.localPos.x, module.localPos.y);
-      this.ctx.rotate(module.localRot);
-      
-      // Draw highlight based on module type
-      this.ctx.strokeStyle = _htColor;
-      this.ctx.lineWidth = 3 / camera.getState().zoom;
-      
-      if (moduleData.kind === 'plank') {
-        // Straight plank
-        const width = moduleData.length || 20;
-        const height = moduleData.width || 10;
-        const halfWidth = width / 2;
-        const halfHeight = height / 2;
-        this.ctx.strokeRect(-halfWidth, -halfHeight, width, height);
-      } else if (moduleData.kind === 'cannon') {
-        // Draw cannon highlight: base rect + barrel at its current aim angle
-        this.ctx.strokeRect(-15, -10, 30, 20);
-        const turretAngle = (moduleData as any).aimDirection ?? 0;
-        this.ctx.save();
-        this.ctx.rotate(turretAngle);
-        this.ctx.strokeRect(-8, -40, 16, 40); // barrel: same dims as drawShipCannons
-        this.ctx.restore();
-      } else if (moduleData.kind === 'ladder') {
-        // Ladder renders as fillRect(-10, -20, 20, 40)
-        this.ctx.strokeRect(-10, -20, 20, 40);
-      } else if (moduleData.kind === 'mast') {
-        // Mast is a circle
-        const radius = (moduleData as any).radius || 15;
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, radius, 0, Math.PI * 2);
-        this.ctx.stroke();
-      } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
-        // Helm renders as a circle with radius 8
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
-        this.ctx.stroke();
-      } else {
-        // Default highlight for other modules
-        const size = 20;
-        this.ctx.strokeRect(-size/2, -size/2, size, size);
-      }
+      if (cur) ls.push(cur);
+      return ls;
+    };
+    const descLines = meta.desc ? wrapText(meta.desc, W - PAD * 2 - 4) : [];
+
+    const totalH = PAD + NAME_H + 4
+      + LINE + 4
+      + descLines.length * LINE + (descLines.length > 0 ? 6 : 0)
+      + stats.length * LINE + (stats.length > 0 ? 6 : 0)
+      + LINE + 8   // weight
+      + LINE       // hint
+      + PAD;
+
+    let tx = screenPos.x + 15;
+    let ty = screenPos.y + 15;
+    if (tx + W      > cw) tx = screenPos.x - W      - 15;
+    if (ty + totalH > ch) ty = screenPos.y - totalH - 15;
+    tx = Math.max(4, tx);
+    ty = Math.max(4, ty);
+
+    // ── Draw card ────────────────────────────────────────────────────────
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = borderCol;
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left accent bar
+    ctx.fillStyle = accentCol;
+    ctx.beginPath();
+    ctx.roundRect(tx, ty, 4, totalH, [6, 0, 0, 6]);
+    ctx.fill();
+
+    let cy = ty + PAD;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    // Name — tier-colored when quality, white otherwise
+    ctx.font      = 'bold 14px Georgia, serif';
+    ctx.fillStyle = qCol ?? '#ffffff';
+    ctx.fillText(hasQuality ? `${qName} ${meta.name}` : meta.name, tx + PAD + 4, cy);
+    cy += NAME_H + 4;
+
+    // ID + kind
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillStyle = '#888888';
+    ctx.fillText(`ID: ${module.id}   [${moduleData.kind}]`, tx + PAD + 4, cy);
+    cy += LINE + 4;
+
+    // Description
+    if (descLines.length > 0) {
+      ctx.font      = '12px Georgia, serif';
+      ctx.fillStyle = '#cccccc';
+      for (const line of descLines) { ctx.fillText(line, tx + PAD + 4, cy); cy += LINE; }
+      cy += 6;
     }
-    
-    this.ctx.restore();
+
+    // Stats (label left, value right)
+    if (stats.length > 0) {
+      ctx.font = '12px Georgia, serif';
+      for (const st of stats) {
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#888888';
+        ctx.fillText(st.label, tx + PAD + 4, cy);
+        ctx.textAlign = 'right';
+        ctx.fillStyle = st.color ?? '#cccccc';
+        ctx.fillText(st.value, tx + W - PAD - 4, cy);
+        cy += LINE;
+      }
+      cy += 6;
+    }
+
+    // Weight
+    ctx.textAlign = 'left';
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillStyle = '#8ab4cc';
+    ctx.fillText(`Weight: ${weightKg} kg`, tx + PAD + 4, cy);
+    cy += LINE + 8;
+
+    // Interact hint
+    if (!this._anyBuildActive) {
+      ctx.font      = '11px Georgia, serif';
+      ctx.fillStyle = interactLabel === '[E] Interact' ? '#aaaaaa' : '#ff6644';
+      ctx.fillText(interactLabel, tx + PAD + 4, cy);
+    }
+
+    ctx.restore();
+
+    // NOTE: Module hover highlight is drawn by drawModuleHoverHighlight() in the
+    // main render pipeline — it fires immediately on hover (no tooltip delay) and
+    // uses the unified glow/inner/fill design. No additional highlight here.
   }
 
   // -----------------------------------------------------------------------
@@ -15413,68 +18600,49 @@ export class RenderSystem {
     const screenPos = camera.worldToScreen(ship.position);
     const { zoom, rotation: camRot } = camera.getState();
 
-    // In hotbar mode, find the nearest matching ghost within the 80u snap radius
-    const hotbarKind: GhostModuleKind | null =
-      this.cannonBuildMode  && !this.explicitBuildState ? 'cannon' :
-      this.mastBuildMode   && !this.explicitBuildState ? 'mast' :
-      this.swivelBuildMode && !this.explicitBuildState ? 'swivel' : null;
-    let snapGhostId: string | null = null;
-    if (hotbarKind && this.mouseWorldPos) {
-      let bestDist = 80;
-      const cos = Math.cos(ship.rotation);
-      const sin = Math.sin(ship.rotation);
-      for (const g of ghosts) {
-        if (g.kind !== hotbarKind) continue;
-        const wx = ship.position.x + g.localPos.x * cos - g.localPos.y * sin;
-        const wy = ship.position.y + g.localPos.x * sin + g.localPos.y * cos;
-        const dist = Math.hypot(this.mouseWorldPos.x - wx, this.mouseWorldPos.y - wy);
-        if (dist < bestDist) { bestDist = dist; snapGhostId = g.id; }
-      }
-    }
-
     this.ctx.save();
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(zoom, zoom);
     this.ctx.rotate(ship.rotation - camRot);
 
     const t = performance.now() / 1000;
-    const pulse = 0.70 + 0.20 * Math.sin(t * 2.5);
-    const snapPulse = 0.85 + 0.15 * Math.sin(t * 5.0); // faster pulse for snap highlight
+    const pulse = 0.65 + 0.25 * Math.sin(t * 2.0);
 
     for (const g of ghosts) {
-      const isSnap = g.id === snapGhostId;
       this.ctx.save();
       this.ctx.translate(g.localPos.x, g.localPos.y);
       this.ctx.rotate(g.localRot);
-      this.ctx.globalAlpha = isSnap ? snapPulse : pulse;
+      this.ctx.globalAlpha = pulse;
 
-      // Snap target uses bright teal; normal plan marker uses faint green
-      const ghostFill   = isSnap ? 'rgba(20,180,160,0.55)' : 'rgba(40,130,70,0.55)';
-      const ghostStroke = isSnap ? '#44ffee' : '#66ee99';
+      // Blueprint style: blue wireframe, no fill
+      const blueprintStroke = '#4da6ff';
+      const blueprintFill   = 'rgba(20, 80, 200, 0.12)';
 
       switch (g.kind) {
         case 'cannon': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
-          this.ctx.setLineDash([3, 2]);
-          this.ctx.fillRect(-15, -10, 30, 20);
-          this.ctx.strokeRect(-15, -10, 30, 20);
-          this.ctx.fillRect(-8, -36, 16, 28);
-          this.ctx.strokeRect(-8, -36, 16, 28);
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([4, 2]);
+          // Base (matches actual cannon 22×15)
+          this.ctx.fillRect(-11, -7.5, 22, 15);
+          this.ctx.strokeRect(-11, -7.5, 22, 15);
+          // Barrel (matches actual cannon 16×40)
+          this.ctx.fillRect(-8, -40, 16, 40);
+          this.ctx.strokeRect(-8, -40, 16, 40);
           this.ctx.setLineDash([]);
           break;
         }
         case 'mast': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([4, 2]);
           this.ctx.beginPath();
           this.ctx.arc(0, 0, 15, 0, Math.PI * 2);
           this.ctx.fill();
           this.ctx.stroke();
-          this.ctx.fillStyle = 'rgba(40,110,60,0.13)';
+          this.ctx.fillStyle = 'rgba(20, 60, 180, 0.08)';
           this.ctx.fillRect(-40, -5, 80, 10);
           this.ctx.strokeRect(-40, -5, 80, 10);
           this.ctx.setLineDash([]);
@@ -15482,9 +18650,9 @@ export class RenderSystem {
         }
         case 'helm': {
           const R = 16;
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([3, 2]);
           this.ctx.beginPath();
           this.ctx.arc(0, 0, R, 0, Math.PI * 2);
@@ -15496,33 +18664,31 @@ export class RenderSystem {
             this.ctx.beginPath();
             this.ctx.moveTo(0, 0);
             this.ctx.lineTo(Math.cos(a) * R, Math.sin(a) * R);
-            this.ctx.strokeStyle = 'rgba(80,190,130,0.45)';
+            this.ctx.strokeStyle = 'rgba(60, 140, 255, 0.55)';
             this.ctx.lineWidth = 1;
             this.ctx.stroke();
           }
           break;
         }
         case 'swivel': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([3, 2]);
-          // Pivot base circle
           this.ctx.beginPath();
           this.ctx.arc(0, 0, 8, 0, Math.PI * 2);
           this.ctx.fill();
           this.ctx.stroke();
-          // Barrel stub (pointing up)
           this.ctx.fillRect(-3, -22, 6, 22);
           this.ctx.strokeRect(-3, -22, 6, 22);
           this.ctx.setLineDash([]);
           break;
         }
         case 'deck': {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
           this.ctx.lineWidth = 1.5;
-          this.ctx.setLineDash([5, 3]);
+          this.ctx.setLineDash([6, 3]);
           this.ctx.beginPath();
           this.ctx.roundRect(-240, -60, 480, 120, 8);
           this.ctx.fill();
@@ -15530,11 +18696,53 @@ export class RenderSystem {
           this.ctx.setLineDash([]);
           break;
         }
+        case 'ramp':
+        case 'hatch_cover': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.roundRect(-20, -10, 40, 20, 4);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'gunport': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.rect(-10, -8, 20, 16);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
+        case 'chest': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.roundRect(-14, -10, 28, 20, 3);
+          this.ctx.fill();
+          this.ctx.stroke();
+          // Chest lid line
+          this.ctx.beginPath();
+          this.ctx.moveTo(-14, -4);
+          this.ctx.lineTo(14, -4);
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
         case 'plank':
         default: {
-          this.ctx.fillStyle = ghostFill;
-          this.ctx.strokeStyle = ghostStroke;
-          this.ctx.lineWidth = 1.2;
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
           this.ctx.setLineDash([3, 2]);
           this.ctx.beginPath();
           this.ctx.roundRect(-25, -8, 50, 16, 4);
@@ -15545,27 +18753,43 @@ export class RenderSystem {
         }
       }
 
-      // Outer snap ring for the hotbar-snap target
-      if (isSnap) {
-        this.ctx.globalAlpha = snapPulse * 0.9;
-        this.ctx.strokeStyle = '#44ffee';
-        this.ctx.lineWidth = 2.5;
-        this.ctx.setLineDash([4, 3]);
-        const ringR = g.kind === 'cannon' ? 28 : g.kind === 'deck' ? 250 : 32;
-        this.ctx.beginPath();
-        this.ctx.arc(0, 0, ringR, 0, Math.PI * 2);
-        this.ctx.stroke();
-        this.ctx.setLineDash([]);
+      // Blueprint corner crosshairs
+      this.ctx.globalAlpha = pulse * 0.6;
+      this.ctx.strokeStyle = blueprintStroke;
+      this.ctx.lineWidth = 1;
+      const cx = 12, cl = 5;
+      for (const [ox, oy] of [[-cx,-cx],[cx,-cx],[cx,cx],[-cx,cx]] as [number,number][]) {
+        this.ctx.beginPath(); this.ctx.moveTo(ox - cl, oy); this.ctx.lineTo(ox + cl, oy); this.ctx.stroke();
+        this.ctx.beginPath(); this.ctx.moveTo(ox, oy - cl); this.ctx.lineTo(ox, oy + cl); this.ctx.stroke();
       }
 
-      // Label
-      this.ctx.globalAlpha = (isSnap ? snapPulse : pulse) * 0.9;
-      this.ctx.fillStyle = isSnap ? '#44ffee' : '#99eebb';
-      this.ctx.font = isSnap ? 'bold 10px Georgia, serif' : '9px Georgia, serif';
+      // Label row: kind name
+      this.ctx.globalAlpha = pulse * 0.95;
+      this.ctx.fillStyle = '#88ccff';
+      this.ctx.font = '9px Georgia, serif';
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'bottom';
-      const labelY = g.kind === 'deck' ? -64 : -22;
-      this.ctx.fillText(isSnap ? '⚡ Click to place!' : g.kind, 0, labelY);
+      const labelY = g.kind === 'deck' ? -64 : -24;
+      this.ctx.fillText(`📋 ${g.kind}`, 0, labelY);
+
+      // Resource cost row
+      const cost = g.resourceCost;
+      const parts: string[] = [];
+      if (cost.wood  > 0) parts.push(`W:${cost.wood}`);
+      if (cost.fiber > 0) parts.push(`Fi:${cost.fiber}`);
+      if (cost.metal > 0) parts.push(`Fe:${cost.metal}`);
+      if (cost.stone > 0) parts.push(`St:${cost.stone}`);
+      if (parts.length > 0) {
+        this.ctx.font = '8px monospace';
+        this.ctx.fillStyle = 'rgba(130,190,255,0.85)';
+        this.ctx.fillText(parts.join(' '), 0, labelY - 10);
+      }
+
+      // "E to build" hint
+      this.ctx.font = '8px Georgia, serif';
+      this.ctx.fillStyle = 'rgba(180,220,255,0.6)';
+      this.ctx.textBaseline = 'top';
+      this.ctx.fillText('[E] build', 0, g.kind === 'deck' ? -58 : -16);
 
       this.ctx.restore();
     }
@@ -15580,6 +18804,10 @@ export class RenderSystem {
   private drawPendingGhostCursor(worldState: WorldState, camera: Camera): void {
     if (!this.pendingGhostState || !this.mouseWorldPos) return;
     const { kind, rotDeg } = this.pendingGhostState;
+
+    // Hide the following cursor ghost when the cannon is already snapping to a gunport —
+    // the slot ghost itself acts as the placement indicator.
+    if (kind === 'cannon' && this.hoveredGunportCannonSnap) return;
 
     // Find nearest ship
     let nearestShip: Ship | null = null;
@@ -15614,6 +18842,8 @@ export class RenderSystem {
         const newFp = getModuleFootprint(newKind as any);
         for (const mod of nearestShip.modules) {
           if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+          if (newKind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
+          if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue; // different deck — no collision
           const existFp = getModuleFootprint(mod.kind);
           if (footprintsOverlap(newFp, localX, localY, rotRad, existFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
             valid = false;
@@ -15679,16 +18909,20 @@ export class RenderSystem {
     this.ctx.rotate(shipRot - camRot + rotRad);
 
     const planBlocked = invalidReason === 'Remove plan first!';
-    const okColor   = valid ? '#44ff88' : planBlocked ? '#ffaa44' : '#ff5555';
-    const fillColor = valid ? 'rgba(30,120,60,0.45)' : planBlocked ? 'rgba(160,90,20,0.45)' : 'rgba(120,30,30,0.45)';
+    // Factor in resource affordability: valid but unaffordable → red tint
+    const canAfford = !valid ? true : this.ghostCanAfford; // only apply afford-check when placement is otherwise valid
+    const okColor   = valid ? (canAfford ? '#44ff88' : '#ff4444') : planBlocked ? '#ffaa44' : '#ff5555';
+    const fillColor = valid ? (canAfford ? 'rgba(30,120,60,0.45)' : 'rgba(180,30,30,0.45)') : planBlocked ? 'rgba(160,90,20,0.45)' : 'rgba(120,30,30,0.45)';
 
     switch (kind) {
       case 'cannon': {
         this.ctx.fillStyle = fillColor;
         this.ctx.strokeStyle = okColor;
         this.ctx.lineWidth = 1.5;
-        this.ctx.fillRect(-15, -10, 30, 20);  this.ctx.strokeRect(-15, -10, 30, 20);
-        this.ctx.fillRect(-8, -38, 16, 30);   this.ctx.strokeRect(-8, -38, 16, 30);
+        // Base (matches actual cannon 22×15)
+        this.ctx.fillRect(-11, -7.5, 22, 15);  this.ctx.strokeRect(-11, -7.5, 22, 15);
+        // Barrel (matches actual cannon 16×40, pointing −y)
+        this.ctx.fillRect(-8, -40, 16, 40);    this.ctx.strokeRect(-8, -40, 16, 40);
         break;
       }
       case 'mast': {
@@ -15812,6 +19046,8 @@ export class RenderSystem {
     if (nearestShip) {
       for (const mod of nearestShip.modules) {
         if (mod.kind === 'plank' || mod.kind === 'deck') continue;
+        if (newKind === 'cannon' && mod.kind === 'gunport') continue; // cannons coexist with gunports
+        if (mod.deckId !== 255 && mod.deckId !== this._playerDeckLevel) continue; // different deck — no collision
         const existingFp = getModuleFootprint(mod.kind);
         if (footprintsOverlap(newFp, localX, localY, rotRad,
                               existingFp, mod.localPos.x, mod.localPos.y, mod.localRot)) {
@@ -15882,14 +19118,14 @@ export class RenderSystem {
       this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';
       this.ctx.strokeStyle = valid ? '#88ff88' : ghostSnap ? '#44ddcc' : ghostBlocked ? '#ffaa44' : '#ff8888';
       this.ctx.lineWidth   = 1 / zoom;
-      this.ctx.fillRect(-15, -10, 30, 20);
-      this.ctx.strokeRect(-15, -10, 30, 20);
+      this.ctx.fillRect(-11, -7.5, 22, 15);
+      this.ctx.strokeRect(-11, -7.5, 22, 15);
 
       // -- Barrel (pointing up / forward) --
       this.ctx.fillStyle   = valid ? '#225522' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#553311' : '#552222';
       this.ctx.strokeStyle = valid ? '#55ee55' : ghostSnap ? '#33ccbb' : ghostBlocked ? '#ee9933' : '#ee5555';
-      this.ctx.fillRect(-8, -38, 16, 30);
-      this.ctx.strokeRect(-8, -38, 16, 30);
+      this.ctx.fillRect(-8, -40, 16, 40);
+      this.ctx.strokeRect(-8, -40, 16, 40);
     } else if (item === 'swivel') {
       // -- Swivel base (smaller than cannon) --
       this.ctx.fillStyle   = valid ? '#336633' : ghostSnap ? '#1a4d44' : ghostBlocked ? '#664422' : '#663333';

@@ -22,7 +22,7 @@ export enum EffectType {
 }
 
 /** Category controls the colour and icon of a top-centre announcement banner. */
-export type AnnouncementKind = 'ship_sink' | 'npc_kill' | 'info';
+export type AnnouncementKind = 'ship_sink' | 'npc_kill' | 'info' | 'warning';
 
 /**
  * Relationship of the damage source to the local player.
@@ -323,6 +323,8 @@ export class EffectRenderer {
         bgColor = 'rgba(20,10,10,0.88)'; borderColor = '#cc3322'; textColor = '#ff7755'; icon = '⚓';
       } else if (ann.kind === 'npc_kill') {
         bgColor = 'rgba(10,18,10,0.88)'; borderColor = '#336622'; textColor = '#88ee55'; icon = '💀';
+      } else if (ann.kind === 'warning') {
+        bgColor = 'rgba(28,18,4,0.90)'; borderColor = '#cc8822'; textColor = '#ffcc55'; icon = '⚠';
       } else {
         bgColor = 'rgba(14,18,30,0.88)'; borderColor = '#445566'; textColor = '#aaccee'; icon = 'ℹ';
       }

@@ -13,6 +13,11 @@ export type ModuleKind =
   | 'plank'          // Ship plank - structural hull component
   | 'deck'           // Ship deck - interior floor surface
   | 'swivel'         // Swivel gun - fast, anti-personnel edge weapon
+  | 'ramp'           // Deck ramp - connects lower and upper deck levels
+  | 'hatch_cover'    // Hatch cover - seals a snap-point hole, blocks falling through
+  | 'gunport'        // Gunport - openable hull hole for lower-deck cannons
+  | 'chest'          // Resource chest - stores raw resources for auto-repair and land supply
+  | 'bed'            // Bed - sets ship respawn point for crewmates
   | 'custom';        // User-defined module types
 
 /**
@@ -29,6 +34,11 @@ export enum ModuleTypeId {
   PLANK = 6,
   DECK = 7,
   SWIVEL = 8,
+  RAMP = 9,
+  HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
+  GUNPORT = 11,      // Gunport — openable hull hole for lower-deck cannons
+  CHEST = 13,        // Resource chest — stores raw resources for auto-repair and land supply
+  BED = 14,          // Bed — sets ship respawn point for crewmates
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -47,6 +57,11 @@ export const MODULE_TYPE_MAP = {
       case 'plank': return ModuleTypeId.PLANK;
       case 'deck': return ModuleTypeId.DECK;
       case 'swivel': return ModuleTypeId.SWIVEL;
+      case 'ramp': return ModuleTypeId.RAMP;
+      case 'hatch_cover': return ModuleTypeId.HATCH_COVER;
+      case 'gunport': return ModuleTypeId.GUNPORT;
+      case 'chest': return ModuleTypeId.CHEST;
+      case 'bed': return ModuleTypeId.BED;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -61,6 +76,11 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.PLANK: return 'plank';
       case ModuleTypeId.DECK: return 'deck';
       case ModuleTypeId.SWIVEL: return 'swivel';
+      case ModuleTypeId.RAMP: return 'ramp';
+      case ModuleTypeId.HATCH_COVER: return 'hatch_cover';
+      case ModuleTypeId.GUNPORT: return 'gunport';
+      case ModuleTypeId.CHEST: return 'chest';
+      case ModuleTypeId.BED: return 'bed';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }
@@ -86,11 +106,18 @@ export enum ModuleStateBits {
 export interface ShipModule {
   id: number;                    // Unique module ID within the ship
   kind: ModuleKind;             // Type of module
-  deckId: number;               // Which deck level this module is on (0 = main deck)
+  deckId: number;               // Which deck this module belongs to: 0=lower deck, 1=upper deck, 255=deck-independent (matches server deck_id)
   localPos: Vec2;               // Position relative to ship center
   localRot: number;             // Rotation relative to ship orientation (radians)
   occupiedBy: number | null;    // Player/entity ID currently using this module
   stateBits: number;            // Bit flags for module state (ModuleStateBits)
+  /** Rolled quality tier (0..6) of the blueprint this module was crafted from.
+   *  Used to tint/outline the module. Absent for plain (un-rolled) modules. */
+  qualityTier?: number;
+  /** q8 weapon-damage multiplier (256=1.00x, 0=N/A). Present on cannons/swivels. */
+  qualityWeaponDmgQ8?: number;
+  /** q8 sail-effectiveness multiplier (256=1.00x, 0=N/A). Present on masts. */
+  qualitySailEffQ8?: number;
   
   // Module-specific data (varies by kind)
   moduleData?: ModuleData;
@@ -108,6 +135,9 @@ export type ModuleData =
   | PlankModuleData
   | DeckModuleData
   | SwivelModuleData
+  | GunportModuleData
+  | ChestModuleData
+  | BedModuleData
   | CustomModuleData;
 
 /**
@@ -142,6 +172,7 @@ export interface CannonModuleData {
   targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
   stateBits: number;            // Server MODULE_STATE_* bitmask (bit 4 = RELOADING)
+  gunportSnapIdx: number;       // 0-11 = linked gunport snap index; 255 = not linked
 }
 
 /**
@@ -220,7 +251,7 @@ export interface DeckModuleData {
   condition: number;           // Surface condition (0-100, affects traction/speed)
   texture: 'smooth' | 'rough' | 'planked' | 'tiled'; // Surface texture
   walkable: boolean;           // Whether players can walk on this deck section
-  deckLevel: number;           // Deck height level (0 = main deck, 1 = upper deck, -1 = lower deck)
+  deckLevel: number;           // Deck level id: 0 = lower deck, 1 = upper deck (matches server deck_id / z_index)
 }
 
 /**
@@ -239,6 +270,18 @@ export interface SwivelModuleData {
 }
 
 /**
+ * Resource chest module data — stores raw resources for ship auto-repair and land supply.
+ * Capacity is unlimited; stored weight counts towards the ship's cargo load.
+ */
+export interface ChestModuleData {
+  kind: 'chest';
+  wood:        number;  // Stored wood units
+  fiber:       number;  // Stored fiber units
+  metal:       number;  // Stored metal units
+  stone:       number;  // Stored stone units
+}
+
+/**
  * Custom module data for user-defined modules
  */
 export interface CustomModuleData {
@@ -246,6 +289,47 @@ export interface CustomModuleData {
   customType: string;          // User-defined type identifier
   properties: Record<string, any>; // Flexible property bag
 }
+
+/**
+ * Bed module data — no persistent state; ship ownership covers permissions.
+ */
+export interface BedModuleData {
+  kind: 'bed';
+}
+
+/**
+ * Gunport module data — openable hole cut into a flat hull plank.
+ * is_open: false = cover flush with hull; true = hole exposed for cannon fire.
+ */
+export interface GunportModuleData {
+  kind: 'gunport';
+  isOpen: boolean;              // Current state: false=closed, true=open
+  snapIndex: number;           // Which of the 12 predefined snap positions this occupies (0-11)
+}
+
+/**
+ * 12 predefined gunport snap positions in ship-local client-px coordinates.
+ * Indices 0-5 = starboard side (y = -90), 6-11 = port side (y = +90).
+ * Each of the 3 straight planks per side has 2 gunports at 1/3 and 2/3 of its length.
+ * Hull runs: bowBottom(190,-90) → sternBottom(-260,-90) for starboard (3 planks of 150px each).
+ */
+export const GUNPORT_SNAP_POINTS: { x: number; y: number; side: 'starboard' | 'port' }[] = [
+  // Starboard (y = -90) — indices 0-5, bow-to-stern order
+  // Evenly spaced: plank centres 115, -35, -185 ± 37.5px = 75px uniform spacing
+  { x: 152.5, y: -90, side: 'starboard' },
+  { x:  77.5, y: -90, side: 'starboard' },
+  { x:   2.5, y: -90, side: 'starboard' },
+  { x: -72.5, y: -90, side: 'starboard' },
+  { x:-147.5, y: -90, side: 'starboard' },
+  { x:-222.5, y: -90, side: 'starboard' },
+  // Port (y = +90) — indices 6-11, bow-to-stern order
+  { x: 152.5, y:  90, side: 'port' },
+  { x:  77.5, y:  90, side: 'port' },
+  { x:   2.5, y:  90, side: 'port' },
+  { x: -72.5, y:  90, side: 'port' },
+  { x:-147.5, y:  90, side: 'port' },
+  { x:-222.5, y:  90, side: 'port' },
+];
 
 /**
  * Module interaction info for UI and input handling
@@ -549,12 +633,16 @@ export class ModuleUtils {
   /**
    * Create ship deck from a polygon hull
    * Creates a deck module that covers the ship's interior area defined by the hull polygon
+   * @param hullPolygon  Hull polygon in ship-local coordinates
+   * @param deckId       Module ID for this deck floor (e.g. 200 = lower, 201 = upper)
+   * @param deckLevel    Deck level / deck_id: 0 = lower deck, 1 = upper deck (matches server deck_id)
    */
-  static createShipDeckFromPolygon(hullPolygon: Vec2[], deckId: number = 200): ShipModule {
+  static createShipDeckFromPolygon(hullPolygon: Vec2[], deckId: number = 200, deckLevel: number = 0): ShipModule {
     // Very small margin to maximize deck coverage and fill plank gaps
     const deckMargin = 1; // Minimal margin for nearly complete coverage
     
     const deckModule = this.createDefaultModule(deckId, 'deck', Vec2.from(0, 0));
+    deckModule.deckId = deckLevel; // module belongs to this deck level
     
     if (deckModule.moduleData && deckModule.moduleData.kind === 'deck') {
       // Create a deck polygon that follows the hull shape, shrunk inward
@@ -565,7 +653,7 @@ export class ModuleUtils {
       deckModule.moduleData.condition = 100;
       deckModule.moduleData.texture = 'planked';
       deckModule.moduleData.walkable = true;
-      deckModule.moduleData.deckLevel = 0;
+      deckModule.moduleData.deckLevel = deckLevel;
       
     }
     

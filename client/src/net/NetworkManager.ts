@@ -11,6 +11,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { createShipAtPosition } from '../sim/ShipUtils.js';
 import { ShipModule, ModuleKind, MODULE_TYPE_MAP } from '../sim/modules.js';
 import { parseInventoryFromServer, createEmptyInventory } from '../sim/Inventory.js';
+import { SchematicEntry } from '../sim/Quality.js';
 import { PlayerActions } from '../sim/Physics.js';
 
 /**
@@ -67,6 +68,7 @@ export enum MessageType {
   SLOT_SELECT = 'slot_select',
   INV_SWAP = 'inv_swap',
   DROP_ITEM = 'drop_item',
+  DROP_RESOURCES = 'drop_resources',
   PICKUP_ITEM = 'pickup_item',
   UNEQUIP = 'unequip',
   GIVE_ITEM = 'give_item',
@@ -96,7 +98,17 @@ export enum MessageType {
   PLACE_MAST_AT = 'place_mast_at',
   REPLACE_HELM = 'replace_helm',
   PLACE_DECK = 'place_deck',
+  PLACE_RAMP = 'place_ramp',
+  PLACE_HATCH_COVER = 'place_hatch_cover',
+  PLACE_GUNPORT = 'place_gunport',
+  TOGGLE_GUNPORT = 'toggle_gunport',
+  PLAYER_SET_DECK = 'player_set_deck',
   PLACE_SWIVEL_AT = 'place_swivel_at',
+  PLACE_CHEST_AT = 'place_chest_at',
+  PLACE_BED_AT = 'place_bed_at',
+  CHEST_TRANSFER = 'chest_transfer',
+  LAND_CHEST_TRANSFER = 'land_chest_transfer',
+  LAND_CHEST_DROP = 'land_chest_drop',
   CREW_ASSIGN = 'crew_assign',
   NPC_RECRUIT = 'npc_recruit',
   NPC_MOVE_ABOARD = 'npc_move_aboard',
@@ -107,6 +119,7 @@ export enum MessageType {
   PLAYER_LEVEL_UP = 'player_level_up',
   COMMAND = 'command',
   RESPAWN_REQUEST = 'respawn_request',
+  USE_BED_ON_SHIP = 'use_bed_on_ship',
   RENAME_SHIP = 'rename_ship',
 
   PING = 'ping',
@@ -122,6 +135,10 @@ export enum MessageType {
   MODULE_INTERACT_SUCCESS = 'module_interact_success',
   MODULE_INTERACT_FAILURE = 'module_interact_failure',
   
+  // Chat
+  CHAT_MESSAGE   = 'chat_message',   // client → server
+  CHAT_BROADCAST = 'chat_broadcast', // server → client
+
   // Server notifications
   PLAYER_BOARDED = 'player_boarded',
   STRUCTURE_PLACED = 'structure_placed',
@@ -384,6 +401,8 @@ interface PlacePlankMessage extends NetworkMessage {
   shipId: number;
   sectionName: string;
   segmentIndex: number;
+  resource_source?: 'pack' | 'ship' | 'auto';
+  bp_index?: number;
 }
 
 interface PlaceCannonMessage extends NetworkMessage {
@@ -414,17 +433,97 @@ interface PlaceMastAtMessage extends NetworkMessage {
   shipId: number;
   localX: number;
   localY: number;
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface ReplaceHelmMessage extends NetworkMessage {
   type: MessageType.REPLACE_HELM;
   timestamp: number;
   shipId: number;
+  resource_source?: 'pack' | 'ship' | 'auto';
 }
 
 interface PlaceDeckMessage extends NetworkMessage {
   type: MessageType.PLACE_DECK;
   timestamp: number;
+  deck_level?: number;
+  resource_source?: 'pack' | 'ship' | 'auto';
+  bp_index?: number;
+}
+
+interface PlaceRampMessage extends NetworkMessage {
+  type: MessageType.PLACE_RAMP;
+  timestamp: number;
+  shipId: number;
+  snapIndex: number;
+  rotation: number;  // ramp facing in radians (0, π/2, π, 3π/2)
+  resource_source?: 'pack' | 'ship' | 'auto';
+}
+
+interface PlaceHatchCoverMessage extends NetworkMessage {
+  type: MessageType.PLACE_HATCH_COVER;
+  timestamp: number;
+  shipId: number;
+  snapIndex: number;
+  resource_source?: 'pack' | 'ship' | 'auto';
+}
+
+interface PlaceGunportMessage extends NetworkMessage {
+  type: MessageType.PLACE_GUNPORT;
+  timestamp: number;
+  shipId: number;
+  snapIndex: number; // 0-11 (0-5 = starboard, 6-11 = port)
+  resource_source?: 'pack' | 'ship' | 'auto';
+}
+
+interface ToggleGunportMessage extends NetworkMessage {
+  type: MessageType.TOGGLE_GUNPORT;
+  timestamp: number;
+  shipId: number;
+  gunportId: number;
+}
+
+interface PlayerSetDeckMessage extends NetworkMessage {
+  type: MessageType.PLAYER_SET_DECK;
+  timestamp: number;
+  deckLevel: number; // 0 = lower deck, 1 = upper deck
+}
+
+interface PlaceChestAtMessage extends NetworkMessage {
+  type: MessageType.PLACE_CHEST_AT;
+  timestamp: number;
+  shipId?: number;   // null/absent for land placement
+  localX: number;
+  localY: number;
+  rotation: number;
+  deckId?: number;
+}
+
+interface ChestTransferMessage extends NetworkMessage {
+  type: MessageType.CHEST_TRANSFER;
+  timestamp: number;
+  shipId: number;
+  moduleId: number;
+  item: string;
+  quantity: number;
+  direction: 'deposit' | 'withdraw';
+}
+
+interface LandChestTransferMessage extends NetworkMessage {
+  type: MessageType.LAND_CHEST_TRANSFER;
+  timestamp: number;
+  structure_id: number;
+  item: string;
+  quantity: number;
+  direction: 'deposit' | 'withdraw';
+}
+
+interface LandChestDropMessage extends NetworkMessage {
+  type: MessageType.LAND_CHEST_DROP;
+  timestamp: number;
+  structure_id: number;
+  item: string;
+  quantity: number;
 }
 
 interface PlaceSwivelAtMessage extends NetworkMessage {
@@ -456,6 +555,7 @@ interface PlaceStructureMessage extends NetworkMessage {
   x: number;
   y: number;
   rotation?: number;
+  under_construction?: boolean;
 }
 
 interface StructureInteractMessage extends NetworkMessage {
@@ -477,13 +577,27 @@ interface DropItemMessage extends NetworkMessage {
   slot: number;
 }
 
+interface DropResourcesMessage extends NetworkMessage {
+  type: MessageType.DROP_RESOURCES;
+  timestamp: number;
+  kind: string;
+  amount: number;
+}
+
 interface PickupItemMessage extends NetworkMessage {
   type: MessageType.PICKUP_ITEM;
   timestamp: number;
   item_id: number;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | PickupItemMessage;
+interface ChatMessageOut extends NetworkMessage {
+  type: MessageType.CHAT_MESSAGE;
+  timestamp: number;
+  channel: string;
+  text: string;
+}
+
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | DropResourcesMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage | LandChestTransferMessage | LandChestDropMessage;
 
 /**
  * Main network manager class
@@ -551,6 +665,14 @@ export class NetworkManager {
   public onFlagRemoved: ((shipId: number) => void) | null = null;
   public onFlagCaptureComplete: ((shipId: number, planterCompany: number) => void) | null = null;
   public onSalvageSuccess: ((item: number, quantity: number) => void) | null = null;
+  /** Fired when the server sends the player's full schematic (blueprint) list. */
+  public onSchematicList: ((items: SchematicEntry[]) => void) | null = null;
+  /** Fired when the player salvages a quality blueprint from a wreck. */
+  public onSalvageBlueprint: ((item: number, tier: number, crafts: number,
+    wreckId: number, bpRemaining: number, lootRemaining: number) => void) | null = null;
+  /** Fired when the server responds to a craft_blueprint request. */
+  public onCraftBlueprintResult: ((success: boolean, index: number, reason: string,
+    item: number, tier: number, craftsRemaining: number) => void) | null = null;
   public onNpcUnclaimed: ((npcId: number) => void) | null = null;
   public onShipRenamed: ((shipId: number, name: string) => void) | null = null;
   public onNpcDialogue: ((npcId: number, npcName: string, text: string) => void) | null = null;
@@ -602,7 +724,11 @@ export class NetworkManager {
   public onSwordSwing: ((playerId: number, x: number, y: number, angle: number, range: number) => void) | null = null;
   public onLadderState: ((shipId: number, moduleId: number, retracted: boolean) => void) | null = null;
   /** Fired when the server broadcasts the authoritative weapon group state for a ship. */
-  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number}[]) => void) | null = null;
+  public onCannonGroupState: ((shipId: number, groups: {index: number, mode: string, cannonIds: number[], targetShipId: number, gunportsOpen: boolean, name: string}[]) => void) | null = null;
+  /** Fired when the server confirms a gunport was toggled (open or closed). mass is the updated ship mass in kg (if provided). */
+  public onGunportState: ((shipId: number, gunportId: number, isOpen: boolean, mass?: number) => void) | null = null;
+  /** Fired when the server blocks a cannon fire attempt because its gunport is closed. */
+  public onGunportBlocked: ((cannonId: number, gunportId: number) => void) | null = null;
   /** Fired when the server confirms the player has boarded a ship (via ladder). */
   public onPlayerBoarded: ((shipId: number) => void) | null = null;
   /** Fired when the server responds to a harvest_resource request. */
@@ -689,12 +815,23 @@ export class NetworkManager {
   public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
   public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
+  /** Fired when a shipyard action is rejected (e.g. ship_limit, missing_materials). */
+  public onShipyardActionFail: ((reason: string) => void) | null = null;
+  /** Fired when the server sends land chest state (after E-key interact or after a transfer). */
+  public onLandChestState: ((structureId: number, resources: { wood: number; fiber: number; metal: number; stone: number }, playerResources?: { wood: number; fiber: number; metal: number; stone: number }, readOnly?: boolean) => void) | null = null;
   /** Fired when the server rejects a structure placement with a reason string. */
   public onPlacementFailed: ((reason: string, x: number, y: number, structureType: string, blockerId: number | null) => void) | null = null;
   /** Fired when a door is toggled open or closed by any player. */
   public onDoorToggled: ((id: number, open: boolean) => void) | null = null;
   /** Fired when a door's lock state is changed. Also includes updated open state. */
   public onDoorLockToggled: ((id: number, locked: boolean, open: boolean) => void) | null = null;
+
+  /** Fired when the server confirms a bed interaction (island bed or ship bed).
+   *  bedId > 0 for island beds; shipId > 0 for ship beds. */
+  public onBedUsed: ((bedId?: number, x?: number, y?: number, shipId?: number) => void) | null = null;
+  /** Fired when the server rejects a bed use due to cooldown.
+   *  remainingMs is the time left in ms before the bed can be used again. */
+  public onBedCooldown: ((remainingMs: number) => void) | null = null;
 
   /** Fired when the server responds to a player command. */
   public onCommandResponse: ((text: string, success: boolean) => void) | null = null;
@@ -714,6 +851,9 @@ export class NetworkManager {
   public onTombstoneSpawned: ((tombstone: import('../sim/Types').Tombstone) => void) | null = null;
   /** Fired when a tombstone is collected by a player. */
   public onTombstoneCollected: ((id: number, playerId: number) => void) | null = null;
+
+  /** Fired when a chat broadcast arrives from the server. */
+  public onChatMessage: ((channel: string, senderName: string, text: string) => void) | null = null;
   /** Fired when a tombstone despawns (15-min TTL expired). */
   public onTombstoneDespawned: ((id: number) => void) | null = null;
   /** Fired when the server sends tombstone item contents (response to tombstone_open). */
@@ -721,6 +861,228 @@ export class NetworkManager {
   
   constructor(config: NetworkConfig) {
     this.config = config;
+    // Expose browser-console debug helper: paste a GAME_STATE JSON string and
+    // get a full diagnostic without having to intercept a live tick.
+    (window as any).__debugGameState = (input: string | object) =>
+      NetworkManager.analyzeGameState(input);
+  }
+
+  /**
+   * Diagnose a raw GAME_STATE payload.
+   *
+   * Usage from the browser console:
+   *   __debugGameState('{"type":"GAME_STATE","tick":1,...}')
+   *   __debugGameState(someAlreadyParsedObject)
+   *
+   * Prints a structured report — no return value needed.
+   */
+  static analyzeGameState(input: string | object): void {
+    // ── 1. Parse ────────────────────────────────────────────────────────────
+    let gs: any;
+    if (typeof input === 'string') {
+      const raw = input.startsWith('GAME_STATE:') ? input.substring(11) : input;
+      try {
+        gs = JSON.parse(raw);
+      } catch (e) {
+        const head = raw.substring(0, 400);
+        const tail = raw.length > 400 ? `…${raw.substring(raw.length - 100)}` : '';
+        console.error(
+          `❌ [analyzeGameState] JSON.parse failed (${raw.length} bytes)\n` +
+          `  Error : ${e}\n` +
+          `  Head  : ${head}${tail}`
+        );
+        return;
+      }
+    } else {
+      gs = input;
+    }
+
+    const WARN = 'color:orange;font-weight:bold';
+    const ERR  = 'color:red;font-weight:bold';
+    const OK   = 'color:green;font-weight:bold';
+    const issues: Array<{ level: 'warn'|'error'; msg: string }> = [];
+    const w = (msg: string) => issues.push({ level: 'warn',  msg });
+    const e = (msg: string) => issues.push({ level: 'error', msg });
+
+    // ── 2. Top-level ────────────────────────────────────────────────────────
+    if (gs.type && gs.type !== 'GAME_STATE') e(`type="${gs.type}" — expected "GAME_STATE"`);
+    if (typeof gs.tick !== 'number')         e('missing numeric "tick"');
+
+    // ── 3. Per-typeId rules ──────────────────────────────────────────────────
+    // deck_id: null = field absent (old server), 0 = lower, 1 = upper, 255 = deck-independent
+    // required_fields: fields the server MUST send for this typeId
+    // deck_must: exact deck_id the module must carry (undefined = flexible)
+    type ModRule = {
+      name: string;
+      requiredFields?: string[];
+      deck_must?: number;    // exact required deck_id
+      deck_allow?: number[]; // allowed deck_id values (if not deck_must)
+      posRequired?: boolean; // must carry x/y
+      singleton?: boolean;   // at most one per ship
+    };
+    const TYPE_RULES: Record<number, ModRule> = {
+      0:  { name:'helm',           posRequired:true,  deck_allow:[0,1],    singleton:true,  requiredFields:['wheelRot','state']          },
+      1:  { name:'seat',           posRequired:true,  deck_allow:[0,1,255]                                                               },
+      2:  { name:'cannon',         posRequired:true,  deck_allow:[0,1],                     requiredFields:['aimDir','state','gunportSnapIdx'] },
+      3:  { name:'mast',           posRequired:true,  deck_must:255,                         requiredFields:['openness','sailAngle']       },
+      4:  { name:'steering-wheel', posRequired:true,  deck_allow:[0,1]                                                                   },
+      5:  { name:'ladder',         posRequired:true,  deck_must:255,       singleton:true                                                },
+      6:  { name:'plank',                             deck_allow:[0,1,255], requiredFields:['health','maxHealth']                        },
+      7:  { name:'deck',                              deck_allow:[0,1],    requiredFields:['health','stateBits']                         },
+      8:  { name:'swivel',         posRequired:true,  deck_allow:[0,1,255]                                                               },
+      9:  { name:'ramp',           posRequired:true,  deck_must:255                                                                      },
+      10: { name:'hatch_cover',    posRequired:true,  deck_allow:[0,1]                                                                   },
+      11: { name:'gunport',        posRequired:true,  deck_allow:[0,1],    requiredFields:['isOpen','snapIndex']                         },
+      13: { name:'chest',          posRequired:true,  deck_allow:[0,1,255]                                                               },
+      14: { name:'bed',            posRequired:true,  deck_allow:[0,1,255]                                                               },
+    };
+
+    // ── 4. Ships ─────────────────────────────────────────────────────────────
+    for (const ship of (gs.ships ?? [])) {
+      const sid = `ship[${ship.id ?? '?'}]`;
+      if (typeof ship.id       !== 'number') { e(`${sid}: missing id`);       continue; }
+      if (typeof ship.x        !== 'number') e(`${sid}: missing x`);
+      if (typeof ship.y        !== 'number') e(`${sid}: missing y`);
+      if (typeof ship.rotation !== 'number') e(`${sid}: missing rotation`);
+      if (!Number.isFinite(ship.x)) e(`${sid}: x=${ship.x} is not finite`);
+      if (!Number.isFinite(ship.y)) e(`${sid}: y=${ship.y} is not finite`);
+      if (!Array.isArray(ship.modules)) { e(`${sid}: modules is not an array`); continue; }
+
+      const seenIds = new Map<number, number>(); // id → first index
+      const singletons = new Set<number>();      // typeIds already seen once
+
+      const rows: Array<Record<string,string>> = [];
+      for (let mi = 0; mi < ship.modules.length; mi++) {
+        const mod = ship.modules[mi];
+        if (mod == null) { e(`${sid}[${mi}]: null/undefined module`); continue; }
+
+        const mid = `${sid}/mod[id=${mod.id ?? '?'} idx=${mi}]`;
+        if (typeof mod.id     === 'undefined') { e(`${mid}: missing id`);     continue; }
+        if (typeof mod.typeId === 'undefined') { e(`${mid}: missing typeId`); continue; }
+
+        const rule = TYPE_RULES[mod.typeId as number];
+        const typeName = rule?.name ?? `UNKNOWN(${mod.typeId})`;
+
+        // Duplicate ID
+        if (seenIds.has(mod.id)) {
+          e(`${mid}: DUPLICATE id — first seen at index ${seenIds.get(mod.id)}`);
+        } else {
+          seenIds.set(mod.id, mi);
+        }
+
+        // Unknown typeId
+        if (!rule) w(`${mid}: unknown typeId ${mod.typeId}`);
+
+        // Singleton (ladder, helm — only one per ship)
+        if (rule?.singleton) {
+          if (singletons.has(mod.typeId)) w(`${mid}: more than one ${typeName} on this ship`);
+          singletons.add(mod.typeId);
+        }
+
+        // deck_id checks
+        const dk: number | undefined = mod.deck_id;
+        if (dk !== undefined) {
+          if (dk !== 0 && dk !== 1 && dk !== 255)
+            e(`${mid}: deck_id=${dk} is not 0/1/255`);
+          if (rule?.deck_must !== undefined && dk !== rule.deck_must)
+            e(`${mid}: ${typeName} must have deck_id=${rule.deck_must} but got ${dk}`);
+          if (rule?.deck_allow && rule.deck_must === undefined && !rule.deck_allow.includes(dk))
+            w(`${mid}: ${typeName} has deck_id=${dk}, expected one of [${rule.deck_allow}]`);
+        } else if (rule?.deck_must !== undefined) {
+          w(`${mid}: ${typeName} missing deck_id (expected ${rule.deck_must})`);
+        }
+
+        // Positions
+        if (rule?.posRequired) {
+          if (mod.x === undefined || mod.y === undefined)
+            e(`${mid}: ${typeName} missing x/y position`);
+          else {
+            if (!Number.isFinite(mod.x)) e(`${mid}: x=${mod.x} is not finite`);
+            if (!Number.isFinite(mod.y)) e(`${mid}: y=${mod.y} is not finite`);
+            const dist = Math.sqrt(mod.x * mod.x + mod.y * mod.y);
+            if (dist > 500) w(`${mid}: position (${mod.x},${mod.y}) is >500px from ship center`);
+          }
+        }
+
+        // Health sanity
+        if (mod.health !== undefined && mod.maxHealth !== undefined &&
+            mod.maxHealth > 0 && mod.health > mod.maxHealth * 1.01)
+          e(`${mid}: health=${mod.health} > maxHealth=${mod.maxHealth}`);
+
+        // Required fields per type
+        for (const rf of (rule?.requiredFields ?? [])) {
+          if (mod[rf] === undefined) w(`${mid}: ${typeName} missing expected field "${rf}"`);
+        }
+
+        rows.push({
+          idx: String(mi),
+          id:  String(mod.id),
+          type: typeName,
+          deck: dk !== undefined ? String(dk) : '—',
+          pos: mod.x !== undefined ? `(${mod.x},${mod.y})` : '—',
+          health: mod.health !== undefined ? `${mod.health}/${mod.maxHealth ?? '?'}` : '—',
+        });
+      }
+
+      // Print module table for this ship
+      console.groupCollapsed(`  📦 ${sid}  (${ship.modules.length} modules, company=${ship.company ?? '?'})`);
+      console.table(rows);
+      console.groupEnd();
+    }
+
+    // ── 5. Players ──────────────────────────────────────────────────────────
+    for (const p of (gs.players ?? [])) {
+      const pid = `player[${p.id ?? '?'}]`;
+      if (typeof p.world_x !== 'number') e(`${pid}: missing world_x`);
+      if (typeof p.world_y !== 'number') e(`${pid}: missing world_y`);
+      if (!Number.isFinite(p.world_x))   e(`${pid}: world_x=${p.world_x} is not finite`);
+      if (!Number.isFinite(p.world_y))   e(`${pid}: world_y=${p.world_y} is not finite`);
+      if (p.parent_ship !== undefined && typeof p.parent_ship !== 'number')
+        w(`${pid}: parent_ship is "${p.parent_ship}" (expected number)`);
+      if (p.inventory) {
+        if (!Array.isArray(p.inventory.slots))
+          e(`${pid}: inventory.slots is not an array`);
+        else {
+          for (let si = 0; si < p.inventory.slots.length; si++) {
+            const slot = p.inventory.slots[si];
+            if (slot !== null && typeof slot === 'object' && typeof slot.item === 'undefined')
+              w(`${pid}: inventory.slots[${si}] missing "item" field`);
+          }
+        }
+      }
+    }
+
+    // ── 6. NPCs ─────────────────────────────────────────────────────────────
+    for (const n of (gs.npcs ?? [])) {
+      const nid = `npc[${n.id ?? '?'}]`;
+      if (!Number.isFinite(n.x)) e(`${nid}: x=${n.x} is not finite`);
+      if (!Number.isFinite(n.y)) e(`${nid}: y=${n.y} is not finite`);
+    }
+
+    // ── 7. Print summary ────────────────────────────────────────────────────
+    const sep = '─'.repeat(72);
+    const errors = issues.filter(i => i.level === 'error');
+    const warns  = issues.filter(i => i.level === 'warn');
+
+    console.group(
+      `%c🔍 analyzeGameState  tick=${gs.tick ?? '?'}  ` +
+      `ships=${gs.ships?.length ?? 0}  players=${gs.players?.length ?? 0}  npcs=${gs.npcs?.length ?? 0}`,
+      errors.length ? ERR : warns.length ? WARN : OK
+    );
+    if (errors.length === 0 && warns.length === 0) {
+      console.log('%c✅ No issues found', OK);
+    } else {
+      if (errors.length) {
+        console.log(`%c❌ ${errors.length} error(s):`, ERR);
+        for (const i of errors) console.error('  •', i.msg);
+      }
+      if (warns.length) {
+        console.log(`%c⚠ ${warns.length} warning(s):`, WARN);
+        for (const i of warns) console.warn('  •', i.msg);
+      }
+    }
+    console.log(sep);
+    console.groupEnd();
   }
   
   /**
@@ -1255,6 +1617,19 @@ export class NetworkManager {
     this.sendMessage(message);
   }
 
+  /** Toggle gunports open/closed for all cannons in the given weapon group indices (R key at helm). */
+  sendGroupGunportToggle(groupIndices: number[]): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'gunport_group_toggle', groups: groupIndices, timestamp: Date.now() }));
+    console.log(`🔳 Group gunport toggle → groups=[${groupIndices.join(',')}]`);
+  }
+
+  /** Rename a weapon group on the given ship. Max 23 chars. */
+  sendRenameWeaponGroup(shipId: number, groupIndex: number, name: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'rename_weapon_group', shipId, groupIndex, name: name.slice(0, 23), timestamp: Date.now() }));
+  }
+
   /**
    * Force-reload the player's manned cannon, discarding the current round.
    * Tells the server to reset the reload timer so the cannon reloads immediately
@@ -1283,6 +1658,16 @@ export class NetworkManager {
   sendDropItem(slot: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.DROP_ITEM, timestamp: Date.now(), slot });
+  }
+
+  sendDropResources(kind: string, amount: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.DROP_RESOURCES, timestamp: Date.now(), kind, amount });
+  }
+
+  sendChatMessage(channel: string, text: string): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.CHAT_MESSAGE, timestamp: Date.now(), channel, text });
   }
 
   sendPickupItem(itemId: number): void {
@@ -1331,9 +1716,11 @@ export class NetworkManager {
    * Request the server to place a plank in a missing hull slot.
    * Server picks the first destroyed plank (100-109) and restores it, consuming 1 ITEM_PLANK.
    */
-  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number): void {
+  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex });
+    const msg: PlacePlankMessage = { type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex, resource_source: resourceSource };
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
   }
 
   /**
@@ -1418,9 +1805,11 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag', x: number, y: number, rotationDeg = 0): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed', x: number, y: number, rotationDeg = 0, underConstruction = false): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg });
+    const msg: PlaceStructureMessage = { type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg };
+    if (underConstruction) msg.under_construction = true;
+    this.sendMessage(msg);
   }
 
   /** Send a ship-construction action to the server. */
@@ -1443,6 +1832,18 @@ export class NetworkManager {
   sendStructureLock(structureId: number, locked: boolean): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.socket.send(JSON.stringify({ type: 'structure_lock', timestamp: Date.now(), structure_id: structureId, locked }));
+  }
+
+  /** Request the player's current schematic (blueprint) list from the server. */
+  sendRequestSchematics(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'request_schematics', timestamp: Date.now() }));
+  }
+
+  /** Craft one item from the schematic at the given index (must be at a workbench). */
+  sendCraftBlueprint(index: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: 'craft_blueprint', timestamp: Date.now(), index }));
   }
 
   sendDemolishStructure(structureId: number): void {
@@ -1508,9 +1909,13 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_CANNON from the player's inventory.
    */
-  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number): void {
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+    const msg: any = { type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
+    if (snapIndex !== undefined && snapIndex >= 0 && snapIndex <= 11) msg.snapIndex = snapIndex;
+    if (deckId !== undefined) msg.deckId = deckId;
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
   }
 
   /**
@@ -1528,9 +1933,11 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates.
    * Consumes 1 ITEM_SAIL from the player's inventory.
    */
-  sendPlaceMastAt(shipId: number, localX: number, localY: number): void {
+  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY });
+    const msg: any = { type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY, resource_source: resourceSource };
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
   }
 
   /**
@@ -1538,27 +1945,123 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_SWIVEL from the player's inventory.
    */
-  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number): void {
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation });
+    const msg: any = { type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
+    if (deckId !== undefined) msg.deckId = deckId;
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
+  }
+
+  /**
+   * Request the server to place a resource chest at a free position on the player's ship or on land.
+   * Consumes 1 ITEM_RESOURCE_CHEST from the player's inventory.
+   */
+  sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: any = { type: MessageType.PLACE_CHEST_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
+    if (shipId !== null) msg.shipId = shipId;
+    if (deckId !== undefined) msg.deckId = deckId;
+    this.sendMessage(msg);
+  }
+
+  sendPlaceBedAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: any = { type: MessageType.PLACE_BED_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
+    if (shipId !== null) msg.shipId = shipId;
+    if (deckId !== undefined) msg.deckId = deckId;
+    this.sendMessage(msg);
+  }
+
+  /**
+   * Transfer resources between a chest module and the player's own inventory.
+   * direction: 'deposit' = player inventory → chest; 'withdraw' = chest → player inventory.
+   */
+  sendChestTransfer(shipId: number, moduleId: number, item: string, quantity: number, direction: 'deposit' | 'withdraw'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.CHEST_TRANSFER, timestamp: Date.now(), shipId, moduleId, item, quantity, direction });
+  }
+
+  /**
+   * Transfer resources between a land chest (placed structure) and the player's pack.
+   * direction: 'deposit' = player → chest; 'withdraw' = chest → player.
+   */
+  sendLandChestTransfer(structureId: number, item: string, quantity: number, direction: 'deposit' | 'withdraw'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.LAND_CHEST_TRANSFER, timestamp: Date.now(), structure_id: structureId, item, quantity, direction });
+  }
+
+  sendLandChestDrop(structureId: number, item: string, quantity: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.LAND_CHEST_DROP, timestamp: Date.now(), structure_id: structureId, item, quantity });
   }
 
   /**
    * Request the server to replace the helm if it was destroyed.
    * Consumes 1 ITEM_HELM from the player's inventory.
    */
-  sendReplaceHelm(shipId: number): void {
+  sendReplaceHelm(shipId: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId });
+    this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId, resource_source: resourceSource });
   }
 
   /**
    * Request the server to place a missing deck module on the player's ship.
    * Consumes 1 ITEM_DECK from the player's inventory.
    */
-  sendPlaceDeck(): void {
+  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
-    this.sendMessage({ type: MessageType.PLACE_DECK, timestamp: Date.now() });
+    const msg: PlaceDeckMessage = { type: MessageType.PLACE_DECK, timestamp: Date.now(), deck_level: deckLevel, resource_source: resourceSource };
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
+    this.sendMessage(msg);
+  }
+
+  /**
+   * Request the server to place a ramp at the given snap-point index on the player's ship.
+   * Consumes 1 ITEM_RAMP from the player's inventory.
+   */
+  sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_RAMP, timestamp: Date.now(), shipId, snapIndex, rotation, resource_source: resourceSource });
+  }
+
+  /**
+   * Request the server to place a hatch cover at the given snap-point index on the player's ship.
+   * Consumes 1 ITEM_WOOD_CEILING from the player's inventory.
+   * Mutually exclusive with a ramp at the same snap point.
+   */
+  sendPlaceHatchCover(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_HATCH_COVER, timestamp: Date.now(), shipId, snapIndex, resource_source: resourceSource });
+  }
+
+  /**
+   * Request the server to place a gunport door at the given snap-point index (0-11) on the player's ship.
+   * Consumes 1 ITEM_DOOR from the player's inventory.
+   */
+  sendPlaceGunport(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLACE_GUNPORT, timestamp: Date.now(), shipId, snapIndex, resource_source: resourceSource });
+  }
+
+  /**
+   * Request the server to toggle a gunport open/closed.
+   * Can be called when player is near a gunport (E-key), mounted at a cannon at that gunport (R-key),
+   * or at the helm with a weapon group selected (R-key toggles all gunports in the group).
+   */
+  sendToggleGunport(shipId: number, gunportId: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.TOGGLE_GUNPORT, timestamp: Date.now(), shipId, gunportId });
+  }
+
+  /**
+   * Notify the server when the local player's deck-level state machine
+   * transitions (fall through hole / climb ramp). The server uses this to
+   * filter per-deck module collisions (lower deck → only masts collide).
+   */
+  sendPlayerSetDeck(deckLevel: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.PLAYER_SET_DECK, timestamp: Date.now(), deckLevel });
   }
 
   /**
@@ -1706,15 +2209,24 @@ export class NetworkManager {
   }
 
   /** Send a respawn request to the server.
-   *  Pass shipId to spawn aboard a friendly ship, or worldX/worldY to spawn at a world position. */
-  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number, islandId?: number): void {
+   *  Pass shipId to spawn aboard a friendly ship, worldX/worldY to spawn at a world position,
+   *  or bedRespawn=true to spawn at the player's stored bed location. */
+  sendRespawnRequest(shipId?: number, worldX?: number, worldY?: number, islandId?: number, bedRespawn?: boolean): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: Record<string, unknown> = { type: MessageType.RESPAWN_REQUEST };
-    if (shipId !== undefined) msg.shipId = shipId;
-    if (worldX !== undefined) msg.worldX = worldX;
-    if (worldY !== undefined) msg.worldY = worldY;
+    if (bedRespawn) { msg.bedRespawn = true; }
+    else if (shipId !== undefined) msg.shipId = shipId;
+    else if (worldX !== undefined) msg.worldX = worldX;
+    else if (worldY !== undefined) msg.worldY = worldY;
     if (islandId !== undefined) msg.islandId = islandId;
     this.socket.send(JSON.stringify(msg));
+  }
+
+  /** Use a bed item while on a ship to set the ship as the respawn point.
+   *  The server consumes 1 bed item and sets respawn_ship_id. */
+  sendUseBedOnShip(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.socket.send(JSON.stringify({ type: MessageType.USE_BED_ON_SHIP }));
   }
 
   sendRenameShip(shipId: number, name: string): void {
@@ -1791,7 +2303,14 @@ export class NetworkManager {
                 timestamp: Date.now()
               };
             } catch (parseError) {
-              console.warn('Failed to parse GAME_STATE:', data);
+              const raw = data.substring(11);
+              const head = raw.substring(0, 300);
+              const tail = raw.length > 300 ? `…${raw.substring(raw.length - 100)}` : '';
+              console.error(
+                `❌ [GAME_STATE] JSON.parse failed (payload ${raw.length} bytes)\n` +
+                `  Error : ${parseError}\n` +
+                `  Head  : ${head}${tail}`
+              );
               return;
             }
           } else {
@@ -1867,6 +2386,7 @@ export class NetworkManager {
         
       case 'GAME_STATE': // Handle server's GAME_STATE response
         // Convert server GAME_STATE to client WorldState format
+        try {
         const worldState: WorldState = {
           tick: message.tick || 0,
           timestamp: Date.now(),
@@ -1880,8 +2400,9 @@ export class NetworkManager {
             if (!this._shipTemplates.has(shipId)) {
               const s = createShipAtPosition(Vec2.from(0, 0), 0);
               const shipSeq = (ship.seq !== undefined ? ship.seq : shipId) & 0xFF;
-              const MID_PLANK_BASE = 0x0C;            // MODULE_OFFSET_PLANK(0)
-              const MID_DECK       = 0x16;            // MODULE_OFFSET_DECK
+              const MID_PLANK_BASE  = 0x0C;           // MODULE_OFFSET_PLANK(0)
+              const MID_DECK_LOWER  = 0x16;           // MODULE_OFFSET_DECK_LOWER
+              const MID_DECK_UPPER  = 0x17;           // MODULE_OFFSET_DECK_UPPER
               let plankIdx = 0;
               s.modules = s.modules.map(m => {
                 if (m.kind === 'plank') {
@@ -1889,7 +2410,9 @@ export class NetworkManager {
                   return { ...m, id: newId };
                 }
                 if (m.kind === 'deck') {
-                  return { ...m, id: (shipSeq << 8) | MID_DECK };
+                  // Assign distinct IDs per deck level so hammer targeting works correctly
+                  const deckOff = m.deckId === 1 ? MID_DECK_UPPER : MID_DECK_LOWER;
+                  return { ...m, id: (shipSeq << 8) | deckOff };
                 }
                 return m;
               });
@@ -1919,13 +2442,18 @@ export class NetworkManager {
               const gameplayModules: ShipModule[] = [];
               const plankHealthBuf = this._plankHealthBuf;
               plankHealthBuf.clear();
-              let deckStateBitsFromServer: number | undefined;
-              let hasDeckFromServer = false;
-              let deckHealthFromServer:       number | undefined;
-              let deckTargetHealthFromServer: number | undefined;
-              let deckMaxHealthFromServer:    number | undefined;
+              // Track health per deck_id (0=lower, 1=upper) — replaced single-deck variables
+              const deckHealthMap = new Map<number, { health: number; targetHealth: number; maxHealth: number; stateBits: number }>();
               
               for (const mod of ship.modules) {
+                if (mod == null) {
+                  console.warn(`⚠ [GAME_STATE] ship ${ship.id}: null/undefined module entry — skipping`);
+                  continue;
+                }
+                if (typeof mod.id === 'undefined' || typeof mod.typeId === 'undefined') {
+                  console.warn(`⚠ [GAME_STATE] ship ${ship.id}: module missing id or typeId:`, mod);
+                  continue;
+                }
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
@@ -1937,17 +2465,17 @@ export class NetworkManager {
                   });
                 } else if (kind === 'deck') {
                   // Deck: client generates polygon from hull; only include if server confirms it exists
-                  // AND its health is > 0. Health=0 means destroyed — treat as absent so the hull
-                  // stops rendering the filled deck even if the server still broadcasts the slot.
+                  // AND its health is > 0. Health=0 means destroyed — treat as absent.
                   const deckHealth = mod.health ?? 1; // fall back to 1 (alive) for old server builds
                   if (deckHealth > 0) {
-                    hasDeckFromServer = true;
-                    deckHealthFromServer       = mod.health;
-                    deckTargetHealthFromServer = mod.targetHealth ?? mod.maxHealth;
-                    deckMaxHealthFromServer    = mod.maxHealth;
-                    if (mod.stateBits !== undefined) {
-                      deckStateBitsFromServer = mod.stateBits ?? 0;
-                    }
+                    // deck_id 0=lower, 1=upper; old server (no deck_id field) defaults to 0
+                    const deckId = mod.deck_id ?? 0;
+                    deckHealthMap.set(deckId, {
+                      health:       mod.health         ?? deckHealth,
+                      targetHealth: mod.targetHealth   ?? mod.maxHealth ?? deckHealth,
+                      maxHealth:    mod.maxHealth      ?? deckHealth,
+                      stateBits:    mod.stateBits      ?? 0,
+                    });
                   }
                 } else {
                   // Gameplay modules: Full transform data from server
@@ -1967,6 +2495,7 @@ export class NetworkManager {
                       targetHealth: mod.targetHealth ?? mod.maxHealth ?? 8000,
                       maxHealth: mod.maxHealth ?? 8000,
                       stateBits: mod.state ?? 0,
+                      gunportSnapIdx: mod.gunportSnapIdx ?? 255,
                     };
                   } else if (kind === 'helm' || kind === 'steering-wheel') {
                     moduleData = {
@@ -2020,37 +2549,62 @@ export class NetworkManager {
                       targetHealth: mod.targetHealth ?? mod.maxHealth ?? 4000,
                       maxHealth: mod.maxHealth ?? 4000,
                     };
+                  } else if (kind === 'gunport') {
+                    moduleData = {
+                      kind: 'gunport',
+                      // is_open is encoded in the server's stateBits or a custom field
+                      isOpen: !!(mod.isOpen ?? mod.is_open ?? false),
+                      snapIndex: mod.snapIndex ?? -1,
+                    };
+                  } else if (kind === 'chest') {
+                    moduleData = {
+                      kind: 'chest',
+                      wood:        mod.wood        ?? 0,
+                      fiber:       mod.fiber       ?? 0,
+                      metal:       mod.metal       ?? 0,
+                      stone:       mod.stone       ?? 0,
+                    };
                   }
                   
+                  // Guard against duplicate IDs sent by the server (e.g. the ladder
+                  // being emitted twice when loading from a save that was written
+                  // before the world_save dedup fix landed).
+                  if (gameplayModules.some(m => m.id === mod.id)) continue;
                   gameplayModules.push({
                     id: mod.id,
                     kind: kind,
-                    deckId: 0,
-                    localPos: Vec2.from(mod.x || 0, mod.y || 0),
-                    localRot: mod.rotation || 0,
+                    deckId: mod.deck_id ?? 255, // 255=deck-independent fallback; 0=lower, 1=upper when server sends it
+                    localPos: Vec2.from(mod.x ?? 0, mod.y ?? 0),
+                    localRot: mod.rotation ?? 0,
                     occupiedBy: null,
                     stateBits: mod.state ?? 0,
+                    qualityTier: typeof mod.qt === 'number' && mod.qt >= 0 ? mod.qt : undefined,
+                    qualityWeaponDmgQ8: typeof mod.qw === 'number' ? mod.qw : undefined,
+                    qualitySailEffQ8: typeof mod.qse === 'number' ? mod.qse : undefined,
                     moduleData: moduleData
                   } as ShipModule);
                 }
               }
               
               // Merge: Keep client-generated planks/deck (shallow-cloned from template) + server gameplay modules.
-              // Deck is only included when the server confirmed it exists — skeleton ships have no deck.
-              // Plank objects are cloned so health can be updated per-tick without mutating the template.
-              const clientDeck = hasDeckFromServer ? tmpl.deck.map(p => {
-                const dmd = p.moduleData as any;
-                return {
-                  ...p,
-                  stateBits: deckStateBitsFromServer !== undefined ? deckStateBitsFromServer : p.stateBits,
-                  moduleData: dmd ? {
-                    ...dmd,
-                    health:       deckHealthFromServer       ?? dmd.health,
-                    targetHealth: deckTargetHealthFromServer ?? dmd.targetHealth,
-                    maxHealth:    deckMaxHealthFromServer    ?? dmd.maxHealth,
-                  } : dmd,
-                } as ShipModule;
-              }) : [];
+              // Only include each template deck if the server reported that deck level as present.
+              // This ensures lower and upper deck health are tracked independently.
+              const clientDeck = tmpl.deck
+                .filter(p => deckHealthMap.has(p.deckId))
+                .map(p => {
+                  const dmd  = p.moduleData as any;
+                  const dhd  = deckHealthMap.get(p.deckId)!;
+                  return {
+                    ...p,
+                    stateBits: dhd.stateBits,
+                    moduleData: dmd ? {
+                      ...dmd,
+                      health:       dhd.health,
+                      targetHealth: dhd.targetHealth,
+                      maxHealth:    dhd.maxHealth,
+                    } : dmd,
+                  } as ShipModule;
+                });
 
               // Include ALL 10 template plank slots. Slots the server reports get real health;
               // slots absent from the server (never placed or destroyed) get health=0 so the
@@ -2100,6 +2654,7 @@ export class NetworkManager {
               companyId: ship.company ?? 0,
               shipType: ship.shipType ?? 3,
               shipName: ship.name ?? '',
+              npcLevel: ship.npcLevel != null ? (ship.npcLevel as number) : undefined,
               levelStats: ship.levelStats ? {
                 levels: [
                   ship.levelStats.weight     ?? 1,
@@ -2142,7 +2697,7 @@ export class NetworkManager {
             rotation: player.rotation || 0, // Server sends rotation (facing direction)
             radius: player.radius || 8,
             carrierId: player.parent_ship || 0, // Server sends parent_ship
-            deckId: player.deckId || 0,
+            deckId: player.deck_index ?? player.deck_level ?? player.deckId ?? 1, // deck_level: 0=lower, 1=upper (default upper)
             onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
             
             // Local (ship-relative) position when on a ship
@@ -2174,6 +2729,10 @@ export class NetworkManager {
                   player.inventory.equip?.feet   ?? 0,
                   player.inventory.equip?.hands  ?? 0,
                   player.inventory.equip?.shield ?? 0,
+                  player.inventory.res_wood  ?? 0,
+                  player.inventory.res_fiber ?? 0,
+                  player.inventory.res_metal ?? 0,
+                  player.inventory.res_stone ?? 0,
                 )
               : createEmptyInventory(),
 
@@ -2229,6 +2788,7 @@ export class NetworkManager {
             statWeight:  n.stat_weight  ?? 0,
             statPoints:  n.stat_points  ?? 0,
             locked:      !!(n.locked),
+            deckLevel:   n.deck_level   ?? 1,
           })),
           carrierDetection: new Map(), // Will be populated as needed
           tombstones: (message.tombstones ?? []).map((t: any) => ({
@@ -2257,6 +2817,15 @@ export class NetworkManager {
         // Parse world wind fields attached to GAME_STATE
         if (typeof message.windAngle    === 'number') this.windAngle    = message.windAngle;
         if (typeof message.windStrength === 'number') this.windStrength = message.windStrength;
+        } catch (gsErr: any) {
+          console.error(
+            `❌ [GAME_STATE] Processing threw on tick ${message?.tick ?? '?'}\n` +
+            `  Error : ${gsErr?.message ?? gsErr}\n` +
+            `  Stack : ${gsErr?.stack ?? '(no stack)'}`
+          );
+          // Run the full structural analyser so the console shows exactly what's wrong
+          NetworkManager.analyzeGameState(message);
+        }
         break;
         
       case MessageType.PONG: // Handles both 'pong' enum and text response
@@ -2406,8 +2975,29 @@ export class NetworkManager {
           mode: g.mode ?? 'haltfire',
           cannonIds: Array.isArray(g.cannonIds) ? g.cannonIds.map((id: any) => Number(id)) : [],
           targetShipId: g.targetShipId ?? 0,
+          gunportsOpen: !!g.gunportsOpen,
+          name: typeof g.name === 'string' ? g.name : '',
         })) : [];
         this.onCannonGroupState?.(gsShipId, gsGroups);
+        break;
+      }
+
+      case 'gunport_state': {
+        const gpShipId: number = message.shipId || 0;
+        const gpId: number = message.gunportId || 0;
+        const gpOpen: boolean = !!message.isOpen;
+        const gpMass: number | undefined = typeof message.mass === 'number' ? message.mass : undefined;
+        this.onGunportState?.(gpShipId, gpId, gpOpen, gpMass);
+        break;
+      }
+
+      case 'gunport_blocked': {
+        // Only process if this message is for the local player
+        if (message.player_id === this.assignedPlayerId) {
+          const gpbCannonId: number = message.cannon_id || 0;
+          const gpbGunportId: number = message.gunport_id || 0;
+          this.onGunportBlocked?.(gpbCannonId, gpbGunportId);
+        }
         break;
       }
 
@@ -2665,6 +3255,8 @@ export class NetworkManager {
                    : s.structure_type === 'flag_fort'    ? 'flag_fort'
                    : s.structure_type === 'claim_flag'   ? 'claim_flag'
                    : s.structure_type === 'company_fortress' ? 'company_fortress'
+                   : s.structure_type === 'chest'        ? 'chest'
+                   : s.structure_type === 'bed'          ? 'bed'
                    : 'wooden_floor',
           islandId:  s.island_id ?? 0,
           x:         s.x ?? 0,
@@ -2694,6 +3286,14 @@ export class NetworkManager {
           claimPhaseProgressMs:  typeof s.claim_progress_ms === 'number' && s.claim_phase === 0 ? s.claim_progress_ms : undefined,
           claimPhaseTotalMs:     typeof s.claim_total_ms === 'number' ? s.claim_total_ms : undefined,
           targetHp:              typeof s.target_hp === 'number' ? s.target_hp : undefined,
+          chestResources: s.structure_type === 'chest' ? {
+            wood:  s.chest_wood  ?? 0,
+            fiber: s.chest_fiber ?? 0,
+            metal: s.chest_metal ?? 0,
+            stone: s.chest_stone ?? 0,
+          } : undefined,
+          wreckTier: typeof s.wreck_tier === 'number' ? s.wreck_tier : undefined,
+          qualityTier: typeof s.qt === 'number' && s.qt >= 0 ? s.qt : undefined,
           construction: s.structure_type === 'shipyard' ? {
             phase: (s.construction_phase === 'building' ? 'building' : 'empty') as ConstructionPhase,
             modulesPlaced: Array.isArray(s.modules_placed) ? s.modules_placed : [],
@@ -2718,6 +3318,8 @@ export class NetworkManager {
                    : message.structure_type === 'flag_fort'    ? 'flag_fort'
                    : message.structure_type === 'claim_flag'   ? 'claim_flag'
                    : message.structure_type === 'company_fortress' ? 'company_fortress'
+                   : message.structure_type === 'chest'        ? 'chest'
+                   : message.structure_type === 'bed'          ? 'bed'
                    : 'wooden_floor',
           islandId:  message.island_id ?? 0,
           x:         message.x ?? 0,
@@ -2745,6 +3347,14 @@ export class NetworkManager {
           claimPhaseProgressMs: typeof message.claim_progress_ms === 'number' && message.claim_phase === 0 ? message.claim_progress_ms : undefined,
           claimPhaseTotalMs:    typeof message.claim_total_ms === 'number' ? message.claim_total_ms : undefined,
           targetHp:             typeof message.target_hp === 'number' ? message.target_hp : undefined,
+          chestResources: message.structure_type === 'chest' ? {
+            wood:  message.chest_wood  ?? 0,
+            fiber: message.chest_fiber ?? 0,
+            metal: message.chest_metal ?? 0,
+            stone: message.chest_stone ?? 0,
+          } : undefined,
+          wreckTier: typeof message.wreck_tier === 'number' ? message.wreck_tier : undefined,
+          qualityTier: typeof message.qt === 'number' && message.qt >= 0 ? message.qt : undefined,
         };
         this.onStructurePlaced?.(sp);
         break;
@@ -2761,6 +3371,7 @@ export class NetworkManager {
           hp:        message.loot_count ?? 1,
           maxHp:     message.loot_count ?? 1,
           placerName: 'shipwreck',
+          wreckTier: typeof message.wreck_tier === 'number' ? message.wreck_tier : undefined,
         };
         this.onWreckSpawned?.(w);
         this.onStructurePlaced?.(w);
@@ -2890,6 +3501,19 @@ export class NetworkManager {
         this.onDoorLockToggled?.(message.id ?? 0, message.locked === true, message.open === true);
         break;
 
+      case 'bed_used':
+        this.onBedUsed?.(
+          message.bed_id  as number | undefined,
+          message.x       as number | undefined,
+          message.y       as number | undefined,
+          message.ship_id as number | undefined,
+        );
+        break;
+
+      case 'bed_cooldown':
+        this.onBedCooldown?.(message.remaining_ms as number ?? 0);
+        break;
+
       case 'structure_demolished':
         this.onStructureDemolished?.(
           message.structure_id ?? message.id ?? 0,
@@ -2971,6 +3595,14 @@ export class NetworkManager {
         this.onCraftingOpen?.(message.structure_id ?? 0, message.structure_type ?? 'workbench');
         break;
 
+      case 'land_chest_state': {
+        const res = { wood: message.wood ?? 0, fiber: message.fiber ?? 0, metal: message.metal ?? 0, stone: message.stone ?? 0 };
+        const playerRes = (message.player_wood != null) ? { wood: message.player_wood ?? 0, fiber: message.player_fiber ?? 0, metal: message.player_metal ?? 0, stone: message.player_stone ?? 0 } : undefined;
+        const readOnly = message.read_only === true;
+        this.onLandChestState?.(message.structure_id ?? 0, res, playerRes, readOnly);
+        break;
+      }
+
       case 'shipyard_state': {
         const phase = message.phase === 'building' ? 'building' : 'empty' as const;
         const modules: string[] = Array.isArray(message.modules_placed) ? message.modules_placed : [];
@@ -2979,7 +3611,7 @@ export class NetworkManager {
       }
 
       case 'shipyard_action_fail':
-        // Surface failure reason as a general announcement if needed (handled in ClientApplication)
+        this.onShipyardActionFail?.(message.reason ?? 'unknown');
         break;
 
       case 'FLAME_CONE_FIRE': // legacy — ignore
@@ -3114,6 +3746,44 @@ export class NetworkManager {
         break;
       }
 
+      case 'schematic_list': {
+        const rawItems: any[] = Array.isArray(message.items) ? message.items : [];
+        const items: SchematicEntry[] = rawItems.map((it: any) => ({
+          index:  typeof it.i === 'number' ? it.i : 0,
+          item:   typeof it.item === 'number' ? it.item : 0,
+          quality: typeof it.q === 'number' ? it.q : 0,
+          tier:   typeof it.tier === 'number' ? it.tier : 0,
+          crafts: typeof it.crafts === 'number' ? it.crafts : 0,
+          stats:  Array.isArray(it.stats) ? it.stats.map((s: any) => (typeof s === 'number' ? s : 0)) : [0, 0, 0, 0, 0],
+        }));
+        this.onSchematicList?.(items);
+        break;
+      }
+
+      case 'salvage_blueprint': {
+        this.onSalvageBlueprint?.(
+          message.item ?? 0,
+          message.tier ?? 0,
+          message.crafts ?? 0,
+          message.wreck_id ?? 0,
+          message.bp_remaining ?? 0,
+          message.loot_remaining ?? 0,
+        );
+        break;
+      }
+
+      case 'craft_blueprint_result': {
+        this.onCraftBlueprintResult?.(
+          message.success === true,
+          message.index ?? -1,
+          message.reason ?? '',
+          message.item ?? 0,
+          message.tier ?? 0,
+          message.crafts_remaining ?? 0,
+        );
+        break;
+      }
+
       case 'place_structure_fail':
         console.warn(`[place_structure_fail] type=${message.structure_type ?? '?'} reason=${message.reason ?? '?'} pos=(${message.x ?? '?'}, ${message.y ?? '?'})${message.blocker_id != null ? ` blocker_id=${message.blocker_id}` : ''}`);
         this.onPlacementFailed?.(
@@ -3165,6 +3835,14 @@ export class NetworkManager {
 
       case 'tombstone_collect_fail':
         // silently ignore — server already sent reason
+        break;
+
+      case MessageType.CHAT_BROADCAST:
+        this.onChatMessage?.(
+          message.channel   ?? 'global',
+          message.senderName ?? 'Unknown',
+          message.text       ?? ''
+        );
         break;
 
       case 'message_ack':

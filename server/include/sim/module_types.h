@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "core/math.h"
+#include "net/quality_payload.h"
 
 /** Cannon reload time: shared by all sources so every cannon reloads identically. */
 #define CANNON_RELOAD_TIME_MS 3000
@@ -26,7 +27,13 @@ typedef enum {
     MODULE_TYPE_PLANK = 6,          // Hull segment
     MODULE_TYPE_DECK = 7,           // Floor surface
     MODULE_TYPE_SWIVEL = 8,         // Swivel gun — fast, low-damage, anti-personnel
-    MODULE_TYPE_CUSTOM = 255        // User-defined
+    MODULE_TYPE_RAMP         = 9,   // Deck ramp — connects lower and upper deck levels
+    MODULE_TYPE_HATCH_COVER  = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
+    MODULE_TYPE_GUNPORT      = 11,  // Gunport — openable hole in hull plank for lower-deck cannons
+    MODULE_TYPE_WORKBENCH    = 12,  // Workbench — required on ship to build any ship module
+    MODULE_TYPE_CHEST        = 13,  // Storage chest — on-ship loot/storage container
+    MODULE_TYPE_BED          = 14,  // Bed — sets ship respawn point for crewmates
+    MODULE_TYPE_CUSTOM       = 255  // User-defined
 } ModuleTypeId;
 
 /**
@@ -64,6 +71,8 @@ typedef struct {
     q16_t aim_direction;         // Current angle the cannon is rotated to
     q16_t desired_aim_direction; // Target angle — actual rotates toward this each tick
     uint8_t ammunition;         // Remaining ammunition
+    uint8_t gunport_snap_idx;   // Snap index (0-11) of associated gunport; 0xFF = not linked
+    uint8_t _pad[2];            // Explicit alignment padding
     uint32_t time_since_fire;   // Time since last fire (ms)
     uint32_t reload_time;       // Time required to reload (ms)
 } CannonModuleData;
@@ -103,6 +112,17 @@ typedef struct {
 } PlankModuleData;
 
 /**
+ * Gunport — openable hole in a flat hull plank for lower-deck cannons.
+ * is_open: 0 = closed (cover flush with hull), 1 = open (hole exposed).
+ * Gunports cannot be damaged; they are placed and demolished by the player.
+ */
+typedef struct {
+    uint8_t is_open;   // 0 = closed, 1 = open
+    uint8_t snap_idx;  // Which snap point this gunport occupies (0-11); 0xFF = unset
+    uint8_t _pad[2];   // alignment
+} GunportModuleData;
+
+/**
  * Swivel gun — fast, low-damage, anti-personnel weapon mounted at ship edges.
  */
 typedef struct {
@@ -115,40 +135,52 @@ typedef struct {
 } SwivelModuleData;
 
 /**
+ * Chest-specific module data — stores raw resources on a ship.
+ */
+typedef struct {
+    uint16_t wood;
+    uint16_t fiber;
+    uint16_t metal;
+    uint16_t stone;
+    uint8_t  _pad[4];
+} ChestModuleData;
+
+/**
+ * Bed-specific module data — no persistent state needed beyond position/deck.
+ */
+typedef struct {
+    uint8_t _pad[8];
+} BedModuleData;
+
+/**
  * Generic ship module structure
  */
 typedef struct {
     uint16_t id;                // Unique module ID
     ModuleTypeId type_id;       // Module type (for network)
-    uint16_t deck_id;           // Which deck this module belongs to
+    uint8_t deck_id;            // Which deck this module belongs to (0=lower, 1=upper, 255=none)
     Vec2Q16 local_pos;          // Position relative to ship center
     q16_t local_rot;            // Rotation relative to ship
     uint16_t state_bits;        // Compact state flags
     q16_t health;               // Current HP (all module types)
     q16_t target_health;        // Repair ceiling (planks only) — decreases with damage;
-                                //   player must spend wood to raise it back toward max_health
-    q16_t max_health;           // Maximum HP:
-                                //   plank: 10000, cannon: 8000
-                                //   mast: 15000, helm: 10000
-    
-    // Type-specific data (union to save memory)
+    q16_t max_health;           // Maximum HP
+
     union {
-        CannonModuleData cannon;
-        MastModuleData mast;
-        HelmModuleData helm;
-        SeatModuleData seat;
-        PlankModuleData plank;
-        SwivelModuleData swivel;
+        CannonModuleData  cannon;
+        MastModuleData    mast;
+        HelmModuleData    helm;
+        SeatModuleData    seat;
+        PlankModuleData   plank;
+        SwivelModuleData  swivel;
+        GunportModuleData gunport;
+        ChestModuleData   chest;
+        BedModuleData     bed;
     } data;
 
-    // Status effects (separate from type-specific data)
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
-
-    /* player_id of the player currently mounted here (0 = none).
-     * Set by handle_cannon_interact / handle_swivel_interact and cleared on
-     * dismount.  NPCs check this so they never attempt to occupy a cannon
-     * that a player is already manning. */
     uint32_t player_mounted_id;
+    QualityPayload quality;  // rolled quality of source item (quality_q8==0 = plain)
 } ShipModule;
 
 /**
@@ -164,6 +196,14 @@ typedef struct {
  * Create a default module of specified type
  */
 ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t rotation);
+
+/**
+ * Apply a rolled quality payload to a freshly-placed module.
+ * Stores the payload and scales HP (and sail fiber HP) by the durability
+ * multiplier. No-op for plain items (quality_q8 == 0). Self-contained: only
+ * uses QualityPayload (no link against net/quality).
+ */
+void module_apply_quality(ShipModule* module, const QualityPayload* q);
 
 /**
  * Update module state based on gameplay

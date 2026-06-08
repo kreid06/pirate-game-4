@@ -12,7 +12,7 @@
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 #define WS_MAX_CLIENTS    100
-#define MAX_SIMPLE_SHIPS  50
+#define MAX_SIMPLE_SHIPS  200
 
 /* Ship sinking animation duration */
 #define SHIP_SINK_DURATION_MS  8000
@@ -106,6 +106,9 @@ bool is_outside_deck(uint16_t ship_id, float local_x, float local_y);
 
 void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y);
 void dismount_player_from_ship(WebSocketPlayer* player, const char* reason);
+/** Recompute ship->mass from hull base + all aboard players' body + inventory weights.
+ *  Also syncs the sim ship's Q16 mass and moment_inertia. Safe to call with NULL. */
+void recalc_ship_mass(SimpleShip* ship);
 
 void websocket_server_broadcast(const char* message);
 
@@ -122,7 +125,11 @@ bool is_allied(uint8_t a, uint8_t b);
 void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShip* ship);
 WeaponGroup* find_weapon_group(uint16_t ship_id, uint32_t cannon_id, uint8_t company_id);
 void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw, WebSocketPlayer* player, uint8_t ammo_type);
+void res_refund_module_demolish(WebSocketPlayer *player, ModuleTypeId type, q16_t health, q16_t max_health);
 bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
 void broadcast_json_all(const char* json);
 void update_flame_waves(uint32_t time_elapsed);
 void player_die(WebSocketPlayer* player);
+/** Apply a group's current gunports_open state to all cannons in the group.
+ *  Opens/closes each cannon's associated gunport and moves the cannon barrel. */
+void apply_group_gunport_state(SimpleShip* ship, WeaponGroup* group);

@@ -47,6 +47,9 @@ export interface Ship {
   // Ship type (SHIP_TYPE_* constants); used for spectral/ghost rendering
   shipType: number;
 
+  // NPC difficulty level (1–60) for ghost ships; 0 or undefined for player ships
+  npcLevel?: number;
+
   // Display name set by the crew (empty string = unnamed)
   shipName?: string;
 
@@ -76,7 +79,7 @@ export interface Player {
   rotation: number; // Facing direction in radians (from mouse aim)
   radius: number;
   carrierId: number; // 0 = not on ship (parent_ship from server)
-  deckId: number;
+  deckId: number;   // Deck the player is on: 0 = lower deck, 1 = upper deck (from server deck_index)
   onDeck: boolean;
   
   // Local (ship-relative) position - used when on a ship
@@ -104,6 +107,10 @@ export interface Player {
   // Stamina
   stamina?: number;    // current stamina (absent = full)
   maxStamina?: number; // max stamina (default 100)
+
+  // Survival stats (0–100; 100 = full)
+  hunger?: number;   // food level (absent = full)
+  thirst?: number;   // water level (absent = full)
 
   // Island presence (0 = not on island)
   onIslandId: number;
@@ -161,7 +168,7 @@ export interface ShipConstruction {
  */
 export interface PlacedStructure {
   id: number;
-  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress';
+  type: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wreck' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'claim_flag' | 'company_fortress' | 'chest' | 'bed';
   islandId: number;
   x: number;
   y: number;
@@ -215,6 +222,14 @@ export interface PlacedStructure {
    *  and never recovers; the auto-repair heals current `hp` up to `targetHp` (not maxHp).
    *  Render "REPAIRING" label whenever `hp < targetHp`. Defaults to maxHp when absent. */
   targetHp?: number;
+  /** Land chest resource storage (STRUCT_CHEST only). Present in STRUCTURES snapshot. */
+  chestResources?: { wood: number; fiber: number; metal: number; stone: number };
+  /** Shipwreck only: highest loot quality tier among remaining blueprints (0..6).
+   *  Used to color the salvage glint. Absent when the wreck holds no blueprints. */
+  wreckTier?: number;
+  /** Crafted structures only: rolled quality tier (0..6) of the blueprint this was
+   *  crafted from. Used to tint/outline the structure. Absent for plain structures. */
+  qualityTier?: number;
 }
 
 // Company identifiers (mirror server COMPANY_* constants)
@@ -274,7 +289,7 @@ export const SHIP_ATTR_NAMES: Record<number, string> = {
 };
 
 export const SHIP_ATTR_DESC: Record<number, string> = {
-  [SHIP_ATTR_WEIGHT]:     '+5% hull mass/lvl (WIP)',
+  [SHIP_ATTR_WEIGHT]:     '+400 kg max weight/lvl',
   [SHIP_ATTR_RESISTANCE]: '−2% dmg taken/lvl  →  floor 30%',
   [SHIP_ATTR_DAMAGE]:     '+4% cannon dmg/lvl  →  ceil 240%',
   [SHIP_ATTR_CREW]:       '+2 max crew/lvl (WIP)',
@@ -346,6 +361,7 @@ export interface Npc {
   statWeight: number;     // upgrade levels (+10% carry capacity each)
   statPoints: number;     // unspent stat points = (npcLevel - 1) - total spent
   locked: boolean;        // when true: pinned to current module; crew panel cannot reassign
+  deckLevel: number;      // 0 = lower deck, 1 = upper deck (255 = deck-independent)
 }
 
 /**
@@ -484,7 +500,7 @@ export const PhysicsConfig = {
  * Module kinds that can be ghost-placed as planning markers.
  * Subset of ModuleKind — only buildable module types.
  */
-export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel';
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'chest' | 'bed';
 
 /**
  * A client-local "ghost" placement — a translucent planning marker showing
@@ -504,6 +520,22 @@ export interface GhostPlacement {
   localPos: { x: number; y: number };
   /** Ship-local rotation in radians. */
   localRot: number;
+  /** Raw resources required to complete this plan. */
+  resourceCost: { wood: number; fiber: number; metal: number; stone: number };
+  /** Closure executed when the plan is completed (sends the appropriate network message). */
+  buildAction: () => void;
+}
+
+/** A planned (ghost) land structure placement — client-local, not yet sent to server. */
+export interface LandGhostPlacement {
+  /** Unique client-local identifier. */
+  id: string;
+  /** Land structure type (wooden_floor, wall, etc.). */
+  kind: string;
+  /** World-absolute position. */
+  worldPos: { x: number; y: number };
+  /** Rotation in degrees. */
+  rotation: number;
 }
 
 // ── Weapon control groups ──────────────────────────────────────────────────
@@ -519,4 +551,8 @@ export interface WeaponGroupState {
   mode: WeaponGroupMode;
   /** For targetfire mode: the ship ID the group is locked onto. -1 = none. */
   targetId: number;
+  /** Whether this group's gunports are in the open state (toggled with R at helm). */
+  gunportsOpen: boolean;
+  /** Player-assigned label for this group (e.g. "Port", "Starboard"). */
+  name: string;
 }

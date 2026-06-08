@@ -11,6 +11,7 @@ import { ModuleUtils } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
 import { simulate } from '../sim/Physics.js';
 import { createEmptyInventory } from '../sim/Inventory.js';
+import { BRIGANTINE_LOWER_DECK_MODULE_ID, BRIGANTINE_UPPER_DECK_MODULE_ID } from '../common/ShipDefinitions.js';
 
 /**
  * Simple GameEngine for local testing and development
@@ -81,8 +82,9 @@ export class GameEngine {
       companyId: 0,
       shipType: 3,
       modules: [
-        // Ship deck (interior floor)
-        ModuleUtils.createShipDeckFromPolygon(shipHull, 200),
+        // Two-deck setup: lower deck (deck_id=0) and upper deck (deck_id=1)
+        ModuleUtils.createShipDeckFromPolygon(shipHull, BRIGANTINE_LOWER_DECK_MODULE_ID, 0),
+        ModuleUtils.createShipDeckFromPolygon(shipHull, BRIGANTINE_UPPER_DECK_MODULE_ID, 1),
         
         // Ship planks for hull coverage
         ...ModuleUtils.createShipPlanksFromSegments(100),
@@ -115,7 +117,7 @@ export class GameEngine {
         radius: PhysicsConfig.PLAYER_RADIUS,
         onDeck: true,
         carrierId: ship.id,
-        deckId: ship.modules[0].id,
+        deckId: 0, // lower deck (deck_index 0)
         isMounted: false,
         companyId: 0,
         health: 100,

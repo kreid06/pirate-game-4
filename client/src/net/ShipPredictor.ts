@@ -28,6 +28,7 @@
 
 import { Ship } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
+import { BRIGANTINE_MASS } from '../common/ShipDefinitions.js';
 
 // ─── Server constants, ported to client pixel units ────────────────────────
 // websocket_server.c  BASE_WIND_SPEED = 225 m/s  ×10 → 2250 px/s
@@ -208,8 +209,14 @@ export class ShipPredictor {
     const avgSailAlign    = mastCount > 0 ? totalAlign / mastCount : 1.0;
     const windForceFactor = (ctrl.windPower * ctrl.sailOpenness / 100.0)
                             * ctrl.windEfficiency * avgSailAlign;
-    const targetSpeed     = BASE_WIND_SPEED * windForceFactor;
-    const blendFactor     = 1.0 - Math.exp(-dt / WIND_ACCEL_RATE);
+
+    // Mass scaling — mirrors server: same load% = same speed regardless of Weight level.
+    // effective_mass = raw_mass * (base_cap / weight_cap); base_cap = 6000 kg.
+    const weightCap     = 6000 + ((ship.levelStats?.levels?.[0] ?? 1) - 1) * 400;
+    const effectiveMass = ship.mass > 0 ? ship.mass * (6000 / weightCap) : BRIGANTINE_MASS;
+    const massRatio     = effectiveMass > 0 ? BRIGANTINE_MASS / effectiveMass : 1.0;
+    const targetSpeed = BASE_WIND_SPEED * windForceFactor * massRatio;
+    const blendFactor = 1.0 - Math.exp(-dt / WIND_ACCEL_RATE);
 
     const cos = Math.cos(ship.rotation);
     const sin = Math.sin(ship.rotation);
@@ -217,11 +224,12 @@ export class ShipPredictor {
     let vx = ship.velocity.x + (cos * targetSpeed - ship.velocity.x) * blendFactor;
     let vy = ship.velocity.y + (sin * targetSpeed - ship.velocity.y) * blendFactor;
 
-    // ── 3. Reverse thrust override ────────────────────────────────────────
-    if (ctrl.reverseThrust) {
+    // ── 3. Reverse thrust override — only when sails are fully closed ────────
+    if (ctrl.reverseThrust && ctrl.sailOpenness === 0) {
+      const revSpeed = REVERSE_SPEED * massRatio;
       const revBlend = 1.0 - Math.exp(-dt / REVERSE_ACCEL);
-      vx += (-cos * REVERSE_SPEED - vx) * revBlend;
-      vy += (-sin * REVERSE_SPEED - vy) * revBlend;
+      vx += (-cos * revSpeed - vx) * revBlend;
+      vy += (-sin * revSpeed - vy) * revBlend;
     }
 
     // ── 4. Rudder → torque → angular acceleration (mirrors server sim_step) ──

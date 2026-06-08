@@ -428,8 +428,10 @@ static void biome_bbox(float cx, float cy,
     *x1 = *y1 = -1e30f;
     for (int i = 0; i < count; i++) {
         float wx = cx + vx[i], wy = cy + vy[i];
-        if (wx < *x0) *x0 = wx;  if (wx > *x1) *x1 = wx;
-        if (wy < *y0) *y0 = wy;  if (wy > *y1) *y1 = wy;
+        if (wx < *x0) { *x0 = wx; }
+        if (wx > *x1) { *x1 = wx; }
+        if (wy < *y0) { *y0 = wy; }
+        if (wy > *y1) { *y1 = wy; }
     }
 }
 

@@ -19,7 +19,7 @@ struct AdminServer;
 
 // Configuration constants
 #define MAX_PLAYERS 100
-#define MAX_SHIPS 50
+#define MAX_SHIPS 200
 #define MAX_PROJECTILES 500
 #define TICK_RATE_HZ 30
 #define TICK_DURATION_MS (1000 / TICK_RATE_HZ)

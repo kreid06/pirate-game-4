@@ -8,7 +8,7 @@
 import { Vec2 } from '../common/Vec2.js';
 import { Ship, WorldState } from './Types.js';
 import { HULL_POINTS, getQuadraticPoint, ModuleUtils } from './modules.js';
-import { BRIGANTINE_PHYSICS } from '../common/ShipDefinitions.js';
+import { BRIGANTINE_PHYSICS, BRIGANTINE_LOWER_DECK_MODULE_ID, BRIGANTINE_UPPER_DECK_MODULE_ID } from '../common/ShipDefinitions.js';
 
 /**
  * Create a curved ship hull polygon that matches the HULL_POINTS definition
@@ -66,8 +66,9 @@ export function createShipAtPosition(position: Vec2, rotation: number): Ship {
     angularVelocity: 0,
     hull,
     modules: [
-      // Basic deck module
-      ModuleUtils.createShipDeckFromPolygon(hull, 200),
+      // Two-deck setup: lower deck (deck_id=0) and upper deck (deck_id=1)
+      ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_LOWER_DECK_MODULE_ID, 0),
+      ModuleUtils.createShipDeckFromPolygon(hull, BRIGANTINE_UPPER_DECK_MODULE_ID, 1),
       // Basic planks 
       ...ModuleUtils.createShipPlanksFromSegments(100),
       // Basic helm

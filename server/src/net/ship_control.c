@@ -16,44 +16,12 @@ bool is_mast_manned(uint16_t ship_id, uint32_t mast_id) {
     return false;
 }
 
-/** Returns true if a friendly rigger (same company as player_company_id, or neutral NPC)
- *  is stationed at mast_id. A neutral NPC (company 0) obeys any player.
- *  A player with company 0 can only command neutral NPCs. */
-static bool is_mast_manned_by_friendly(uint16_t ship_id, uint32_t mast_id, uint8_t player_company_id) {
-    for (int i = 0; i < world_npc_count; i++) {
-        WorldNpc* w = &world_npcs[i];
-        if (!w->active || w->ship_id != ship_id) continue;
-        if (w->role != NPC_ROLE_RIGGER) continue;
-        if (w->assigned_weapon_id != mast_id) continue;
-        if (w->state != WORLD_NPC_STATE_AT_GUN) continue;
-        // A rigger is here — is it friendly?
-        if (w->company_id == 0) return true;            // neutral obeys anyone
-        if (player_company_id != 0 &&
-            w->company_id == player_company_id) return true;  // same company
-        return false;  // enemy rigger
-    }
-    return false;  // no rigger at this mast
-}
-
 /**
  * Handle sail openness control from helm-mounted player
  * Sets the desired openness - actual openness will gradually adjust in tick
  */
 void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, int desired_openness) {
-/* Gate: at least one friendly rigger must be stationed at a mast before allowing sail control.
-     * Enemy/neutral-to-player riggers on a mast cannot be commanded. */
-    {
-        bool any_rigger = false;
-        for (int m = 0; m < ship->module_count && !any_rigger; m++) {
-            if (ship->modules[m].type_id == MODULE_TYPE_MAST)
-                any_rigger = is_mast_manned_by_friendly(ship->ship_id, ship->modules[m].id, player->company_id);
-        }
-        if (!any_rigger) {
-            log_info("⛵ Sail control rejected for player %u — no friendly rigger manning any mast on ship %u",
-                     player->player_id, ship->ship_id);
-            return;
-        }
-    }
+    (void)player; /* no per-player gate — any helmsman can control sails */
 
     if (desired_openness < 0) desired_openness = 0;
     if (desired_openness > 100) desired_openness = 100;
@@ -88,6 +56,7 @@ void handle_ship_sail_control(WebSocketPlayer* player, struct WebSocketClient* c
  * Sets target rudder angle - actual angle will gradually adjust in tick
  */
 void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, bool turning_left, bool turning_right, bool moving_backward) {
+    (void)player;
     const char* direction = "STRAIGHT";
     float target_angle = 0.0f;
     
@@ -126,6 +95,7 @@ void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient*
  * Handle sail angle control from helm-mounted player
  */
 void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, float desired_angle) {
+    (void)player;
     // Clamp to range -60 to +60 degrees
     if (desired_angle < -60.0f) desired_angle = -60.0f;
     if (desired_angle > 60.0f) desired_angle = 60.0f;

@@ -89,7 +89,6 @@ void server_stats_log_summary(const struct ServerStats* stats) {
     log_info("🔄 Simulation: %u total ticks", stats->total_ticks);
     
     if (stats->total_ticks > 0) {
-        uint32_t avg_tick_ms = (stats->tick_duration_total_us / stats->total_ticks) / 1000;
         log_info("⚡ Tick Performance:");
         log_info("   Average: %u μs (%u.%u ms)", 
                 stats->avg_tick_time_us, 

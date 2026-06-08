@@ -70,6 +70,7 @@ set(NET_SOURCES
     src/net/npc_world.c
     src/net/player_movement.c
     src/net/player_persistence.c
+    src/net/quality.c
     src/net/ship_control.c
     src/net/ship_init.c
     src/net/structures.c

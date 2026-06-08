@@ -9,7 +9,7 @@
 
 /* Players must be within one full floor-tile (50px) to harvest a resource. */
 #define HARVEST_RANGE 50.0f
-#define BOULDER_HARVEST_RANGE (HARVEST_RANGE * 1.25f)  /* 25% larger reach for boulders */
+#define BOULDER_HARVEST_RANGE (HARVEST_RANGE * 1.40625f)  /* scales with node size in find_nearest_resource */
 #define HARVEST_STAMINA_COST 15u   /* stamina drained per harvest action */
 
 /* Respawn delays per resource type (milliseconds) */
@@ -127,44 +127,15 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
                      "{\"type\":\"harvest_success\",\"wood\":0}");
             goto send_and_ret;
         }
-        int grant_slot = -1;
-        /* Prefer an existing wood stack that isn't full */
-        for (int s = 0; s < INVENTORY_SLOTS; s++) {
-            if (player->inventory.slots[s].item == ITEM_WOOD &&
-                player->inventory.slots[s].quantity < 99) {
-                grant_slot = s;
-                break;
-            }
-        }
-        /* Fall back to first empty slot */
-        if (grant_slot < 0) {
-            for (int s = 0; s < INVENTORY_SLOTS; s++) {
-                if (player->inventory.slots[s].item == ITEM_NONE ||
-                    player->inventory.slots[s].quantity == 0) {
-                    grant_slot = s;
-                    break;
-                }
-            }
-        }
-        if (grant_slot < 0) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_failure\",\"reason\":\"inventory_full\"}");
-            goto send_and_ret;
-        }
 
-        if (player->inventory.slots[grant_slot].item == ITEM_WOOD) {
-            int new_qty = (int)player->inventory.slots[grant_slot].quantity + net_wood;
-            if (new_qty > 99) new_qty = 99;
-            player->inventory.slots[grant_slot].quantity = (uint8_t)new_qty;
-        } else {
-            player->inventory.slots[grant_slot].item     = ITEM_WOOD;
-            player->inventory.slots[grant_slot].quantity = (uint8_t)net_wood;
-        }
+        /* Grant wood to resource pool (capped at 9999) */
+        int new_wood = (int)player->res_wood + net_wood;
+        if (new_wood > 9999) new_wood = 9999;
+        player->res_wood = (uint16_t)new_wood;
 
         player_apply_xp(player, PLAYER_XP_PER_WOOD_HARVEST);
-        log_info("🪓 Player %u harvested wood → +%d wood +%u xp (slot %d qty=%d)",
-                 player->player_id, net_wood, PLAYER_XP_PER_WOOD_HARVEST, grant_slot,
-                 (int)player->inventory.slots[grant_slot].quantity);
+        log_info("🪓 Player %u harvested wood → +%d wood (pool=%u) +%u xp",
+                 player->player_id, net_wood, player->res_wood, PLAYER_XP_PER_WOOD_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_success\",\"wood\":%d}", net_wood);
     }
@@ -192,7 +163,7 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
 
     {
         /* Find the island */
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_fiber_failure\",\"reason\":\"island_not_found\"}");
@@ -220,26 +191,30 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
                      player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
             websocket_server_broadcast(dmsg);
         }
-        if (!craft_grant(player, ITEM_FIBER,
-                         claim_apply_harvest_tax(player, player->x, player->y, 5, ITEM_FIBER))) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_fiber_failure\",\"reason\":\"inventory_full\"}");
-            goto send_fiber_ret;
+        int net_fiber = claim_apply_harvest_tax(player, player->x, player->y, 5, ITEM_FIBER);
+        if (net_fiber > 0) {
+            int new_fiber = (int)player->res_fiber + net_fiber;
+            if (new_fiber > 9999) new_fiber = 9999;
+            player->res_fiber = (uint16_t)new_fiber;
         }
 
-        /* 10% chance to also drop 1 wood */
+        /* 10% chance to also grant 1 wood */
         int bonus_wood = (rand() % 10 == 0) ? 1 : 0;
-        if (bonus_wood) craft_grant(player, ITEM_WOOD, 1); /* ignore full — fiber already granted */
+        if (bonus_wood) {
+            int new_wood = (int)player->res_wood + 1;
+            if (new_wood > 9999) new_wood = 9999;
+            player->res_wood = (uint16_t)new_wood;
+        }
 
         player_apply_xp(player, PLAYER_XP_PER_FIBER_HARVEST);
-        log_info("🌿 Player %u gathered fiber → +5 fiber +%u xp%s", player->player_id,
-                 PLAYER_XP_PER_FIBER_HARVEST, bonus_wood ? " +1 wood (bonus)" : "");
+        log_info("🌿 Player %u gathered fiber → +%d fiber (pool=%u) +%u xp%s", player->player_id,
+                 net_fiber, player->res_fiber, PLAYER_XP_PER_FIBER_HARVEST, bonus_wood ? " +1 wood (bonus)" : "");
         if (bonus_wood) {
             snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_fiber_success\",\"fiber\":5,\"wood\":1}");
+                     "{\"type\":\"harvest_fiber_success\",\"fiber\":%d,\"wood\":1}", net_fiber);
         } else {
             snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_fiber_success\",\"fiber\":5}");
+                     "{\"type\":\"harvest_fiber_success\",\"fiber\":%d}", net_fiber);
         }
     }
 
@@ -287,7 +262,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
     player->stamina_last_used_ms = get_time_ms();
 
     {
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"island_not_found\"}");
@@ -315,14 +290,14 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             websocket_server_broadcast(dmsg);
         }
 
-        if (!craft_grant(player, ITEM_METAL, 3)) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_rock_failure\",\"reason\":\"inventory_full\"}");
-            goto send_rock_ret;
+        {
+            int new_metal = (int)player->res_metal + 3;
+            if (new_metal > 9999) new_metal = 9999;
+            player->res_metal = (uint16_t)new_metal;
         }
 
         player_apply_xp(player, PLAYER_XP_PER_ROCK_HARVEST);
-        log_info("⛏ Player %u mined rock → +3 metal +%u xp", player->player_id, PLAYER_XP_PER_ROCK_HARVEST);
+        log_info("⛏ Player %u mined rock → +3 metal (pool=%u) +%u xp", player->player_id, player->res_metal, PLAYER_XP_PER_ROCK_HARVEST);
         snprintf(response, sizeof(response),
                  "{\"type\":\"harvest_rock_success\",\"metal\":3}");
     }
@@ -349,7 +324,7 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
     }
 
     {
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_stone_failure\",\"reason\":\"island_not_found\"}");
@@ -376,17 +351,17 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
             websocket_server_broadcast(dmsg);
         }
 
-        if (!craft_grant(player, ITEM_STONE,
-                         claim_apply_harvest_tax(player, player->x, player->y, 2, ITEM_STONE))) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_stone_failure\",\"reason\":\"inventory_full\"}");
-            goto send_stone_ret;
+        int net_stone = claim_apply_harvest_tax(player, player->x, player->y, 2, ITEM_STONE);
+        if (net_stone > 0) {
+            int new_stone = (int)player->res_stone + net_stone;
+            if (new_stone > 9999) new_stone = 9999;
+            player->res_stone = (uint16_t)new_stone;
         }
 
         player_apply_xp(player, PLAYER_XP_PER_STONE_HARVEST);
-        log_info("🪨 Player %u gathered stone → +2 stone +%u xp", player->player_id, PLAYER_XP_PER_STONE_HARVEST);
+        log_info("🪨 Player %u gathered stone → +%d stone (pool=%u) +%u xp", player->player_id, net_stone, player->res_stone, PLAYER_XP_PER_STONE_HARVEST);
         snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_stone_success\",\"stone\":2}");
+                 "{\"type\":\"harvest_stone_success\",\"stone\":%d}", net_stone);
     }
 
 send_stone_ret:;
@@ -434,7 +409,7 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
     player->stamina_last_used_ms = get_time_ms();
 
     {
-        const IslandDef *isl = get_island_for_player(player);
+        IslandDef *isl = (IslandDef *)get_island_for_player(player);
         if (!isl) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"island_not_found\"}");
@@ -471,12 +446,15 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         }
 
         /* Grant 5 stone or 5 metal depending on boulder type */
-        const int grant_item  = (best_type == RES_BOULDER) ? ITEM_METAL : ITEM_STONE;
         const char *item_name = (best_type == RES_BOULDER) ? "metal" : "stone";
-        if (!craft_grant(player, grant_item, 5)) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_boulder_failure\",\"reason\":\"inventory_full\"}");
-            goto send_boulder_ret;
+        if (best_type == RES_BOULDER) {
+            int new_metal = (int)player->res_metal + 5;
+            if (new_metal > 9999) new_metal = 9999;
+            player->res_metal = (uint16_t)new_metal;
+        } else {
+            int new_stone = (int)player->res_stone + 5;
+            if (new_stone > 9999) new_stone = 9999;
+            player->res_stone = (uint16_t)new_stone;
         }
 
         player_apply_xp(player, PLAYER_XP_PER_BOULDER_HARVEST);

@@ -2,6 +2,7 @@
 
 #include "sim/types.h"
 #include "sim/module_ids.h"
+#include "net/quality_payload.h"
 #include <stdint.h>
 #include <stdbool.h>
 
@@ -50,6 +51,8 @@ typedef struct {
     uint8_t         weapon_count;
     uint8_t         mode;             /* WeaponGroupMode enum value */
     uint16_t        target_ship_id;
+    uint8_t         gunports_open;    /* 0=closed (default), 1=open — group gunport state */
+    char            name[24];         /* Player-assigned group label (NUL-terminated) */
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -66,7 +69,8 @@ typedef struct SimpleShip {
     float angular_velocity;
     
     // Physics properties (from ship definitions)
-    float mass;              // Ship mass (kg)
+    float base_mass;         // Hull-only mass (kg) — constant, set at creation
+    float mass;              // Total dynamic mass (kg) = base_mass + crew + cargo
     float moment_of_inertia; // Rotational inertia (kg⋅m²)
     float max_speed;         // Maximum speed (m/s)
     float turn_rate;         // Maximum turn rate (rad/s)
@@ -119,6 +123,10 @@ typedef struct SimpleShip {
 
     /* Display name — set by the owning player; broadcast to all clients */
     char ship_name[32];
+
+    /* NPC difficulty level (1–60). Only used for SHIP_TYPE_GHOST ships.
+     * Scales hull HP (1×–10×) and cannon damage (1×–5×). 0 = not set (treated as 1). */
+    uint8_t npc_level;
 } SimpleShip;
 
 // NPC behavior types
@@ -151,12 +159,12 @@ typedef struct NpcAgent {
     uint8_t  desired_openness;   // 0-100 sail openness to maintain
 } NpcAgent;
 
-#define MAX_NPC_AGENTS 64
+#define MAX_NPC_AGENTS 512
 
 // ── World NPCs ───────────────────────────────────────────────────────────────
 // Visible, interactable character entities in the world (separate from NpcAgent AI controllers).
 // All crews are sailors for now; a company/alliance system will sort friend from foe later.
-#define MAX_WORLD_NPCS 64
+#define MAX_WORLD_NPCS 512
 
 // NPC movement/AI state machine
 typedef enum {
@@ -220,6 +228,10 @@ typedef struct WorldNpc {
     uint32_t      fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
     bool          in_water;       // true when NPC has been knocked off the ship deck
 
+    // ── Passive HP regeneration ─────────────────────────────────────────────
+    uint32_t      hp_regen_accum_ms; // accumulates ms; triggers +2 HP every 5 s
+    uint32_t      last_damage_ms;    // timestamp (get_time_ms) of last damage taken
+
     // ── Task lock ───────────────────────────────────────────────────────────
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.
@@ -235,12 +247,17 @@ typedef struct WorldNpc {
     // When > 0, NPC is dwelling at a roam module; counts down in ms per tick.
     // Cleared to 0 when any module on the ship takes damage.
     uint32_t      roam_wait_ms;
+
+    // ── Deck level ──────────────────────────────────────────────────────
+    // 0 = lower deck, 1 = upper deck.  NPCs default to upper deck (1).
+    // Used for deck-gated collision filtering with players.
+    uint8_t       deck_level;
 } WorldNpc;
 // ────────────────────────────────────────────────────────────────────────────
 
 // ── Player Inventory ────────────────────────────────────────────────────────
-#define INVENTORY_SLOTS 58   /* total regular inventory slots per player      */
-#define HOTBAR_SLOTS    10   /* first HOTBAR_SLOTS of slots[] shown on hotbar */
+#define INVENTORY_SLOTS 16   /* total regular inventory slots per player      */
+#define HOTBAR_SLOTS    8    /* first HOTBAR_SLOTS of slots[] shown on hotbar */
 
 typedef enum {
     ITEM_NONE          = 0,
@@ -276,6 +293,8 @@ typedef enum {
     ITEM_CLAIM_FLAG    = 29,  /* Claiming flag — plant on enemy ship OR contested island territory */
     ITEM_FLAG_FORT     = 35,  /* Flag fort — claims radius around it (40 wood + 40 stone) */
     ITEM_COMPANY_FORTRESS = 36, /* Company fortress — claims whole island, 15-min build (100w+100s+20m) */
+    ITEM_RAMP          = 37,  /* Wooden ramp — connects lower and upper deck levels */
+    ITEM_BED           = 39,  /* Bed — sets a respawn point on an island or ship (60 s cooldown) */
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
     ITEM_CLOTH_SHIRT   = 31,  /* torso slot — 20 armour */
@@ -416,6 +435,8 @@ typedef enum {
     STRUCT_FLAG_FORT    = 9,  /* radius claim anchor — one per island, 40 wood + 40 stone */
     STRUCT_CLAIM_FLAG   = 10, /* territory claiming flag — placed in enemy radius, timer-based */
     STRUCT_COMPANY_FORTRESS = 11, /* whole-island claim — 15-min build, 100w+100s+20m */
+    STRUCT_CHEST        = 12, /* storage chest — placed on a floor tile, costs 12 wood */
+    STRUCT_BED          = 13, /* bed — placed on a floor tile, sets player respawn point */
 } PlacedStructureType;
 
 /** Shallow-water ring width as a multiple of the island's own radius.
@@ -438,9 +459,9 @@ typedef struct {
     ShipConstructionPhase construction_phase; /* Shipyard-only; zero for all other types */
     /* 2-byte fields */
     uint16_t id;                  /* unique structure ID (max MAX_PLACED_STRUCTURES=512) */
-    uint16_t hp;                  /* current hit points */
-    uint16_t max_hp;              /* maximum hit points */
-    uint16_t target_hp;           /* permanent heal ceiling. Initialised to max_hp at placement; combat damage subtracts from both hp and target_hp so a structure can never auto-repair back to its undamaged ceiling. STRUCT_FLAG_FORT uses this as the heal cap; other types currently track it informationally (target_hp == hp in steady state). */
+    uint32_t hp;                  /* current hit points */
+    uint32_t max_hp;              /* maximum hit points */
+    uint32_t target_hp;           /* permanent heal ceiling. Initialised to max_hp at placement; combat damage subtracts from both hp and target_hp so a structure can never auto-repair back to its undamaged ceiling. STRUCT_FLAG_FORT uses this as the heal cap; other types currently track it informationally (target_hp == hp in steady state). */
     uint16_t scaffolded_ship_id;  /* ship_id attached to this shipyard (0 = none) */
     /* 1-byte fields */
     uint8_t  island_id;           /* which island this structure is on (ISLAND_COUNT=2) */
@@ -455,7 +476,15 @@ typedef struct {
     uint8_t  wreck_items[6];     /* ItemKind as uint8_t, 0 = empty slot   */
     uint8_t  wreck_qtys[6];      /* quantity per loot slot                */
     uint8_t  wreck_loot_count;   /* number of remaining non-empty slots   */
+    /* Wreck-only blueprint loot — quality schematics dropped by ghost ships.
+     * Parallel arrays; wreck_bp_items[i]==0 marks an empty/claimed slot. */
+    uint8_t        wreck_bp_items[6];    /* blueprint ItemKind, 0 = empty   */
+    uint8_t        wreck_bp_crafts[6];   /* crafts remaining per blueprint   */
+    QualityPayload wreck_bp_quality[6];  /* rolled-once payload per blueprint */
+    uint8_t        wreck_bp_count;       /* number of remaining blueprints   */
+    QualityPayload quality;              /* placed-item quality (quality_q8==0 = plain) */
     uint32_t wreck_expires_ms;   /* wall-clock ms for auto-despawn; 0 = persist */
+    bool     wreck_resource_cache; /* true = chest-ruin wreck (holds chest_wood/fiber/metal/stone); false = ship-wreck item loot */
     /* Island cannon state (STRUCT_CANNON only) */
     float    cannon_aim_angle;    /* current aim direction (radians, world space) */
         float    cannon_desired_aim_angle; /* desired aim direction (radians, world space) */
@@ -482,9 +511,10 @@ typedef struct {
      * structure is destroyed mid-repair or the player re-interacts. */
     uint32_t repair_player_id;    /* player_id currently repairing this structure (0 = none) */
     float    repair_progress_ms;  /* ms elapsed since repair started; total = STRUCTURE_REPAIR_FULL_MS */
-    uint16_t repair_start_hp;     /* hp at repair start (for rate computation) */
+    uint32_t repair_start_hp;     /* hp at repair start (for rate computation) */
     uint32_t repair_broadcast_acc_ms; /* ms accumulated since last hp broadcast (throttle to ~1Hz) */
     uint32_t last_damaged_ms;     /* get_time_ms() of most recent combat damage; 0 = never */
+    bool     under_construction;  /* true while newly placed from schematic; heals 10%→100% passively */
     /* ── Per-structure dominance list ──────────────────────────────────────
      * Ordered list of OTHER-company structure IDs that dominate this
      * structure on the overlap area of their claim radii. Index 0 = top
@@ -494,9 +524,17 @@ typedef struct {
 #define MAX_DOMINATORS 32
     uint32_t dominators[MAX_DOMINATORS];
     uint8_t  dominator_count;
+    /* ── Land chest storage (STRUCT_CHEST only) ─────────────────────────── */
+#define LAND_CHEST_MAX 8192
+    uint16_t chest_wood;
+    uint16_t chest_fiber;
+    uint16_t chest_metal;
+    uint16_t chest_stone;
     /* 64-byte string last (avoids breaking alignment of above) */
     char     placer_name[64];     /* display name of builder */
 } PlacedStructure;
+
+#define MAX_PLACED_STRUCTURES 512
 
 #define MAX_PLACED_STRUCTURES 512
 
@@ -517,9 +555,24 @@ typedef struct {
 
 typedef struct {
     InventorySlot   slots[INVENTORY_SLOTS]; /* regular bag slots 0..57       */
+    /* Per-slot quality payload (parallel to slots[]). quality_q8 == 0 → plain
+     * item, no rolled stats. Quality items do not stack (quantity stays 1). */
+    QualityPayload  slot_quality[INVENTORY_SLOTS];
     PlayerEquipment equipment;              /* 6 body-slot items             */
     uint8_t         active_slot;            /* hotbar selection 0-9; 255=off */
 } PlayerInventory;
+
+/* ── Schematic / blueprint inventory ───────────────────────────────────────
+ * Separate persistent container (NOT the 16 bag slots). Ghost ships drop
+ * blueprints whose quality is rolled once; every craft from a blueprint is
+ * identical. Retained through death; permanent (no research gate yet).
+ * See docs/LOOT_QUALITY_SYSTEM.md. */
+#define MAX_PLAYER_SCHEMATICS 128
+typedef struct {
+    uint8_t        item;             /* ItemKind output of this blueprint (0 = empty) */
+    uint8_t        crafts_remaining; /* charges left; entry freed at 0                */
+    QualityPayload quality;          /* rolled-once payload, copied to every craft    */
+} PlayerBlueprint;
 // ────────────────────────────────────────────────────────────────────────────
 
 typedef enum {
@@ -567,14 +620,16 @@ typedef struct WebSocketPlayer {
     uint8_t company_id;            // Inherited from the ship this player boards
 
     // Health
-    uint16_t health;             // Current HP (0 = dead)
+    uint16_t health;             // Current HP (0 when dead)
     uint16_t max_health;         // Max HP (default 100)
+    bool     is_dead;            // Explicit death flag — set by player_die(), cleared by respawn
 
     // Stamina pool — drained by sprinting, attacking, and harvesting; regens when idle
     uint16_t stamina;            // Current stamina (0–max_stamina)
     uint16_t max_stamina;        // Max stamina (base 100 + 10 * stat_stamina)
     uint32_t stamina_last_used_ms; // Wall-clock ms of last stamina drain (regen delayed 2 s after)
     uint32_t hp_regen_accum_ms;   // Accumulated ms since last passive HP regen tick
+    uint32_t last_damage_ms;      // Wall-clock ms of last time this player took damage (delays regen)
 
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
@@ -590,6 +645,20 @@ typedef struct WebSocketPlayer {
     // Inventory
     PlayerInventory inventory;
 
+    /* Schematic / blueprint inventory — persistent, retained through death. */
+    PlayerBlueprint schematics[MAX_PLAYER_SCHEMATICS];
+    uint8_t         schematic_count;
+
+    /* ── Resource pool ─────────────────────────────────────────────────────
+     * Raw resource counts harvested from the world.  Stored separately from
+     * the item inventory so they do not occupy hotbar slots.  Consumed when
+     * building ship modules or island structures that cost resources.
+     * Max 9999 per resource type (fits in uint16_t, capped on grant). */
+    uint16_t res_wood;
+    uint16_t res_fiber;
+    uint16_t res_metal;
+    uint16_t res_stone;
+
     // Status effects
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0
 
@@ -600,6 +669,22 @@ typedef struct WebSocketPlayer {
     /* Dynamic AOI view radius (server units). Updated from client input each frame.
      * Used to tune what entities are relevant to this player. 0 = unknown/default. */
     float view_radius;
+
+    /* Which deck the player is currently standing on (0 = lower, 1 = upper).
+     * Driven by client's deck-level state machine (ramp fall/climb). Used by
+     * server collision filtering: on lower deck, the player passes through
+     * upper-deck modules (cannons, helm) but always collides with masts. */
+    uint8_t deck_level;
+
+    /* ── Bed respawn point ───────────────────────────────────────────────────
+     * A player can sleep in a STRUCT_BED (island) or use a bed item on a ship
+     * to set a custom respawn location.  Only one of these is active at a time:
+     * respawn_bed_id > 0 → island bed (cleared when structure is destroyed)
+     * respawn_ship_id > 0 → ship bed (cleared when ship is destroyed)
+     * bed_last_use_ms tracks the 60-second cooldown between uses. */
+    uint16_t respawn_bed_id;    /* PlacedStructure.id of active island bed (0 = none) */
+    uint16_t respawn_ship_id;   /* ship_id of active ship bed (0 = none) */
+    uint32_t bed_last_use_ms;   /* wall-clock ms of last bed sleep (cooldown gate) */
 } WebSocketPlayer;
 
 struct WebSocketStats {
@@ -645,7 +730,7 @@ uint32_t websocket_server_create_ship(float x, float y, uint8_t company_id, uint
  * @param y  World Y position in client pixels
  * @return Entity ID of the new ghost ship, or 0 on failure
  */
-uint32_t websocket_server_create_ghost_ship(float x, float y);
+uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level);
 
 /**
  * Clean up WebSocket server and close all connections

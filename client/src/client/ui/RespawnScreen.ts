@@ -14,9 +14,10 @@ const WORLD_H = WORLD_MAX_Y - WORLD_MIN_Y;
 const MAJOR_GRID_STEP = 30_000;
 
 interface SpawnOption {
-  type: 'ship' | 'island';
+  type: 'ship' | 'island' | 'bed';
   shipId?: number;
   islandId?: number;
+  bedId?: number;
   x: number;
   y: number;
   label: string;
@@ -27,7 +28,7 @@ export class RespawnScreen {
 
   /** Called when the player confirms a respawn location.
    * spawnX/spawnY are the world-space target coords for camera snapping. */
-  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number) => void) | null = null;
+  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number, bedRespawn?: boolean) => void) | null = null;
 
   private selectedOption: SpawnOption | null = null;
   private spawnOptions: SpawnOption[] = [];
@@ -56,6 +57,24 @@ export class RespawnScreen {
 
   // Position where the player died (world coords), shown as an X on the map
   private _deathPos: { x: number; y: number } | null = null;
+
+  // Stored bed respawn point (set by server bed_used event)
+  private _bedRespawn: { bedId?: number; x: number; y: number; shipId?: number } | null = null;
+
+  /** Called by the app when the server confirms a bed was used.
+   *  Stores the respawn point so it can appear as an option on next death. */
+  setBedRespawn(bedId?: number, x?: number, y?: number, shipId?: number): void {
+    if (shipId) {
+      this._bedRespawn = { shipId, x: x ?? 0, y: y ?? 0 };
+    } else if (bedId !== undefined && x !== undefined && y !== undefined) {
+      this._bedRespawn = { bedId, x, y };
+    }
+  }
+
+  /** Clear a stored bed respawn (e.g. if the bed structure was destroyed). */
+  clearBedRespawn(): void {
+    this._bedRespawn = null;
+  }
 
   // Two-phase fade: border frame first, then map content
   private _fadeStartTime = 0;
@@ -99,6 +118,15 @@ export class RespawnScreen {
 
     this.selectedOption = this.spawnOptions[0] ?? null;
 
+    // Add bed respawn option if one is stored (highest priority — shown first)
+    if (this._bedRespawn) {
+      const bedOpt: SpawnOption = this._bedRespawn.shipId
+        ? { type: 'bed', shipId: this._bedRespawn.shipId, x: this._bedRespawn.x, y: this._bedRespawn.y, label: '🛏 Ship Bed' }
+        : { type: 'bed', bedId: this._bedRespawn.bedId,  x: this._bedRespawn.x, y: this._bedRespawn.y, label: '🛏 Bed' };
+      this.spawnOptions.unshift(bedOpt);
+      this.selectedOption = bedOpt;
+    }
+
     this._deathPos = deathPos ?? null;
 
     // Reset zoom to auto-fit on open
@@ -131,7 +159,9 @@ export class RespawnScreen {
         if (this.selectedOption) {
           const sx = this.selectedOption.x;
           const sy = this.selectedOption.y;
-          if (this.selectedOption.type === 'ship') {
+          if (this.selectedOption.type === 'bed') {
+            this.onRespawnConfirmed?.(undefined, undefined, undefined, undefined, sx, sy, true);
+          } else if (this.selectedOption.type === 'ship') {
             this.onRespawnConfirmed?.(this.selectedOption.shipId, undefined, undefined, undefined, sx, sy);
           } else {
             this.onRespawnConfirmed?.(undefined, undefined, undefined, this.selectedOption.islandId, sx, sy);
