@@ -11,6 +11,7 @@
 #include "sim/world_save.h"
 #include "net/claim.h"
 #include "net/structures.h"
+#include "net/ship_init.h"
 
 volatile int g_server_shutdown_requested = 0;
 volatile int g_server_restart_requested  = 0;
@@ -132,6 +133,9 @@ int server_init(struct ServerContext** out_ctx) {
     // Link WebSocket server to simulation for collision detection
     websocket_server_set_simulation(&ctx->simulation);
     log_info("WebSocket server linked to simulation");
+
+    /* ── Load ghost fleet spawn points ── */
+    ghost_spawns_load();
 
     /* ── Auto-load world state if a save file exists ── */
     {

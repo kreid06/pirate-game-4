@@ -1,0 +1,26 @@
+{
+  "spawn_points": [
+    {"id":1,"x":10642.0,"y":31824.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":0.0},
+    {"id":2,"x":5574.0,"y":4257.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":43.0},
+    {"id":3,"x":80169.0,"y":7703.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":244.0},
+    {"id":4,"x":81588.0,"y":33041.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":0.0},
+    {"id":5,"x":83919.0,"y":58581.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":194.0},
+    {"id":6,"x":66588.0,"y":79155.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":0.0},
+    {"id":7,"x":31520.0,"y":81892.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":0.0},
+    {"id":8,"x":9020.0,"y":64054.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":351.0},
+    {"id":9,"x":29899.0,"y":64257.0,"level_min":20,"level_max":40,"fleet_min":3,"fleet_max":5,"angle_deg":44.0},
+    {"id":10,"x":28176.0,"y":29797.0,"level_min":20,"level_max":40,"fleet_min":3,"fleet_max":5,"angle_deg":293.0},
+    {"id":11,"x":54628.0,"y":28986.0,"level_min":20,"level_max":40,"fleet_min":3,"fleet_max":5,"angle_deg":156.0},
+    {"id":12,"x":57466.0,"y":66284.0,"level_min":20,"level_max":40,"fleet_min":3,"fleet_max":5,"angle_deg":61.0},
+    {"id":13,"x":69020.0,"y":49865.0,"level_min":20,"level_max":40,"fleet_min":3,"fleet_max":5,"angle_deg":340.0},
+    {"id":14,"x":22601.0,"y":47027.0,"level_min":20,"level_max":40,"fleet_min":3,"fleet_max":5,"angle_deg":278.0},
+    {"id":16,"x":31093.0,"y":11492.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":44.0},
+    {"id":17,"x":60991.0,"y":15344.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":222.0},
+    {"id":18,"x":4437.0,"y":85986.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":343.0},
+    {"id":19,"x":85316.0,"y":85580.0,"level_min":1,"level_max":20,"fleet_min":3,"fleet_max":5,"angle_deg":228.0},
+    {"id":20,"x":38086.0,"y":40479.0,"level_min":40,"level_max":60,"fleet_min":3,"fleet_max":5,"angle_deg":294.0},
+    {"id":21,"x":53796.0,"y":40986.0,"level_min":40,"level_max":60,"fleet_min":3,"fleet_max":5,"angle_deg":126.0},
+    {"id":22,"x":39505.0,"y":53655.0,"level_min":40,"level_max":60,"fleet_min":3,"fleet_max":5,"angle_deg":105.0},
+    {"id":23,"x":52883.0,"y":54161.0,"level_min":40,"level_max":60,"fleet_min":3,"fleet_max":5,"angle_deg":245.0}
+  ]
+}

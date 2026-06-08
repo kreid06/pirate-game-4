@@ -1,10 +1,10 @@
-// Map Editor — world-scale canvas for editing island positions and spawning ghost ships.
-// Admin API runs on port 8081 (configurable).
+// Map Editor — world-scale canvas for editing island positions and ghost fleet spawn points.
+// No live server feed; this is a static world configuration tool.
 
 const MAP_W = 90000;
 const MAP_H = 90000;
 
-// ── Data types ──────────────────────────────────────────────────────────────
+// ── Data types ───────────────────────────────────────────────────────────────
 
 interface IslandApiData {
   id: number;
@@ -13,86 +13,99 @@ interface IslandApiData {
   preset: string;
   beachRadius?: number;
   grassRadius?: number;
-  grassPolyScale?: number;
-  vertexCount?: number;
   outerVerts?: { x: number; y: number }[];
   shallowVerts?: { x: number; y: number }[];
 }
 
 interface IslandState extends IslandApiData {
-  // Editable position (may differ from server until saved)
   editX: number;
   editY: number;
   dirty: boolean;
 }
 
-interface LiveShip {
+interface SpawnPoint {
   id: number;
   x: number;
   y: number;
-  company: number;
-  npcLevel?: number;
-  shipType?: number;
-  name?: string;
+  level_min: number;
+  level_max: number;
+  fleet_min: number;
+  fleet_max: number;
+  angle_deg: number;
+  dirty: boolean;
 }
 
-type EditorMode = 'view' | 'move-island' | 'spawn-ghost';
+type EditorMode = 'view' | 'move-island' | 'spawn-point';
 
-// ── State ───────────────────────────────────────────────────────────────────
+// ── State ────────────────────────────────────────────────────────────────────
 
-let islands: IslandState[] = [];
-let liveShips: LiveShip[] = [];
+let islands: IslandState[]  = [];
+let spawnPoints: SpawnPoint[] = [];
+let nextSpawnId = 1;
+
 let selectedIslandId: number | null = null;
+let selectedSpawnId:  number | null = null;
 
 let mode: EditorMode = 'view';
-let autoRefresh = false;
-let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
-let showShips = true;
-let showGhosts = true;
 let showGrid = true;
 
-// Canvas pan/zoom
-let offsetX = 0; // canvas pixels from left edge to world (0,0)
+// Canvas pan / zoom
+let offsetX = 0;
 let offsetY = 0;
-let scale = 1;   // canvas px per world px
+let scale   = 1;
 
-// Drag state
-let isPanning = false;
+// ── Drag / rotate state ───────────────────────────────────────────────────────
+
+let isPanning        = false;
 let isDraggingIsland = false;
+let isDraggingSpawn  = false;
+let isRotatingSpawn  = false;
+
 let dragIslandId: number | null = null;
+let dragSpawnId:  number | null = null;
+
 let dragStartCanvasX = 0;
 let dragStartCanvasY = 0;
-let dragStartWorldX = 0;
-let dragStartWorldY = 0;
-let panStartX = 0;
-let panStartY = 0;
+let dragStartWorldX  = 0;
+let dragStartWorldY  = 0;
+
+let panStartX    = 0;
+let panStartY    = 0;
 let panStartOffX = 0;
 let panStartOffY = 0;
 
-// Mouse world position
+// Mouse world position (for crosshair preview)
 let mouseWorldX = 0;
 let mouseWorldY = 0;
 
-// ── DOM refs ─────────────────────────────────────────────────────────────────
+// ── DOM refs ──────────────────────────────────────────────────────────────────
 
-const canvas = document.getElementById('map-canvas') as HTMLCanvasElement;
-const ctx = canvas.getContext('2d')!;
-const statusBar = document.getElementById('status-bar')!;
+const canvas        = document.getElementById('map-canvas')   as HTMLCanvasElement;
+const ctx           = canvas.getContext('2d')!;
+const statusBar     = document.getElementById('status-bar')!;
 const coordsDisplay = document.getElementById('coords-display')!;
-const islandList = document.getElementById('island-list')!;
-const islandDetail = document.getElementById('island-detail')!;
-const selIslandId = document.getElementById('sel-island-id')!;
-const selIslandX = document.getElementById('sel-island-x')!;
-const selIslandY = document.getElementById('sel-island-y')!;
+const modeHint      = document.getElementById('mode-hint')!;
+const islandList    = document.getElementById('island-list')!;
+const islandDetail  = document.getElementById('island-detail')!;
+const selIslandId   = document.getElementById('sel-island-id')!;
+const selIslandX    = document.getElementById('sel-island-x')!;
+const selIslandY    = document.getElementById('sel-island-y')!;
 const selIslandTmpl = document.getElementById('sel-island-tmpl')!;
-const shipStats = document.getElementById('ship-stats')!;
-const toast = document.getElementById('toast')!;
+const spawnList     = document.getElementById('spawn-list')!;
+const spawnDetail   = document.getElementById('spawn-detail') as HTMLElement;
+const selSpawnId    = document.getElementById('sel-spawn-id')!;
+const selSpawnLevelMin = document.getElementById('sel-spawn-level-min') as HTMLInputElement;
+const selSpawnLevelMax = document.getElementById('sel-spawn-level-max') as HTMLInputElement;
+const selSpawnFleetMin = document.getElementById('sel-spawn-fleet-min') as HTMLInputElement;
+const selSpawnFleetMax = document.getElementById('sel-spawn-fleet-max') as HTMLInputElement;
+const selSpawnAngle    = document.getElementById('sel-spawn-angle')     as HTMLInputElement;
+const toast         = document.getElementById('toast')!;
 
-// ── Helpers ──────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function serverUrl(): string {
-  const port = (document.getElementById('server-port') as HTMLInputElement).value.trim();
-  return `http://localhost:${port}`;
+  const raw = (document.getElementById('server-url') as HTMLInputElement).value.trim();
+  return raw.replace(/\/+$/, '');
 }
 
 function worldToCanvas(wx: number, wy: number): [number, number] {
@@ -106,36 +119,31 @@ function canvasToWorld(cx: number, cy: number): [number, number] {
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 function showToast(msg: string, type: 'ok' | 'err' | '' = '') {
   toast.textContent = msg;
-  toast.className = `show ${type}`;
+  toast.className   = `show ${type}`;
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { toast.className = ''; }, 3000);
 }
 
-function setStatus(msg: string) {
-  statusBar.textContent = msg;
-}
+function setStatus(msg: string) { statusBar.textContent = msg; }
 
-// ── Colour palette ────────────────────────────────────────────────────────────
+function clamp(v: number, lo: number, hi: number) { return Math.max(lo, Math.min(hi, v)); }
 
-const COMPANY_COLORS: Record<number, string> = {
-  0:  '#aaaaaa', // neutral
-  1:  '#d04040', // pirates
-  2:  '#4080d0', // navy
-  3:  '#40b040', // merchant
-  99: '#cc44cc', // ghost
-};
+// ── Colours ───────────────────────────────────────────────────────────────────
 
 const ISLAND_COLORS = [
-  '#4db87a', '#5bc85e', '#65a86d', '#3ea87b',
-  '#56b86e', '#4aa875', '#60c87a', '#3e9862',
-  '#50b870',
+  '#4db87a','#5bc85e','#65a86d','#3ea87b','#56b86e','#4aa875','#60c87a','#3e9862','#50b870',
 ];
+function islandColor(id: number) { return ISLAND_COLORS[(id - 1) % ISLAND_COLORS.length]; }
 
-function islandColor(id: number): string {
-  return ISLAND_COLORS[(id - 1) % ISLAND_COLORS.length];
+function levelColor(lv: number): string {
+  const t = clamp((lv - 1) / 59, 0, 1);
+  return `rgb(${Math.round(80 + t * 175)},${Math.round(200 - t * 140)},80)`;
 }
 
-// ── Fetch ────────────────────────────────────────────────────────────────────
+// Mid-point of the level range for colouring
+function spawnColor(sp: SpawnPoint) { return levelColor((sp.level_min + sp.level_max) / 2); }
+
+// ── Fetch ─────────────────────────────────────────────────────────────────────
 
 async function fetchIslands(): Promise<void> {
   try {
@@ -145,155 +153,213 @@ async function fetchIslands(): Promise<void> {
     const prev = new Map(islands.map(i => [i.id, i]));
     islands = data.islands.map(d => {
       const old = prev.get(d.id);
-      return {
-        ...d,
-        editX: old?.dirty ? old.editX : d.cx,
-        editY: old?.dirty ? old.editY : d.cy,
-        dirty: old?.dirty ?? false,
-      };
+      return { ...d, editX: old?.dirty ? old.editX : d.cx, editY: old?.dirty ? old.editY : d.cy, dirty: old?.dirty ?? false };
     });
     renderIslandList();
-    setStatus(`Loaded ${islands.length} islands`);
-  } catch (e) {
-    setStatus(`Island fetch failed: ${e}`);
-  }
+    setStatus(`Loaded ${islands.length} island(s)`);
+  } catch (e) { setStatus(`Island fetch failed: ${e}`); }
 }
 
-async function fetchMap(): Promise<void> {
+async function fetchSpawnPoints(): Promise<void> {
   try {
-    const r = await fetch(`${serverUrl()}/api/map`);
+    const r = await fetch(`${serverUrl()}/api/ghost-spawns`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    const ships: LiveShip[] = [];
-    if (Array.isArray(data.ships)) {
-      for (const s of data.ships) {
-        ships.push({
-          id: s.id,
-          x: s.x,
-          y: s.y,
-          company: s.company_id ?? s.company ?? 0,
-          npcLevel: s.npc_level ?? s.npcLevel,
-          shipType: s.ship_type ?? s.shipType,
-          name: s.name,
-        });
-      }
-    }
-    if (Array.isArray(data.players)) {
-      for (const p of data.players) {
-        ships.push({
-          id: p.id,
-          x: p.world_x ?? p.x,
-          y: p.world_y ?? p.y,
-          company: p.company ?? 0,
-          name: p.name ?? 'player',
-        });
-      }
-    }
-    liveShips = ships;
-    const ghostCount = ships.filter(s => s.company === 99).length;
-    const playerCount = ships.filter(s => !s.npcLevel).length;
-    shipStats.innerHTML =
-      `Ships: <span>${ships.length}</span><br>` +
-      `Ghosts: <span>${ghostCount}</span><br>` +
-      `Players: <span>${playerCount}</span>`;
-  } catch (e) {
-    shipStats.textContent = `Map fetch failed: ${e}`;
-  }
+    const data = await r.json() as {
+      spawn_points: {
+        id: number; x: number; y: number;
+        level_min?: number; level_max?: number;
+        fleet_min?: number; fleet_max?: number;
+        /* legacy */ level?: number; fleet_size?: number;
+        angle_deg?: number;
+      }[];
+    };
+    const prevDirty = new Map(spawnPoints.filter(p => p.dirty).map(p => [p.id, p]));
+    spawnPoints = (data.spawn_points ?? []).map(sp => {
+      if (prevDirty.has(sp.id)) return prevDirty.get(sp.id)!;
+      const lmin = sp.level_min ?? sp.level ?? 1;
+      const lmax = sp.level_max ?? sp.level ?? lmin;
+      const fmin = sp.fleet_min ?? sp.fleet_size ?? 3;
+      const fmax = sp.fleet_max ?? sp.fleet_size ?? fmin;
+      return { id: sp.id, x: sp.x, y: sp.y, level_min: lmin, level_max: lmax,
+               fleet_min: fmin, fleet_max: fmax, angle_deg: sp.angle_deg ?? 0, dirty: false };
+    });
+    nextSpawnId = spawnPoints.reduce((m, p) => Math.max(m, p.id + 1), 1);
+    renderSpawnList();
+    setStatus(`Loaded ${spawnPoints.length} spawn point(s)`);
+  } catch (e) { setStatus(`Spawn fetch failed: ${e}`); }
 }
 
 async function refreshAll(): Promise<void> {
   setStatus('Refreshing…');
-  await Promise.all([fetchIslands(), fetchMap()]);
+  await Promise.all([fetchIslands(), fetchSpawnPoints()]);
   draw();
   setStatus('Ready');
 }
 
-// ── Save island positions ─────────────────────────────────────────────────────
+// ── Save ──────────────────────────────────────────────────────────────────────
 
 async function saveIslandPositions(): Promise<void> {
-  const payload = islands
-    .filter(i => i.dirty)
+  const payload = islands.filter(i => i.dirty)
     .map(i => ({ id: i.id, x: Math.round(i.editX), y: Math.round(i.editY) }));
-
-  if (payload.length === 0) {
-    showToast('No changes to save', '');
-    return;
-  }
-
+  if (!payload.length) { showToast('No island changes', ''); return; }
   try {
     const r = await fetch(`${serverUrl()}/api/islands/reposition`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
     });
-    const data = await r.json();
-    if (data.ok) {
-      islands.forEach(i => { i.dirty = false; });
-      renderIslandList();
-      showToast(`Saved ${payload.length} island position(s)`, 'ok');
-    } else {
-      showToast(`Save failed: ${data.error ?? 'unknown'}`, 'err');
-    }
-  } catch (e) {
-    showToast(`Save error: ${e}`, 'err');
-  }
+    const d = await r.json();
+    if (d.ok) { islands.forEach(i => { i.dirty = false; }); renderIslandList(); showToast(`Saved ${payload.length} island(s)`, 'ok'); }
+    else showToast(`Save failed: ${d.error ?? 'unknown'}`, 'err');
+  } catch (e) { showToast(`Save error: ${e}`, 'err'); }
 }
 
-// ── Spawn ghost ships ─────────────────────────────────────────────────────────
+async function saveSpawnPoints(): Promise<void> {
+  const payload = spawnPoints.map(sp => ({
+    id: sp.id, x: Math.round(sp.x), y: Math.round(sp.y),
+    level_min: sp.level_min, level_max: sp.level_max,
+    fleet_min: sp.fleet_min, fleet_max: sp.fleet_max,
+    angle_deg: Math.round(sp.angle_deg),
+  }));
+  try {
+    const r = await fetch(`${serverUrl()}/api/ghost-spawns`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+    });
+    const d = await r.json();
+    if (d.ok) { spawnPoints.forEach(sp => { sp.dirty = false; }); renderSpawnList(); showToast(`Saved ${payload.length} spawn point(s)`, 'ok'); }
+    else showToast(`Save failed: ${d.error ?? 'unknown'}`, 'err');
+  } catch (e) { showToast(`Save error: ${e}`, 'err'); }
+}
 
-async function spawnGhost(wx: number, wy: number): Promise<void> {
-  const level = parseInt((document.getElementById('ghost-level') as HTMLInputElement).value, 10) || 30;
-  const fleetSize = parseInt((document.getElementById('ghost-fleet') as HTMLInputElement).value, 10) || 1;
+// ── Spawn point CRUD ──────────────────────────────────────────────────────────
 
-  const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
-  const spawnX = clamp(wx, 1000, MAP_W - 1000);
-  const spawnY = clamp(wy, 1000, MAP_H - 1000);
+function readNewDefaults(): Omit<SpawnPoint, 'id' | 'x' | 'y' | 'dirty'> {
+  const lmin = clamp(parseInt((document.getElementById('new-spawn-level-min') as HTMLInputElement).value, 10) || 20, 1, 60);
+  const lmax = clamp(parseInt((document.getElementById('new-spawn-level-max') as HTMLInputElement).value, 10) || 40, lmin, 60);
+  const fmin = clamp(parseInt((document.getElementById('new-spawn-fleet-min') as HTMLInputElement).value, 10) || 3, 1, 10);
+  const fmax = clamp(parseInt((document.getElementById('new-spawn-fleet-max') as HTMLInputElement).value, 10) || 5, fmin, 10);
+  return { level_min: lmin, level_max: lmax, fleet_min: fmin, fleet_max: fmax, angle_deg: 0 };
+}
 
-  let spawned = 0;
-  for (let i = 0; i < fleetSize; i++) {
-    const angle = (i / fleetSize) * Math.PI * 2;
-    const radius = fleetSize > 1 ? 400 : 0;
-    const sx = spawnX + Math.cos(angle) * radius;
-    const sy = spawnY + Math.sin(angle) * radius;
-    try {
-      const r = await fetch(`${serverUrl()}/api/admin/phantom-brig`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ x: Math.round(sx), y: Math.round(sy), level }),
-      });
-      const data = await r.json();
-      if (data.success) spawned++;
-    } catch { /* ignore individual failures */ }
-  }
+function addSpawnPoint(wx: number, wy: number): void {
+  const defaults = readNewDefaults();
+  const sp: SpawnPoint = {
+    id: nextSpawnId++,
+    x: clamp(wx, 1000, MAP_W - 1000),
+    y: clamp(wy, 1000, MAP_H - 1000),
+    ...defaults,
+    dirty: true,
+  };
+  spawnPoints.push(sp);
+  selectSpawn(sp.id);
+  renderSpawnList();
+  draw();
+  showToast(`Added spawn #${sp.id} lv${sp.level_min}–${sp.level_max} ×${sp.fleet_min}–${sp.fleet_max}`, 'ok');
+}
 
-  if (spawned > 0) {
-    showToast(`Spawned ${spawned} ghost ship(s) at (${Math.round(wx)}, ${Math.round(wy)}) lv${level}`, 'ok');
-    await fetchMap();
-    draw();
+function deleteSpawn(id: number): void {
+  spawnPoints = spawnPoints.filter(sp => sp.id !== id);
+  if (selectedSpawnId === id) selectSpawn(null);
+  renderSpawnList();
+  draw();
+}
+
+function selectSpawn(id: number | null): void {
+  selectedSpawnId = id;
+  const sp = spawnPoints.find(p => p.id === id);
+  if (sp) {
+    spawnDetail.style.display = 'flex';
+    selSpawnId.textContent    = String(sp.id);
+    selSpawnLevelMin.value    = String(sp.level_min);
+    selSpawnLevelMax.value    = String(sp.level_max);
+    selSpawnFleetMin.value    = String(sp.fleet_min);
+    selSpawnFleetMax.value    = String(sp.fleet_max);
+    selSpawnAngle.value       = String(Math.round(sp.angle_deg));
   } else {
-    showToast('Ghost spawn failed (server may be offline)', 'err');
+    spawnDetail.style.display = 'none';
   }
+  renderSpawnList();
 }
 
-// ── Island list sidebar ───────────────────────────────────────────────────────
+function applySpawnEdit(): void {
+  const sp = spawnPoints.find(p => p.id === selectedSpawnId);
+  if (!sp) return;
+  const lmin = clamp(parseInt(selSpawnLevelMin.value, 10) || sp.level_min, 1, 60);
+  const lmax = clamp(parseInt(selSpawnLevelMax.value, 10) || sp.level_max, lmin, 60);
+  const fmin = clamp(parseInt(selSpawnFleetMin.value, 10) || sp.fleet_min, 1, 10);
+  const fmax = clamp(parseInt(selSpawnFleetMax.value, 10) || sp.fleet_max, fmin, 10);
+  const ang  = ((parseInt(selSpawnAngle.value, 10) || 0) % 360 + 360) % 360;
+  sp.level_min = lmin; sp.level_max = lmax;
+  sp.fleet_min = fmin; sp.fleet_max = fmax;
+  sp.angle_deg = ang;
+  sp.dirty = true;
+  // Sync angle input back in case it was clamped
+  selSpawnAngle.value = String(ang);
+  renderSpawnList();
+  draw();
+}
+
+// ── Hit-test helpers ──────────────────────────────────────────────────────────
+
+const SPAWN_OCCUPIED_R_WORLD = 4000;
+
+function spawnScreenRadius(sp: SpawnPoint): number {
+  return Math.max(10, (400 + (sp.fleet_min + sp.fleet_max) / 2 * 200) * scale);
+}
+
+/** Returns the canvas-space position of the rotation handle for a spawn point. */
+function spawnHandlePos(sp: SpawnPoint): [number, number] {
+  const [cx, cy] = worldToCanvas(sp.x, sp.y);
+  // Handle sits on the occupancy ring edge, or at least 30 canvas px out
+  const handleR = Math.max(30, SPAWN_OCCUPIED_R_WORLD * scale);
+  const rad = sp.angle_deg * (Math.PI / 180);
+  return [cx + Math.cos(rad) * handleR, cy + Math.sin(rad) * handleR];
+}
+
+function hitTestIsland(cx: number, cy: number): IslandState | null {
+  let best: IslandState | null = null, bestDist = Infinity;
+  for (const isl of islands) {
+    const [icx, icy] = worldToCanvas(isl.editX, isl.editY);
+    const dist = Math.hypot(cx - icx, cy - icy);
+    let screenR = 20;
+    if (isl.outerVerts?.length) screenR = Math.max(20, estimatePolyRadius(isl.outerVerts) * scale * 0.5);
+    else screenR = Math.max(20, (isl.grassRadius ?? isl.beachRadius ?? 2500) * scale);
+    if (dist < screenR && dist < bestDist) { best = isl; bestDist = dist; }
+  }
+  return best;
+}
+
+function hitTestSpawnHandle(cx: number, cy: number): SpawnPoint | null {
+  if (selectedSpawnId === null) return null;
+  const sp = spawnPoints.find(p => p.id === selectedSpawnId);
+  if (!sp) return null;
+  const [hx, hy] = spawnHandlePos(sp);
+  return Math.hypot(cx - hx, cy - hy) < 14 ? sp : null;
+}
+
+function hitTestSpawnCenter(cx: number, cy: number): SpawnPoint | null {
+  let best: SpawnPoint | null = null, bestDist = Infinity;
+  for (const sp of spawnPoints) {
+    const [scx, scy] = worldToCanvas(sp.x, sp.y);
+    const d = Math.hypot(cx - scx, cy - scy);
+    const r = spawnScreenRadius(sp);
+    if (d < r && d < bestDist) { best = sp; bestDist = d; }
+  }
+  return best;
+}
+
+// ── Island sidebar ────────────────────────────────────────────────────────────
 
 function renderIslandList(): void {
   islandList.innerHTML = '';
   for (const isl of islands) {
     const item = document.createElement('div');
-    item.className = 'island-list-item' + (isl.id === selectedIslandId ? ' selected' : '');
-    item.dataset.id = String(isl.id);
-
+    item.className = `island-list-item${isl.id === selectedIslandId ? ' selected' : ''}`;
     const dot = document.createElement('div');
     dot.className = 'island-dot';
-    dot.style.background = islandColor(isl.id);
+    dot.style.background  = islandColor(isl.id);
     if (isl.dirty) dot.style.boxShadow = '0 0 4px #f5c842';
-
     const label = document.createElement('span');
     label.textContent = `Island ${isl.id}${isl.dirty ? ' *' : ''}`;
-
-    item.appendChild(dot);
-    item.appendChild(label);
+    item.append(dot, label);
     item.addEventListener('click', () => selectIsland(isl.id));
     islandList.appendChild(item);
   }
@@ -301,288 +367,290 @@ function renderIslandList(): void {
 }
 
 function selectIsland(id: number | null): void {
-  selectedIslandId = id;
-  renderIslandList();
-  updateIslandDetail();
-  draw();
+  selectedIslandId = id; renderIslandList(); updateIslandDetail(); draw();
 }
 
 function updateIslandDetail(): void {
   const isl = islands.find(i => i.id === selectedIslandId);
-  if (!isl) {
-    islandDetail.style.display = 'none';
-    return;
-  }
+  if (!isl) { islandDetail.style.display = 'none'; return; }
   islandDetail.style.display = '';
-  selIslandId.textContent = String(isl.id);
-  selIslandX.textContent = Math.round(isl.editX).toString();
-  selIslandY.textContent = Math.round(isl.editY).toString();
+  selIslandId.textContent   = String(isl.id);
+  selIslandX.textContent    = Math.round(isl.editX).toString();
+  selIslandY.textContent    = Math.round(isl.editY).toString();
   selIslandTmpl.textContent = (isl as any).template ?? isl.preset;
 }
 
-// ── Drawing ──────────────────────────────────────────────────────────────────
+// ── Spawn point sidebar ───────────────────────────────────────────────────────
+
+function renderSpawnList(): void {
+  spawnList.innerHTML = '';
+  for (const sp of spawnPoints) {
+    const item = document.createElement('div');
+    item.className = `spawn-item${sp.id === selectedSpawnId ? ' selected' : ''}`;
+
+    const dot = document.createElement('div');
+    dot.className = 'spawn-dot';
+    dot.style.background = spawnColor(sp);
+    if (sp.dirty) dot.style.boxShadow = '0 0 5px rgba(200,80,200,0.8)';
+
+    const info = document.createElement('div');
+    info.className = 'spawn-item-info';
+    info.innerHTML =
+      `<div>#${sp.id}${sp.dirty ? ' *' : ''} — lv${sp.level_min}–${sp.level_max} ×${sp.fleet_min}–${sp.fleet_max} <span style="color:rgba(200,150,200,0.6)">${Math.round(sp.angle_deg)}°</span></div>` +
+      `<div class="coords">(${Math.round(sp.x)}, ${Math.round(sp.y)})</div>`;
+
+    const del = document.createElement('button');
+    del.className = 'btn-danger'; del.textContent = '✕'; del.title = 'Delete';
+    del.addEventListener('click', e => { e.stopPropagation(); deleteSpawn(sp.id); });
+
+    item.append(dot, info, del);
+    item.addEventListener('click', () => selectSpawn(sp.id === selectedSpawnId ? null : sp.id));
+    spawnList.appendChild(item);
+  }
+}
+
+// ── Drawing ───────────────────────────────────────────────────────────────────
 
 function draw(): void {
-  const W = canvas.width;
-  const H = canvas.height;
-
+  const W = canvas.width, H = canvas.height;
   ctx.clearRect(0, 0, W, H);
 
-  // Ocean background
   ctx.fillStyle = '#0e2240';
   ctx.fillRect(0, 0, W, H);
 
-  // World boundary
   const [bx0, by0] = worldToCanvas(0, 0);
   const [bx1, by1] = worldToCanvas(MAP_W, MAP_H);
   ctx.strokeStyle = 'rgba(245,200,66,0.3)';
   ctx.lineWidth = 1;
   ctx.strokeRect(bx0, by0, bx1 - bx0, by1 - by0);
 
-  // Grid
   if (showGrid) drawGrid(W, H);
 
-  // Islands
-  for (const isl of islands) {
-    drawIsland(isl);
+  for (const sp of spawnPoints) drawSpawnOccupancyRing(sp);
+  for (const isl of islands)     drawIsland(isl);
+  for (const sp of spawnPoints)  drawSpawnPoint(sp);
+
+  // Rotation handle for selected spawn
+  if (selectedSpawnId !== null && !isDraggingIsland) {
+    const sp = spawnPoints.find(p => p.id === selectedSpawnId);
+    if (sp) drawRotationHandle(sp);
   }
 
-  // Ships
-  if (showShips || showGhosts) {
-    for (const ship of liveShips) {
-      if (ship.company === 99 && !showGhosts) continue;
-      if (ship.company !== 99 && !showShips) continue;
-      drawShip(ship);
+  // Cursor crosshair in spawn mode (only when not dragging/rotating)
+  if (mode === 'spawn-point' && !isDraggingSpawn && !isRotatingSpawn) {
+    const hit = hitTestSpawnCenter(
+      offsetX + mouseWorldX * scale, offsetY + mouseWorldY * scale);
+    if (!hit) {
+      const [cx, cy] = worldToCanvas(mouseWorldX, mouseWorldY);
+      ctx.strokeStyle = 'rgba(200,80,200,0.6)';
+      ctx.lineWidth = 1;
+      const sz = 14;
+      ctx.beginPath();
+      ctx.moveTo(cx - sz, cy); ctx.lineTo(cx + sz, cy);
+      ctx.moveTo(cx, cy - sz); ctx.lineTo(cx, cy + sz);
+      ctx.stroke();
+      ctx.beginPath(); ctx.arc(cx, cy, 5, 0, Math.PI * 2); ctx.stroke();
     }
-  }
-
-  // Cursor crosshair in spawn mode
-  if (mode === 'spawn-ghost') {
-    const [cx, cy] = worldToCanvas(mouseWorldX, mouseWorldY);
-    ctx.strokeStyle = 'rgba(200,80,80,0.7)';
-    ctx.lineWidth = 1;
-    const sz = 12;
-    ctx.beginPath();
-    ctx.moveTo(cx - sz, cy); ctx.lineTo(cx + sz, cy);
-    ctx.moveTo(cx, cy - sz); ctx.lineTo(cx, cy + sz);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
-    ctx.stroke();
   }
 }
 
 function drawGrid(W: number, H: number): void {
-  const step = chooseGridStep();
+  const step   = chooseGridStep();
   const startX = Math.floor((-offsetX / scale) / step) * step;
   const startY = Math.floor((-offsetY / scale) / step) * step;
-
   ctx.strokeStyle = 'rgba(255,255,255,0.05)';
   ctx.lineWidth = 1;
   ctx.beginPath();
-  for (let wx = startX; wx < MAP_W + step; wx += step) {
-    const [cx] = worldToCanvas(wx, 0);
-    if (cx < -1 || cx > W + 1) continue;
+  for (let wx = startX; wx <= MAP_W; wx += step) {
+    const [cx] = worldToCanvas(wx, 0); if (cx < -1 || cx > W + 1) continue;
     ctx.moveTo(cx, 0); ctx.lineTo(cx, H);
   }
-  for (let wy = startY; wy < MAP_H + step; wy += step) {
-    const [, cy] = worldToCanvas(0, wy);
-    if (cy < -1 || cy > H + 1) continue;
+  for (let wy = startY; wy <= MAP_H; wy += step) {
+    const [, cy] = worldToCanvas(0, wy); if (cy < -1 || cy > H + 1) continue;
     ctx.moveTo(0, cy); ctx.lineTo(W, cy);
   }
   ctx.stroke();
-
-  // Grid labels at major lines
-  ctx.fillStyle = 'rgba(232,213,154,0.25)';
-  ctx.font = '9px monospace';
-  for (let wx = startX; wx < MAP_W + step; wx += step) {
-    const [cx] = worldToCanvas(wx, 0);
-    if (cx < 0 || cx > W) continue;
+  ctx.fillStyle = 'rgba(232,213,154,0.25)'; ctx.font = '9px monospace';
+  for (let wx = startX; wx <= MAP_W; wx += step) {
+    const [cx] = worldToCanvas(wx, 0); if (cx < 0 || cx > W) continue;
     ctx.fillText(String(Math.round(wx)), cx + 2, 10);
   }
-  for (let wy = startY; wy < MAP_H + step; wy += step) {
-    const [, cy] = worldToCanvas(0, wy);
-    if (cy < 0 || cy > H) continue;
+  for (let wy = startY; wy <= MAP_H; wy += step) {
+    const [, cy] = worldToCanvas(0, wy); if (cy < 0 || cy > H) continue;
     ctx.fillText(String(Math.round(wy)), 2, cy - 2);
   }
 }
 
 function chooseGridStep(): number {
-  const worldVisible = MAP_W / scale;
-  const steps = [1000, 2000, 5000, 10000, 20000, 50000];
-  for (const s of steps) {
-    if (worldVisible / s < 20) return s;
-  }
+  const w = MAP_W / scale;
+  for (const s of [1000, 2000, 5000, 10000, 20000, 50000]) if (w / s < 20) return s;
   return 50000;
 }
 
 function drawIsland(isl: IslandState): void {
   const [cx, cy] = worldToCanvas(isl.editX, isl.editY);
-  const isSelected = isl.id === selectedIslandId;
-  const isDirty = isl.dirty;
-
+  const sel = isl.id === selectedIslandId;
   ctx.save();
 
   if (isl.outerVerts && isl.outerVerts.length > 2) {
-    // Polygon island
-    const polyBoundR = (isl as any).polyBoundR ?? estimatePolyRadius(isl.outerVerts);
-    const screenR = polyBoundR * scale;
-
-    // Shallow water halo
+    const screenR = estimatePolyRadius(isl.outerVerts) * scale;
     if (isl.shallowVerts && isl.shallowVerts.length > 2) {
       ctx.beginPath();
-      for (let i = 0; i < isl.shallowVerts.length; i++) {
-        const sx = cx + isl.shallowVerts[i].x * scale;
-        const sy = cy + isl.shallowVerts[i].y * scale;
-        i === 0 ? ctx.moveTo(sx, sy) : ctx.lineTo(sx, sy);
-      }
-      ctx.closePath();
-      ctx.fillStyle = 'rgba(30,100,160,0.35)';
-      ctx.fill();
+      isl.shallowVerts.forEach((v, i) => i === 0 ? ctx.moveTo(cx + v.x * scale, cy + v.y * scale) : ctx.lineTo(cx + v.x * scale, cy + v.y * scale));
+      ctx.closePath(); ctx.fillStyle = 'rgba(30,100,160,0.35)'; ctx.fill();
     }
-
-    // Main island shape
     ctx.beginPath();
-    for (let i = 0; i < isl.outerVerts.length; i++) {
-      const vx = cx + isl.outerVerts[i].x * scale;
-      const vy = cy + isl.outerVerts[i].y * scale;
-      i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
-    }
+    isl.outerVerts.forEach((v, i) => i === 0 ? ctx.moveTo(cx + v.x * scale, cy + v.y * scale) : ctx.lineTo(cx + v.x * scale, cy + v.y * scale));
     ctx.closePath();
-    ctx.fillStyle = isSelected ? '#5bcf8a' : islandColor(isl.id);
+    ctx.fillStyle   = sel ? '#5bcf8a' : islandColor(isl.id);
     ctx.fill();
-    ctx.strokeStyle = isDirty ? '#f5c842' : (isSelected ? '#fff' : 'rgba(255,255,255,0.4)');
-    ctx.lineWidth = isSelected ? 2 : 1;
+    ctx.strokeStyle = isl.dirty ? '#f5c842' : (sel ? '#fff' : 'rgba(255,255,255,0.4)');
+    ctx.lineWidth   = sel ? 2 : 1;
     ctx.stroke();
-
-    // Centre dot
-    ctx.beginPath();
-    ctx.arc(cx, cy, Math.max(3, screenR * 0.04), 0, Math.PI * 2);
-    ctx.fillStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.5)';
-    ctx.fill();
-
-    // Label (only if large enough)
+    ctx.beginPath(); ctx.arc(cx, cy, Math.max(3, screenR * 0.04), 0, Math.PI * 2);
+    ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,0.5)'; ctx.fill();
     if (screenR > 20) {
-      ctx.fillStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.7)';
+      ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,0.7)';
       ctx.font = `bold ${Math.max(10, Math.min(14, screenR * 0.1))}px monospace`;
-      ctx.textAlign = 'center';
-      ctx.fillText(`${isl.id}`, cx, cy + 4);
+      ctx.textAlign = 'center'; ctx.fillText(`${isl.id}`, cx, cy + 4);
     }
   } else {
-    // Bump-circle island
-    const radius = (isl.grassRadius ?? isl.beachRadius ?? 2500) * scale;
-
-    // Shallow halo
-    const shallowR = (isl.beachRadius ?? 2500) * scale * 1.4;
-    ctx.beginPath();
-    ctx.arc(cx, cy, shallowR, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(30,100,160,0.35)';
-    ctx.fill();
-
-    // Island body
-    ctx.beginPath();
-    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-    ctx.fillStyle = isSelected ? '#5bcf8a' : islandColor(isl.id);
-    ctx.fill();
-    ctx.strokeStyle = isDirty ? '#f5c842' : (isSelected ? '#fff' : 'rgba(255,255,255,0.4)');
-    ctx.lineWidth = isSelected ? 2 : 1;
-    ctx.stroke();
-
-    // Label
-    if (radius > 6) {
-      ctx.fillStyle = isSelected ? '#fff' : 'rgba(255,255,255,0.7)';
-      ctx.font = `bold ${Math.max(10, Math.min(14, radius * 0.3))}px monospace`;
-      ctx.textAlign = 'center';
-      ctx.fillText(`${isl.id}`, cx, cy + 4);
+    const r  = (isl.grassRadius ?? isl.beachRadius ?? 2500) * scale;
+    const sr = (isl.beachRadius ?? 2500) * scale * 1.4;
+    ctx.beginPath(); ctx.arc(cx, cy, sr, 0, Math.PI * 2); ctx.fillStyle = 'rgba(30,100,160,0.35)'; ctx.fill();
+    ctx.beginPath(); ctx.arc(cx, cy, r,  0, Math.PI * 2);
+    ctx.fillStyle   = sel ? '#5bcf8a' : islandColor(isl.id); ctx.fill();
+    ctx.strokeStyle = isl.dirty ? '#f5c842' : (sel ? '#fff' : 'rgba(255,255,255,0.4)');
+    ctx.lineWidth   = sel ? 2 : 1; ctx.stroke();
+    if (r > 6) {
+      ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,0.7)';
+      ctx.font = `bold ${Math.max(10, Math.min(14, r * 0.3))}px monospace`;
+      ctx.textAlign = 'center'; ctx.fillText(`${isl.id}`, cx, cy + 4);
     }
+  }
+  ctx.restore();
+}
+
+function estimatePolyRadius(verts: { x: number; y: number }[]): number {
+  return verts.reduce((m, v) => Math.max(m, Math.hypot(v.x, v.y)), 0);
+}
+
+function drawSpawnOccupancyRing(sp: SpawnPoint): void {
+  const [cx, cy] = worldToCanvas(sp.x, sp.y);
+  const r = SPAWN_OCCUPIED_R_WORLD * scale;
+  if (r < 2) return;
+  const sel = sp.id === selectedSpawnId;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.strokeStyle = sel ? 'rgba(200,100,220,0.35)' : 'rgba(180,60,180,0.12)';
+  ctx.setLineDash([4, 4]); ctx.lineWidth = 1; ctx.stroke(); ctx.setLineDash([]);
+}
+
+function drawSpawnPoint(sp: SpawnPoint): void {
+  const [cx, cy] = worldToCanvas(sp.x, sp.y);
+  const sel    = sp.id === selectedSpawnId;
+  const color  = spawnColor(sp);
+  const r      = spawnScreenRadius(sp);
+
+  ctx.save();
+
+  // Outer ring
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle   = sel ? `${color}33` : `${color}18`;
+  ctx.fill();
+  ctx.strokeStyle = sel ? color : `${color}88`;
+  ctx.lineWidth   = sel ? 2 : 1;
+  ctx.stroke();
+
+  // Direction arrow line from centre (shows angle_deg)
+  const arrowLen = Math.max(r * 0.7, 8);
+  const rad = sp.angle_deg * (Math.PI / 180);
+  const ax = cx + Math.cos(rad) * arrowLen;
+  const ay = cy + Math.sin(rad) * arrowLen;
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(ax, ay);
+  ctx.strokeStyle = sel ? '#fff' : `${color}cc`;
+  ctx.lineWidth   = sel ? 2 : 1;
+  ctx.stroke();
+
+  // Arrowhead
+  const headLen = Math.max(5, arrowLen * 0.3);
+  const headAngle = 0.45;
+  ctx.beginPath();
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax - headLen * Math.cos(rad - headAngle), ay - headLen * Math.sin(rad - headAngle));
+  ctx.moveTo(ax, ay);
+  ctx.lineTo(ax - headLen * Math.cos(rad + headAngle), ay - headLen * Math.sin(rad + headAngle));
+  ctx.stroke();
+
+  // Centre dot
+  const dotR = Math.max(5, Math.min(12, r * 0.3));
+  ctx.beginPath(); ctx.arc(cx, cy, dotR, 0, Math.PI * 2);
+  ctx.fillStyle = color; ctx.fill();
+  if (sel) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke(); }
+
+  // Labels
+  if (r > 8 || scale > 0.001) {
+    const fz = Math.max(9, Math.min(12, r * 0.3));
+    ctx.fillStyle = sel ? '#fff' : 'rgba(255,255,255,0.8)';
+    ctx.font = `bold ${fz}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillText(`lv${sp.level_min}–${sp.level_max}`, cx, cy - dotR - 3);
+    ctx.font = `${Math.max(8, fz - 1)}px monospace`;
+    ctx.fillStyle = 'rgba(200,150,200,0.7)';
+    ctx.fillText(`×${sp.fleet_min}–${sp.fleet_max}`, cx, cy + dotR + 10);
+    ctx.fillStyle = 'rgba(200,150,200,0.45)';
+    ctx.fillText(`#${sp.id}`, cx, cy + dotR + 20);
   }
 
   ctx.restore();
 }
 
-function estimatePolyRadius(verts: { x: number; y: number }[]): number {
-  let maxR = 0;
-  for (const v of verts) maxR = Math.max(maxR, Math.hypot(v.x, v.y));
-  return maxR;
-}
-
-function drawShip(ship: LiveShip): void {
-  const [cx, cy] = worldToCanvas(ship.x, ship.y);
-  const r = ship.company === 99 ? 5 : 4;
-
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fillStyle = COMPANY_COLORS[ship.company] ?? '#aaaaaa';
+function drawRotationHandle(sp: SpawnPoint): void {
+  const [hx, hy] = spawnHandlePos(sp);
+  ctx.save();
+  // Line from occupancy ring edge to handle (already drawn in arrow, this is the outer handle dot)
+  ctx.beginPath(); ctx.arc(hx, hy, 8, 0, Math.PI * 2);
+  ctx.fillStyle   = 'rgba(255,255,255,0.15)';
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 0.5;
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth   = 1.5;
   ctx.stroke();
-
-  // Ghost ships get a skull indicator when zoomed in enough
-  if (ship.company === 99 && scale > 0.003) {
-    ctx.fillStyle = 'rgba(200,80,200,0.7)';
-    ctx.font = '8px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText('☠', cx, cy - r - 2);
-  }
+  // Rotation icon suggestion — small arc inside handle
+  ctx.beginPath();
+  ctx.arc(hx, hy, 4, 0, Math.PI * 1.5);
+  ctx.strokeStyle = '#fff';
+  ctx.lineWidth   = 1.5;
+  ctx.stroke();
+  // arrowhead on arc end
+  const endAngle = Math.PI * 1.5;
+  ctx.beginPath();
+  ctx.moveTo(hx + 4 * Math.cos(endAngle), hy + 4 * Math.sin(endAngle));
+  ctx.lineTo(hx + 4 * Math.cos(endAngle) + 4, hy + 4 * Math.sin(endAngle) - 2);
+  ctx.stroke();
+  ctx.restore();
 }
 
-// ── Viewport / zoom ─────────────────────────────────────────────────────────
+// ── Viewport / zoom ───────────────────────────────────────────────────────────
 
 function fitAll(): void {
-  const W = canvas.width;
-  const H = canvas.height;
-  const margin = 30;
-  const scaleX = (W - margin * 2) / MAP_W;
-  const scaleY = (H - margin * 2) / MAP_H;
-  scale = Math.min(scaleX, scaleY);
-  offsetX = margin + (W - margin * 2 - MAP_W * scale) / 2;
-  offsetY = margin + (H - margin * 2 - MAP_H * scale) / 2;
+  const W = canvas.width, H = canvas.height, m = 30;
+  scale   = Math.min((W - m * 2) / MAP_W, (H - m * 2) / MAP_H);
+  offsetX = m + (W - m * 2 - MAP_W * scale) / 2;
+  offsetY = m + (H - m * 2 - MAP_H * scale) / 2;
   draw();
 }
 
-function zoomAtPoint(canvasPx: number, canvasPy: number, factor: number): void {
-  const wx = (canvasPx - offsetX) / scale;
-  const wy = (canvasPy - offsetY) / scale;
-  scale *= factor;
-  scale = Math.max(0.00015, Math.min(0.08, scale));
-  offsetX = canvasPx - wx * scale;
-  offsetY = canvasPy - wy * scale;
+function zoomAtPoint(px: number, py: number, factor: number): void {
+  const wx = (px - offsetX) / scale, wy = (py - offsetY) / scale;
+  scale = clamp(scale * factor, 0.00015, 0.08);
+  offsetX = px - wx * scale; offsetY = py - wy * scale;
   draw();
 }
 
-// ── Hit testing ───────────────────────────────────────────────────────────────
-
-function hitTestIsland(cx: number, cy: number): IslandState | null {
-  let best: IslandState | null = null;
-  let bestDist = Infinity;
-
-  for (const isl of islands) {
-    const [icx, icy] = worldToCanvas(isl.editX, isl.editY);
-    const dist = Math.hypot(cx - icx, cy - icy);
-
-    // Use approximate screen radius for hit detection
-    let screenR = 20; // minimum hit radius in px
-    if (isl.outerVerts && isl.outerVerts.length > 0) {
-      const polyR = estimatePolyRadius(isl.outerVerts);
-      screenR = Math.max(20, polyR * scale * 0.5);
-    } else {
-      screenR = Math.max(20, (isl.grassRadius ?? isl.beachRadius ?? 2500) * scale);
-    }
-
-    if (dist < screenR && dist < bestDist) {
-      best = isl;
-      bestDist = dist;
-    }
-  }
-  return best;
-}
-
-// ── Event handlers ────────────────────────────────────────────────────────────
+// ── Events ────────────────────────────────────────────────────────────────────
 
 function resizeCanvas(): void {
   const wrap = document.getElementById('canvas-wrap')!;
-  canvas.width = wrap.clientWidth;
+  canvas.width  = wrap.clientWidth;
   canvas.height = wrap.clientHeight;
   draw();
 }
@@ -590,20 +658,47 @@ function resizeCanvas(): void {
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   const rect = canvas.getBoundingClientRect();
-  const px = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const px = (e.clientX - rect.left) * (canvas.width  / rect.width);
   const py = (e.clientY - rect.top)  * (canvas.height / rect.height);
-  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-  zoomAtPoint(px, py, factor);
+  zoomAtPoint(px, py, e.deltaY < 0 ? 1.15 : 1 / 1.15);
 }, { passive: false });
 
 canvas.addEventListener('mousedown', (e) => {
   const rect = canvas.getBoundingClientRect();
-  const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
   const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
   const [wx, wy] = canvasToWorld(cx, cy);
 
-  if (mode === 'spawn-ghost' && e.button === 0) {
-    spawnGhost(wx, wy);
+  if (mode === 'spawn-point' && e.button === 0) {
+    // Rotation handle takes priority (only when a point is selected)
+    const handleHit = hitTestSpawnHandle(cx, cy);
+    if (handleHit) {
+      isRotatingSpawn = true;
+      dragSpawnId = handleHit.id;
+      return;
+    }
+
+    // Hit-test spawn center for drag-to-move
+    const centerHit = hitTestSpawnCenter(cx, cy);
+    if (centerHit) {
+      // First click selects; second click on already selected starts drag
+      if (centerHit.id === selectedSpawnId) {
+        isDraggingSpawn  = true;
+        dragSpawnId      = centerHit.id;
+        dragStartCanvasX = cx;
+        dragStartCanvasY = cy;
+        dragStartWorldX  = centerHit.x;
+        dragStartWorldY  = centerHit.y;
+        canvas.style.cursor = 'move';
+      } else {
+        selectSpawn(centerHit.id);
+        draw();
+      }
+      return;
+    }
+
+    // Click on empty water → place new spawn point
+    addSpawnPoint(wx, wy);
     return;
   }
 
@@ -611,155 +706,133 @@ canvas.addEventListener('mousedown', (e) => {
     const hit = hitTestIsland(cx, cy);
     if (hit) {
       isDraggingIsland = true;
-      dragIslandId = hit.id;
-      dragStartCanvasX = cx;
-      dragStartCanvasY = cy;
-      dragStartWorldX = hit.editX;
-      dragStartWorldY = hit.editY;
+      dragIslandId     = hit.id;
+      dragStartCanvasX = cx; dragStartCanvasY = cy;
+      dragStartWorldX  = hit.editX; dragStartWorldY = hit.editY;
       selectIsland(hit.id);
-      canvas.classList.remove('cursor-grab');
       canvas.classList.add('cursor-move');
       return;
     }
   }
 
-  // Pan on any middle-click, or left-click in view mode
   if (e.button === 1 || (e.button === 0 && mode === 'view') ||
-      (e.button === 0 && mode === 'move-island' && !isDraggingIsland)) {
+      (e.button === 0 && mode === 'move-island' && !isDraggingIsland) ||
+      (e.button === 0 && mode === 'spawn-point' && !isDraggingSpawn && !isRotatingSpawn)) {
     isPanning = true;
-    panStartX = e.clientX;
-    panStartY = e.clientY;
-    panStartOffX = offsetX;
-    panStartOffY = offsetY;
+    panStartX = e.clientX; panStartY = e.clientY;
+    panStartOffX = offsetX; panStartOffY = offsetY;
     canvas.classList.add('cursor-grab');
   }
 });
 
 canvas.addEventListener('mousemove', (e) => {
   const rect = canvas.getBoundingClientRect();
-  const cx = (e.clientX - rect.left) * (canvas.width / rect.width);
+  const cx = (e.clientX - rect.left) * (canvas.width  / rect.width);
   const cy = (e.clientY - rect.top)  * (canvas.height / rect.height);
   const [wx, wy] = canvasToWorld(cx, cy);
-  mouseWorldX = wx;
-  mouseWorldY = wy;
-
+  mouseWorldX = wx; mouseWorldY = wy;
   coordsDisplay.textContent = `World: (${Math.round(wx)}, ${Math.round(wy)})`;
 
+  // Rotating spawn point
+  if (isRotatingSpawn && dragSpawnId !== null) {
+    const sp = spawnPoints.find(p => p.id === dragSpawnId);
+    if (sp) {
+      const [scx, scy] = worldToCanvas(sp.x, sp.y);
+      const ang = Math.atan2(cy - scy, cx - scx) * (180 / Math.PI);
+      sp.angle_deg = ((ang % 360) + 360) % 360;
+      sp.dirty     = true;
+      if (selectedSpawnId === sp.id) selSpawnAngle.value = String(Math.round(sp.angle_deg));
+      renderSpawnList(); draw();
+    }
+    return;
+  }
+
+  // Dragging spawn point
+  if (isDraggingSpawn && dragSpawnId !== null) {
+    const sp = spawnPoints.find(p => p.id === dragSpawnId);
+    if (sp) {
+      const dxW = (cx - dragStartCanvasX) / scale;
+      const dyW = (cy - dragStartCanvasY) / scale;
+      sp.x     = clamp(dragStartWorldX + dxW, 1000, MAP_W - 1000);
+      sp.y     = clamp(dragStartWorldY + dyW, 1000, MAP_H - 1000);
+      sp.dirty = true;
+      renderSpawnList(); draw();
+    }
+    return;
+  }
+
+  // Dragging island
   if (isDraggingIsland && dragIslandId !== null) {
-    const dx = (cx - dragStartCanvasX) / scale;
-    const dy = (cy - dragStartCanvasY) / scale;
     const isl = islands.find(i => i.id === dragIslandId);
     if (isl) {
-      isl.editX = Math.max(0, Math.min(MAP_W, dragStartWorldX + dx));
-      isl.editY = Math.max(0, Math.min(MAP_H, dragStartWorldY + dy));
+      isl.editX = clamp(dragStartWorldX + (cx - dragStartCanvasX) / scale, 0, MAP_W);
+      isl.editY = clamp(dragStartWorldY + (cy - dragStartCanvasY) / scale, 0, MAP_H);
       isl.dirty = true;
-      updateIslandDetail();
-      renderIslandList();
+      updateIslandDetail(); renderIslandList();
     }
-    draw();
-    return;
+    draw(); return;
   }
 
+  // Panning
   if (isPanning) {
-    const dx = e.clientX - panStartX;
-    const dy = e.clientY - panStartY;
-    offsetX = panStartOffX + dx;
-    offsetY = panStartOffY + dy;
-    draw();
-    return;
+    offsetX = panStartOffX + (e.clientX - panStartX);
+    offsetY = panStartOffY + (e.clientY - panStartY);
+    draw(); return;
   }
 
-  // Update cursor hint for move-island mode
+  // Cursor hints
   if (mode === 'move-island') {
-    const hit = hitTestIsland(cx, cy);
-    canvas.style.cursor = hit ? 'grab' : 'default';
+    canvas.style.cursor = hitTestIsland(cx, cy) ? 'grab' : 'default';
+  } else if (mode === 'spawn-point') {
+    if (hitTestSpawnHandle(cx, cy))       canvas.style.cursor = 'ew-resize';
+    else if (hitTestSpawnCenter(cx, cy))  canvas.style.cursor = selectedSpawnId === hitTestSpawnCenter(cx, cy)?.id ? 'move' : 'pointer';
+    else                                  canvas.style.cursor = 'crosshair';
+    draw(); // refresh crosshair / hover highlighting
   }
-
-  if (mode === 'spawn-ghost') draw();
 });
 
-canvas.addEventListener('mouseup', (e) => {
-  if (isDraggingIsland) {
-    isDraggingIsland = false;
-    dragIslandId = null;
-    canvas.classList.remove('cursor-move');
-    canvas.style.cursor = 'grab';
-  }
-  if (isPanning) {
-    isPanning = false;
-    canvas.classList.remove('cursor-grab');
-    canvas.style.cursor = mode === 'spawn-ghost' ? 'crosshair' : 'default';
-  }
+canvas.addEventListener('mouseup', () => {
+  if (isDraggingSpawn)  { isDraggingSpawn  = false; dragSpawnId  = null; canvas.style.cursor = 'crosshair'; }
+  if (isRotatingSpawn)  { isRotatingSpawn  = false; dragSpawnId  = null; canvas.style.cursor = 'crosshair'; }
+  if (isDraggingIsland) { isDraggingIsland = false; dragIslandId = null; canvas.classList.remove('cursor-move'); canvas.style.cursor = 'grab'; }
+  if (isPanning)        { isPanning = false; canvas.classList.remove('cursor-grab'); canvas.style.cursor = mode === 'spawn-point' ? 'crosshair' : 'default'; }
 });
 
 canvas.addEventListener('mouseleave', () => {
-  isPanning = false;
-  isDraggingIsland = false;
+  isPanning = isDraggingIsland = isDraggingSpawn = isRotatingSpawn = false;
+  if (mode === 'spawn-point') draw();
 });
 
-// ── Mode buttons ─────────────────────────────────────────────────────────────
+// ── Mode buttons ──────────────────────────────────────────────────────────────
+
+const MODE_HINTS: Record<EditorMode, string> = {
+  'view':        'Left-drag to pan · Scroll to zoom',
+  'move-island': 'Drag an island to move it',
+  'spawn-point': 'Click open water to place · Click point to select · Drag to move · Drag ↻ handle to rotate',
+};
 
 function setMode(m: EditorMode): void {
   mode = m;
-  document.querySelectorAll<HTMLButtonElement>('.btn[data-mode]').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.mode === m);
-  });
-  if (m === 'spawn-ghost') {
-    canvas.style.cursor = 'crosshair';
-    (document.getElementById('spawn-hint') as HTMLElement).textContent =
-      'Click on the map to spawn ghost ships.';
-  } else if (m === 'move-island') {
-    canvas.style.cursor = 'default';
-    (document.getElementById('spawn-hint') as HTMLElement).textContent =
-      'Switch to 💀 Spawn mode then click on the map.';
-  } else {
-    canvas.style.cursor = 'default';
-    (document.getElementById('spawn-hint') as HTMLElement).textContent =
-      'Switch to 💀 Spawn mode then click on the map.';
-  }
+  document.querySelectorAll<HTMLButtonElement>('.btn[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === m));
+  modeHint.textContent = MODE_HINTS[m];
+  canvas.style.cursor  = m === 'spawn-point' ? 'crosshair' : 'default';
   draw();
 }
 
-document.getElementById('btn-view')!.addEventListener('click', () => setMode('view'));
-document.getElementById('btn-move')!.addEventListener('click', () => setMode('move-island'));
-document.getElementById('btn-spawn')!.addEventListener('click', () => setMode('spawn-ghost'));
+document.getElementById('btn-view')!.addEventListener('click',  () => setMode('view'));
+document.getElementById('btn-move')!.addEventListener('click',  () => setMode('move-island'));
+document.getElementById('btn-spawn')!.addEventListener('click', () => setMode('spawn-point'));
+document.getElementById('btn-refresh')!.addEventListener('click',  refreshAll);
+document.getElementById('btn-fit')!.addEventListener('click',      fitAll);
+document.getElementById('btn-zoom-in')!.addEventListener('click',  () => zoomAtPoint(canvas.width / 2, canvas.height / 2, 1.5));
+document.getElementById('btn-zoom-out')!.addEventListener('click', () => zoomAtPoint(canvas.width / 2, canvas.height / 2, 1 / 1.5));
+document.getElementById('btn-save-islands')!.addEventListener('click', saveIslandPositions);
+document.getElementById('btn-save-spawns')!.addEventListener('click',  saveSpawnPoints);
+document.getElementById('btn-apply-spawn')!.addEventListener('click',  applySpawnEdit);
+document.getElementById('btn-delete-spawn')!.addEventListener('click', () => { if (selectedSpawnId !== null) deleteSpawn(selectedSpawnId); });
+document.getElementById('chk-grid')!.addEventListener('change', e => { showGrid = (e.target as HTMLInputElement).checked; draw(); });
 
-document.getElementById('btn-refresh')!.addEventListener('click', refreshAll);
-document.getElementById('btn-fit')!.addEventListener('click', fitAll);
-document.getElementById('btn-zoom-in')!.addEventListener('click', () => {
-  zoomAtPoint(canvas.width / 2, canvas.height / 2, 1.5);
-});
-document.getElementById('btn-zoom-out')!.addEventListener('click', () => {
-  zoomAtPoint(canvas.width / 2, canvas.height / 2, 1 / 1.5);
-});
-
-document.getElementById('btn-save-positions')!.addEventListener('click', saveIslandPositions);
-
-document.getElementById('btn-auto-refresh')!.addEventListener('click', function() {
-  autoRefresh = !autoRefresh;
-  (this as HTMLButtonElement).textContent = `⏱ Auto: ${autoRefresh ? 'on' : 'off'}`;
-  (this as HTMLButtonElement).classList.toggle('active', autoRefresh);
-  if (autoRefresh) {
-    autoRefreshTimer = setInterval(() => { fetchMap().then(draw); }, 3000);
-  } else {
-    if (autoRefreshTimer !== null) clearInterval(autoRefreshTimer);
-  }
-});
-
-document.getElementById('chk-ships')!.addEventListener('change', (e) => {
-  showShips = (e.target as HTMLInputElement).checked;
-  draw();
-});
-document.getElementById('chk-ghosts')!.addEventListener('change', (e) => {
-  showGhosts = (e.target as HTMLInputElement).checked;
-  draw();
-});
-document.getElementById('chk-grid')!.addEventListener('change', (e) => {
-  showGrid = (e.target as HTMLInputElement).checked;
-  draw();
-});
-
-// ── Initialise ───────────────────────────────────────────────────────────────
+// ── Initialise ────────────────────────────────────────────────────────────────
 
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();

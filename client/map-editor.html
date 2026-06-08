@@ -19,7 +19,7 @@
       width: 100%; height: 100%;
     }
     #sidebar {
-      width: 260px;
+      width: 270px;
       flex-shrink: 0;
       background: rgba(10,18,36,0.97);
       border-right: 1px solid rgba(245,200,66,0.25);
@@ -41,8 +41,8 @@
       height: 100%;
       cursor: default;
     }
-    canvas.cursor-move  { cursor: move; }
-    canvas.cursor-grab  { cursor: grab; }
+    canvas.cursor-move      { cursor: move; }
+    canvas.cursor-grab      { cursor: grab; }
     canvas.cursor-crosshair { cursor: crosshair; }
 
     h2 { margin: 0 0 4px; font-size: 15px; color: #f5c842; }
@@ -61,10 +61,6 @@
       font-family: inherit;
       font-size: 12px;
     }
-    input[type=range] {
-      width: 100%;
-      accent-color: #f5c842;
-    }
 
     .btn-row { display: flex; gap: 4px; flex-wrap: wrap; }
     .btn {
@@ -79,8 +75,9 @@
       cursor: pointer;
       white-space: nowrap;
     }
-    .btn:hover { background: rgba(245,200,66,0.15); }
+    .btn:hover  { background: rgba(245,200,66,0.15); }
     .btn.active { background: rgba(245,200,66,0.22); color: #f5c842; border-color: rgba(245,200,66,0.55); }
+
     .btn-save {
       width: 100%;
       background: rgba(30,90,30,0.7);
@@ -93,18 +90,17 @@
       cursor: pointer;
     }
     .btn-save:hover { background: rgba(40,120,40,0.8); }
-    .btn-spawn {
-      width: 100%;
-      background: rgba(120,30,30,0.7);
-      color: #e8a0a0;
-      border: 1px solid rgba(200,60,60,0.4);
-      border-radius: 3px;
-      padding: 7px;
-      font-family: inherit;
-      font-size: 12px;
+
+    .btn-danger {
+      background: none;
+      border: none;
+      color: #e87070;
       cursor: pointer;
+      font-size: 13px;
+      padding: 0 4px;
+      line-height: 1;
     }
-    .btn-spawn:hover { background: rgba(160,40,40,0.8); }
+    .btn-danger:hover { color: #ff4040; }
 
     #status-bar {
       position: absolute;
@@ -136,6 +132,7 @@
     }
     .info-box span { color: #f5c842; }
 
+    /* ── Island list ──────────────────────────────────────────────────────── */
     .island-list-item {
       display: flex;
       align-items: center;
@@ -145,7 +142,7 @@
       font-size: 11px;
       cursor: pointer;
     }
-    .island-list-item:hover { background: rgba(245,200,66,0.1); }
+    .island-list-item:hover    { background: rgba(245,200,66,0.1); }
     .island-list-item.selected { background: rgba(245,200,66,0.18); color: #f5c842; }
     .island-dot {
       width: 9px; height: 9px;
@@ -153,29 +150,60 @@
       flex-shrink: 0;
     }
 
-    .ghost-zone-item {
+    /* ── Spawn point list ─────────────────────────────────────────────────── */
+    .spawn-list {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+    .spawn-item {
       display: flex;
       align-items: center;
       gap: 5px;
-      padding: 3px 5px;
+      padding: 4px 6px;
       border-radius: 3px;
       font-size: 11px;
-    }
-    .ghost-zone-item button {
-      margin-left: auto;
-      background: none;
-      border: none;
-      color: #e87070;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid transparent;
       cursor: pointer;
-      font-size: 12px;
-      padding: 0 3px;
     }
+    .spawn-item:hover    { border-color: rgba(200,80,200,0.35); }
+    .spawn-item.selected { border-color: rgba(200,80,200,0.7); background: rgba(120,40,120,0.25); color: #cc88ff; }
+    .spawn-dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: #cc44cc;
+      flex-shrink: 0;
+    }
+    .spawn-item-info { flex: 1; min-width: 0; }
+    .spawn-item-info .coords { color: rgba(232,213,154,0.5); font-size: 10px; }
+
+    /* ── Spawn point property panel ──────────────────────────────────────── */
+    #spawn-detail {
+      display: none;
+      flex-direction: column;
+      gap: 5px;
+      padding: 8px;
+      background: rgba(80,20,80,0.2);
+      border: 1px solid rgba(200,80,200,0.3);
+      border-radius: 4px;
+      margin-top: 4px;
+    }
+    #spawn-detail label { color: rgba(200,150,200,0.8); }
+    #spawn-detail input { border-color: rgba(200,80,200,0.35); }
+    .spawn-detail-row { display: flex; gap: 6px; }
+    .spawn-detail-row > div { flex: 1; }
 
     .hint {
       font-size: 10px;
       color: rgba(232,213,154,0.38);
       line-height: 1.45;
     }
+
+    /* Tighter number pairs */
+    .spawn-detail-row input { font-size: 11px; padding: 3px 5px; }
 
     #toast {
       position: absolute;
@@ -195,8 +223,8 @@
       z-index: 100;
     }
     #toast.show { opacity: 1; }
-    #toast.ok  { border-color: rgba(80,180,60,0.6); color: #a8e890; }
-    #toast.err { border-color: rgba(220,60,60,0.6); color: #e8a0a0; }
+    #toast.ok   { border-color: rgba(80,180,60,0.6);  color: #a8e890; }
+    #toast.err  { border-color: rgba(220,60,60,0.6);  color: #e8a0a0; }
   </style>
 </head>
 <body>
@@ -208,37 +236,29 @@
 
     <h3>Mode</h3>
     <div class="btn-row">
-      <button class="btn active" id="btn-view"   data-mode="view">👁 View</button>
-      <button class="btn"        id="btn-move"   data-mode="move-island">✋ Islands</button>
-      <button class="btn"        id="btn-spawn"  data-mode="spawn-ghost">💀 Spawn</button>
+      <button class="btn active" id="btn-view"  data-mode="view">👁 View</button>
+      <button class="btn"        id="btn-move"  data-mode="move-island">✋ Islands</button>
+      <button class="btn"        id="btn-spawn" data-mode="spawn-point">💀 Spawns</button>
     </div>
+    <div class="hint" id="mode-hint">Pan with left-drag · Scroll to zoom</div>
 
     <hr class="sep"/>
     <h3>Server</h3>
-    <label>Admin port</label>
-    <input type="number" id="server-port" value="8081" min="1" max="65535"/>
+    <label>Admin URL</label>
+    <input type="text" id="server-url" value="http://localhost:8081" placeholder="http://localhost:8081"/>
     <div class="btn-row">
       <button class="btn" id="btn-refresh">↻ Refresh</button>
-      <button class="btn" id="btn-auto-refresh">⏱ Auto: off</button>
-    </div>
-
-    <hr class="sep"/>
-    <h3>View</h3>
-    <div class="btn-row">
-      <button class="btn" id="btn-fit">⊡ Fit all</button>
+      <button class="btn" id="btn-fit">⊡ Fit</button>
       <button class="btn" id="btn-zoom-in">+</button>
       <button class="btn" id="btn-zoom-out">−</button>
     </div>
-    <label>Show ships
-      <input type="checkbox" id="chk-ships" checked/>
-    </label>
-    <label>Show ghost ships
-      <input type="checkbox" id="chk-ghosts" checked/>
-    </label>
-    <label>Show grid
-      <input type="checkbox" id="chk-grid" checked/>
+
+    <hr class="sep"/>
+    <label style="display:flex;align-items:center;gap:5px;cursor:pointer;">
+      <input type="checkbox" id="chk-grid" checked/> Show grid
     </label>
 
+    <!-- ── Islands section ─────────────────────────────────────────── -->
     <hr class="sep"/>
     <h3>Islands</h3>
     <div id="island-list" style="display:flex;flex-direction:column;gap:2px;"></div>
@@ -250,28 +270,78 @@
         <div>Template: <span id="sel-island-tmpl">—</span></div>
       </div>
     </div>
-    <button class="btn-save" id="btn-save-positions">💾 Save Island Positions</button>
-    <div class="hint">Saves centre positions to islands.json. Restart server to apply geometry changes.</div>
+    <button class="btn-save" id="btn-save-islands">💾 Save Island Positions</button>
+    <div class="hint">Restart server after saving to apply geometry.</div>
 
+    <!-- ── Ghost fleet spawn points ────────────────────────────────── -->
     <hr class="sep"/>
-    <h3>Ghost Ship Spawn</h3>
-    <label>Level (1–60)</label>
-    <input type="number" id="ghost-level" value="30" min="1" max="60"/>
-    <label>Fleet size</label>
-    <input type="number" id="ghost-fleet" value="1" min="1" max="5"/>
-    <div class="hint" id="spawn-hint">Switch to 💀 Spawn mode then click on the map.</div>
-
-    <hr class="sep"/>
-    <h3>Live Ships</h3>
-    <div class="info-box" id="ship-stats">—</div>
-
-    <hr class="sep"/>
-    <div class="hint">
-      👁 View: pan/zoom<br>
-      ✋ Islands: drag to move<br>
-      💀 Spawn: click to place ghost ship<br>
-      Scroll to zoom
+    <h3>Ghost Fleet Spawn Points</h3>
+    <div class="hint" style="margin-bottom:4px;">
+      In 💀 Spawns mode: <b>click</b> open water to place · <b>click</b> existing point to select
     </div>
+
+    <!-- New spawn point defaults -->
+    <div class="spawn-detail-row">
+      <div>
+        <label>Level min</label>
+        <input type="number" id="new-spawn-level-min" value="20" min="1" max="60"/>
+      </div>
+      <div>
+        <label>Level max</label>
+        <input type="number" id="new-spawn-level-max" value="40" min="1" max="60"/>
+      </div>
+    </div>
+    <div class="spawn-detail-row">
+      <div>
+        <label>Fleet min</label>
+        <input type="number" id="new-spawn-fleet-min" value="3" min="1" max="10"/>
+      </div>
+      <div>
+        <label>Fleet max</label>
+        <input type="number" id="new-spawn-fleet-max" value="5" min="1" max="10"/>
+      </div>
+    </div>
+
+    <!-- Selected spawn point editor -->
+    <div id="spawn-detail">
+      <div style="font-size:11px;color:rgba(200,150,200,0.8);">
+        Selected: Spawn #<span id="sel-spawn-id">—</span>
+      </div>
+      <div class="spawn-detail-row">
+        <div>
+          <label>Level min</label>
+          <input type="number" id="sel-spawn-level-min" value="20" min="1" max="60"/>
+        </div>
+        <div>
+          <label>Level max</label>
+          <input type="number" id="sel-spawn-level-max" value="40" min="1" max="60"/>
+        </div>
+      </div>
+      <div class="spawn-detail-row">
+        <div>
+          <label>Fleet min</label>
+          <input type="number" id="sel-spawn-fleet-min" value="3" min="1" max="10"/>
+        </div>
+        <div>
+          <label>Fleet max</label>
+          <input type="number" id="sel-spawn-fleet-max" value="5" min="1" max="10"/>
+        </div>
+      </div>
+      <div>
+        <label>Rotation (°) — drag arrow on map</label>
+        <input type="number" id="sel-spawn-angle" value="0" min="0" max="359" step="1"/>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btn-apply-spawn">✓ Apply</button>
+        <button class="btn btn-danger" id="btn-delete-spawn" style="flex:none;padding:5px 8px;">🗑</button>
+      </div>
+    </div>
+
+    <!-- Spawn point list -->
+    <div class="spawn-list" id="spawn-list"></div>
+
+    <button class="btn-save" id="btn-save-spawns">💾 Save Spawn Points</button>
+
   </div>
 
   <div id="canvas-wrap">
