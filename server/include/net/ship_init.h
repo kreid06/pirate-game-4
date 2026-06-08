@@ -10,6 +10,7 @@ void init_brigantine_ship(int idx, float world_x, float world_y, uint8_t ship_se
 void tick_ghost_ships(float dt);
 void tick_ghost_ship_spawner(float dt);
 void ghost_notify_damaged(uint32_t victim_ship_id, uint32_t attacker_ship_id);
+void ghost_notify_dealt_damage(uint32_t attacker_ship_id);
 
 /* ── Ghost fleet spawn points ─────────────────────────────────────────────────
  * Static world positions where ghost fleets respawn when the area is clear.

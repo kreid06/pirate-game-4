@@ -1111,7 +1111,10 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             if (dot < cosf(half_cone)) continue;
             uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
             bool killed = false;
-            if (npc->health <= dmg) { npc->health = 0; npc->active = false; killed = true; }
+            if (npc->health <= dmg) {
+                npc->health = 0; npc->active = false; killed = true;
+                npc->assigned_weapon_id = 0;
+            }
             else { npc->health -= dmg; }
             npc->last_damage_ms = get_time_ms();
             npc->hp_regen_accum_ms = 0;

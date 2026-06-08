@@ -61,6 +61,23 @@ void tick_sinking_ships(void) {
         /* Destroy in sim */
         if (global_sim) sim_destroy_entity(global_sim, sunk_id);
 
+        /* Remove NpcAgents belonging to this ship (compacts the array in-place) */
+        for (int ai = 0; ai < npc_count; ) {
+            if (npc_agents[ai].ship_id == (uint16_t)sunk_id) {
+                /* Clear MODULE_STATE_OCCUPIED on the module the agent held */
+                SimpleShip* _as = find_ship(npc_agents[ai].ship_id);
+                if (_as) {
+                    ShipModule* _am = find_module_by_id(_as, npc_agents[ai].module_id);
+                    if (_am) _am->state_bits &= ~MODULE_STATE_OCCUPIED;
+                }
+                memmove(&npc_agents[ai], &npc_agents[ai + 1],
+                        (size_t)(npc_count - ai - 1) * sizeof(NpcAgent));
+                npc_count--;
+            } else {
+                ai++;
+            }
+        }
+
         /* Swap-and-pop */
         ships[s] = ships[ship_count - 1];
         memset(&ships[ship_count - 1], 0, sizeof(SimpleShip));
@@ -708,6 +725,12 @@ static float ghost_sway_phase[MAX_SIMPLE_SHIPS] = {0};
 static float ghost_angular_vel[MAX_SIMPLE_SHIPS] = {0};
 /* Forced aggro target (ship_id) set by damage events or pack-alert; 0 = none */
 static uint32_t ghost_forced_target[MAX_SIMPLE_SHIPS] = {0};
+/* Timestamp (ms) of the last combat event (damage dealt or received) for each ghost slot.
+ * Used to de-aggro a forced target that has left range with no combat for 30 s. */
+static uint32_t ghost_last_combat_ms[MAX_SIMPLE_SHIPS] = {0};
+/* De-aggro timeout: forced target is cleared if target has been out of GHOST_ATTACK_RANGE
+ * for longer than this with no damage exchanged. */
+#define GHOST_DEAGGRO_MS  30000u
 
 /* Radius within which an alerted ghost propagates its target to idle fleet-mates */
 #define GHOST_PACK_ALERT_RADIUS  3000.0f
@@ -756,13 +779,34 @@ void tick_ghost_ships(float dt) {
         SimpleShip* target = NULL;
 
         /* Forced target: set by damage events or pack-alert.  Pursue regardless
-         * of normal attack range; clear once the target is gone. */
+         * of normal attack range; clear once the target is gone or de-aggro fires. */
         if (ghost_forced_target[s] != 0) {
             SimpleShip* ft = find_ship(ghost_forced_target[s]);
             if (ft && ft->active && !ft->is_sinking && !is_allied(ship->company_id, ft->company_id)) {
-                target = ft;
+                float ftdx = ft->x - ship->x, ftdy = ft->y - ship->y;
+                float ft_dist2 = ftdx * ftdx + ftdy * ftdy;
+                float ar2 = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+
+                if (ft_dist2 <= ar2) {
+                    /* Target is in range — keep aggro and refresh combat timer */
+                    ghost_last_combat_ms[s] = get_time_ms();
+                    target = ft;
+                } else {
+                    /* Target out of range — check de-aggro timeout */
+                    uint32_t now = get_time_ms();
+                    if (ghost_last_combat_ms[s] == 0)
+                        ghost_last_combat_ms[s] = now; /* first tick out of range */
+                    if (now - ghost_last_combat_ms[s] >= GHOST_DEAGGRO_MS) {
+                        /* 30 s out of range with no combat — drop aggro */
+                        ghost_forced_target[s]  = 0;
+                        ghost_last_combat_ms[s] = 0;
+                    } else {
+                        target = ft; /* still chasing, haven't timed out yet */
+                    }
+                }
             } else {
-                ghost_forced_target[s] = 0; /* target gone — fall through to range scan */
+                ghost_forced_target[s]  = 0; /* target gone — fall through to range scan */
+                ghost_last_combat_ms[s] = 0;
             }
         }
 
@@ -976,7 +1020,21 @@ void ghost_notify_damaged(uint32_t victim_ship_id, uint32_t attacker_ship_id) {
     for (int s = 0; s < ship_count; s++) {
         if (ships[s].active && ships[s].ship_id == victim_ship_id &&
             ships[s].ship_type == SHIP_TYPE_GHOST) {
-            ghost_forced_target[s] = attacker_ship_id;
+            ghost_forced_target[s]  = attacker_ship_id;
+            ghost_last_combat_ms[s] = get_time_ms(); /* damage received — reset de-aggro clock */
+            return;
+        }
+    }
+}
+
+/* ── Dealt-damage notification ────────────────────────────────────────────────
+ * Called whenever a ghost ship projectile hits its current forced target so the
+ * de-aggro timer is reset (ghost is actively fighting — don't drop aggro). */
+void ghost_notify_dealt_damage(uint32_t attacker_ship_id) {
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active && ships[s].ship_id == attacker_ship_id &&
+            ships[s].ship_type == SHIP_TYPE_GHOST) {
+            ghost_last_combat_ms[s] = get_time_ms();
             return;
         }
     }

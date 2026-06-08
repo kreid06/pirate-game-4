@@ -246,7 +246,7 @@ typedef struct {
 } SharedBlobSnapshot;
 
 typedef struct {
-    char ships_json[1048576]; /* 1 MB — fits MAX_SHIPS (150) × ~5 KB each */
+    char ships_json[2097152]; /* 2 MB — fits MAX_SHIPS (200) × ~10 KB each */
     int  ships_len;
     float    aoi_ship_px[MAX_SHIPS];
     float    aoi_ship_py[MAX_SHIPS];
@@ -785,7 +785,7 @@ bool is_outside_deck(uint16_t ship_id, float local_x, float local_y) {
 static float module_collision_radius(ModuleTypeId type) {
     switch (type) {
         case MODULE_TYPE_HELM:
-        case MODULE_TYPE_STEERING_WHEEL: return 18.0f;
+        case MODULE_TYPE_STEERING_WHEEL: return 10.0f;
         case MODULE_TYPE_MAST:           return 14.0f;
         case MODULE_TYPE_CANNON:         return 13.0f;
         case MODULE_TYPE_SWIVEL:         return 10.0f;
@@ -802,7 +802,7 @@ static float module_collision_radius(ModuleTypeId type) {
 static float module_placement_radius(ModuleTypeId type) {
     switch (type) {
         case MODULE_TYPE_HELM:
-        case MODULE_TYPE_STEERING_WHEEL: return 25.0f;
+        case MODULE_TYPE_STEERING_WHEEL: return 14.0f;
         case MODULE_TYPE_CANNON:         return 28.0f;  /* box 16×25 → circle approx */
         case MODULE_TYPE_MAST:           return 20.0f;  /* deck-spanning; see deck logic below */
         case MODULE_TYPE_SWIVEL:         return 14.0f;
@@ -1911,6 +1911,12 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
         if (_ssc > MAX_SHIPS) _ssc = MAX_SHIPS;
         for (uint16_t s = 0; s < _ssc; s++) {
             const struct Ship* ship = &snap->sim_ships[s];
+            /* Reserve 32 bytes so the closing ']' always fits */
+            if (ships_offset >= (int)sizeof(out->ships_json) - 32) {
+                log_warn("⚠️  ships_json near capacity (%d/%zu) — skipping remaining ships",
+                         ships_offset, sizeof(out->ships_json));
+                break;
+            }
             if (!first_ship) {
                 ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, ",");
             }
@@ -2116,6 +2122,11 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
         if (_sc > MAX_SIMPLE_SHIPS) _sc = MAX_SIMPLE_SHIPS;
         for (int s = 0; s < _sc; s++) {
             if (!snap->ships[s].active) continue;
+            if (ships_offset >= (int)sizeof(out->ships_json) - 32) {
+                log_warn("⚠️  ships_json near capacity (%d/%zu) — skipping remaining simple ships",
+                         ships_offset, sizeof(out->ships_json));
+                break;
+            }
             if (!first_ship) {
                 ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, ",");
                 if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
@@ -3872,14 +3883,14 @@ int websocket_server_update(struct Sim* sim) {
                             if (handled && client->player_id != 0) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
-                                    /* Buffers sized for MAX_SHIPS (150) × ~5 KB per ship.
+                                    /* Buffers sized for MAX_SHIPS (200) × ~10 KB per ship.
                                      * Static to avoid large stack frames; safe because only
                                      * one client handshake is processed per event-loop tick. */
-                                    static char game_state_frame[1310720];    /* 1.25 MB WS frame  */
-                                    static char game_state_response[1245184]; /* 1.19 MB JSON blob */
+                                    static char game_state_frame[4194304];    /* 4 MB WS frame     */
+                                    static char game_state_response[4096000]; /* ~3.9 MB JSON blob */
                                     
                                     // Build ships array for initial state
-                                    static char ships_str[1048576]; /* 1 MB — fits 150 ships   */
+                                    static char ships_str[2097152]; /* 2 MB — fits 200 ships   */
                                     int ships_offset = 0;
                                     ships_offset += snprintf(ships_str + ships_offset, sizeof(ships_str) - ships_offset, "[");
                                     
@@ -5326,6 +5337,7 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (tnpc->health <= dmg16) {
                                                         tnpc->health = 0;
                                                         tnpc->active = false;
+                                                        tnpc->assigned_weapon_id = 0;
                                                         killed_npc = true;
                                                         // Award XP to the attacker
                                                         player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
@@ -5486,6 +5498,7 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (tnpc->health <= dmg16) {
                                                         tnpc->health = 0;
                                                         tnpc->active = false;
+                                                        tnpc->assigned_weapon_id = 0;
                                                         killed_npc = true;
                                                         player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
                                                     } else {
@@ -11904,9 +11917,14 @@ void websocket_server_tick(float dt) {
             /* Damage aggro: ghost ship hit → force it to pursue the attacker */
             if (ev->shooter_ship_id != 0 && ev->shooter_ship_id != ev->ship_id
                 && ev->damage_dealt > 0) {
-                SimpleShip* victim = find_ship(ev->ship_id);
+                SimpleShip* victim  = find_ship(ev->ship_id);
+                SimpleShip* shooter = find_ship(ev->shooter_ship_id);
                 if (victim && victim->ship_type == SHIP_TYPE_GHOST)
                     ghost_notify_damaged(ev->ship_id, ev->shooter_ship_id);
+                /* Ghost dealt damage to a non-ghost — reset its de-aggro timer */
+                if (shooter && shooter->ship_type == SHIP_TYPE_GHOST &&
+                    victim  && victim->ship_type  != SHIP_TYPE_GHOST)
+                    ghost_notify_dealt_damage(ev->shooter_ship_id);
             }
         }
         global_sim->hit_event_count = 0;
