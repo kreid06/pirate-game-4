@@ -95,6 +95,14 @@ export class PredictionEngine {
   private clientTickAtLastServerState = 0;
   private estimatedNetworkDelay = 0;
   private serverTickOffset = 0;
+  // RTT expressed in server ticks. The local input made "now" will be applied by the server
+  // roughly this many ticks ahead of the last snapshot we received, so we label predictions
+  // with this lead. That makes server reconciliation compare the same logical tick (the one
+  // the server actually applied our input on) instead of a tick that's ~RTT stale.
+  private rttTicks = 0;
+  // Cap the lead so it can never outrun the prediction-history window (else the matching
+  // prediction would be evicted before its server snapshot returns). ~333ms RTT at 30 Hz.
+  private static readonly MAX_RTT_TICKS = 10;
   
   // Rollback and correction
   private needsRollback = false;
@@ -134,7 +142,12 @@ export class PredictionEngine {
 
   // Ring buffer constants (16 frames = ~350ms at 60Hz)
   private static readonly REWIND_BUFFER_SIZE = 16;
-  private static readonly MAX_PREDICTION_HISTORY = 32;
+  // Sized to hold the rollback window (rollbackLimit) plus the RTT lead (MAX_RTT_TICKS) plus a
+  // little margin, in client ticks (×4 at 120/30 Hz): (16 + 10 + 4) × 4 = 120 → round to 128.
+  // Ensures the prediction labelled with a server tick survives until that tick's snapshot
+  // returns ~RTT later. If a match is ever missed at extreme ping, reconciliation just skips
+  // that frame (findPredictionState → null) — safe degradation, no snap.
+  private static readonly MAX_PREDICTION_HISTORY = 128;
   
   constructor(config: PredictionConfig) {
     this.config = config;
@@ -162,10 +175,18 @@ export class PredictionEngine {
     const minBuffer = 50; // Minimum 50ms
     const maxBuffer = 300; // Maximum 300ms
     this.config.interpolationBuffer = Math.max(minBuffer, Math.min(maxBuffer, dynamicBuffer));
+
+    // Prediction lead, in server ticks, = full RTT / server tick time. Smoothed implicitly via
+    // estimatedNetworkDelay (one-way) ×2. Clamped so it never exceeds the history window.
+    const fullRttMs = this.estimatedNetworkDelay * 2;
+    this.rttTicks = Math.min(
+      PredictionEngine.MAX_RTT_TICKS,
+      Math.max(0, Math.round(fullRttMs / serverTickTime))
+    );
     
     // Log occasionally for debugging
     if (Math.random() < 0.01) {
-      console.log(`📡 Network: ping=${pingMs.toFixed(0)}ms, buffer=${this.config.interpolationBuffer.toFixed(0)}ms`);
+      console.log(`📡 Network: ping=${pingMs.toFixed(0)}ms, buffer=${this.config.interpolationBuffer.toFixed(0)}ms, lead=${this.rttTicks} ticks`);
     }
   }
   
@@ -194,7 +215,10 @@ export class PredictionEngine {
     
     const clientTicksSinceLastServer = this.clientTick - this.clientTickAtLastServerState;
     const serverTickOffset = Math.floor(clientTicksSinceLastServer / clientToServerRatio);
-    const estimatedServerTick = this.lastAuthoritativeTick + serverTickOffset;
+    // Add the RTT lead so the input we make now is labelled with the tick the server will
+    // actually apply it on (last snapshot + full RTT). Reconciliation then compares matching
+    // logical ticks instead of a ~RTT-stale tick, which avoids false corrections on high ping.
+    const estimatedServerTick = this.lastAuthoritativeTick + this.rttTicks + serverTickOffset;
     
     // Override input frame tick with estimated server tick
     inputFrame.tick = estimatedServerTick;
