@@ -390,21 +390,22 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     /* ── Schematic resource cost table ────────────────────────────────────
      * Matches client LAND_BUILD_PANEL_ENTRIES costs.  craft_count_item /
      * craft_consume route ITEM_WOOD/FIBER/METAL/STONE to the res_* pool. */
+    /* Costs must match client LAND_BUILD_PANEL_ENTRIES in UIManager.ts */
     static const struct { int wood, fiber, metal, stone; } SCHEMATIC_COST[14] = {
-        [STRUCT_WOODEN_FLOOR]     = {  5, 0,  0,  0 },
-        [STRUCT_WORKBENCH]        = { 15, 0,  0,  0 },
-        [STRUCT_WALL]             = {  8, 0,  0,  0 },
-        [STRUCT_DOOR_FRAME]       = {  8, 0,  0,  0 },
-        [STRUCT_DOOR]             = {  8, 0,  0,  0 },
-        [STRUCT_SHIPYARD]         = { 50, 0,  0,  0 },
-        [STRUCT_WRECK]            = {  0, 0,  0,  0 },
-        [STRUCT_CEILING]          = {  5, 0,  0,  0 },
-        [STRUCT_CANNON]           = {  8, 0, 20,  0 },
-        [STRUCT_FLAG_FORT]        = {300, 0,  0,200 },
-        [STRUCT_CLAIM_FLAG]       = {  0, 0,  0,  0 },
-        [STRUCT_COMPANY_FORTRESS] = {  0, 0,  0,  0 },
-        [STRUCT_CHEST]            = { 12, 0,  0,  0 },
-        [STRUCT_BED]              = {  8, 4,  0,  0 },
+        [STRUCT_WOODEN_FLOOR]     = { 40, 0,  0,   0 },
+        [STRUCT_WORKBENCH]        = { 12, 0,  0,   0 },
+        [STRUCT_WALL]             = { 20, 0,  0,   0 },
+        [STRUCT_DOOR_FRAME]       = { 20, 0,  0,   0 },
+        [STRUCT_DOOR]             = {  8, 0,  0,   0 },
+        [STRUCT_SHIPYARD]         = {250, 0,  0, 100 },
+        [STRUCT_WRECK]            = {  0, 0,  0,   0 },
+        [STRUCT_CEILING]          = { 25, 0,  0,   0 },
+        [STRUCT_CANNON]           = { 15, 0, 25,   0 },
+        [STRUCT_FLAG_FORT]        = {300, 0,  0, 200 },
+        [STRUCT_CLAIM_FLAG]       = {  5, 5,  0,   0 },
+        [STRUCT_COMPANY_FORTRESS] = {300, 0,  0, 200 },
+        [STRUCT_CHEST]            = { 12, 0,  0,   0 },
+        [STRUCT_BED]              = { 10, 5,  0,   0 },
     };
     if (req_schematic && (int)stype_enum < 14) {
         int nw = SCHEMATIC_COST[stype_enum].wood;
@@ -2028,14 +2029,17 @@ lcd_send:;
 /* ── Helper: build shipyard_state JSON into buf (caller provides space) ── */
 static void build_shipyard_state_json(char* buf, size_t bufsz,
                                       const PlacedStructure* sy,
-                                      uint32_t ship_spawned) {
+                                      uint32_t ship_spawned,
+                                      uint32_t spawner_player_id) {
     const char* phase_str = sy->construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
     if (ship_spawned) {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
                  "\"phase\":\"%s\",\"modules_placed\":[],"
-                 "\"ship_spawned\":%u,\"scaffolded_ship_id\":%u}",
-                 sy->id, phase_str, ship_spawned, sy->scaffolded_ship_id);
+                 "\"ship_spawned\":%u,\"scaffolded_ship_id\":%u,"
+                 "\"spawner_player_id\":%u}",
+                 sy->id, phase_str, ship_spawned, sy->scaffolded_ship_id,
+                 spawner_player_id);
     } else {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
@@ -2157,7 +2161,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
         sy->modules_placed      = 0;
         sy->scaffolded_ship_id  = 0;
         char bcast[512];
-        build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id);
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id, player->player_id);
         websocket_server_broadcast(bcast);
         log_info("⚓ Shipyard %u: released ship %u", sid, released_id);
         return; /* broadcast sent */
@@ -2171,7 +2175,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
     /* Broadcast updated state to all clients */
     {
         char bcast[512];
-        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0);
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0, 0);
         websocket_server_broadcast(bcast);
     }
     return;

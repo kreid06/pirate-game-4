@@ -966,3 +966,5 @@ window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 fitAll();
 refreshAll();
+
+export {};

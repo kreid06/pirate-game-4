@@ -447,6 +447,8 @@ export class ClientApplication {
       this.renderSystem = new RenderSystem(this.canvas, this.config.graphics);
       await this.renderSystem.initialize();
       this.renderSystem.setRadialMenu(this._radialMenu);
+      // Per-kind land affordability check used by plan-marker tints
+      this.renderSystem.landAffordabilityCheck = (kind: string) => this._canAffordLandBuild(kind);
 
       // Mirror deck-level transitions to the server so its per-deck collision
       // filter (lower deck = only masts block movement) stays in sync.
@@ -512,6 +514,9 @@ export class ClientApplication {
           this.setLoadingStep(3);
           this.hideLoadingOverlay();
           console.log('🎮 Entered game world (server ack)');
+          // Fetch schematics immediately so hotbar variant badges are visible
+          // without needing to open the player menu first.
+          this.networkManager.sendRequestSchematics();
         }
       };
       
@@ -727,6 +732,12 @@ export class ClientApplication {
           ship.levelStats.totalCap        = totalCap;
           ship.levelStats.nextUpgradeCost = nextUpgradeCost;
         }
+      };
+
+      this.networkManager.onShipXpGained = (shipId, xp, x, y, shared) => {
+        const label = shared ? `+${xp} XP (shared)` : `+${xp} XP`;
+        const color = shared ? '#88ddff' : '#ffe066';
+        this.renderSystem.spawnResourcePickup(Vec2.from(x, y), label, color);
       };
 
       this.networkManager.onShipUnclaimed = (shipId) => {
@@ -1154,6 +1165,44 @@ export class ClientApplication {
             this.renderSystem.notifySwordSwing(this.AXE_COOLDOWN_MS);
             return;
           }
+          // Metal axe attack
+          if (activeItem === 'metal_axe' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastAxeMs < this.AXE_COOLDOWN_MS * 0.9) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
+            this.lastAxeMs = now;
+            this.lastCombatActionMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 38);
+            this.renderSystem.notifySwordSwing(this.AXE_COOLDOWN_MS * 0.9);
+            return;
+          }
+          // Metal pickaxe attack
+          if (activeItem === 'metal_pickaxe' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastPickaxeMs < this.PICKAXE_COOLDOWN_MS * 0.92) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
+            this.lastPickaxeMs = now;
+            this.lastCombatActionMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 36);
+            this.renderSystem.notifySwordSwing(this.PICKAXE_COOLDOWN_MS * 0.92);
+            return;
+          }
           // Pickaxe attack
           if (activeItem === 'pickaxe' && player && !player.isMounted) {
             const now = performance.now();
@@ -1259,9 +1308,8 @@ export class ClientApplication {
             return;
           }
 
-          // Harvest mode: active slot = axe + not on a ship + hovering a tree → chop
-          // (disabled in combat mode — sword/punch state suppresses gathering)
-          if (activeItem === 'axe' && player && player.carrierId === 0 && !this.combatMode) {
+          // Harvest mode: axe (stone or metal) + not on a ship + hovering a tree → chop
+          if ((activeItem === 'axe' || activeItem === 'metal_axe') && player && player.carrierId === 0 && !this.combatMode) {
             const tree = this.renderSystem.getHoveredTree();
             if (tree) {
               console.log(`🪓 [HARVEST] Sending harvest_resource`);
@@ -1337,8 +1385,8 @@ export class ClientApplication {
             }
           }
 
-          // Mine rock: pickaxe equipped + hovering rock → press E (gives ITEM_METAL)
-          if (activeItem === 'pickaxe' && player && player.carrierId === 0 && !this.combatMode) {
+          // Mine rock: pickaxe (stone or metal) equipped + hovering rock → press E
+          if ((activeItem === 'pickaxe' || activeItem === 'metal_pickaxe') && player && player.carrierId === 0 && !this.combatMode) {
             const rock = this.renderSystem.getHoveredRock();
             if (rock) {
               this.networkManager.sendHarvestRock();
@@ -2650,6 +2698,15 @@ export class ClientApplication {
         this.groupRenameDialog.open(groupIndex, grp?.name ?? currentName, grp?.name || `G${groupIndex + 1}`);
       });
 
+      // Wire Release Ship button in ship settings — shown when docked at a shipyard
+      this.uiManager.setShipReleaseCallback((_shipId, shipyardId) => {
+        this.confirmDialog.open(
+          '⚓  Release Ship?',
+          'The ship will be launched from the shipyard. You can still board it afterwards.',
+          () => { this.networkManager.sendShipyardAction(shipyardId, 'release_ship'); },
+        );
+      });
+
       // Wire deck demolish buttons in the ship menu — confirm before sending to server
       this.uiManager.setShipDemolishDeckCallback((shipId, moduleId, deckLevel) => {
         const deckName = deckLevel === 1 ? 'Upper' : 'Lower';
@@ -3327,7 +3384,7 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId) => {
+      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId, spawnerPlayerId) => {
         this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced, scaffoldedShipId);
         if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
           this.shipyardMenu.updateState(phase, modulesPlaced);
@@ -3335,11 +3392,17 @@ export class ClientApplication {
         // Don't auto-open the menu on broadcast — player opens it with E or
         // installs modules by clicking on the skeleton directly.
         if (shipSpawned) {
-          this.shipyardMenu.close();
-          this.uiManager.setActiveMenuId(null);
+          const myId = this.networkManager.getAssignedPlayerId();
+          const isMyShip = spawnerPlayerId != null && myId != null && spawnerPlayerId === myId;
+          if (isMyShip) {
+            this.shipyardMenu.close();
+            this.uiManager.setActiveMenuId(null);
+          }
           this.renderSystem.showAnnouncement('⚓ Ship released!', 'info', 3.5);
-          // Open custom rename dialog for the newly-launched ship
-          this.renameDialog.open(shipSpawned, '');
+          // Only open the rename dialog for the player who released the ship
+          if (isMyShip) {
+            this.renameDialog.open(shipSpawned, '');
+          }
         }
       };
 
@@ -4043,7 +4106,8 @@ export class ClientApplication {
         (localPlayer?.inventory?.slots[_activeSlot]?.item === 'sword') &&
         !(localPlayer?.isMounted ?? false);
       this.renderSystem.axeEquipped =
-        (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe') &&
+        (localPlayer?.inventory?.slots[_activeSlot]?.item === 'axe' ||
+         localPlayer?.inventory?.slots[_activeSlot]?.item === 'metal_axe') &&
         !(localPlayer?.isMounted ?? false);
       this.renderSystem.combatMode = this.combatMode;
       if (this.explicitBuildMode) this.syncBuildModeState();
@@ -4068,6 +4132,19 @@ export class ClientApplication {
           (_inAnyShipBuild && _effectiveKind)
             ? this._canAffordShipBuild(_effectiveKind)
             : true;
+
+        // Land build affordability — use ClientApplication.islandBuildMode directly
+        // (RenderSystem.islandBuildKind is only set during the draw phase, too late)
+        if (this.islandBuildMode || this.landBuildMenuOpen) {
+          const _activeSlotLand = localPlayer?.inventory?.activeSlot ?? 0;
+          const _hotbarLand     = localPlayer?.inventory?.slots[_activeSlotLand]?.item ?? null;
+          // Priority: explicit plan kind → land schematic selection → hotbar item
+          const _rawKind        = this.pendingLandBuildKind ?? this.buildSchematicKind ?? _hotbarLand;
+          const _resolvedKind   = this.applyWallVariant(_rawKind);
+          this.renderSystem.landGhostCanAfford = this._canAffordLandBuild(_resolvedKind);
+        } else {
+          this.renderSystem.landGhostCanAfford = true;
+        }
       }
 
       // Sync tombstones into the render system on every frame
@@ -4119,10 +4196,14 @@ export class ClientApplication {
         const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
         const hotbarKind = localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor';
         const islandBuildKind = this.applyWallVariant(this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
+        const _isWallContext = (this.buildSchematicKind === 'wall' || this.buildSchematicKind === 'door_frame'
+          || this.pendingLandBuildKind === 'wall' || this.pendingLandBuildKind === 'door_frame'
+          || islandBuildKind === 'wall' || islandBuildKind === 'door_frame');
         this.uiManager.setIslandBuildState({
           kind: islandBuildKind,
           tooFar: this.renderSystem.getIslandBuildTooFar(),
           enemyClose: false, // TODO: detect when enemies are nearby
+          wallVariant: _isWallContext ? this.wallVariant : undefined,
         });
       } else {
         this.uiManager.setIslandBuildState(null);
@@ -4133,6 +4214,14 @@ export class ClientApplication {
       const playerShip = playerShipId
         ? (worldToRender.ships.find(s => s.id === playerShipId) ?? null)
         : null;
+      // Determine if the player's ship is currently scaffolded at a shipyard
+      const _scaffoldedShipyardId = (() => {
+        if (!playerShipId) return 0;
+        const structs = this.renderSystem.getPlacedStructures();
+        const sy = structs.find(s => s.type === 'shipyard' && s.construction?.scaffoldedShipId === playerShipId);
+        return sy?.id ?? 0;
+      })();
+
       this.uiManager.render(this.renderSystem.getContext(), {
         worldState: worldToRender,
         camera: this.camera,
@@ -4156,6 +4245,7 @@ export class ClientApplication {
         debugMode: this.uiManager.isDebugMode,
         combatMode: this.combatMode,
         altHeld: this.inputManager?.isAltHeld() ?? false,
+        scaffoldedShipyardId: _scaffoldedShipyardId,
       });
 
       // Crafting menu (rendered on top of all other UI)
@@ -4918,7 +5008,7 @@ export class ClientApplication {
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     // Also activated when pendingLandBuildKind is set (via the land build panel)
     const islandItem = this.pendingLandBuildKind ?? activeItem;
-    const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag']);
+    const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag', 'chest']);
     const inIslandBuildMode = (player?.carrierId === 0) && LAND_BUILDABLE.has(islandItem);
     // Also active when a build schematic is selected in the hotbar (player may build from plan)
     const inSchematicBuildMode = (player?.carrierId === 0) && this.buildSchematicKind !== null;
@@ -5264,6 +5354,27 @@ export class ClientApplication {
    * Returns true if resources were available and consumed, false (+ flashCancel) if not.
    */
   /** Read-only affordability check — same logic as _consumeShipBuildResources but no deduction. */
+  private _canAffordLandBuild(kind: string | null): boolean {
+    if (!kind) return true;
+    const entry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    if (!entry || !entry.cost.length) return true;
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const playerId = this.networkManager.getAssignedPlayerId();
+    const player = ws?.players.find(p => p.id === playerId);
+    if (!player) return false;
+    const res  = player.inventory.resources;
+    const RES_KEYS = ['wood', 'fiber', 'metal', 'stone'] as const;
+    const _have = (item: string): number => {
+      if ((RES_KEYS as readonly string[]).includes(item)) return (res as any)[item] ?? 0;
+      let total = 0;
+      for (const sl of (player.inventory.slots ?? [])) {
+        if (sl && (sl.item as string) === item) total += sl.quantity ?? 0;
+      }
+      return total;
+    };
+    return entry.cost.every(({ item, qty }) => _have(item) >= qty);
+  }
+
   private _canAffordShipBuild(kind: GhostModuleKind): boolean {
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     const playerId = this.networkManager.getAssignedPlayerId();
@@ -5946,6 +6057,18 @@ export class ClientApplication {
           if (this.renderSystem.isInDeckBuildMode()) {
             this.renderSystem.cycleDeckLevel();
             e.preventDefault();
+          }
+          // In wall/door-frame placement: cycle between wall and door frame
+          if (this.renderSystem.isIslandBuildGhostActive()) {
+            const _ws2 = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+            const _p2 = _ws2?.players.find(p => p.id === this.networkManager.getAssignedPlayerId());
+            const _slot2 = _p2?.inventory?.activeSlot ?? 0;
+            const _hotbarItem = _p2?.inventory?.slots[_slot2]?.item ?? 'none';
+            const _activeBase = this.buildSchematicKind ?? this.pendingLandBuildKind ?? _hotbarItem;
+            if (_activeBase === 'wall' || _activeBase === 'door_frame') {
+              this.toggleWallVariant();
+              e.preventDefault();
+            }
           }
           break;
         }

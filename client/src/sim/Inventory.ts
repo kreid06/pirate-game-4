@@ -52,7 +52,10 @@ export type ItemKind =
   | 'cloth_shoes'
   | 'cloth_gloves'
   | 'resource_chest'
-  | 'bed';
+  | 'bed'
+  | 'metal_axe'
+  | 'metal_pickaxe'
+  | 'grapple_hook';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield' | 'resource' | 'utility';
@@ -94,7 +97,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   iron_shield:   { kind: 'iron_shield',   name: 'Iron Shield',   category: 'shield',   maxStack: 1,  color: '#aaaaac', borderColor: '#666668', symbol: 'D',  description: 'A sturdy iron shield for reliable defense.',                                         weight: 4   },
   swivel:        { kind: 'swivel',        name: 'Swivel Gun',    category: 'building', maxStack: 9,  color: '#7a4a2a', borderColor: '#4a2810', symbol: '\u2023', description: 'A fast anti-personnel swivel gun. Place anywhere on the ship rail.',            weight: 50  },
   ramp:          { kind: 'ramp',          name: 'Ramp',          category: 'building', maxStack: 9,  color: '#7a5c2a', borderColor: '#4a3410', symbol: '\u27cb', description: 'A wooden ramp connecting the lower and upper ship decks.',                   weight: 10  },
-  axe:           { kind: 'axe',           name: 'Axe',           category: 'tool',     maxStack: 1,  color: '#8b5e2a', borderColor: '#5c3a10', symbol: '\uD83E\uDE93', description: 'Chop wood resources on islands. Equip and press E near a tree.',           weight: 2   },
+  axe:           { kind: 'axe',           name: 'Stone Axe',     category: 'tool',     maxStack: 1,  color: '#8b5e2a', borderColor: '#5c3a10', symbol: '\uD83E\uDE93', description: 'Chop wood resources on islands. Equip and press E near a tree.',           weight: 2   },
   wooden_floor:  { kind: 'wooden_floor',  name: 'Wooden Floor',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u229f',      description: 'Place on island ground as a foundation for workbenches.',               weight: 10  },
   workbench:     { kind: 'workbench',     name: 'Workbench',     category: 'building', maxStack: 5,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u2692',      description: 'Crafting station. Place on a wooden floor and press E to open.',       weight: 30  },
   wall:          { kind: 'wall',          name: 'Wall',          category: 'building', maxStack: 20, color: '#5c3a1a', borderColor: '#2e1a08', symbol: '\u2503',      description: 'Place on a floor tile edge to build a wall segment.',                   weight: 15  },
@@ -103,7 +106,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   wood:          { kind: 'wood',          name: 'Wood',          category: 'resource', maxStack: 99, color: '#8b5e2a', borderColor: '#5c3a10', symbol: 'W',  description: 'Raw wood harvested from island trees. Used for crafting and construction.',     weight: 0.5 },
   fiber:         { kind: 'fiber',         name: 'Fiber',         category: 'resource', maxStack: 99, color: '#c8a46e', borderColor: '#8a6030', symbol: 'Fi', description: 'Plant fiber from island vegetation. Used to craft sails and cloth.',              weight: 0.1 },
   metal:         { kind: 'metal',         name: 'Metal',         category: 'resource', maxStack: 99, color: '#8a8a8c', borderColor: '#555558', symbol: 'Fe', description: 'Metal ingots. Used to craft weapons, cannons, and fittings.',                     weight: 1   },
-  pickaxe:       { kind: 'pickaxe',       name: 'Pickaxe',       category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.',                         weight: 3   },
+  pickaxe:       { kind: 'pickaxe',       name: 'Stone Pickaxe', category: 'tool',     maxStack: 1,  color: '#7a7a7c', borderColor: '#555558', symbol: '\u26cf', description: 'Mine rock outcroppings on islands to gather metal.',                         weight: 3   },
   shipyard:      { kind: 'shipyard',      name: 'Shipyard',      category: 'building', maxStack: 1,  color: '#2a5f8a', borderColor: '#14304a', symbol: '\u2693', description: 'Place in shallow water next to an island to build ships.',                 weight: 100 },
   stone:         { kind: 'stone',         name: 'Stone',         category: 'resource', maxStack: 99, color: '#9a9a9c', borderColor: '#666668', symbol: 'St', description: 'Raw stone gathered from rocky outcroppings. Used for crafting.',                  weight: 0.75},
   wood_ceiling:  { kind: 'wood_ceiling',  name: 'Wood Ceiling',  category: 'building', maxStack: 20, color: '#b8832b', borderColor: '#7a5520', symbol: '\u25a6', description: 'A wooden ceiling tile. Fits over a floor section.',                        weight: 10  },
@@ -118,6 +121,9 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   cloth_gloves:  { kind: 'cloth_gloves',  name: 'Cloth Gloves',  category: 'armor',    maxStack: 1,  color: '#9a8855', borderColor: '#635830', symbol: 'Cg', description: 'Light cloth gloves. +7 armour. Reduces incoming damage.',      weight: 0.3 },
   resource_chest: { kind: 'resource_chest', name: 'Resource Chest', category: 'building', maxStack: 3,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u229f', description: 'A wooden chest for storing resources. Supplies ship auto-repair and land structure upkeep.', weight: 0 },
   bed:           { kind: 'bed',           name: 'Bed',           category: 'utility',  maxStack: 3,  color: '#6a3a8f', borderColor: '#3d1e5e', symbol: '\uD83D\uDECF', description: 'Place on an island floor to set a respawn point. Use on a ship to set ship respawn. 60 s cooldown.', weight: 12 },
+  metal_axe:     { kind: 'metal_axe',     name: 'Metal Axe',     category: 'tool',     maxStack: 1,  color: '#7a9ab0', borderColor: '#4a6878', symbol: '\uD83E\uDE93', description: 'A durable metal axe. Yields more wood per swing than a stone axe.',                            weight: 3   },
+  metal_pickaxe: { kind: 'metal_pickaxe', name: 'Metal Pickaxe', category: 'tool',     maxStack: 1,  color: '#6a8aa0', borderColor: '#3a5868', symbol: '\u26cf',       description: 'A sturdy metal pickaxe. Yields more metal/stone per swing than a stone pickaxe.',           weight: 4   },
+  grapple_hook:  { kind: 'grapple_hook',  name: 'Grapple Hook',  category: 'tool',     maxStack: 1,  color: '#808080', borderColor: '#505050', symbol: '\u2693',       description: 'A metal grappling hook. Craft at a workbench.',                                                 weight: 2   },
 };
 
 /**
@@ -166,6 +172,9 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   34: 'cloth_gloves',
   38: 'resource_chest',
   39: 'bed',
+  40: 'metal_axe',
+  41: 'metal_pickaxe',
+  42: 'grapple_hook',
 };
 
 /**

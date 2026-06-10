@@ -1179,3 +1179,5 @@ refreshVertCount();
 refreshSubIslandList();
 updateSubIslandUI();
 requestAnimationFrame(render);
+
+export {};

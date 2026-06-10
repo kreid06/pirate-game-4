@@ -59,17 +59,19 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         goto send_and_ret;
     }
 
-    /* Active item must be the axe */
+    /* Active item must be an axe (stone or metal) */
     {
         uint8_t slot = player->inventory.active_slot;
-        if (slot >= INVENTORY_SLOTS ||
-            player->inventory.slots[slot].item != ITEM_AXE ||
-            player->inventory.slots[slot].quantity == 0)
-        {
+        ItemKind equipped = (slot < INVENTORY_SLOTS) ? player->inventory.slots[slot].item : ITEM_NONE;
+        bool is_axe = (equipped == ITEM_AXE || equipped == ITEM_METAL_AXE)
+                      && player->inventory.slots[slot].quantity > 0;
+        if (!is_axe) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_failure\",\"reason\":\"need_axe\"}");
             goto send_and_ret;
         }
+        /* Metal axe bonus: +5 extra wood per swing */
+        (void)equipped; /* referenced below at wood grant */
     }
 
     /* Stamina check */
@@ -115,9 +117,10 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         websocket_server_broadcast(dmsg);
     }
 
-    /* Grant 2 planks — find an existing plank stack or a free slot */
+    /* Grant wood — metal axe yields 5 extra per swing */
     {
-        int gross_wood = 10;
+        uint8_t _aslot = player->inventory.active_slot;
+        int gross_wood = (player->inventory.slots[_aslot].item == ITEM_METAL_AXE) ? 15 : 10;
         int net_wood = claim_apply_harvest_tax(player, player->x, player->y,
                                                gross_wood, ITEM_WOOD);
         if (net_wood <= 0) {
@@ -239,12 +242,11 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         goto send_rock_ret;
     }
 
-    /* Check pickaxe equipped */
+    /* Check pickaxe equipped (stone or metal) */
     {
-        bool has_pickaxe = false;
         int active = player->inventory.active_slot;
-        if (player->inventory.slots[active].item == ITEM_PICKAXE)
-            has_pickaxe = true;
+        ItemKind _pk = player->inventory.slots[active].item;
+        bool has_pickaxe = (_pk == ITEM_PICKAXE || _pk == ITEM_METAL_PICKAXE);
         if (!has_pickaxe) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_rock_failure\",\"reason\":\"need_pickaxe\"}");
@@ -291,15 +293,21 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         }
 
         {
-            int new_metal = (int)player->res_metal + 3;
+            int _pkactive = player->inventory.active_slot;
+            int rock_yield = (player->inventory.slots[_pkactive].item == ITEM_METAL_PICKAXE) ? 5 : 3;
+            int new_metal = (int)player->res_metal + rock_yield;
             if (new_metal > 9999) new_metal = 9999;
             player->res_metal = (uint16_t)new_metal;
         }
 
-        player_apply_xp(player, PLAYER_XP_PER_ROCK_HARVEST);
-        log_info("⛏ Player %u mined rock → +3 metal (pool=%u) +%u xp", player->player_id, player->res_metal, PLAYER_XP_PER_ROCK_HARVEST);
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_rock_success\",\"metal\":3}");
+        {
+            int _pkactive2 = player->inventory.active_slot;
+            int _ry = (player->inventory.slots[_pkactive2].item == ITEM_METAL_PICKAXE) ? 5 : 3;
+            player_apply_xp(player, PLAYER_XP_PER_ROCK_HARVEST);
+            log_info("⛏ Player %u mined rock → +%d metal (pool=%u) +%u xp", player->player_id, _ry, player->res_metal, PLAYER_XP_PER_ROCK_HARVEST);
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"harvest_rock_success\",\"metal\":%d}", _ry);
+        }
     }
 
 send_rock_ret:;
@@ -386,12 +394,11 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         goto send_boulder_ret;
     }
 
-    /* Check pickaxe equipped */
+    /* Check pickaxe equipped (stone or metal) */
     {
-        bool has_pickaxe = false;
         int active = player->inventory.active_slot;
-        if (player->inventory.slots[active].item == ITEM_PICKAXE)
-            has_pickaxe = true;
+        ItemKind _bpk = player->inventory.slots[active].item;
+        bool has_pickaxe = (_bpk == ITEM_PICKAXE || _bpk == ITEM_METAL_PICKAXE);
         if (!has_pickaxe) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"harvest_boulder_failure\",\"reason\":\"need_pickaxe\"}");
@@ -445,14 +452,16 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             websocket_server_broadcast(dmsg);
         }
 
-        /* Grant 5 stone or 5 metal depending on boulder type */
+        /* Grant stone or metal — metal pickaxe yields +3 extra */
+        int _bpkact = player->inventory.active_slot;
+        int boulder_bonus = (player->inventory.slots[_bpkact].item == ITEM_METAL_PICKAXE) ? 3 : 0;
         const char *item_name = (best_type == RES_BOULDER) ? "metal" : "stone";
         if (best_type == RES_BOULDER) {
-            int new_metal = (int)player->res_metal + 5;
+            int new_metal = (int)player->res_metal + 5 + boulder_bonus;
             if (new_metal > 9999) new_metal = 9999;
             player->res_metal = (uint16_t)new_metal;
         } else {
-            int new_stone = (int)player->res_stone + 5;
+            int new_stone = (int)player->res_stone + 5 + boulder_bonus;
             if (new_stone > 9999) new_stone = 9999;
             player->res_stone = (uint16_t)new_stone;
         }

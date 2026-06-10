@@ -658,6 +658,7 @@ export class NetworkManager {
   public onShipSunk: ((shipId: number) => void) | null = null;
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
+  public onShipXpGained: ((shipId: number, xp: number, x: number, y: number, shared: boolean) => void) | null = null;
   public onShipUnclaimed: ((shipId: number) => void) | null = null;
   public onShipClaimed: ((shipId: number, companyId: number) => void) | null = null;
   public onFlagPlanted: ((shipId: number, planterId: number, planterCompany: number) => void) | null = null;
@@ -814,7 +815,7 @@ export class NetworkManager {
   /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
   public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
-  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number) => void) | null = null;
+  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number, spawnerPlayerId?: number) => void) | null = null;
   /** Fired when a shipyard action is rejected (e.g. ship_limit, missing_materials). */
   public onShipyardActionFail: ((reason: string) => void) | null = null;
   /** Fired when the server sends land chest state (after E-key interact or after a transfer). */
@@ -3606,7 +3607,7 @@ export class NetworkManager {
       case 'shipyard_state': {
         const phase = message.phase === 'building' ? 'building' : 'empty' as const;
         const modules: string[] = Array.isArray(message.modules_placed) ? message.modules_placed : [];
-        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned, message.scaffolded_ship_id);
+        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned, message.scaffolded_ship_id, message.spawner_player_id);
         break;
       }
 
@@ -3688,6 +3689,16 @@ export class NetworkManager {
         const lvlNextCost:       number = message.nextUpgradeCost  ?? 0;
         console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlAttrLevel} | ship level ${lvlShipLevel}/${lvlTotalCap} | next cost ${lvlNextCost} | ${lvlXp} XP left`);
         this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlAttrLevel, lvlXp, lvlShipLevel, lvlTotalCap, lvlNextCost);
+        break;
+      }
+
+      case 'ship_xp_gained': {
+        const xpShipId: number  = message.shipId  || 0;
+        const xpAmount: number  = message.xp      || 0;
+        const xpX: number       = message.x       ?? 0;
+        const xpY: number       = message.y       ?? 0;
+        const xpShared: boolean = message.shared   ?? false;
+        this.onShipXpGained?.(xpShipId, xpAmount, xpX, xpY, xpShared);
         break;
       }
 

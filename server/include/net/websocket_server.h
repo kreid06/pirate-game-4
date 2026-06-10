@@ -127,6 +127,10 @@ typedef struct SimpleShip {
     /* NPC difficulty level (1–60). Only used for SHIP_TYPE_GHOST ships.
      * Scales hull HP (1×–10×) and cannon damage (1×–5×). 0 = not set (treated as 1). */
     uint8_t npc_level;
+
+    /* Ship ID of the last player-owned ship to hit this ship.
+     * Used to credit kill XP when a ghost ship finishes sinking. */
+    uint16_t killer_ship_id;
 } SimpleShip;
 
 // NPC behavior types
@@ -295,6 +299,11 @@ typedef enum {
     ITEM_COMPANY_FORTRESS = 36, /* Company fortress — claims whole island, 15-min build (100w+100s+20m) */
     ITEM_RAMP          = 37,  /* Wooden ramp — connects lower and upper deck levels */
     ITEM_BED           = 39,  /* Bed — sets a respawn point on an island or ship (60 s cooldown) */
+
+    ITEM_METAL_AXE     = 40,  /* Metal axe — better yield/damage than the stone axe    */
+    ITEM_METAL_PICKAXE = 41,  /* Metal pickaxe — better yield/damage than stone one    */
+    ITEM_GRAPPLE_HOOK  = 42,  /* Grapple hook — workbench-crafted utility tool         */
+
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
     ITEM_CLOTH_SHIRT   = 31,  /* torso slot — 20 armour */
