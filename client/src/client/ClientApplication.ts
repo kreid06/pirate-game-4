@@ -143,6 +143,10 @@ export class ClientApplication {
   private predictedWorldState: WorldState | null = null;
   /** Predicted state from the previous fixed tick — used for sub-tick position lerp. */
   private prevPredictedWorldState: WorldState | null = null;
+  /** Wall-clock time of the previous render frame (ms) — for smooth-error-correction decay. */
+  private _lastRenderTime = 0;
+  /** Single bound game-loop reference to avoid allocating a closure every frame. */
+  private _boundGameLoop = (t: number) => this.gameLoop(t);
   private demoWorldState: WorldState | null = null;
   private camera!: Camera;
   private hasReceivedWorldState = false; // Track if we've received at least one world state
@@ -958,7 +962,15 @@ export class ClientApplication {
       // HYBRID PROTOCOL: Wire up state change callbacks
       this.inputManager.onMovementStateChange = (movement, isMoving, isSprinting) => {
         if (this.uiManager?.isAnyMenuOpen()) return;
-        this.networkManager.sendMovementState(movement, isMoving, isSprinting);
+        // Semi-authority: attach the client's predicted authoritative world position so the
+        // server adopts it for land/dock walking instead of re-integrating from direction.
+        let predPos: Vec2 | undefined;
+        const pid = this.networkManager.getAssignedPlayerId();
+        if (pid !== null && this.predictedWorldState) {
+          const lp = this.predictedWorldState.players.find(p => p.id === pid);
+          if (lp) predPos = lp.position;
+        }
+        this.networkManager.sendMovementState(movement, isMoving, isSprinting, predPos);
       };
       this.inputManager.onRotationUpdate = (rotation) => {
         if (this.uiManager?.isAnyMenuOpen()) return;
@@ -3739,7 +3751,7 @@ export class ClientApplication {
       // Start game loop regardless of server connection
       this.running = true;
       this.lastFrameTime = performance.now();
-      requestAnimationFrame(this.gameLoop.bind(this));
+      requestAnimationFrame(this._boundGameLoop);
       
       console.log('✅ Client application started successfully');
       
@@ -3805,10 +3817,21 @@ export class ClientApplication {
     // Update FPS tracking
     this.updateFPSTracking(deltaTime);
     
-    // Fixed timestep client updates (prediction, input processing)
-    while (this.accumulator >= this.clientTickDuration) {
+    // Fixed timestep client updates (prediction, input processing).
+    // Cap the number of catch-up ticks per frame: after a long stall (tab refocus, GC, a heavy
+    // frame) the accumulator can hold many ticks' worth of time. Running all of them in one
+    // frame produces a visible hitch. Instead we run at most MAX_TICKS_PER_FRAME and drop the
+    // backlog (keeping only the sub-tick remainder so the render `alpha` stays valid).
+    const MAX_TICKS_PER_FRAME = 5;
+    let ticksThisFrame = 0;
+    while (this.accumulator >= this.clientTickDuration && ticksThisFrame < MAX_TICKS_PER_FRAME) {
       this.updateClient(this.clientTickDuration);
       this.accumulator -= this.clientTickDuration;
+      ticksThisFrame++;
+    }
+    if (this.accumulator >= this.clientTickDuration) {
+      // Hit the cap — discard the whole-tick backlog, keep the fractional remainder.
+      this.accumulator = this.accumulator % this.clientTickDuration;
     }
     
     // Variable timestep updates (UI, audio, etc.)
@@ -3818,8 +3841,8 @@ export class ClientApplication {
     const alpha = this.accumulator / this.clientTickDuration;
     this.renderFrame(alpha);
     
-    // Continue game loop
-    requestAnimationFrame(this.gameLoop.bind(this));
+    // Continue game loop (reuse a single bound reference — no per-frame closure allocation)
+    requestAnimationFrame(this._boundGameLoop);
   }
   
   /**
@@ -4005,6 +4028,14 @@ export class ClientApplication {
     // Get interpolated state for smooth rendering of other entities
     const currentTime = performance.now();
     const interpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
+
+    // Frame delta (seconds) for decaying the smooth-error-correction offset.
+    const _renderDt = this._lastRenderTime > 0
+      ? Math.min(0.1, (currentTime - this._lastRenderTime) / 1000)
+      : 0;
+    this._lastRenderTime = currentTime;
+    // Decaying visual offset that eases server corrections in instead of popping.
+    const _renderErrorOffset = this.predictionEngine.getRenderErrorOffset(_renderDt);
     
     // Build hybrid world: predicted local player + interpolated other entities
     const assignedPlayerId = this.networkManager.getAssignedPlayerId();
@@ -4029,9 +4060,10 @@ export class ClientApplication {
         const currentRotation = this.inputManager.getCurrentInputFrame().rotation;
 
         // Sub-tick lerp: blend prev→current predicted position using accumulator fraction.
-        const predPos = prevPlayer
+        // Then add the decaying error offset so server corrections ease in instead of popping.
+        const predPos = (prevPlayer
           ? prevPlayer.position.lerp(predictedPlayer.position, alpha)
-          : predictedPlayer.position;
+          : predictedPlayer.position).add(_renderErrorOffset);
         const predVel = prevPlayer
           ? prevPlayer.velocity.lerp(predictedPlayer.velocity, alpha)
           : predictedPlayer.velocity;
@@ -4575,7 +4607,12 @@ export class ClientApplication {
       if (crossedWrapSeam) {
         this.camera.setPosition(player.position);
       } else {
-        const lerpFactor = 1.0 - Math.pow(0.001, dt); // Frame-rate independent smoothing
+        // Frame-rate independent smoothing via an exponential time-constant.
+        // Now that the local player is predicted (already smooth), the camera can follow much
+        // more tightly than before — a ~50 ms constant keeps motion responsive without the
+        // old ~145 ms "swimmy" lag while still absorbing sub-tick boundaries.
+        const CAMERA_FOLLOW_TAU = 0.05; // seconds
+        const lerpFactor = 1.0 - Math.exp(-dt / CAMERA_FOLLOW_TAU);
         const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;
         const smoothedY = currentPos.y + (player.position.y - currentPos.y) * lerpFactor;
         this.camera.setPosition(Vec2.from(smoothedX, smoothedY));

@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1781054624,
+    "timestamp": 1781057589,
     "ship_count": 3,
     "npc_count": 35,
     "structure_count": 33
@@ -115,8 +115,8 @@
       "level_stats": {"xp":0,"w":1,"r":1,"d":1,"c":1,"s":1}
     },
     {
-      "id": 173,
-      "seq": 153,
+      "id": 5,
+      "seq": 3,
       "name": "",
       "type": 3,
       "company": 3,
@@ -134,7 +134,7 @@
       "is_scaffolded": true,
       "hull_health": 100.00,
       "modules": [
-        {"id":39169,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":255}
+        {"id":769,"type":5,"lx":-30.5000,"ly":0.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":255,"gp_open":0,"deck":255}
       ],
       "weapon_groups": [
         {"co":0,"idx":0,"mode":2,"target":0,"gpopen":0,"name":"Port","wids":[]},
@@ -1658,7 +1658,7 @@
       "construction_phase": 1,
       "construction_company": 3,
       "modules_placed": 0,
-      "scaffolded_ship_id": 173
+      "scaffolded_ship_id": 5
     }
   ],
   "island_resources": [

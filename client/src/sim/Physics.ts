@@ -299,9 +299,11 @@ function updatePlayerOnLand(player: Player, inputFrame: InputFrame, dt: number):
   // Direct position integration (input is already in world space from the camera transform).
   player.position = player.position.add(inputFrame.movement.mul(walkSpeed * dt));
 
-  // Report the instantaneous walk velocity so the camera / stop-detection see motion.
-  // (The server stores 0 here, but reconciliation is position-dominant so this is safe.)
-  player.velocity = inputFrame.movement.mul(walkSpeed);
+  // Server uses direct-position model and stores velocity = 0 for land walking.
+  // Mirror this exactly so statesDiffer never sees a velocity divergence.
+  // Camera follows position directly; stop-detection in InputManager uses its own
+  // playerVelocity field (fed from server snapshots), not this physics velocity.
+  player.velocity = Vec2.zero();
 }
 
 /**
