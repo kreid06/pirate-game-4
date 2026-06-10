@@ -480,10 +480,10 @@ export const PhysicsConfig = {
   ICE_DRIFT_HALF_LIFE: 0.35, // seconds
   
   // Player movement speeds
-  PLAYER_WALK_SPEED: 40, // units/second when walking on ship - matches server CLIENT_TO_SERVER(40) = 4 su/s
+  PLAYER_WALK_SPEED: 60, // units/second walking on ship/dock/land - matches server WALK_MAX_SPEED = CLIENT_TO_SERVER(60)
   PLAYER_SWIM_SPEED: 140, // units/second when swimming (unused - updatePlayerOffDeck uses inline constants)
   PLAYER_SPEED: 200, // Deprecated - use WALK_SPEED or SWIM_SPEED
-  PLAYER_SPRINT_MULT: 1.6, // sprint speed multiplier (deck/land only)
+  PLAYER_SPRINT_MULT: 2.0, // sprint speed multiplier (deck/land only) - matches server (walk_speed *= 2.0)
   PLAYER_RADIUS: 8, // Match server radius for collision detection
   
   // Cannonball physics
