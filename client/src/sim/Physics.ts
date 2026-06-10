@@ -2,6 +2,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { AngleUtils } from '../common/AngleUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
 import { WorldState, InputFrame, Ship, Player, PhysicsConfig } from './Types.js';
+import { CollisionContext, resolveIslandCollisions, isInsideIsland } from './IslandCollisions.js';
 import { CollisionSystem, CollisionResult } from './CollisionSystem.js';
 import { predictShipCollisions, predictIslandCollisions } from './PhysicsCollisionPredict.js';
 import { 
@@ -27,7 +28,7 @@ export const PlayerActions = {
  * Pure deterministic simulation function
  * This is the core of Phase 0 - completely deterministic physics
  */
-export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: number): WorldState {
+export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: number, collisionCtx?: CollisionContext | null): WorldState {
   // Clone the world state for immutability
   const newWorld: WorldState = {
     tick: prevWorld.tick + 1,
@@ -70,7 +71,7 @@ export function simulate(prevWorld: WorldState, inputFrame: InputFrame, dt: numb
   const allEvents: CarrierChangeEvent[] = [];
   
   for (const player of newWorld.players) {
-    const events = updatePlayerWithDetection(player, newWorld.ships, newWorld.carrierDetection, inputFrame, dt, newWorld.timestamp);
+    const events = updatePlayerWithDetection(player, newWorld.ships, newWorld.carrierDetection, inputFrame, dt, newWorld.timestamp, collisionCtx);
     for (const ev of events) allEvents.push(ev);
   }
 
@@ -208,12 +209,13 @@ function updateShipWithPosition(ship: Ship, dt: number): void {
  * Enhanced player update with Phase 2 carrier detection
  */
 function updatePlayerWithDetection(
-  player: Player, 
-  ships: Ship[], 
+  player: Player,
+  ships: Ship[],
   carrierDetectionMap: Map<number, CarrierDetectionState>,
-  inputFrame: InputFrame, 
+  inputFrame: InputFrame,
   dt: number,
-  currentTime: number
+  currentTime: number,
+  collisionCtx?: CollisionContext | null
 ): CarrierChangeEvent[] {
   // If player is mounted to a module, lock their position and prevent movement
   if (player.isMounted && player.mountedModuleId && player.mountOffset) {
@@ -276,7 +278,7 @@ function updatePlayerWithDetection(
   } else if ((player.onIslandId ?? 0) > 0) {
     // On land the server uses DIRECT-position walking (no acceleration/drag), not swim
     // physics. Mirror that here or the prediction constantly diverges from the server.
-    updatePlayerOnLand(player, inputFrame, dt);
+    updatePlayerOnLand(player, inputFrame, dt, collisionCtx);
   } else {
     updatePlayerOffDeck(player, ships, inputFrame, dt);
   }
@@ -287,10 +289,16 @@ function updatePlayerWithDetection(
 /**
  * Land walking — mirrors the server's island movement (websocket_server.c):
  * position moves directly by movement·walkSpeed·dt each tick (no velocity integration,
- * no drag). Wall / tree / boulder collisions are resolved authoritatively by the server;
- * the client just predicts free movement and lets reconciliation correct on contact.
+ * no drag). When a CollisionContext is available, wall/tree/boulder collisions are
+ * resolved client-side so the predicted position is already collision-correct and the
+ * server simply adopts it, eliminating reconciliation spikes on wall contact.
  */
-function updatePlayerOnLand(player: Player, inputFrame: InputFrame, dt: number): void {
+function updatePlayerOnLand(
+  player: Player,
+  inputFrame: InputFrame,
+  dt: number,
+  collisionCtx?: CollisionContext | null
+): void {
   const isSprinting = (inputFrame.actions & PlayerActions.SPRINT) !== 0;
   const walkSpeed = isSprinting
     ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT
@@ -298,6 +306,24 @@ function updatePlayerOnLand(player: Player, inputFrame: InputFrame, dt: number):
 
   // Direct position integration (input is already in world space from the camera transform).
   player.position = player.position.add(inputFrame.movement.mul(walkSpeed * dt));
+
+  // Client-side collision resolution — mirrors server's island collision block.
+  // Only runs when we have geometry data and the player is on a known island.
+  if (collisionCtx && (player.onIslandId ?? 0) > 0) {
+    const island = collisionCtx.islands.find(i => i.id === player.onIslandId);
+    if (island) {
+      player.position = resolveIslandCollisions(player.position, island, collisionCtx);
+
+      // Island boundary: if the collision-resolved position is still outside the polygon,
+      // don't override the server transition — just clamp to avoid drifting further out.
+      // The server handles the actual island→swim state transition authoritatively.
+      if (!isInsideIsland(player.position, island)) {
+        // Keep previous position so we don't predict ourselves into the water.
+        // The server will correct our state (onIslandId → 0) via reconciliation.
+        player.position = player.position.sub(inputFrame.movement.mul(walkSpeed * dt));
+      }
+    }
+  }
 
   // Server uses direct-position model and stores velocity = 0 for land walking.
   // Mirror this exactly so statesDiffer never sees a velocity divergence.

@@ -22,6 +22,7 @@ import { DamageTeam } from './gfx/EffectRenderer.js';
 import { NetworkManager, ConnectionState } from '../net/NetworkManager.js';
 import { PredictionEngine } from '../net/PredictionEngine.js';
 import { ShipPredictor } from '../net/ShipPredictor.js';
+import { CollisionContext } from '../sim/IslandCollisions.js';
 
 // Gameplay Systems
 import { InputManager } from './gameplay/InputManager.js';
@@ -3112,6 +3113,7 @@ export class ClientApplication {
         // Expose islands on world states so client-side collision prediction can use them
         if (this.authoritativeWorldState) this.authoritativeWorldState.islands = islands;
         if (this.predictedWorldState) this.predictedWorldState.islands = islands;
+        this._refreshCollisionContext();
 
         // (Re-)initialise the fog worker with the new island set.
         // Strip resources from the island data — the worker only needs geometry.
@@ -3162,6 +3164,7 @@ export class ClientApplication {
       // Handle placed structures
       this.networkManager.onStructuresList = (structs) => {
         this.renderSystem.setPlacedStructures(structs);
+        this._refreshCollisionContext();
       };
 
       // Tombstone lifecycle
@@ -3196,6 +3199,7 @@ export class ClientApplication {
         this._structureCompanyMap.delete(id);
         this._structureLastDamagedAt.delete(id);
         this.renderSystem.removePlacedStructure(id);
+        this._refreshCollisionContext();
         if (x !== undefined && y !== undefined) {
           // Cannonball kill — big explosion
           this.renderSystem.spawnExplosion(Vec2.from(x, y), 1.2);
@@ -3236,6 +3240,7 @@ export class ClientApplication {
       this.networkManager.onStructurePlaced = (s) => {
         this._structureCompanyMap.set(s.id, s.companyId ?? 0);
         this.renderSystem.addPlacedStructure(s);
+        this._refreshCollisionContext();
       };
 
       // Territory claim events
@@ -3799,6 +3804,20 @@ export class ClientApplication {
     console.log('✅ Client application shutdown complete');
   }
   
+  /**
+  /**
+   * Rebuilds and pushes the collision context to the prediction engine.
+   * Called whenever islands or placed structures change.
+   * Cheap — just grabs existing references; no copying.
+   */
+  private _refreshCollisionContext(): void {
+    const islands = this.renderSystem.getIslands?.() ?? [];
+    const structures = this.renderSystem.getPlacedStructures?.() ?? [];
+    if (islands.length === 0 && structures.length === 0) return;
+    const ctx: CollisionContext = { islands, structures };
+    this.predictionEngine.setCollisionContext(ctx);
+  }
+
   /**
    * Main game loop - handles timing, input, prediction, and rendering
    */

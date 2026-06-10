@@ -13,6 +13,7 @@ import { WorldState, InputFrame } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { simulate } from '../sim/Physics.js';
 import { createCarrierDetectionState, DETECTION_CONFIG, ShipDetectionState, CarrierDetectionState } from '../sim/CarrierDetection.js';
+import { CollisionContext } from '../sim/IslandCollisions.js';
 
 /**
  * Prediction state entry with enhanced tracking
@@ -79,6 +80,15 @@ export class PredictionEngine {
 
   /** ID of the local player — set by ClientApplication after assignment. */
   public localPlayerId: number | null = null;
+
+  /** Static world geometry used for client-side collision prediction.
+   *  Updated from ClientApplication when structures/islands are loaded or change.
+   *  Held by reference — NOT cloned per prediction tick. */
+  private collisionCtx: CollisionContext | null = null;
+
+  public setCollisionContext(ctx: CollisionContext): void {
+    this.collisionCtx = ctx;
+  }
   
   // Enhanced prediction state history (16-frame buffer)
   private predictionHistory: PredictionState[] = [];
@@ -741,8 +751,7 @@ export class PredictionEngine {
   // Private methods
   
   private simulateStep(worldState: WorldState, inputFrame: InputFrame, deltaTime: number): WorldState {
-    // Run one step of client-side simulation
-    return simulate(worldState, inputFrame, deltaTime);
+    return simulate(worldState, inputFrame, deltaTime, this.collisionCtx);
   }
   
   private storePredictionState(tick: number, worldState: WorldState, inputFrame: InputFrame): void {
