@@ -204,6 +204,13 @@ interface MovementStateMessage extends NetworkMessage {
   };
   is_moving: boolean;
   is_sprinting: boolean;
+  // Semi-authority: client's predicted authoritative world position. The server
+  // adopts this (anti-cheat speed-clamped) for on-foot land/dock movement instead
+  // of re-integrating from direction, so reconciliation stays quiet and abrupt
+  // direction changes don't rubber-band. Optional — server falls back to direction
+  // integration when absent.
+  px?: number;
+  py?: number;
 }
 
 /**
@@ -1385,7 +1392,7 @@ export class NetworkManager {
    * Send movement state change (HYBRID PROTOCOL)
    * Only send when movement keys change, not every frame
    */
-  sendMovementState(movement: Vec2, isMoving: boolean, isSprinting: boolean = false): void {
+  sendMovementState(movement: Vec2, isMoving: boolean, isSprinting: boolean = false, position?: Vec2): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) {
       return;
     }
@@ -1398,7 +1405,10 @@ export class NetworkManager {
         y: movement.y
       },
       is_moving: isMoving,
-      is_sprinting: isSprinting
+      is_sprinting: isSprinting,
+      // Semi-authority: report the client's authoritative world position so the
+      // server can adopt it for land/dock walking (see MovementStateMessage docs).
+      ...(position ? { px: Math.round(position.x * 10) / 10, py: Math.round(position.y * 10) / 10 } : {})
     };
 
     this.sendMessage(message);

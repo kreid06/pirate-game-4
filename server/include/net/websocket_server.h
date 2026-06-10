@@ -605,6 +605,17 @@ typedef struct WebSocketPlayer {
     float movement_direction_y;  // -1.0 to 1.0 (normalized)
     bool is_moving;              // true if actively moving
     bool is_sprinting;           // true if Shift+W sprint is active (land/deck only)
+
+    /* ── Client semi-authority (on-foot world-coordinate movement) ───────────
+     * The client streams its predicted authoritative world position in the
+     * movement_state message. For island / dock walking the server adopts this
+     * position (clamped to max walk speed for anti-cheat) instead of integrating
+     * from movement_direction, so the local player never rubber-bands on abrupt
+     * direction changes. Forced movement (knockback/respawn) and the speed clamp
+     * still diverge from the client and reconcile normally. */
+    float    client_pos_x, client_pos_y; // last client-reported world position
+    uint32_t client_pos_ms;              // get_time_ms() when client_pos last received (0 = none)
+    uint32_t last_pos_adopt_ms;          // get_time_ms() when server last adopted/integrated
     
     // Rotation tracking for interpolation
     float last_rotation;         // Previous rotation value

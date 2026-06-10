@@ -85,7 +85,10 @@ export class InputManager {
   // Movement heartbeat — resend current movement every 150ms while keys are held
   // so the server's inactivity timeout doesn't fire during sustained keypresses.
   private movementHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly MOVEMENT_HEARTBEAT_INTERVAL = 150;
+  // Semi-authority: while moving we stream the client's authoritative position to the
+  // server inside the movement_state heartbeat. Keep this near the server tick (~30 Hz)
+  // so the server always has a fresh position to adopt and observers see smooth motion.
+  private readonly MOVEMENT_HEARTBEAT_INTERVAL = 40;
   
   // Event callbacks
   public altKeyHeld: boolean = false;

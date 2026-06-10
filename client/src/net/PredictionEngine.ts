@@ -13,6 +13,7 @@ import { WorldState, InputFrame } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { simulate } from '../sim/Physics.js';
 import { createCarrierDetectionState, DETECTION_CONFIG, ShipDetectionState, CarrierDetectionState } from '../sim/CarrierDetection.js';
+import { CollisionContext } from '../sim/IslandCollisions.js';
 
 /**
  * Prediction state entry with enhanced tracking
@@ -79,6 +80,15 @@ export class PredictionEngine {
 
   /** ID of the local player — set by ClientApplication after assignment. */
   public localPlayerId: number | null = null;
+
+  /** Static world geometry used for client-side collision prediction.
+   *  Updated from ClientApplication when structures/islands are loaded or change.
+   *  Held by reference — NOT cloned per prediction tick. */
+  private collisionCtx: CollisionContext | null = null;
+
+  public setCollisionContext(ctx: CollisionContext): void {
+    this.collisionCtx = ctx;
+  }
   
   // Enhanced prediction state history (16-frame buffer)
   private predictionHistory: PredictionState[] = [];
@@ -139,6 +149,19 @@ export class PredictionEngine {
   private runningPredicted: WorldState | null = null;
   // Snap if a server correction is larger than this (units) — e.g. teleport / respawn.
   private static readonly RECONCILE_SNAP_DIST = 80.0;
+
+  // ── Smooth error correction (projective smoothing) ──────────────────────────
+  // When the server corrects the predicted local player, we snap the SIMULATION to the
+  // authoritative truth (keeping prediction accurate) but carry the visual discrepancy as a
+  // decaying offset so the on-screen sprite eases into place instead of popping. This removes
+  // the 30 Hz judder that discrete per-correction blends would otherwise create.
+  private localRenderErrorOffset: Vec2 = Vec2.zero();
+  // Errors above this are treated as hard snaps (teleport/respawn) — no visual smoothing.
+  private static readonly SMOOTH_ERROR_MAX = 60.0;
+  // Clamp the accumulated visual offset so repeated same-direction errors can't rubber-band.
+  private static readonly SMOOTH_OFFSET_CLAMP = 40.0;
+  // Exponential decay time-constant (seconds) for the visual offset → ~smooth over ~100 ms.
+  private static readonly SMOOTH_TAU = 0.09;
 
   // Ring buffer constants (16 frames = ~350ms at 60Hz)
   private static readonly REWIND_BUFFER_SIZE = 16;
@@ -728,14 +751,14 @@ export class PredictionEngine {
   // Private methods
   
   private simulateStep(worldState: WorldState, inputFrame: InputFrame, deltaTime: number): WorldState {
-    // Run one step of client-side simulation
-    return simulate(worldState, inputFrame, deltaTime);
+    return simulate(worldState, inputFrame, deltaTime, this.collisionCtx);
   }
   
   private storePredictionState(tick: number, worldState: WorldState, inputFrame: InputFrame): void {
     const state: PredictionState = {
       tick,
-      worldState: this.cloneWorldState(worldState),
+      // Only the local player is ever read back from history — keep the snapshot lightweight.
+      worldState: this.cloneLocalSnapshot(worldState),
       inputFrame: { 
         tick: inputFrame.tick,
         movement: inputFrame.movement.clone ? inputFrame.movement.clone() : Vec2.from(inputFrame.movement.x, inputFrame.movement.y),
@@ -779,7 +802,12 @@ export class PredictionEngine {
     // Velocity divergence
     const velocityDiff = player1.velocity.sub(player2.velocity).length();
 
-    const isMoving = player1.velocity.length() > 0.5 || player2.velocity.length() > 0.5;
+    // Use the server's explicit is_moving flag for tolerance, not velocity.
+    // On land/island the direct-position model sets velocity=0 even while sprinting,
+    // so a velocity-based check would give the tight (stopped) tolerance while the
+    // player is actually moving at 120 u/s and generating larger position drift.
+    const isMoving = (player1.isMoving ?? (player1.velocity.length() > 0.5))
+                  || (player2.isMoving ?? (player2.velocity.length() > 0.5));
     const baseTolerance = this.config.predictionErrorThreshold;
     const movementTolerance = isMoving ? baseTolerance * 2.0 : baseTolerance;
 
@@ -791,8 +819,13 @@ export class PredictionEngine {
     // velocity threshold here would fire every tick on land/deck. Only catch gross desync.
     if (velocityDiff > 150.0) return true;
 
-    // Carrier state transitions always require an immediate correction
-    if (player1.onDeck !== player2.onDeck || player1.carrierId !== player2.carrierId) {
+    // Actual ship boarding/disembarking: carrierId changes between 0 and a real ship ID.
+    // Do NOT check `onDeck` here — the server emits state='WALKING' for both island and
+    // ship-deck walking, so `onDeck` maps to true in both cases and would cause a false
+    // rollback every tick while the player walks on land.
+    const c1boarded = player1.carrierId !== 0;
+    const c2boarded = player2.carrierId !== 0;
+    if (c1boarded !== c2boarded) {
       return true;
     }
     
@@ -825,8 +858,11 @@ export class PredictionEngine {
       correctedState = this.simulateStep(correctedState, state.inputFrame, deltaTime);
     }
 
-    // Adaptive correction: snap on big jumps (teleport/respawn/large desync), otherwise
-    // blend gently so normal mispredictions converge without a visible pop.
+    // Smooth error correction:
+    //   • The SIMULATION snaps fully to the authoritative-replayed `correctedState`, so the
+    //     prediction never accumulates error and future ticks stay accurate.
+    //   • The VISUAL discrepancy (where we *were* vs where we *should be*) is folded into a
+    //     decaying render offset, so the on-screen sprite eases over ~100 ms instead of popping.
     const localId = this.localPlayerId;
     const curLocal = localId !== null
       ? currentPredictedState.players.find(p => p.id === localId)
@@ -834,18 +870,43 @@ export class PredictionEngine {
     const corLocal = localId !== null
       ? correctedState.players.find(p => p.id === localId)
       : correctedState.players[0];
-    const localErr = (curLocal && corLocal)
-      ? curLocal.position.sub(corLocal.position).length()
-      : 0;
 
-    const smoothingFactor = localErr > PredictionEngine.RECONCILE_SNAP_DIST ? 1.0 : 0.2;
-    const blendedState = this.blendWorldStates(currentPredictedState, correctedState, smoothingFactor);
-    
-    // Update prediction history with corrected states
-    this.updatePredictionHistory(rollbackStates, blendedState);
+    if (curLocal && corLocal) {
+      const errorVec = curLocal.position.sub(corLocal.position); // where we were − where we should be
+      const errLen = errorVec.length();
+      if (errLen > PredictionEngine.SMOOTH_ERROR_MAX) {
+        // Large desync (teleport/respawn) — hard snap, no smoothing.
+        this.localRenderErrorOffset = Vec2.zero();
+      } else {
+        // Carry the discrepancy so the sprite stays put, then decays to the corrected spot.
+        let off = this.localRenderErrorOffset.add(errorVec);
+        const offLen = off.length();
+        if (offLen > PredictionEngine.SMOOTH_OFFSET_CLAMP) {
+          off = off.mul(PredictionEngine.SMOOTH_OFFSET_CLAMP / offLen);
+        }
+        this.localRenderErrorOffset = off;
+      }
+    }
+
+    // Update prediction history with the snapped (authoritative) states
+    this.updatePredictionHistory(rollbackStates, correctedState);
     
     this.needsRollback = false;
-    return blendedState;
+    return correctedState;
+  }
+
+  /**
+   * Current decaying visual offset for the local player, advanced by `dtSeconds`. The renderer
+   * adds this to the predicted position so server corrections ease in smoothly. Returns a copy.
+   */
+  public getRenderErrorOffset(dtSeconds: number): Vec2 {
+    const off = this.localRenderErrorOffset;
+    if (off.x === 0 && off.y === 0) return Vec2.zero();
+    const decay = Math.exp(-Math.max(0, dtSeconds) / PredictionEngine.SMOOTH_TAU);
+    this.localRenderErrorOffset = off.mul(decay);
+    // Snap tiny residuals to zero to avoid endless sub-pixel drift.
+    if (this.localRenderErrorOffset.lengthSq() < 0.01) this.localRenderErrorOffset = Vec2.zero();
+    return this.localRenderErrorOffset.clone();
   }
   
   /**
@@ -889,7 +950,7 @@ export class PredictionEngine {
     // This is a simplified implementation - real version would update each intermediate state
     if (rollbackStates.length > 0) {
       const lastState = rollbackStates[rollbackStates.length - 1];
-      lastState.worldState = this.cloneWorldState(finalState);
+      lastState.worldState = this.cloneLocalSnapshot(finalState);
     }
   }
   
@@ -901,6 +962,39 @@ export class PredictionEngine {
     );
   }
   
+  /**
+   * Lightweight clone for the per-tick history/rewind buffers. These are only ever read for the
+   * LOCAL player (reconciliation comparison + input replay), so cloning the entire world (all
+   * ships/players/cannonballs) at 120 Hz × 128 history entries is pure GC pressure. We copy only
+   * the local player and leave the other collections as cheap empty arrays.
+   */
+  private cloneLocalSnapshot(worldState: WorldState): WorldState {
+    const localId = this.localPlayerId;
+    const src = localId !== null
+      ? worldState.players.find(p => p.id === localId)
+      : worldState.players[0];
+    const players = src
+      ? [{
+          ...src,
+          position: src.position ? src.position.clone() : Vec2.zero(),
+          velocity: src.velocity ? src.velocity.clone() : Vec2.zero(),
+          localPosition: src.localPosition ? src.localPosition.clone() : undefined,
+        }]
+      : [];
+    return {
+      tick: worldState.tick,
+      timestamp: worldState.timestamp,
+      ships: [],
+      players,
+      cannonballs: [],
+      npcs: [],
+      tombstones: [],
+      droppedItems: [],
+      companies: [],
+      carrierDetection: new Map(),
+    } as WorldState;
+  }
+
   private cloneWorldState(worldState: WorldState): WorldState {
     // Deep clone world state for prediction
     return {
@@ -972,7 +1066,8 @@ export class PredictionEngine {
   private updateRewindBuffer(tick: number, worldState: WorldState, inputFrame: InputFrame, deltaTime: number): void {
     const entry: RewindBufferEntry = {
       tick,
-      worldState: this.cloneWorldState(worldState),
+      // Lightweight: only the local player is needed for lag-comp queries.
+      worldState: this.cloneLocalSnapshot(worldState),
       inputFrame: { ...inputFrame },
       timestamp: Date.now(),
       networkDelay: this.estimatedNetworkDelay

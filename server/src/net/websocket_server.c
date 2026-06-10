@@ -956,6 +956,57 @@ static bool hull_section_plank_alive(const SimpleShip* ship, int slot) {
  * Padding: INSET = PLAYER_RADIUS (body) + PLANK_THICKNESS (visual clearance).
  * This keeps the player's sprite fully clear of the visible plank line.
  */
+/*
+ * Semi-authority target position for on-foot world-coordinate walking.
+ *
+ * Prefers the client's reported authoritative world position (client_pos_x/y),
+ * anti-cheat clamped so the player can never move faster than walk_speed_client
+ * over the elapsed wall-clock time. Falls back to server-side direction
+ * integration when no fresh client position is available (older clients, or a
+ * gap in the position stream). The caller then runs its normal collision /
+ * transition logic on (*out_x, *out_y) exactly as before.
+ *
+ * Returns true if the client position was adopted, false if integrated.
+ */
+static bool ws_player_walk_target(WebSocketPlayer* p,
+                                  float movement_x, float movement_y,
+                                  float walk_speed_client, float dt,
+                                  float* out_x, float* out_y)
+{
+    uint32_t now = get_time_ms();
+    bool fresh = (p->client_pos_ms != 0u) && (now - p->client_pos_ms <= 250u);
+
+    if (fresh) {
+        /* Distance the client is allowed to have travelled since we last committed. */
+        float elapsed = (p->last_pos_adopt_ms != 0u && now > p->last_pos_adopt_ms)
+                        ? (float)(now - p->last_pos_adopt_ms) / 1000.0f
+                        : dt;
+        if (elapsed > 0.5f) elapsed = 0.5f;          /* cap after a stream gap */
+        float max_step = walk_speed_client * elapsed * 1.5f + 6.0f; /* tolerance + epsilon */
+
+        float dx = p->client_pos_x - p->x;
+        float dy = p->client_pos_y - p->y;
+        float d  = sqrtf(dx * dx + dy * dy);
+        if (d <= max_step || d < 1e-4f) {
+            *out_x = p->client_pos_x;                /* adopt as-is */
+            *out_y = p->client_pos_y;
+        } else {
+            /* Too far for the elapsed time — clamp toward the client (anti-cheat).
+             * The resulting divergence reconciles on the client like any correction. */
+            *out_x = p->x + dx / d * max_step;
+            *out_y = p->y + dy / d * max_step;
+        }
+        p->last_pos_adopt_ms = now;
+        return true;
+    }
+
+    /* No fresh client position — legacy direction integration. */
+    *out_x = p->x + movement_x * walk_speed_client * dt;
+    *out_y = p->y + movement_y * walk_speed_client * dt;
+    p->last_pos_adopt_ms = now;
+    return false;
+}
+
 static void resolve_player_hull_containment(const SimpleShip* ship,
                                             float* new_local_x, float* new_local_y)
 {
@@ -4464,6 +4515,22 @@ int websocket_server_update(struct Sim* sim) {
                                     player->is_moving = is_moving;
                                     player->is_sprinting = (strstr(payload, "\"is_sprinting\":true") != NULL);
                                     player->last_input_time = get_time_ms();
+
+                                    /* Semi-authority: capture the client's predicted world position.
+                                     * Adopted (speed-clamped) by island/dock walking below so the
+                                     * local player doesn't rubber-band on abrupt direction changes. */
+                                    if (player->health > 0) {
+                                        const char* px_p = strstr(payload, "\"px\":");
+                                        const char* py_p = strstr(payload, "\"py\":");
+                                        if (px_p && py_p) {
+                                            float px = 0.0f, py = 0.0f;
+                                            sscanf(px_p + 5, "%f", &px);
+                                            sscanf(py_p + 5, "%f", &py);
+                                            player->client_pos_x = px;
+                                            player->client_pos_y = py;
+                                            player->client_pos_ms = get_time_ms();
+                                        }
+                                    }
                                     /* Dynamic AOI: update per-player view radius from client hint */
                                     {
                                         const char* vr_p = strstr(payload, "\"view_radius\":");
@@ -12819,8 +12886,41 @@ void websocket_server_tick(float dt) {
                             float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
                             if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
-                            float new_local_x = ws_player->local_x + local_move_x * walk_speed_client * dt;
-                            float new_local_y = ws_player->local_y + local_move_y * walk_speed_client * dt;
+
+                            /* Semi-authority: if the client reported a fresh world position, convert
+                             * it to ship-local space and adopt it (speed-clamped) instead of
+                             * integrating from direction. Collision resolution below runs unchanged. */
+                            float new_local_x, new_local_y;
+                            uint32_t _now_ship = get_time_ms();
+                            bool _ship_fresh = (ws_player->client_pos_ms != 0u) &&
+                                               (_now_ship - ws_player->client_pos_ms <= 250u);
+                            if (_ship_fresh) {
+                                float _cl_lx, _cl_ly;
+                                ship_world_to_local(player_ship,
+                                                    ws_player->client_pos_x, ws_player->client_pos_y,
+                                                    &_cl_lx, &_cl_ly);
+                                float _elapsed = (ws_player->last_pos_adopt_ms != 0u &&
+                                                  _now_ship > ws_player->last_pos_adopt_ms)
+                                                 ? (float)(_now_ship - ws_player->last_pos_adopt_ms) / 1000.0f
+                                                 : dt;
+                                if (_elapsed > 0.5f) _elapsed = 0.5f;
+                                float _max_step = walk_speed_client * _elapsed * 1.5f + 6.0f;
+                                float _dlx = _cl_lx - ws_player->local_x;
+                                float _dly = _cl_ly - ws_player->local_y;
+                                float _dl  = sqrtf(_dlx * _dlx + _dly * _dly);
+                                if (_dl <= _max_step || _dl < 1e-4f) {
+                                    new_local_x = _cl_lx;
+                                    new_local_y = _cl_ly;
+                                } else {
+                                    new_local_x = ws_player->local_x + (_dlx / _dl) * _max_step;
+                                    new_local_y = ws_player->local_y + (_dly / _dl) * _max_step;
+                                }
+                                ws_player->last_pos_adopt_ms = _now_ship;
+                            } else {
+                                new_local_x = ws_player->local_x + local_move_x * walk_speed_client * dt;
+                                new_local_y = ws_player->local_y + local_move_y * walk_speed_client * dt;
+                                ws_player->last_pos_adopt_ms = _now_ship;
+                            }
                             
                             // log_info("🚶 P%u: Move calc | speed=%.2f client/s | dt=%.4f | delta=(%.4f, %.4f) | old_local=(%.2f, %.2f) | new_local=(%.2f, %.2f)",
                             //          ws_player->player_id, walk_speed_client, dt,
@@ -12922,8 +13022,12 @@ void websocket_server_tick(float dt) {
                             float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
                             if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
-                            float new_x = ws_player->x + movement_x * walk_speed_client * dt;
-                            float new_y = ws_player->y + movement_y * walk_speed_client * dt;
+                            /* Semi-authority: adopt the client's reported world position (speed-clamped)
+                             * when available, else integrate from direction. Collision/transition below
+                             * runs on the result unchanged. */
+                            float new_x, new_y;
+                            ws_player_walk_target(ws_player, movement_x, movement_y,
+                                                  walk_speed_client, dt, &new_x, &new_y);
                             /* Walk freely on beach + grass. Step off the beach → swim. */
                             const IslandDef *isl_mv = NULL;
                             for (int ii = 0; ii < ISLAND_COUNT; ii++) {
@@ -13094,8 +13198,10 @@ void websocket_server_tick(float dt) {
                                 float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
                                 float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
                                 if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
-                                float new_x = ws_player->x + movement_x * walk_speed_client * dt;
-                                float new_y = ws_player->y + movement_y * walk_speed_client * dt;
+                                /* Semi-authority: adopt client world position (speed-clamped) when fresh. */
+                                float new_x, new_y;
+                                ws_player_walk_target(ws_player, movement_x, movement_y,
+                                                      walk_speed_client, dt, &new_x, &new_y);
                                 bool _hs = (dock_sy->construction_phase == CONSTRUCTION_BUILDING);
                                 float _dlx, _dly;
                                 dock_world_to_local(dock_sy, new_x, new_y, &_dlx, &_dly);
@@ -13135,33 +13241,48 @@ void websocket_server_tick(float dt) {
                             }
                         } else {
                             // ===== SWIMMING MOVEMENT (WORLD COORDINATES) =====
-                            // Apply acceleration in movement direction
-                            q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
-                            q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
-                            
-                            // log_info("⚡ P%u: Swimming | accel=(%.2f, %.2f) | dir=(%.2f, %.2f) | dt=%.3f",
-                            //          sim_player->id,
-                            //          Q16_TO_FLOAT(accel_x), Q16_TO_FLOAT(accel_y),
-                            //          movement_x, movement_y, dt);
-                            
-                            sim_player->velocity.x += accel_x;
-                            sim_player->velocity.y += accel_y;
-                            
-                            // Clamp to maximum speed
-                            float current_vx = Q16_TO_FLOAT(sim_player->velocity.x);
-                            float current_vy = Q16_TO_FLOAT(sim_player->velocity.y);
-                            float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
-                            
-                            if (current_speed > SWIM_MAX_SPEED) {
-                                // Scale velocity back to max speed
-                                float scale = SWIM_MAX_SPEED / current_speed;
-                                // log_info("🚀 P%u: Speed clamped %.2f → %.2f m/s | vel=(%.2f, %.2f) → (%.2f, %.2f)",
-                                //          sim_player->id,
-                                //          current_speed, SWIM_MAX_SPEED,
-                                //          current_vx, current_vy,
-                                //          current_vx * scale, current_vy * scale);
-                                sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
-                                sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                            /* Semi-authority: adopt client's reported world position when fresh
+                             * (speed-clamped to SWIM_MAX_SPEED). Derive sim velocity from the
+                             * position delta so drag/deceleration still apply when the player
+                             * releases keys. Falls back to legacy acceleration when no fresh
+                             * position is available. */
+                            float _swim_speed_client = SERVER_TO_CLIENT(SWIM_MAX_SPEED);
+                            float _sw_new_x, _sw_new_y;
+                            bool _sw_adopted = ws_player_walk_target(ws_player, movement_x, movement_y,
+                                                                     _swim_speed_client, dt,
+                                                                     &_sw_new_x, &_sw_new_y);
+                            if (_sw_adopted) {
+                                /* Derive velocity from position delta so the deceleration path
+                                 * has the correct speed when the player stops. */
+                                float _sv_x = CLIENT_TO_SERVER(_sw_new_x - ws_player->x) / (dt > 0.0001f ? dt : 0.0001f);
+                                float _sv_y = CLIENT_TO_SERVER(_sw_new_y - ws_player->y) / (dt > 0.0001f ? dt : 0.0001f);
+                                /* Clamp derived velocity to SWIM_MAX_SPEED (rounding guard). */
+                                float _sv_spd = sqrtf(_sv_x * _sv_x + _sv_y * _sv_y);
+                                if (_sv_spd > SWIM_MAX_SPEED && _sv_spd > 1e-4f) {
+                                    float _sv_sc = SWIM_MAX_SPEED / _sv_spd;
+                                    _sv_x *= _sv_sc;
+                                    _sv_y *= _sv_sc;
+                                }
+                                ws_player->x = _sw_new_x;
+                                ws_player->y = _sw_new_y;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_sw_new_x));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_sw_new_y));
+                                sim_player->velocity.x = Q16_FROM_FLOAT(_sv_x);
+                                sim_player->velocity.y = Q16_FROM_FLOAT(_sv_y);
+                            } else {
+                                /* Legacy acceleration model when no fresh client position. */
+                                q16_t accel_x = Q16_FROM_FLOAT(movement_x * SWIM_ACCELERATION * dt);
+                                q16_t accel_y = Q16_FROM_FLOAT(movement_y * SWIM_ACCELERATION * dt);
+                                sim_player->velocity.x += accel_x;
+                                sim_player->velocity.y += accel_y;
+                                float current_vx    = Q16_TO_FLOAT(sim_player->velocity.x);
+                                float current_vy    = Q16_TO_FLOAT(sim_player->velocity.y);
+                                float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
+                                if (current_speed > SWIM_MAX_SPEED) {
+                                    float scale = SWIM_MAX_SPEED / current_speed;
+                                    sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
+                                    sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
+                                }
                             }
                         }
                     }
