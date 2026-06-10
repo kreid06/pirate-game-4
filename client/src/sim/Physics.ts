@@ -273,11 +273,35 @@ function updatePlayerWithDetection(
   
   if (carrierShip && player.onDeck) {
     updatePlayerOnDeck(player, carrierShip, inputFrame, dt);
+  } else if ((player.onIslandId ?? 0) > 0) {
+    // On land the server uses DIRECT-position walking (no acceleration/drag), not swim
+    // physics. Mirror that here or the prediction constantly diverges from the server.
+    updatePlayerOnLand(player, inputFrame, dt);
   } else {
     updatePlayerOffDeck(player, ships, inputFrame, dt);
   }
   
   return events;
+}
+
+/**
+ * Land walking — mirrors the server's island movement (websocket_server.c):
+ * position moves directly by movement·walkSpeed·dt each tick (no velocity integration,
+ * no drag). Wall / tree / boulder collisions are resolved authoritatively by the server;
+ * the client just predicts free movement and lets reconciliation correct on contact.
+ */
+function updatePlayerOnLand(player: Player, inputFrame: InputFrame, dt: number): void {
+  const isSprinting = (inputFrame.actions & PlayerActions.SPRINT) !== 0;
+  const walkSpeed = isSprinting
+    ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT
+    : PhysicsConfig.PLAYER_WALK_SPEED;
+
+  // Direct position integration (input is already in world space from the camera transform).
+  player.position = player.position.add(inputFrame.movement.mul(walkSpeed * dt));
+
+  // Report the instantaneous walk velocity so the camera / stop-detection see motion.
+  // (The server stores 0 here, but reconciliation is position-dominant so this is safe.)
+  player.velocity = inputFrame.movement.mul(walkSpeed);
 }
 
 /**

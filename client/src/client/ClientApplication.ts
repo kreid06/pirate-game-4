@@ -141,6 +141,8 @@ export class ClientApplication {
   // Game State
   private authoritativeWorldState: WorldState | null = null;
   private predictedWorldState: WorldState | null = null;
+  /** Predicted state from the previous fixed tick — used for sub-tick position lerp. */
+  private prevPredictedWorldState: WorldState | null = null;
   private demoWorldState: WorldState | null = null;
   private camera!: Camera;
   private hasReceivedWorldState = false; // Track if we've received at least one world state
@@ -3843,17 +3845,35 @@ export class ClientApplication {
       // Step the ship predictor every fixed tick (mirrors server physics rate)
       this.shipPredictor?.step(dt);
 
+      // Snapshot previous state for sub-tick position lerp in renderFrame
+      this.prevPredictedWorldState = this.predictedWorldState;
+
       this.predictedWorldState = this.predictionEngine.update(
         this.authoritativeWorldState,
         this.inputManager.getCurrentInputFrame(),
         dt
       );
       
-      // Update camera based on interpolated state so it tracks the same smoothed
-      // position that the renderer uses, avoiding the 20 Hz snap from raw server data.
+      // Camera follows the PREDICTED local player so the world scrolls at the full client
+      // tick rate (120 Hz). Following the interpolated state instead would re-introduce the
+      // 30 Hz server cadence into camera motion (perceived as choppy movement). updateCamera
+      // only reads the local player, so splicing it into the interpolated world is sufficient.
       if (this.predictedWorldState) {
-        const _cameraFollowState =
-          this.predictionEngine.getInterpolatedState(performance.now()) ?? this.predictedWorldState;
+        const _interp = this.predictionEngine.getInterpolatedState(performance.now());
+        const _assignedId = this.networkManager.getAssignedPlayerId();
+        let _cameraFollowState: WorldState = this.predictedWorldState;
+        if (_interp && _assignedId !== null) {
+          const _predLocal = this.predictedWorldState.players.find(p => p.id === _assignedId);
+          if (_predLocal) {
+            const _idx = _interp.players.findIndex(p => p.id === _assignedId);
+            const _players = _interp.players.slice();
+            if (_idx >= 0) _players[_idx] = _predLocal;
+            else _players.push(_predLocal);
+            _cameraFollowState = { ..._interp, players: _players };
+          } else {
+            _cameraFollowState = _interp;
+          }
+        }
         this.updateCamera(_cameraFollowState, dt);
         
         // Update input manager with current player position and velocity for hybrid protocol
@@ -3993,21 +4013,46 @@ export class ClientApplication {
     // Only use hybrid rendering if prediction is enabled
     const predictionEnabled = this.config.prediction.enablePrediction;
     
-    // If we have both predicted and interpolated states AND prediction is enabled, create hybrid
-    // Local player uses prediction (instant response), others use interpolation (smooth)
+    // If we have both predicted and interpolated states AND prediction is enabled, create hybrid.
+    // Local player uses prediction (instant response), others use interpolation (smooth).
+    // Sub-tick lerp: the fixed-step simulation runs at 120 Hz but the display runs at the
+    // browser frame rate. `alpha` is the fractional tick elapsed since the last sim step, so
+    // we lerp the predicted position between prevPredicted → currentPredicted to eliminate
+    // the staircase micro-jitter that would otherwise appear at ≤120 fps.
     if (predictionEnabled && assignedPlayerId !== null && this.predictedWorldState && interpolatedState) {
       const predictedPlayer = this.predictedWorldState.players.find(p => p.id === assignedPlayerId);
-      const interpolatedPlayer = interpolatedState.players.find(p => p.id === assignedPlayerId);
+      const prevPlayer = this.prevPredictedWorldState?.players.find(p => p.id === assignedPlayerId);
+      const localIdx = interpolatedState.players.findIndex(p => p.id === assignedPlayerId);
+      const interpolatedPlayer = localIdx >= 0 ? interpolatedState.players[localIdx] : undefined;
       
-      if (predictedPlayer && interpolatedPlayer) {
-        // Get current rotation from input manager
+      if (predictedPlayer) {
         const currentRotation = this.inputManager.getCurrentInputFrame().rotation;
-        
-        // Splice predicted player in — avoid allocating N player objects when only 1 changes.
-        const localIdx = interpolatedState.players.findIndex(p => p.id === assignedPlayerId);
+
+        // Sub-tick lerp: blend prev→current predicted position using accumulator fraction.
+        const predPos = prevPlayer
+          ? prevPlayer.position.lerp(predictedPlayer.position, alpha)
+          : predictedPlayer.position;
+        const predVel = prevPlayer
+          ? prevPlayer.velocity.lerp(predictedPlayer.velocity, alpha)
+          : predictedPlayer.velocity;
+
+        // IMPORTANT: take only the CONTINUOUS quantities (position/velocity/rotation) from the
+        // predictor. All DISCRETE state flags (onDeck, carrierId, isMounted, deckId, health, …)
+        // come from the authoritative interpolated server state. The client-side carrier
+        // detection re-runs every prediction tick and can flip onDeck on/off frame-to-frame
+        // (e.g. standing on an island next to a docked ship), which would otherwise make the
+        // player sprite flicker green/red. Server flags are stable, so use them for rendering.
+        const stateBase = interpolatedPlayer ?? predictedPlayer;
+        const renderPlayer = {
+          ...stateBase,
+          rotation: currentRotation,
+          position: predPos,
+          velocity: predVel,
+        };
+
         if (localIdx >= 0) {
-          const newPlayers = interpolatedState.players.slice(); // 1 array alloc
-          newPlayers[localIdx] = { ...predictedPlayer, rotation: currentRotation }; // 1 player alloc
+          const newPlayers = interpolatedState.players.slice();
+          newPlayers[localIdx] = renderPlayer;
           worldToRender = { ...interpolatedState, players: newPlayers };
         } else {
           worldToRender = interpolatedState;
@@ -4734,6 +4779,9 @@ export class ClientApplication {
       this.hasReceivedWorldState = true;
     }
     
+    // Sync local player ID into prediction engine (safe to do every frame — cheap assignment)
+    this.predictionEngine.localPlayerId = this.networkManager.getAssignedPlayerId();
+
     // Update prediction engine with authoritative state
     this.predictionEngine.onAuthoritativeState(worldState);
 

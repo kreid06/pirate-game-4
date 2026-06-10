@@ -182,13 +182,13 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   
   prediction: {
     clientTickRate: 120, // 120 Hz client prediction for ultra-smooth local player movement
-    serverTickRate: 30, // 30 Hz server GAME_STATE broadcast (33.3ms per frame)
+    serverTickRate: 30,  // 30 Hz server GAME_STATE broadcast (33.3ms per frame)
     interpolationBuffer: 100, // 100ms buffer (~3 server frames at 30Hz) for jitter-free rendering
-    interpolationDelay: 66, // 66ms render delay (~2 server frames at 30Hz - ensures we always have data)
-    extrapolationLimit: 66, // 66ms max extrapolation (~2 server frames - allows smooth rendering between updates)
-    rollbackLimit: 10, // 10 ticks rollback for lag compensation
-    predictionErrorThreshold: 5.0, // 5 px position tolerance before rollback (doubled when moving)
-    enablePrediction: false,
+    interpolationDelay: 66,   // 66ms render delay (~2 server frames at 30Hz)
+    extrapolationLimit: 66,   // 66ms max extrapolation (~2 server frames)
+    rollbackLimit: 16,        // 16 ticks rollback — matches REWIND_BUFFER_SIZE
+    predictionErrorThreshold: 8.0, // px tolerance before rollback (8px = ~1/6 tile; doubled when moving)
+    enablePrediction: true,
     enableInterpolation: true
   },
   

@@ -76,6 +76,9 @@ interface ServerStateEntry {
  */
 export class PredictionEngine {
   private config: PredictionConfig;
+
+  /** ID of the local player — set by ClientApplication after assignment. */
+  public localPlayerId: number | null = null;
   
   // Enhanced prediction state history (16-frame buffer)
   private predictionHistory: PredictionState[] = [];
@@ -120,6 +123,14 @@ export class PredictionEngine {
   // Each frame starts from the raw server state (empty carrierDetection), so without this
   // the detection confirmationTicks would always be 0 and onDeck would flicker every frame.
   private persistentCarrierDetection: Map<number, CarrierDetectionState> = new Map();
+
+  // Running, accumulated predicted world. The local player's position persists across ticks
+  // and is advanced one sim step per client tick (120 Hz). Remote entities are refreshed from
+  // the latest server snapshot each tick. This is what makes prediction feel 120 Hz instead of
+  // snapping to the 30 Hz server cadence.
+  private runningPredicted: WorldState | null = null;
+  // Snap if a server correction is larger than this (units) — e.g. teleport / respawn.
+  private static readonly RECONCILE_SNAP_DIST = 80.0;
 
   // Ring buffer constants (16 frames = ~350ms at 60Hz)
   private static readonly REWIND_BUFFER_SIZE = 16;
@@ -210,27 +221,78 @@ export class PredictionEngine {
       // Prediction disabled - just return authoritative state
       return baseWorldState;
     }
-    
-    // Perform client-side simulation step.
-    // Inject persistent carrier detection so on-ship confirmation state is continuous
-    // between frames (raw server state has empty carrierDetection each time).
-    const stateForSim: WorldState = this.persistentCarrierDetection.size > 0
-      ? { ...baseWorldState, carrierDetection: new Map(this.persistentCarrierDetection) }
-      : baseWorldState;
+
+    // Build the state we simulate from this tick.
+    //
+    // CRITICAL: we do NOT re-simulate one step from the frozen server snapshot every tick —
+    // that would make the local player move only when a new 30 Hz snapshot arrives (the
+    // "feels like 30 Hz" bug). Instead we keep an accumulated running prediction and advance
+    // the LOCAL player from its own previous predicted position each 120 Hz tick. Remote
+    // entities (ships, other players, NPCs, islands) are refreshed from the latest server
+    // snapshot so collision and carrier data stay current.
+    const stateForSim = this.buildSimBase(baseWorldState);
+
     const predictedState = this.simulateStep(stateForSim, inputFrame, deltaTime);
 
-    // Carry forward carrier detection into the next frame
+    // Carry forward carrier detection + running prediction into the next frame
     this.persistentCarrierDetection = new Map(predictedState.carrierDetection);
+    this.runningPredicted = predictedState;
     
     // Store prediction state using the estimated server tick
     this.storePredictionState(inputFrame.tick, predictedState, inputFrame);
     
     // Handle rollback if needed
     if (this.needsRollback) {
-      return this.performRollback(predictedState, deltaTime);
+      const rolled = this.performRollback(predictedState, deltaTime);
+      this.runningPredicted = rolled;
+      return rolled;
     }
     
     return predictedState;
+  }
+
+  /**
+   * Construct the world state to simulate from for this tick.
+   *
+   * Remote entities come from the freshest server snapshot (`baseWorldState`); the local
+   * player is carried over from the accumulated running prediction so its position advances
+   * smoothly at the client tick rate rather than snapping to the 30 Hz server cadence.
+   */
+  private buildSimBase(baseWorldState: WorldState): WorldState {
+    const carrierDetection = this.persistentCarrierDetection.size > 0
+      ? new Map(this.persistentCarrierDetection)
+      : new Map(baseWorldState.carrierDetection);
+
+    // No accumulated state yet, or we don't know the local player — just use the server snapshot.
+    const localId = this.localPlayerId;
+    if (!this.runningPredicted || localId === null) {
+      return { ...baseWorldState, carrierDetection };
+    }
+
+    const runningLocal = this.runningPredicted.players.find(p => p.id === localId);
+    if (!runningLocal) {
+      return { ...baseWorldState, carrierDetection };
+    }
+
+    // Splice the accumulated local player into the fresh server world: keep the predicted
+    // position/velocity, but adopt the server's authoritative movement-state flags so the
+    // correct physics branch (land / deck / swim) is selected immediately on a transition.
+    const serverLocal = baseWorldState.players.find(p => p.id === localId);
+    const mergedLocal = serverLocal
+      ? {
+          ...serverLocal,
+          position: runningLocal.position,
+          velocity: runningLocal.velocity,
+          localPosition: runningLocal.localPosition,
+        }
+      : { ...runningLocal };
+
+    const players = baseWorldState.players.map(p => (p.id === localId ? mergedLocal : p));
+    if (!players.some(p => p.id === localId)) {
+      players.push(mergedLocal);
+    }
+
+    return { ...baseWorldState, players, carrierDetection };
   }
   
   /**
@@ -272,8 +334,12 @@ export class PredictionEngine {
     const predictionState = this.findPredictionState(serverState.tick);
     
     if (predictionState) {
-      const serverPlayer = serverState.players[0];
-      const predictedPlayer = predictionState.worldState.players[0];
+      const serverPlayer = this.localPlayerId !== null
+        ? serverState.players.find(p => p.id === this.localPlayerId)
+        : serverState.players[0];
+      const predictedPlayer = this.localPlayerId !== null
+        ? predictionState.worldState.players.find(p => p.id === this.localPlayerId)
+        : predictionState.worldState.players[0];
       
       if (serverPlayer && predictedPlayer) {
         const serverVel = serverPlayer.velocity.length();
@@ -671,59 +737,39 @@ export class PredictionEngine {
   }
   
   private statesDiffer(state1: WorldState, state2: WorldState): boolean {
-    // Compare key aspects of world state to detect meaningful differences
-    
-    // Compare player positions (most important for prediction)
-    if (state1.players.length !== state2.players.length) return true;
-    
-    for (let i = 0; i < state1.players.length; i++) {
-      const player1 = state1.players[i];
-      const player2 = state2.players[i];
-      
-      if (!player1 || !player2) return true;
-      
-      // Check position difference with velocity-based tolerance
-      const positionDiff = player1.position.sub(player2.position).length();
-      
-      // Check velocity difference (important for detecting input desync)
-      const velocityDiff = player1.velocity.sub(player2.velocity).length();
-      
-      // Higher tolerance for moving players to prevent choppy rendering
-      const velocity1 = player1.velocity.length();
-      const velocity2 = player2.velocity.length();
-      const isMoving = velocity1 > 0.1 || velocity2 > 0.1;
-      
-      // Dynamic tolerance based on movement state
-      const baseTolerance = this.config.predictionErrorThreshold; // 5.0 units
-      const movementTolerance = isMoving ? baseTolerance * 2.0 : baseTolerance; // Double when moving
-      
-      // Trigger rollback if EITHER position OR velocity differs significantly
-      // Velocity threshold of 10.0 units/s to avoid constant corrections during normal deceleration
-      // (input lag causes ~7 units/s difference during stop, which is acceptable)
-      if (positionDiff > movementTolerance || velocityDiff > 10.0) {
-        return true;
-      }
-      
-      // Check other important player state
-      if (player1.onDeck !== player2.onDeck || 
-          player1.carrierId !== player2.carrierId) {
-        return true;
-      }
-    }
-    
-    // Compare ship positions
-    if (state1.ships.length !== state2.ships.length) return true;
-    
-    for (let i = 0; i < state1.ships.length; i++) {
-      const ship1 = state1.ships[i];
-      const ship2 = state2.ships[i];
-      
-      if (!ship1 || !ship2) return true;
-      
-      const positionDiff = ship1.position.sub(ship2.position).length();
-      if (positionDiff > 5.0) { // Increased from 2.0 to 5.0 units tolerance for ships
-        return true;
-      }
+    // Only check the local player's state — comparing remote players would cause false rollbacks
+    // because we don't predict them (they follow server authority).
+    const localId = this.localPlayerId;
+    const player1 = localId !== null
+      ? state1.players.find(p => p.id === localId)
+      : state1.players[0];
+    const player2 = localId !== null
+      ? state2.players.find(p => p.id === localId)
+      : state2.players[0];
+
+    if (!player1 || !player2) return false; // Can't compare — assume OK
+
+    // Position divergence
+    const positionDiff = player1.position.sub(player2.position).length();
+
+    // Velocity divergence
+    const velocityDiff = player1.velocity.sub(player2.velocity).length();
+
+    const isMoving = player1.velocity.length() > 0.5 || player2.velocity.length() > 0.5;
+    const baseTolerance = this.config.predictionErrorThreshold;
+    const movementTolerance = isMoving ? baseTolerance * 2.0 : baseTolerance;
+
+    // POSITION is the authoritative visual signal and the primary rollback trigger.
+    if (positionDiff > movementTolerance) return true;
+
+    // Velocity is only a coarse safety net. The server uses a DIRECT-position model for
+    // walking (reports velocity ≈ 0) while the client predicts a walk velocity, so a low
+    // velocity threshold here would fire every tick on land/deck. Only catch gross desync.
+    if (velocityDiff > 150.0) return true;
+
+    // Carrier state transitions always require an immediate correction
+    if (player1.onDeck !== player2.onDeck || player1.carrierId !== player2.carrierId) {
+      return true;
     }
     
     // States are similar enough
@@ -754,13 +800,22 @@ export class PredictionEngine {
     for (const state of rollbackStates) {
       correctedState = this.simulateStep(correctedState, state.inputFrame, deltaTime);
     }
-    
-    // Apply smooth correction instead of instant snap
-    // Blend between current prediction and corrected state for smoother visual result
-    const smoothingFactor = 0.15; // 15% towards correction per frame for gentler corrections
+
+    // Adaptive correction: snap on big jumps (teleport/respawn/large desync), otherwise
+    // blend gently so normal mispredictions converge without a visible pop.
+    const localId = this.localPlayerId;
+    const curLocal = localId !== null
+      ? currentPredictedState.players.find(p => p.id === localId)
+      : currentPredictedState.players[0];
+    const corLocal = localId !== null
+      ? correctedState.players.find(p => p.id === localId)
+      : correctedState.players[0];
+    const localErr = (curLocal && corLocal)
+      ? curLocal.position.sub(corLocal.position).length()
+      : 0;
+
+    const smoothingFactor = localErr > PredictionEngine.RECONCILE_SNAP_DIST ? 1.0 : 0.2;
     const blendedState = this.blendWorldStates(currentPredictedState, correctedState, smoothingFactor);
-    
-    console.log(`🔄 Smoothed correction: ${smoothingFactor * 100}% blend applied`);
     
     // Update prediction history with corrected states
     this.updatePredictionHistory(rollbackStates, blendedState);
