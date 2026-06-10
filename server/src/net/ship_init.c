@@ -78,6 +78,64 @@ void tick_sinking_ships(void) {
             }
         }
 
+        /* ── Kill XP: award the killer ship on ghost ship despawn ─────────────
+         * Formula: 100 × ghost_level so higher-level ghosts give more XP.
+         * Allied ships within 2000 client units also receive 50% of that XP. */
+        if (sunk_company == COMPANY_GHOST) {
+            uint16_t killer_id = ship->killer_ship_id;
+            if (killer_id != 0) {
+                struct Ship* killer_sim = find_sim_ship(killer_id);
+                SimpleShip* killer_ss   = find_ship(killer_id);
+                if (killer_sim && killer_ss) {
+                    uint32_t kill_xp = 100u * (uint32_t)(sunk_level > 0 ? sunk_level : 1u);
+                    killer_sim->level_stats.xp += kill_xp;
+                    log_info("⚓ Ghost ship %u (lvl %u) sunk by ship %u — awarded %u kill XP",
+                             sunk_id, (unsigned)sunk_level, (unsigned)killer_id, kill_xp);
+
+                    /* Notify killer ship's clients */
+                    {
+                        char _xmsg[128];
+                        float _kx = SERVER_TO_CLIENT(killer_ss->x);
+                        float _ky = SERVER_TO_CLIENT(killer_ss->y);
+                        snprintf(_xmsg, sizeof(_xmsg),
+                            "{\"type\":\"ship_xp_gained\",\"shipId\":%u,\"xp\":%u,\"x\":%.1f,\"y\":%.1f,\"shared\":false}",
+                            (unsigned)killer_id, kill_xp, _kx, _ky);
+                        websocket_server_broadcast(_xmsg);
+                    }
+
+                    /* Share 50% with allied ships within 2000 client units (200 srv units) */
+                    const float SHARE_RANGE2 = 200.0f * 200.0f;
+                    uint32_t share_xp = kill_xp / 2u;
+                    for (int _si = 0; _si < ship_count; _si++) {
+                        SimpleShip* ally = &ships[_si];
+                        if (!ally->active) continue;
+                        if (ally->ship_id == killer_id) continue;
+                        if (ally->company_id == COMPANY_GHOST) continue;
+                        if (!is_allied(ally->company_id, killer_ss->company_id)) continue;
+                        float _dx = ally->x - killer_ss->x;
+                        float _dy = ally->y - killer_ss->y;
+                        if (_dx * _dx + _dy * _dy > SHARE_RANGE2) continue;
+                        struct Ship* ally_sim = find_sim_ship(ally->ship_id);
+                        if (!ally_sim) continue;
+                        ally_sim->level_stats.xp += share_xp;
+                        log_info("⚓ Allied ship %u received %u shared kill XP from ghost %u kill",
+                                 (unsigned)ally->ship_id, share_xp, sunk_id);
+
+                        /* Notify allied ship's clients */
+                        {
+                            char _axmsg[128];
+                            float _ax = SERVER_TO_CLIENT(ally->x);
+                            float _ay = SERVER_TO_CLIENT(ally->y);
+                            snprintf(_axmsg, sizeof(_axmsg),
+                                "{\"type\":\"ship_xp_gained\",\"shipId\":%u,\"xp\":%u,\"x\":%.1f,\"y\":%.1f,\"shared\":true}",
+                                (unsigned)ally->ship_id, share_xp, _ax, _ay);
+                            websocket_server_broadcast(_axmsg);
+                        }
+                    }
+                }
+            }
+        }
+
         /* Swap-and-pop */
         ships[s] = ships[ship_count - 1];
         memset(&ships[ship_count - 1], 0, sizeof(SimpleShip));

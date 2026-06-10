@@ -658,6 +658,7 @@ export class NetworkManager {
   public onShipSunk: ((shipId: number) => void) | null = null;
   public onShipSinking: ((shipId: number) => void) | null = null;
   public onShipLevelUp: ((shipId: number, attribute: string, attrLevel: number, xp: number, shipLevel: number, totalCap: number, nextUpgradeCost: number) => void) | null = null;
+  public onShipXpGained: ((shipId: number, xp: number, x: number, y: number, shared: boolean) => void) | null = null;
   public onShipUnclaimed: ((shipId: number) => void) | null = null;
   public onShipClaimed: ((shipId: number, companyId: number) => void) | null = null;
   public onFlagPlanted: ((shipId: number, planterId: number, planterCompany: number) => void) | null = null;
@@ -3688,6 +3689,16 @@ export class NetworkManager {
         const lvlNextCost:       number = message.nextUpgradeCost  ?? 0;
         console.log(`⬆️  SHIP_LEVEL_UP: ship ${lvlShipId} ${lvlAttribute} → L${lvlAttrLevel} | ship level ${lvlShipLevel}/${lvlTotalCap} | next cost ${lvlNextCost} | ${lvlXp} XP left`);
         this.onShipLevelUp?.(lvlShipId, lvlAttribute, lvlAttrLevel, lvlXp, lvlShipLevel, lvlTotalCap, lvlNextCost);
+        break;
+      }
+
+      case 'ship_xp_gained': {
+        const xpShipId: number  = message.shipId  || 0;
+        const xpAmount: number  = message.xp      || 0;
+        const xpX: number       = message.x       ?? 0;
+        const xpY: number       = message.y       ?? 0;
+        const xpShared: boolean = message.shared   ?? false;
+        this.onShipXpGained?.(xpShipId, xpAmount, xpX, xpY, xpShared);
         break;
       }
 

@@ -1275,6 +1275,9 @@ static const float ITEM_WEIGHT_KG[64] = {
     [36] = 200.0f,// ITEM_COMPANY_FORTRESS
     [38] = 12.0f, // ITEM_RESOURCE_CHEST (client-only)
     [39] = 12.0f, // ITEM_BED
+    [40] = 3.0f,  // ITEM_METAL_AXE
+    [41] = 4.0f,  // ITEM_METAL_PICKAXE
+    [42] = 2.0f,  // ITEM_GRAPPLE_HOOK
 };
 
 /** Body mass assumed for every player aboard (kg). */
@@ -5451,12 +5454,24 @@ int websocket_server_update(struct Sim* sim) {
                                                     melee_cooldown_ms = 1000u;
                                                     melee_stamina     = 20u;
                                                     melee_label       = "axe";
+                                                } else if (cur_item == ITEM_METAL_AXE) {
+                                                    melee_damage      = 35.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                    melee_range       = 38.0f;
+                                                    melee_cooldown_ms = 900u;
+                                                    melee_stamina     = 18u;
+                                                    melee_label       = "metal_axe";
                                                 } else if (cur_item == ITEM_PICKAXE) {
                                                     melee_damage      = 20.0f * (1.0f + 0.1f * (float)player->stat_damage);
                                                     melee_range       = 35.0f;
                                                     melee_cooldown_ms = 1200u;
                                                     melee_stamina     = 15u;
                                                     melee_label       = "pickaxe";
+                                                } else if (cur_item == ITEM_METAL_PICKAXE) {
+                                                    melee_damage      = 28.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                    melee_range       = 36.0f;
+                                                    melee_cooldown_ms = 1100u;
+                                                    melee_stamina     = 14u;
+                                                    melee_label       = "metal_pickaxe";
                                                 } else {
                                                     melee_damage      = 15.0f * (1.0f + 0.1f * (float)player->stat_damage);
                                                     melee_range       = 25.0f;
@@ -11538,6 +11553,9 @@ void websocket_server_tick(float dt) {
                 if (sinking_ship && !sinking_ship->is_sinking) {
                     sinking_ship->is_sinking    = true;
                     sinking_ship->sink_start_ms = get_time_ms();
+                    /* Record who delivered the killing blow for kill-XP credit */
+                    if (ev->shooter_ship_id != 0)
+                        sinking_ship->killer_ship_id = (uint16_t)ev->shooter_ship_id;
 
                     /* Zero the sim-ship velocity so the ship stops dead */
                     {

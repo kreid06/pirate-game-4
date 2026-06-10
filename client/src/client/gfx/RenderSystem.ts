@@ -148,6 +148,10 @@ export class RenderSystem {
   // Build mode state
   /** Set by ClientApplication each frame: false when the hovered ghost slot can't be afforded. */
   public ghostCanAfford: boolean = true;
+  /** Set by ClientApplication each frame: false when the player can't afford the active land build. */
+  public landGhostCanAfford: boolean = true;
+  /** Optional per-kind affordability callback for plan markers — set by ClientApplication. */
+  public landAffordabilityCheck: ((kind: string) => boolean) | null = null;
   private buildMode: boolean = false;
   /** Whether cannon replacement build mode is active (cannon item held). */
   private cannonBuildMode: boolean = false;
@@ -398,6 +402,8 @@ export class RenderSystem {
 
   /** Returns whether the last-rendered island build ghost was out of placement range. */
   getIslandBuildTooFar(): boolean { return this._islandGhostTooFar; }
+  /** Returns true when the island build ghost is currently being drawn (kind is set). */
+  isIslandBuildGhostActive(): boolean { return this.islandBuildKind !== null; }
   /** Returns the current snapped placement position (or null when no ghost is active). */
   getSnappedBuildPos(): { x: number; y: number } | null { return this._snappedBuildPos; }
   /** Returns the rotation (deg) inherited from the snap source tile, or null if freely placing. */
@@ -4322,18 +4328,19 @@ export class RenderSystem {
     this.executeRenderQueue();
 
     // ── Fiber bushes — above players, below tree leaves ──────────────────────
-    const zoom = camera.getState().zoom;
+    const { zoom, rotation: _deferCamRot } = camera.getState();
     for (const b of this._pendingBushes) {
-      this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy, b.wx, b.wy);
+      this.drawIslandFiberPlant(b.sp.x, b.sp.y, zoom, _deferCamRot, b.isHovered, b.bushAlpha * b.deathAlpha, b.ox, b.oy, b.wx, b.wy);
     }
 
     // ── Wood ceilings — above bushes (roof covers vegetation underneath) ──────
     this.drawPendingCeilings(camera);
 
     // ── Tree leaves — above bushes and players ────────────────────────────────
+    const camRot = camera.getState().rotation;
     for (const e of this._pendingAllRes) {
       if (e.res.type !== 'wood') continue;
-      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha, e.wx, e.wy);
+      this.drawIslandTreeLeaves(e.sp.x, e.sp.y, zoom, camRot, e.isHovered, e.inRange, e.leafAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.deathAlpha, e.wx, e.wy);
     }
 
     // ── Hover prompts + health bars (always on top) ───────────────────────────
@@ -4980,7 +4987,7 @@ export class RenderSystem {
   }
 
   private drawIsland(camera: Camera): void {
-    const zoom = camera.getState().zoom;
+    const { zoom, rotation: camRot } = camera.getState();
     // Reset per-frame hovered resource nodes
     this._hoveredTree       = null;
     this._hoveredFiberPlant = null;
@@ -5356,12 +5363,12 @@ export class RenderSystem {
       // Pass 1 – rocks (below structures)
       for (const e of visibleRes) {
         if (e.res.type !== 'rock') continue;
-        this.drawIslandRock(e.sp.x, e.sp.y, zoom, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy, e.wx, e.wy);
+        this.drawIslandRock(e.sp.x, e.sp.y, zoom, camRot, e.isHovered, e.deathAlpha, e.res.ox, e.res.oy, e.wx, e.wy);
       }
       // Pass 2 – boulders (above rocks, below players)
       for (const e of visibleRes) {
         if (e.res.type !== 'boulder') continue;
-        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy, e.res.metal === true);
+        this.drawIslandBoulder(e.sp.x, e.sp.y, zoom, camRot, e.isHovered, e.boulderAlpha * e.deathAlpha, e.res.ox, e.res.oy, e.res.size ?? 1.0, e.wx, e.wy, e.res.metal === true);
       }
       // Pass 3 – tree trunks (only visible when player is near or hovering)
       for (const e of visibleRes) {
@@ -5448,7 +5455,7 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0, deathAlpha = 1.0, wx?: number, wy?: number): void {
+  private drawIslandTreeLeaves(sx: number, sy: number, zoom: number, camRot = 0, hovered = false, inRange = false, leafAlpha = 1.0, seedX = 0, seedY = 0, size = 1.0, deathAlpha = 1.0, wx?: number, wy?: number): void {
     const ctx = this.ctx;
     const h  = (Math.imul(seedX | 0, 2654435761) ^ Math.imul(seedY | 0, 1664525)) >>> 0;
     const h2 = (Math.imul(h, 2246822519) ^ Math.imul(h >>> 13, 2654435761)) >>> 0;
@@ -5467,7 +5474,7 @@ export class RenderSystem {
     const drawSize     = RenderSystem.TREE_SPRITE_SIZE * (canopy / spriteCanopy);
 
     ctx.save();
-    // Hover glow
+    // Hover glow (drawn before rotation so the circle stays upright)
     if (hovered) {
       const glowColor = inRange ? 'rgba(255,230,80,0.22)' : 'rgba(180,180,180,0.15)';
       ctx.beginPath();
@@ -5475,12 +5482,15 @@ export class RenderSystem {
       ctx.fillStyle = glowColor;
       ctx.fill();
     }
+    // Rotate the pre-baked sprite around the tree centre to match world-space orientation
+    ctx.translate(sx, sy);
+    ctx.rotate(-camRot);
     ctx.globalAlpha = leafAlpha * deathAlpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.globalAlpha = deathAlpha;
     if (hovered) {
       ctx.beginPath();
-      ctx.arc(sx, sy, canopy * 1.08, 0, Math.PI * 2);
+      ctx.arc(0, 0, canopy * 1.08, 0, Math.PI * 2);
       ctx.strokeStyle = inRange ? '#f0c040' : '#888888';
       ctx.lineWidth   = 1.8 * zoom;
       ctx.stroke();
@@ -5502,7 +5512,7 @@ export class RenderSystem {
     ctx.restore();
   }
 
-  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
+  private drawIslandFiberPlant(sx: number, sy: number, zoom: number, camRot = 0, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
     const ctx      = this.ctx;
     const h        = 60 * zoom;
     const spriteH  = RenderSystem.FIBER_SPRITE_H;
@@ -5517,12 +5527,12 @@ export class RenderSystem {
     ctx.save();
     ctx.globalAlpha = deathAlpha;
     ctx.translate(sx, sy);
-    ctx.rotate(rot);
+    ctx.rotate(rot - camRot);
     ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
-  private drawIslandRock(sx: number, sy: number, zoom: number, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
+  private drawIslandRock(sx: number, sy: number, zoom: number, camRot = 0, hovered = false, deathAlpha = 1.0, ox = 0, oy = 0, wx?: number, wy?: number): void {
     const ctx  = this.ctx;
     const R    = RenderSystem.ROCK_SPRITE_R;
     const SIZE = RenderSystem.ROCK_SPRITE_SIZE;
@@ -5531,15 +5541,18 @@ export class RenderSystem {
     const hash = Math.abs((ox * 73856093) ^ (oy * 19349663)) | 0;
     const ti   = hash % RenderSystem.ROCK_TONES.length;
     const si   = (hash >> 4) % RenderSystem.ROCK_SHAPES.length;
+    const drawRot = ((hash >> 8) % 360) * Math.PI / 180;
     const key  = `${ti}_${si}_${hovered ? 'h' : 'n'}`;
     const sprite = RenderSystem._ensureRockSprites().get(key)!;
     ctx.save();
     ctx.globalAlpha = deathAlpha;
-    ctx.drawImage(sprite, sx - drawSize / 2, sy - drawSize / 2, drawSize, drawSize);
+    ctx.translate(sx, sy);
+    ctx.rotate(drawRot - camRot);
+    ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
 
-  private drawIslandBoulder(sx: number, sy: number, zoom: number, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number, metal = false): void {
+  private drawIslandBoulder(sx: number, sy: number, zoom: number, camRot = 0, hovered = false, alpha = 1.0, ox = 0, oy = 0, size = 1.0, wx?: number, wy?: number, metal = false): void {
     const ctx      = this.ctx;
     const R        = RenderSystem.BOULDER_SPRITE_R;
     const SIZE     = RenderSystem.BOULDER_SPRITE_SIZE;
@@ -5559,7 +5572,7 @@ export class RenderSystem {
     ctx.save();
     ctx.globalAlpha = alpha;
     ctx.translate(sx, sy);
-    ctx.rotate(drawRot);
+    ctx.rotate(drawRot - camRot);
     ctx.drawImage(sprite, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
     ctx.restore();
   }
@@ -5597,7 +5610,7 @@ export class RenderSystem {
   }
   private drawPlacedStructures(camera: Camera): void {
     const ctx  = this.ctx;
-    const zoom = camera.getState().zoom;
+    const { zoom, rotation: camRot } = camera.getState();
 
     // ── Update hovered structure ──────────────────────────────────────────────
 
@@ -5788,14 +5801,23 @@ export class RenderSystem {
       return order(a.type) - order(b.type);
     });
 
+    // TILE = 50 CLIENT units (= 5 server units after ×WORLD_SCALE_FACTOR=10).
+    // Half-extents in CLIENT units: shipyard 445 (= TILE*17.8/2), flag_fort ~70, fortress ~90.
+    const STRUCT_TILE = 50;
     for (const s of sorted) {
+      // World-space bounding radius for each structure type.
+      // isWorldPositionVisible margin is in CLIENT units — same space as s.x / s.y.
+      const _halfExt = s.type === 'shipyard'         ? STRUCT_TILE * 17.8 / 2   // 445
+                     : s.type === 'flag_fort'        ? STRUCT_TILE * 1.4        //  70
+                     : s.type === 'company_fortress' ? STRUCT_TILE * 1.8        //  90
+                     : STRUCT_TILE * 1.1;                                        //  55
+      // Screen-space culling — skip structures completely outside the visible area
+      if (!camera.isWorldPositionVisible(Vec2.from(s.x, s.y), _halfExt)) continue;
+      // Fog culling — use same half-extent so partial visibility of a large structure
+      // (e.g. one dock arm in view while the center is in fog) still triggers rendering.
+      if (!this.fogVisibleAt(s.x, s.y, _halfExt)) continue;
       const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const sz  = Math.max(4, 50 * zoom);
-      // Cull structures that are entirely off-screen
-      if (ssp.x + sz < 0 || ssp.x - sz > this.canvas.width ||
-          ssp.y + sz < 0 || ssp.y - sz > this.canvas.height) continue;
-      // Fog culling — don't render structures outside the player's view range
-      if (!this.fogVisibleAt(s.x, s.y)) continue;
       const isHovered  = this._hoveredStructure?.id === s.id;
       const isBlocker  = this._blockerStructureId === s.id && performance.now() < this._blockerExpiry;
 
@@ -5806,9 +5828,10 @@ export class RenderSystem {
         const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const baseColor = isBlocker ? '#cc3322' : isHovered ? '#d09a3a' : '#b8832b';
         ctx.save();
-        if (s.rotation) {
+        const floorRotRad = (s.rotation ?? 0) * Math.PI / 180;
+        if (floorRotRad !== 0 || camRot !== 0) {
           ctx.translate(ssp.x, ssp.y);
-          ctx.rotate(s.rotation * Math.PI / 180);
+          ctx.rotate(floorRotRad - camRot);
           ctx.translate(-ssp.x, -ssp.y);
         }
         ctx.fillStyle   = baseColor;
@@ -5868,13 +5891,12 @@ export class RenderSystem {
         const bx = ssp.x - bw / 2;
         const by = ssp.y - bh / 2;
         ctx.save();
-        if (s.rotation) {
+        const wbRotRad = (s.rotation ?? 0) * Math.PI / 180;
+        if (wbRotRad !== 0 || camRot !== 0) {
           ctx.translate(ssp.x, ssp.y);
-          ctx.rotate(s.rotation * Math.PI / 180);
+          ctx.rotate(wbRotRad - camRot);
           ctx.translate(-ssp.x, -ssp.y);
         }
-
-        // Outer frame (structural legs / frame seen from above)
         const frameColor  = isHovered ? '#5a3010' : '#4a2408';
         ctx.fillStyle   = frameColor;
         ctx.strokeStyle = '#2a1204';
@@ -5988,7 +6010,7 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(wallRotRad);
+        ctx.rotate(wallRotRad - camRot);
         ctx.translate(-ssp.x, -ssp.y);
         // Main wall fill
         ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
@@ -6066,7 +6088,7 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(dfRotRad);
+        ctx.rotate(dfRotRad - camRot);
         ctx.translate(-ssp.x, -ssp.y);
         ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
         ctx.strokeStyle = '#3e200c';
@@ -6136,7 +6158,7 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(doorRotRad);
+        ctx.rotate(doorRotRad - camRot);
         ctx.translate(-ssp.x, -ssp.y);
         if (!isOpen) {
           // Closed door: filled planks
@@ -6214,7 +6236,7 @@ export class RenderSystem {
         const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         ctx.save();
         ctx.translate(cx, cy);
-        ctx.rotate((s.rotation ?? 0) * Math.PI / 180);
+        ctx.rotate((s.rotation ?? 0) * Math.PI / 180 - camRot);
         ctx.translate(-cx, -cy);
         // U-path: clockwise outer polygon with gap at +y (mouth / open end)
         const uPath = () => {
@@ -6388,7 +6410,7 @@ export class RenderSystem {
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         // Tilted broken planks (cross shape, rotated 35°)
-        ctx.rotate(0.61); // ~35 degrees
+        ctx.rotate(0.61 - camRot);
         const alpha = isHovered ? 1.0 : 0.88;
         ctx.globalAlpha = alpha;
         // Hull outline (irregular pentagon for a battered ship)
@@ -6485,7 +6507,7 @@ export class RenderSystem {
 
         // Base (brown rectangle) at placement rotation — stays fixed
         ctx.save();
-        ctx.rotate(rotRad);
+        ctx.rotate(rotRad - camRot);
         ctx.fillStyle   = isHovered ? '#b06030' : '#8B4513';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth   = lw;
@@ -6502,7 +6524,7 @@ export class RenderSystem {
 
         // Barrel — rotates to live aim angle when mounted
         ctx.save();
-        ctx.rotate(barrelRot);
+        ctx.rotate(barrelRot - camRot);
         ctx.fillStyle   = isHovered ? '#aaaaaa' : '#333333';
         ctx.strokeStyle = '#000000';
         ctx.lineWidth   = lw;
@@ -6529,6 +6551,7 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(-camRot);
 
         // Tower base (stone)
         const stoneR = Math.round(hpFrac * 120 + 60);
@@ -6783,6 +6806,7 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(-camRot);
 
         // Stone walls (larger than flag_fort)
         const stoneR = Math.round(hpFrac * 110 + 60);
@@ -6876,6 +6900,7 @@ export class RenderSystem {
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(-camRot);
 
         // Background ring
         ctx.strokeStyle = 'rgba(0,0,0,0.4)';
@@ -7014,14 +7039,16 @@ export class RenderSystem {
         // ── Land chest — top-down view: rectangular body with lid strip and latch ──
         const cw = sz * 0.72;   // chest width
         const ch = sz * 0.52;   // chest depth
-        const cx2 = ssp.x - cw / 2;
-        const cy2 = ssp.y - ch / 2;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const chestTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
         const chestIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
 
         ctx.save();
+        ctx.translate(ssp.x, ssp.y);
+        ctx.rotate(-camRot);
+        const cx2 = -cw / 2;
+        const cy2 = -ch / 2;
 
         // Body (bottom half of chest, darker brown)
         ctx.fillStyle   = isHovered ? '#7a4820' : '#5c3210';
@@ -7046,8 +7073,8 @@ export class RenderSystem {
         // Latch — small rectangle centred on the lid/body seam
         const ltW = Math.max(2, cw * 0.12);
         const ltH = Math.max(2, ch * 0.20);
-        const ltX = ssp.x - ltW / 2;
-        const ltY = ssp.y - ch / 2 + lidH - ltH / 2;
+        const ltX = -ltW / 2;
+        const ltY = cy2 + lidH - ltH / 2;
         ctx.fillStyle   = '#d4a040';
         ctx.strokeStyle = '#7a5010';
         ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
@@ -7080,19 +7107,19 @@ export class RenderSystem {
           ctx.fillRect(cx2, cy2, cw, ch);
           const chBuildFrac = Math.max(0, Math.min(1, chestTargetHp > 0 ? s.hp / chestTargetHp : 0));
           const chBarW = cw * 0.7; const chBarH = Math.max(2, 4 * zoom);
-          const chBarX = ssp.x - chBarW / 2; const chBarY = cy2 - chBarH - 2;
+          const chBarX = -chBarW / 2; const chBarY = cy2 - chBarH - 2;
           ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
           ctx.strokeRect(chBarX, chBarY, chBarW, chBarH);
           ctx.fillStyle = '#55ddff'; ctx.fillRect(chBarX, chBarY, chBarW * chBuildFrac, chBarH);
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
-          ctx.fillText('\u2692', ssp.x, chBarY - 2);
+          ctx.fillText('\u2692', 0, chBarY - 2);
         }
         // Repair icon when hammer equipped and chest is damaged (not schematic)
         if (this.hammerEquipped && !chestIsSchematic && hpFrac < 0.999) {
           ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
-          ctx.fillText('\u2692', ssp.x, ssp.y);
+          ctx.fillText('\u2692', 0, 0);
         }
 
         ctx.restore();
@@ -7104,11 +7131,11 @@ export class RenderSystem {
     // small tier-colored gem above each so the world shows item prestige.
     for (const s of sorted) {
       if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
-      if (!this.fogVisibleAt(s.x, s.y)) continue;
+      const _qHalfExt = s.type === 'shipyard' ? STRUCT_TILE * 17.8 / 2 : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
+      if (!this.fogVisibleAt(s.x, s.y, _qHalfExt)) continue;
+      if (!camera.isWorldPositionVisible(Vec2.from(s.x, s.y), _qHalfExt)) continue;
       const gsp = camera.worldToScreen(Vec2.from(s.x, s.y));
       const gsz = Math.max(4, 50 * zoom);
-      if (gsp.x + gsz < 0 || gsp.x - gsz > this.canvas.width ||
-          gsp.y + gsz < 0 || gsp.y - gsz > this.canvas.height) continue;
       const col = tierColor(s.qualityTier);
       const r = Math.max(2.5, 4 * zoom);
       const gy = gsp.y - gsz * 0.5 - r * 1.5;
@@ -7176,7 +7203,7 @@ export class RenderSystem {
       ctx.shadowBlur  = 8 * zoom;
       ctx.lineWidth   = Math.max(1, 3 * zoom);
       ctx.translate(ssp.x, ssp.y);
-      ctx.rotate(rotRad);
+      ctx.rotate(rotRad - camRot);
       if (s.type === 'cannon') {
         // Draw highlight matching cannon shape: base rect + barrel rect
         // Base inherits rotRad from ctx.rotate(rotRad) above — correct.
@@ -7193,7 +7220,7 @@ export class RenderSystem {
             ? (s.cannonAimAngle! + Math.PI / 2)
             : rotRad; // no aim data → barrel aligned with base
         ctx.save();
-        ctx.rotate(barrelRot - rotRad); // net absolute = rotRad + (barrelRot - rotRad) = barrelRot ✓
+        ctx.rotate(barrelRot - rotRad); // net absolute = rotRad + delta = barrelRot - camRot ✓
         ctx.strokeRect(-barW / 2, -barH, barW, barH);
         ctx.restore();
       } else {
@@ -7476,7 +7503,7 @@ export class RenderSystem {
           ctx.globalAlpha = flashAlpha;
           ctx.strokeStyle = entry.color;
           ctx.translate(ssp2.x, ssp2.y);
-          ctx.rotate(rotRad2);
+          ctx.rotate(rotRad2 - camRot);
           ctx.strokeRect(-rawW2 / 2, -rawH2 / 2, rawW2, rawH2);
           ctx.restore();
         }
@@ -7494,7 +7521,7 @@ export class RenderSystem {
   private drawPendingCeilings(camera: Camera): void {
     if (this._pendingCeilings.length === 0) return;
     const ctx  = this.ctx;
-    const zoom = camera.getState().zoom;
+    const { zoom, rotation: camRot } = camera.getState();
     const visPolyPts   = this._visPolyPts;
     const visPolyValid = visPolyPts.length >= 6;
     const MIN_CEIL_ALPHA = 0.25;
@@ -7536,7 +7563,7 @@ export class RenderSystem {
 
       ctx.save();
       ctx.translate(ssp.x, ssp.y);
-      ctx.rotate(rotRad);
+      ctx.rotate(rotRad - camRot);
 
       if (visPolyValid) {
         const cosR = Math.cos(-rotRad), sinR = Math.sin(-rotRad);
@@ -7667,19 +7694,27 @@ export class RenderSystem {
       ctx.scale(zoom, zoom);
       ctx.rotate(drawRot);
 
+      const _ghostAfford = this.landAffordabilityCheck ? this.landAffordabilityCheck(g.kind) : this.landGhostCanAfford;
+      const _hoverAfford = !isHovered || _ghostAfford;
       if (isHovered) {
-        // Bright green glow fill to show this ghost can be built here
-        ctx.fillStyle = `rgba(80, 220, 80, ${pulse * 0.30})`;
+        // Fill: green when affordable, red when not
+        ctx.fillStyle = _hoverAfford
+          ? `rgba(80, 220, 80, ${pulse * 0.30})`
+          : `rgba(220, 60, 40, ${pulse * 0.30})`;
         ctx.fillRect(-hw, -hh, hw * 2, hh * 2);
 
-        // Solid green outline
-        ctx.strokeStyle = `rgba(100, 255, 100, ${pulse})`;
+        // Outline
+        ctx.strokeStyle = _hoverAfford
+          ? `rgba(100, 255, 100, ${pulse})`
+          : `rgba(255, 80, 60, ${pulse})`;
         ctx.lineWidth = 3 / zoom;
         ctx.setLineDash([]);
         ctx.strokeRect(-hw, -hh, hw * 2, hh * 2);
 
-        // Inner shadow for depth
-        ctx.strokeStyle = `rgba(40, 180, 40, ${pulse * 0.5})`;
+        // Inner shadow
+        ctx.strokeStyle = _hoverAfford
+          ? `rgba(40, 180, 40, ${pulse * 0.5})`
+          : `rgba(180, 40, 20, ${pulse * 0.5})`;
         ctx.lineWidth = 1.5 / zoom;
         ctx.strokeRect(-hw + 3 / zoom, -hh + 3 / zoom, hw * 2 - 6 / zoom, hh * 2 - 6 / zoom);
       } else {
@@ -7697,16 +7732,19 @@ export class RenderSystem {
 
       ctx.restore();
 
-      // Number badge (screen-space, no rotation) — green on hover, amber otherwise
-      const badge = isHovered ? '✓' : `${idx + 1}`;
+      // Number badge (screen-space, no rotation) — green on hover (affordable), red if not, blue otherwise
+      const _badgeAfford = !isHovered || _ghostAfford;
+      const badge = isHovered ? (_badgeAfford ? '✓' : '✗') : `${idx + 1}`;
       ctx.save();
       ctx.translate(sp.x, sp.y);
       ctx.font = `bold ${Math.round(11 * zoom)}px monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillStyle = isHovered ? 'rgba(0,60,0,0.85)' : 'rgba(0,20,80,0.8)';
+      ctx.fillStyle = isHovered
+        ? (_badgeAfford ? 'rgba(0,60,0,0.85)' : 'rgba(80,0,0,0.85)')
+        : 'rgba(0,20,80,0.8)';
       ctx.fillRect(-8 * zoom, -8 * zoom, 16 * zoom, 16 * zoom);
-      ctx.fillStyle = isHovered ? '#88ff88' : '#66aaff';
+      ctx.fillStyle = isHovered ? (_badgeAfford ? '#88ff88' : '#ff6666') : '#66aaff';
       ctx.fillText(badge, 0, 0);
       ctx.restore();
     });
@@ -7746,7 +7784,7 @@ export class RenderSystem {
 
     if (!this.islandBuildKind || !this.mouseWorldPos) return;
     const ctx  = this.ctx;
-    const zoom = camera.getState().zoom;
+    const { zoom, rotation: camRot } = camera.getState();
     const TILE = 50; // world px — floor tile size
     const sampleBoundary = (baseR: number, bumps: number[], angle: number): number => {
       const TWO_PI = Math.PI * 2;
@@ -8047,6 +8085,7 @@ export class RenderSystem {
         s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 700
       );
       const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear;
+      const syCantAfford = !syInvalid && !this.landGhostCanAfford;
       this._islandGhostTooFar = syInvalid;
       // Ghost uses same proportions as rendered shipyard (bracketized to brigantine scale)
       const GA_T = TILE * 1.00 * zoom;
@@ -8059,13 +8098,14 @@ export class RenderSystem {
       ctx.save();
       ctx.globalAlpha = 0.72 + 0.14 * Math.sin(performance.now() / 300);
       // Apply rotation — same effectiveRotDeg used by floor/workbench ghost
-      if (effectiveRotDeg !== 0) {
+      const syRotRad = effectiveRotDeg * Math.PI / 180;
+      if (syRotRad !== 0 || camRot !== 0) {
         ctx.translate(msp.x, msp.y);
-        ctx.rotate(effectiveRotDeg * Math.PI / 180);
+        ctx.rotate(syRotRad - camRot);
         ctx.translate(-msp.x, -msp.y);
       }
-      ctx.fillStyle   = syInvalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 180, 255, 0.45)';
-      ctx.strokeStyle = syInvalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 200, 255, 0.75)';
+      ctx.fillStyle   = (syInvalid || syCantAfford) ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 180, 255, 0.45)';
+      ctx.strokeStyle = (syInvalid || syCantAfford) ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 200, 255, 0.75)';
       ctx.lineWidth   = Math.max(1, 2 * zoom);
       ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
       ctx.beginPath();
@@ -8096,6 +8136,8 @@ export class RenderSystem {
         ctx.fillStyle = '#ff6644'; ctx.fillText('TOO CLOSE TO SHIPYARD', msp.x, syLabelY);
       } else if (syPlayerFar) {
         ctx.fillStyle = '#ff6644'; ctx.fillText('TOO FAR', msp.x, syLabelY);
+      } else if (syCantAfford) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('Insufficient Resources', msp.x, syLabelY);
       } else {
         ctx.fillStyle = '#aadeff'; ctx.fillText('Shipyard', msp.x, syLabelY);
       }
@@ -8371,8 +8413,9 @@ export class RenderSystem {
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
     const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
-    const ghostColor  = invalid ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
-    const borderColor = invalid ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
+    const cantAfford = !invalid && !this.landGhostCanAfford;
+    const ghostColor  = (invalid || cantAfford) ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
+    const borderColor = (invalid || cantAfford) ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
 
     // ── Claim-flag slice preview ──────────────────────────────────────────
     // When hovering with a claim_flag selected and the cursor sits in a
@@ -8604,9 +8647,9 @@ export class RenderSystem {
     const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling' || buildKind === 'cannon';
     const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
                        : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
-    if (ghostRotRad !== 0) {
+    if (ghostRotRad !== 0 || camRot !== 0) {
       ctx.translate(msp.x, msp.y);
-      ctx.rotate(ghostRotRad);
+      ctx.rotate(ghostRotRad - camRot);
       ctx.translate(-msp.x, -msp.y);
     }
     ctx.fillStyle   = ghostColor;
@@ -8775,11 +8818,14 @@ export class RenderSystem {
     } else if (cfSliceAlreadyOwned) {
       ctx.fillStyle = '#ff3333';
       ctx.fillText('ALREADY OWNED', msp.x, labelY);
+    } else if (cantAfford) {
+      ctx.fillStyle = '#ff4444';
+      ctx.fillText('Insufficient Resources', msp.x, labelY);
     } else {
       ctx.fillStyle = '#aaffaa';
       const label = this.islandBuildKind === 'wooden_floor' ? 'Wooden Floor'
-                  : this.islandBuildKind === 'wall' ? 'Wall'
-                  : this.islandBuildKind === 'door_frame' ? 'Door Frame'
+                  : this.islandBuildKind === 'wall' ? 'Wall  [T] Door Frame'
+                  : this.islandBuildKind === 'door_frame' ? 'Door Frame  [T] Wall'
                   : this.islandBuildKind === 'door' ? 'Door'
                   : this.islandBuildKind === 'wood_ceiling' ? 'Wood Ceiling'
                   : this.islandBuildKind === 'cannon' ? 'Cannon'

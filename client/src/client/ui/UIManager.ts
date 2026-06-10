@@ -176,6 +176,7 @@ export class UIManager {
     kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
     tooFar: boolean;
     enemyClose: boolean;
+    wallVariant?: 'wall' | 'door_frame';
   } | null = null;
 
   /** Called when the player clicks the XP bar to level up (has enough XP). */
@@ -1488,6 +1489,7 @@ export class UIManager {
     kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
     tooFar: boolean;
     enemyClose: boolean;
+    wallVariant?: 'wall' | 'door_frame';
   } | null): void {
     this.islandBuildState = state;
   }
@@ -2331,7 +2333,7 @@ export class UIManager {
   /** Amber top banner shown when the player has a wooden_floor or workbench equipped. */
   private renderIslandBuildOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
     if (!this.islandBuildState) return;
-    const { kind, tooFar, enemyClose } = this.islandBuildState;
+    const { kind, tooFar, enemyClose, wallVariant } = this.islandBuildState;
 
     ctx.save();
 
@@ -2387,6 +2389,93 @@ export class UIManager {
       `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Plan${confirmHint}${status}`,
       cw / 2, BANNER_H / 2
     );
+
+    ctx.restore();
+
+    // ── Wall / Door Frame variant selector — mid-right of screen ─────────────
+    if (wallVariant !== undefined) {
+      this._renderWallVariantSelector(ctx, canvas, wallVariant);
+    }
+  }
+
+  private _renderWallVariantSelector(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    wallVariant: 'wall' | 'door_frame'
+  ): void {
+    const options: Array<{ label: string; value: 'wall' | 'door_frame' }> = [
+      { label: '\u258b  Wall',       value: 'wall'       },
+      { label: '\u2293  Door Frame', value: 'door_frame' },
+    ];
+
+    const ITEM_H  = 38;
+    const ITEM_W  = 140;
+    const ITEM_GAP = 6;
+    const PAD_X   = 14;
+    const PAD_Y   = 12;
+    const RADIUS  = 8;
+    const HINT_H  = 18;
+
+    const totalH  = options.length * ITEM_H + (options.length - 1) * ITEM_GAP + PAD_Y * 2 + HINT_H + 4;
+    const panelW  = ITEM_W + PAD_X * 2;
+    const panelX  = canvas.width - panelW - 18;
+    const panelY  = (canvas.height - totalH) / 2;
+
+    ctx.save();
+
+    // Panel background
+    ctx.fillStyle = 'rgba(20, 15, 8, 0.82)';
+    ctx.strokeStyle = 'rgba(180, 140, 50, 0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, panelW, totalH, RADIUS + 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(220, 180, 80, 0.65)';
+    ctx.fillText('STRUCTURE TYPE', panelX + panelW / 2, panelY + PAD_Y / 2 + 4);
+
+    options.forEach((opt, i) => {
+      const itemX = panelX + PAD_X;
+      const itemY = panelY + PAD_Y + HINT_H / 2 + i * (ITEM_H + ITEM_GAP);
+      const isSelected = opt.value === wallVariant;
+
+      // Row background
+      ctx.beginPath();
+      ctx.roundRect(itemX, itemY, ITEM_W, ITEM_H, RADIUS);
+
+      if (isSelected) {
+        ctx.fillStyle = 'rgba(220, 175, 40, 0.90)';
+        ctx.fill();
+        ctx.strokeStyle = '#ffe066';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = 'rgba(50, 40, 20, 0.60)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(120, 100, 40, 0.35)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Label
+      ctx.font = isSelected ? 'bold 14px Georgia, serif' : '14px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isSelected ? '#1a1000' : 'rgba(180, 150, 70, 0.50)';
+      ctx.fillText(opt.label, itemX + ITEM_W / 2, itemY + ITEM_H / 2);
+    });
+
+    // [T] hint at the bottom of the panel
+    ctx.font = '11px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(220, 180, 80, 0.50)';
+    ctx.fillText('[T] to cycle', panelX + panelW / 2, panelY + totalH - 4);
 
     ctx.restore();
   }
