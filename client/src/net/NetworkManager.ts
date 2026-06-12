@@ -2753,6 +2753,7 @@ export class NetworkManager {
             stamina: player.stamina ?? undefined,
             maxStamina: player.max_stamina ?? 100,
             onIslandId: player.on_island ?? 0,
+            onDockId: player.on_dock ?? 0,
             level: player.player_level ?? 1,
             xp: player.player_xp ?? 0,
             statHealth: player.stat_health ?? 0,
@@ -2760,6 +2761,8 @@ export class NetworkManager {
             statStamina: player.stat_stamina ?? 0,
             statWeight: player.stat_weight ?? 0,
             statPoints: player.stat_points ?? 0,
+            speedMult: typeof player.speed_mult === 'number' ? player.speed_mult : 1.0,
+            canSprint: typeof player.can_sprint === 'boolean' ? player.can_sprint : true,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,

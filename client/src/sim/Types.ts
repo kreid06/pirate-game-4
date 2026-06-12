@@ -115,6 +115,9 @@ export interface Player {
   // Island presence (0 = not on island)
   onIslandId: number;
 
+  // Dock/shipyard presence (0 = not on dock). Set to the PlacedStructure id of the shipyard.
+  onDockId: number;
+
   // Player XP / levelling (optional until server sends it)
   level?: number;       // player_level (1–66)
   xp?: number;          // accumulated XP
@@ -123,6 +126,11 @@ export interface Player {
   statStamina?: number; // stamina stat points spent
   statWeight?: number;  // weight stat points spent
   statPoints?: number;  // unspent stat points
+
+  // Server-computed movement speed modifiers (carry-weight penalties).
+  // Used by client-side prediction to match the server exactly.
+  speedMult?: number;  // Effective walk-speed multiplier in [0.3, 1.0]. Absent = 1.0 (unloaded).
+  canSprint?: boolean; // False when carry ratio >= 85 % of capacity. Absent = true.
 }
 
 /**

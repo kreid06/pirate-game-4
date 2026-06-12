@@ -186,7 +186,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     interpolationBuffer: 100, // 100ms buffer (~3 server frames at 30Hz) for jitter-free rendering
     interpolationDelay: 66,   // 66ms render delay (~2 server frames at 30Hz)
     extrapolationLimit: 66,   // 66ms max extrapolation (~2 server frames)
-    rollbackLimit: 16,        // 16 ticks rollback — matches REWIND_BUFFER_SIZE
+    rollbackLimit: 48,        // 48 prediction ticks (~400ms) — covers MAX_RTT_TICKS at high ping
     predictionErrorThreshold: 8.0, // px tolerance before rollback (8px = ~1/6 tile; doubled when moving)
     enablePrediction: true,
     enableInterpolation: true

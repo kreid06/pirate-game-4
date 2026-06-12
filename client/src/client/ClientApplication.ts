@@ -4116,7 +4116,8 @@ export class ClientApplication {
     if (predictionEnabled && assignedPlayerId !== null && worldToRender) {
       const predictedShip = this.shipPredictor?.getPredictedShip();
       if (predictedShip) {
-        const myPlayer = worldToRender.players.find(p => p.id === assignedPlayerId);
+        const myPlayerIdx = worldToRender.players.findIndex(p => p.id === assignedPlayerId);
+        const myPlayer = myPlayerIdx >= 0 ? worldToRender.players[myPlayerIdx] : undefined;
         if (myPlayer?.carrierId) {
           const shipIdx = worldToRender.ships.findIndex(s => s.id === myPlayer.carrierId);
           if (shipIdx >= 0) {
@@ -4129,6 +4130,31 @@ export class ClientApplication {
               angularVelocity: predictedShip.angularVelocity,
             };
             worldToRender = { ...worldToRender, ships: newShips };
+
+            // Re-anchor the local player to the RENDERED ship pose. The player's predicted
+            // world position was computed against the prediction engine's own ship copy,
+            // which can diverge from the ShipPredictor pose drawn on screen — that mismatch
+            // is the visible "sliding/lagging on deck while sailing". On deck the player is
+            // a rigid ship-local anchor, so derive their render position from the same ship
+            // transform the renderer uses.
+            const predLocalPlayer = this.predictedWorldState?.players.find(p => p.id === assignedPlayerId);
+            const prevLocalPlayer = this.prevPredictedWorldState?.players.find(p => p.id === assignedPlayerId);
+            let anchor = predLocalPlayer?.localPosition;
+            if (anchor && prevLocalPlayer?.localPosition) {
+              // Sub-tick lerp of the local anchor (same alpha as the position splice above).
+              anchor = prevLocalPlayer.localPosition.lerp(anchor, alpha);
+            }
+            if (anchor) {
+              const cosR = Math.cos(predictedShip.rotation);
+              const sinR = Math.sin(predictedShip.rotation);
+              const anchoredPos = Vec2.from(
+                predictedShip.position.x + anchor.x * cosR - anchor.y * sinR,
+                predictedShip.position.y + anchor.x * sinR + anchor.y * cosR,
+              ).add(_renderErrorOffset);
+              const newPlayers = worldToRender.players.slice();
+              newPlayers[myPlayerIdx] = { ...myPlayer, position: anchoredPos };
+              worldToRender = { ...worldToRender, players: newPlayers };
+            }
           }
         }
       }
@@ -4847,7 +4873,19 @@ export class ClientApplication {
       const myPlayer = worldState.players.find(p => p.id === myId);
       const playerShip = myPlayer?.carrierId ? worldState.ships.find(s => s.id === myPlayer.carrierId) : null;
       if (playerShip) {
-        this.shipPredictor.onServerShip(playerShip);
+        // Snapshot age ≈ one-way latency + half the server broadcast interval.
+        // The predictor forward-projects the snapshot by this much before
+        // reconciling — comparing against the raw (stale) snapshot drags the
+        // ship backwards by speed × age every snapshot (rubberbanding).
+        const pingMs = this.networkManager.getStats().ping;
+        const snapshotAgeMs = (pingMs > 0 ? pingMs / 2 : 0) + (1000 / 30) / 2;
+        this.shipPredictor.setIslands(this.renderSystem.getIslands());
+        // Collision impulse partners: other ships + shipyard dock walls.
+        // Must be fed BEFORE onServerShip so the snapshot forward-projection
+        // advances the freshly cloned other-ship states by the same age.
+        this.shipPredictor.setOtherShips(worldState.ships, playerShip.id);
+        this.shipPredictor.setStructures(this.renderSystem.getPlacedStructures());
+        this.shipPredictor.onServerShip(playerShip, snapshotAgeMs);
         this.shipPredictor.setWindPower(this.networkManager.windStrength);
         this.shipPredictor.setWindAngle(this.networkManager.windAngle);
       }
@@ -7703,6 +7741,7 @@ export class ClientApplication {
           health: 100,
           maxHealth: 100,
           onIslandId: 0,
+          onDockId: 0,
           inventory: createEmptyInventory()
         }
       ],

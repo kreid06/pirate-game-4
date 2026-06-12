@@ -253,3 +253,115 @@ function pointInPolygon(px: number, py: number, verts: { x: number; y: number }[
   }
   return inside;
 }
+
+// ── Shipyard dock collision — mirrors dock_physics.c ─────────────────────────
+// Geometry constants must match dock_physics.c exactly.
+const DOCK_HW     = 170;   // half-width of the U
+const DOCK_HH     = 445;   // half-height of each arm
+const DOCK_ARM_T  = 50;    // arm wall thickness
+const DOCK_BACK_T = 50;    // back wall thickness
+
+/**
+ * OBB circle pushout in dock-local space.
+ * Mirrors dock_obb_pushout(): only pushes when the player is OUTSIDE the OBB
+ * (d2 > 0); when the centre is inside (d2 == 0) the player is on the walkable
+ * surface and no push occurs.
+ */
+function dockOBBPushout(
+  cx: number, cy: number, hx: number, hy: number,
+  r: number, p: { lx: number; ly: number }
+): void {
+  const dx  = p.lx - cx;
+  const dy  = p.ly - cy;
+  const clX = Math.max(-hx, Math.min(hx, dx));
+  const clY = Math.max(-hy, Math.min(hy, dy));
+  const px  = dx - clX;
+  const py  = dy - clY;
+  const d2  = px * px + py * py;
+  if (d2 < r * r && d2 > 0.0001) {
+    const d   = Math.sqrt(d2);
+    const pen = r - d;
+    p.lx += (px / d) * pen;
+    p.ly += (py / d) * pen;
+  }
+}
+
+/**
+ * True if a world-space position is on a walkable dock surface.
+ * Mirrors server dock_point_on_surface() (dock_physics.c).
+ *
+ * Used by client prediction to detect when the player has walked off the dock
+ * so the client can clear onDockId and switch physics models in the same tick
+ * the server would — preventing the temporary rubberbanding on dock exit.
+ */
+export function isDockPointOnSurface(pos: Vec2, dock: PlacedStructure): boolean {
+  const rad  = (dock.rotation ?? 0) * Math.PI / 180;
+  const cosN = Math.cos(-rad);
+  const sinN = Math.sin(-rad);
+  const dx   = pos.x - dock.x;
+  const dy   = pos.y - dock.y;
+  const lx   = dx * cosN - dy * sinN;
+  const ly   = dx * sinN + dy * cosN;
+
+  const hasScaffolding = dock.construction?.phase === 'building';
+  const P  = 10;                    // padding ≈ player radius — matches server
+  const ai = DOCK_HW - DOCK_ARM_T; // arm inner edge = 120
+
+  // Left arm top surface
+  if (lx >= -(DOCK_HW + P) && lx <= -(ai - P) && Math.abs(ly) <= DOCK_HH + P) return true;
+  // Right arm top surface
+  if (lx >=  (ai - P)      && lx <=  (DOCK_HW + P) && Math.abs(ly) <= DOCK_HH + P) return true;
+  // Back wall top surface
+  if (Math.abs(lx) <= DOCK_HW + P &&
+      ly >= -(DOCK_HH + P) && ly <= -(DOCK_HH - DOCK_BACK_T - P)) return true;
+  // Interior bay — only walkable when ship is under construction
+  if (hasScaffolding && Math.abs(lx) <= ai + P &&
+      ly >= -(DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
+
+  return false;
+}
+
+/**
+ * Resolve dock U-wall OBB pushout for a player on a shipyard dock.
+ * Mirrors server dock_apply_player_collision() (dock_physics.c).
+ *
+ * @param pos           Candidate world-space position
+ * @param dock          The shipyard PlacedStructure (type === 'shipyard')
+ * @returns             Corrected world-space position
+ */
+export function resolveDockCollisions(pos: Vec2, dock: PlacedStructure): Vec2 {
+  const rad   = (dock.rotation ?? 0) * Math.PI / 180;
+  const cosN  = Math.cos(-rad);
+  const sinN  = Math.sin(-rad);
+
+  // World → dock-local
+  const dx = pos.x - dock.x;
+  const dy = pos.y - dock.y;
+  const p = {
+    lx: dx * cosN - dy * sinN,
+    ly: dx * sinN + dy * cosN,
+  };
+
+  const hasScaffolding = dock.construction?.phase === 'building';
+  const ai = DOCK_HW - DOCK_ARM_T;   // inner arm edge = 120
+
+  // Left arm:  centre (-145, 0), half-extents (25, 445)
+  dockOBBPushout(-(DOCK_HW - DOCK_ARM_T / 2),  0, DOCK_ARM_T / 2, DOCK_HH, PLAYER_R, p);
+  // Right arm: centre (+145, 0), half-extents (25, 445)
+  dockOBBPushout( (DOCK_HW - DOCK_ARM_T / 2),  0, DOCK_ARM_T / 2, DOCK_HH, PLAYER_R, p);
+  // Back wall: centre (0, -420), half-extents (170, 25)
+  dockOBBPushout(0, -(DOCK_HH - DOCK_BACK_T / 2), DOCK_HW,  DOCK_BACK_T / 2, PLAYER_R, p);
+  // Front scaffolding wall (only while ship is being built):
+  // centre (0, +420), half-extents (120, 25)
+  if (hasScaffolding) {
+    dockOBBPushout(0, DOCK_HH - DOCK_BACK_T / 2, ai, DOCK_BACK_T / 2, PLAYER_R, p);
+  }
+
+  // Dock-local → world
+  const cosF = Math.cos(rad);
+  const sinF = Math.sin(rad);
+  return Vec2.from(
+    dock.x + p.lx * cosF - p.ly * sinF,
+    dock.y + p.lx * sinF + p.ly * cosF,
+  );
+}

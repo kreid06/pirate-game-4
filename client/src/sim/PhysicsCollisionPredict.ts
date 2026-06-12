@@ -20,10 +20,16 @@
 
 import { Vec2 } from '../common/Vec2.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
-import { Ship, IslandDef } from './Types.js';
+import { Ship } from './Types.js';
 
 // ── Constants (client pixel space) ───────────────────────────────────────────
 // Server originals in comments; converted by WORLD_SCALE = 10.
+
+/** Server simulation tick rate. Baumgarte factors and per-tick drag multipliers
+ *  on the server are defined "per 30 Hz tick"; callers may invoke these solvers
+ *  at other rates (e.g. 120 Hz prediction steps), so anything per-tick must be
+ *  rescaled by dt × SERVER_TICK_RATE. */
+const SERVER_TICK_RATE = 30;
 
 /** Coefficient of restitution for ship-ship collisions (dimensionless). */
 const SHIP_RESTITUTION = 0.3;
@@ -31,7 +37,7 @@ const SHIP_RESTITUTION = 0.3;
 /** Coulomb friction coefficient for tangential impulse (dimensionless). */
 const SHIP_FRICTION = 0.35;
 
-/** Baumgarte position-correction factor [0,1]. */
+/** Baumgarte position-correction factor [0,1], applied per SERVER tick. */
 const SHIP_BAUMGARTE = 0.4;
 
 /** Minimum penetration ignored by Baumgarte bias (px). Server: 0.05 su. */
@@ -40,9 +46,25 @@ const SHIP_SLOP = 0.5;
 /** Maximum contact points evaluated per ship pair. */
 const MAX_CONTACT_POINTS = 4;
 
-/** Fallback moment of inertia when ship.momentOfInertia is 0 (px²·kg).
- *  Matches BRIGANTINE_MOMENT_OF_INERTIA in ShipDefinitions. */
-const SHIP_INERTIA_FALLBACK = 500000.0;
+/**
+ * Effective ship moment of inertia in client px² units — the SAME for every ship.
+ *
+ * The server stores Q16_FROM_FLOAT(50000.0f), which overflows int32 and saturates
+ * to Q16_MAX, i.e. an effective 32768 in server units (recalc_ship_mass even writes
+ * Q16_MAX explicitly). All server impulse solvers divide by that value. Converted
+ * to client pixel space: I_px = I_su × WORLD_SCALE² = 32768 × 100 = 3,276,800.
+ *
+ * Do NOT use ship.momentOfInertia here — the client template value (500000) does
+ * not match the server's effective runtime value and would under-rotate impulse
+ * responses by ~6.5×.
+ */
+const SHIP_INERTIA_PX = 32768 * 100;
+
+/** Restitution for ship-island contacts. Server apply_island_impulse: 0.15. */
+const ISLAND_RESTITUTION = 0.15;
+
+/** Coulomb friction for ship-island contacts. Server apply_island_impulse: 0.75. */
+const ISLAND_FRICTION = 0.75;
 
 /** CCD minimum displacement² before we bother sweeping (px²). Server: 0.25 su². */
 const CCD_MIN_DISP_SQ = 25.0;
@@ -319,7 +341,10 @@ function runDiscreteShipCollisions(ships: Ship[], dt: number): void {
       }
 
       // ── Baumgarte position correction ─────────────────────────────────────
-      const corr = SHIP_BAUMGARTE * Math.max(depth - SHIP_SLOP, 0) * 0.5;
+      // Server applies the 0.4 factor once per 30 Hz tick; scale by elapsed
+      // time so faster callers don't over-correct (4× at 120 Hz).
+      const corrScale = Math.min(1, dt * SERVER_TICK_RATE);
+      const corr = SHIP_BAUMGARTE * Math.max(depth - SHIP_SLOP, 0) * 0.5 * corrScale;
       ship1.position = ship1.position.sub(normal.mul(corr));
       ship2.position = ship2.position.add(normal.mul(corr));
 
@@ -332,8 +357,9 @@ function runDiscreteShipCollisions(ships: Ship[], dt: number): void {
 
       const m1 = ship1.mass > 0 ? ship1.mass : 5000;
       const m2 = ship2.mass > 0 ? ship2.mass : 5000;
-      const I1 = ship1.momentOfInertia > 0 ? ship1.momentOfInertia : SHIP_INERTIA_FALLBACK;
-      const I2 = ship2.momentOfInertia > 0 ? ship2.momentOfInertia : SHIP_INERTIA_FALLBACK;
+      // Server uses the saturated Q16_MAX inertia for every ship — see SHIP_INERTIA_PX.
+      const I1 = SHIP_INERTIA_PX;
+      const I2 = SHIP_INERTIA_PX;
 
       const nContacts = Math.min(cpx.length, MAX_CONTACT_POINTS);
       const P_n = new Array<number>(nContacts).fill(0);
@@ -357,8 +383,10 @@ function runDiscreteShipCollisions(ships: Ship[], dt: number): void {
         const denom = 1 / m1 + 1 / m2 + r1xn * r1xn / I1 + r2xn * r2xn / I2;
         if (denom < 1e-10) continue;
 
-        // Baumgarte velocity bias to drive out residual penetration
-        const bias = (SHIP_BAUMGARTE / dt) * Math.max(depth - SHIP_SLOP, 0);
+        // Baumgarte velocity bias to drive out residual penetration.
+        // Server: β / dt_tick with dt_tick = 1/30 s — the bias is a target
+        // separation VELOCITY, so it must not grow when our step dt shrinks.
+        const bias = SHIP_BAUMGARTE * SERVER_TICK_RATE * Math.max(depth - SHIP_SLOP, 0);
         if (vrelN <= 0 && bias < 1e-4) continue; // Separating and no penetration
 
         let J = (-(1 + SHIP_RESTITUTION) * vrelN - bias) / denom;
@@ -427,16 +455,421 @@ export function predictShipCollisions(ships: Ship[], dt: number): void {
   runDiscreteShipCollisions(ships, dt);
 }
 
+// ── Dock (shipyard) U-wall collisions ─────────────────────────────────────────
+// Port of server dock_physics.c handle_ship_dock_collisions(): 3 wall OBBs in
+// dock-local space (left arm, right arm, back wall), solved with SAT + Baumgarte
+// position correction + accumulated normal/friction impulses, a final
+// equal-and-opposite reaction pass, and the in-dock angular velocity cap +
+// extra angular drag. The server's translational/rotational CCD pre-passes and
+// contact-cache warm start are omitted: at 120 Hz prediction steps the per-step
+// displacement (< 2 px) can't tunnel a 50 px wall, and divergence is mopped up
+// by normal reconciliation.
+
+/** Minimal placed-structure shape needed for dock collision prediction. */
+export interface DockStructure {
+  type: string;
+  x: number;
+  y: number;
+  /** Rotation in degrees (default 0). */
+  rotation?: number;
+  construction?: { scaffoldedShipId?: number };
+}
+
+// Dock geometry in client pixels (matches dock_physics.c defines)
+const DOCK_HW     = 170;
+const DOCK_HH     = 445;
+const DOCK_ARM_T  = 50;
+const DOCK_BACK_T = 50;
+
+const DOCK_RESTITUTION       = 0.18;
+const DOCK_WALL_FRICTION     = 0.6;
+const DOCK_BAUMGARTE         = 0.3;  // per server tick
+const DOCK_SLOP              = 0.5;  // px
+const DOCK_N_ITER            = 3;
+const DOCK_OMEGA_FLOOR       = 0.04; // rad/s
+const DOCK_ANGULAR_EXTRA_DRAG = 0.80; // per server tick, applied near docks
+
+/** The three dock walls as AABBs in dock-local space {cx, cy, hx, hy}. */
+const DOCK_WALLS = [
+  { cx: -(DOCK_HW - DOCK_ARM_T / 2), cy: 0,                              hx: DOCK_ARM_T / 2, hy: DOCK_HH },
+  { cx:  (DOCK_HW - DOCK_ARM_T / 2), cy: 0,                              hx: DOCK_ARM_T / 2, hy: DOCK_HH },
+  { cx: 0,                           cy: -(DOCK_HH - DOCK_BACK_T / 2),   hx: DOCK_HW,        hy: DOCK_BACK_T / 2 },
+] as const;
+
+interface DockWallContact { pen: number; nx: number; ny: number; cx: number; cy: number; }
+
+/**
+ * Per-wall SAT: hull polygon (dock-local px) vs wall AABB.
+ * Direct port of server dock_wall_sat(). Returns penetration depth, outward
+ * normal (wall → ship), and a contact point, or null when separated.
+ */
+function dockWallSat(
+  hdx: number[], hdy: number[],
+  dcx: number, dcy: number, dhx: number, dhy: number,
+  originLx: number, originLy: number,
+): DockWallContact | null {
+  const N = hdx.length;
+  let minPen = Infinity, bestNx = 1, bestNy = 0;
+
+  // ── AABB axis X ──
+  let hmn = hdx[0], hmx = hdx[0];
+  for (let i = 1; i < N; i++) { if (hdx[i] < hmn) hmn = hdx[i]; if (hdx[i] > hmx) hmx = hdx[i]; }
+  if (hmx < dcx - dhx || hmn > dcx + dhx) return null;
+  {
+    const a = hmx - (dcx - dhx), b = (dcx + dhx) - hmn;
+    if (a < b) { if (a < minPen) { minPen = a; bestNx =  1; bestNy = 0; } }
+    else       { if (b < minPen) { minPen = b; bestNx = -1; bestNy = 0; } }
+  }
+
+  // ── AABB axis Y ──
+  hmn = hdy[0]; hmx = hdy[0];
+  for (let i = 1; i < N; i++) { if (hdy[i] < hmn) hmn = hdy[i]; if (hdy[i] > hmx) hmx = hdy[i]; }
+  if (hmx < dcy - dhy || hmn > dcy + dhy) return null;
+  {
+    const a = hmx - (dcy - dhy), b = (dcy + dhy) - hmn;
+    if (a < b) { if (a < minPen) { minPen = a; bestNx = 0; bestNy =  1; } }
+    else       { if (b < minPen) { minPen = b; bestNx = 0; bestNy = -1; } }
+  }
+
+  // ── Hull edge normals ──
+  for (let i = 0; i < N; i++) {
+    const j = (i + 1) % N;
+    const ex = hdx[j] - hdx[i], ey = hdy[j] - hdy[i];
+    const len = Math.sqrt(ex * ex + ey * ey);
+    if (len < 0.5) continue;
+    const nx = -ey / len, ny = ex / len;
+
+    let phMin = Infinity, phMax = -Infinity;
+    for (let k = 0; k < N; k++) {
+      const p = hdx[k] * nx + hdy[k] * ny;
+      if (p < phMin) phMin = p;
+      if (p > phMax) phMax = p;
+    }
+    const ap = [
+      (dcx - dhx) * nx + (dcy - dhy) * ny, (dcx + dhx) * nx + (dcy - dhy) * ny,
+      (dcx - dhx) * nx + (dcy + dhy) * ny, (dcx + dhx) * nx + (dcy + dhy) * ny,
+    ];
+    let awMin = ap[0], awMax = ap[0];
+    for (let k = 1; k < 4; k++) { if (ap[k] < awMin) awMin = ap[k]; if (ap[k] > awMax) awMax = ap[k]; }
+    if (phMax < awMin || phMin > awMax) return null;
+    const a = phMax - awMin, b = awMax - phMin;
+    if (a < b) { if (a < minPen) { minPen = a; bestNx =  nx; bestNy =  ny; } }
+    else       { if (b < minPen) { minPen = b; bestNx = -nx; bestNy = -ny; } }
+  }
+
+  // Orient normal: wall → ship origin
+  if ((originLx - dcx) * bestNx + (originLy - dcy) * bestNy < 0) {
+    bestNx = -bestNx; bestNy = -bestNy;
+  }
+
+  // ── Contact point: centroid of hull vertices inside the AABB, else the
+  //    support vertex most penetrating along -normal ──
+  let sumCx = 0, sumCy = 0, nIn = 0;
+  for (let i = 0; i < N; i++) {
+    if (hdx[i] >= dcx - dhx && hdx[i] <= dcx + dhx &&
+        hdy[i] >= dcy - dhy && hdy[i] <= dcy + dhy) {
+      sumCx += hdx[i]; sumCy += hdy[i]; nIn++;
+    }
+  }
+  let cx: number, cy: number;
+  if (nIn > 0) {
+    cx = sumCx / nIn;
+    cy = sumCy / nIn;
+  } else {
+    let bestP = Infinity;
+    cx = hdx[0]; cy = hdy[0];
+    for (let i = 0; i < N; i++) {
+      const p = hdx[i] * bestNx + hdy[i] * bestNy;
+      if (p < bestP) { bestP = p; cx = hdx[i]; cy = hdy[i]; }
+    }
+  }
+
+  return { pen: minPen, nx: bestNx, ny: bestNy, cx, cy };
+}
+
+/**
+ * Predict ship vs dock (shipyard) U-wall collision responses.
+ * Call AFTER position integration. The ship scaffolded inside a dock is exempt,
+ * matching the server.
+ *
+ * @param ships - Mutable ship array (positions/velocities updated in place)
+ * @param docks - Placed structures; non-shipyards are ignored
+ * @param dt    - Step delta time in seconds
+ */
+export function predictDockCollisions(
+  ships: Ship[],
+  docks: readonly DockStructure[],
+  dt: number,
+): void {
+  if (!docks || docks.length === 0) return;
+
+  for (const dock of docks) {
+    if (dock.type !== 'shipyard') continue;
+    const scaffoldedId = dock.construction?.scaffoldedShipId ?? 0;
+    const dockRad = (dock.rotation ?? 0) * Math.PI / 180;
+    const dc = Math.cos(dockRad), ds = Math.sin(dockRad);
+
+    for (const ship of ships) {
+      if (scaffoldedId && ship.id === scaffoldedId) continue;
+      if (ship.hull.length < 3) continue;
+
+      // Broad phase
+      const brad = boundingRadius(ship);
+      const ddx = ship.position.x - dock.x, ddy = ship.position.y - dock.y;
+      const broad = brad + DOCK_HH + DOCK_HW;
+      if (ddx * ddx + ddy * ddy > broad * broad) continue;
+
+      // Hull + ship origin in dock-local space
+      const cs = Math.cos(ship.rotation), ss = Math.sin(ship.rotation);
+      const N = ship.hull.length;
+      const hdx = new Array<number>(N), hdy = new Array<number>(N);
+      for (let vi = 0; vi < N; vi++) {
+        const wx = ship.position.x + ship.hull[vi].x * cs - ship.hull[vi].y * ss;
+        const wy = ship.position.y + ship.hull[vi].x * ss + ship.hull[vi].y * cs;
+        const rx = wx - dock.x, ry = wy - dock.y;
+        hdx[vi] =  rx * dc + ry * ds;
+        hdy[vi] = -rx * ds + ry * dc;
+      }
+      let lx =  ddx * dc + ddy * ds;
+      let ly = -ddx * ds + ddy * dc;
+
+      // Velocity in dock-local space
+      const vxDl =  ship.velocity.x * dc + ship.velocity.y * ds;
+      const vyDl = -ship.velocity.x * ds + ship.velocity.y * dc;
+      const omega0 = ship.angularVelocity;
+
+      const mass = ship.mass > 0 ? ship.mass : 5000;
+      const invMass = 1 / mass;
+      const invInertia = 1 / SHIP_INERTIA_PX;
+
+      let totalPushX = 0, totalPushY = 0;
+      const P_n = [0, 0, 0];
+      const P_f = [0, 0, 0];
+      let curVx = vxDl, curVy = vyDl, curW = omega0;
+
+      // Per-server-tick factors, rescaled to this step's dt
+      const corrScale = Math.min(1, dt * SERVER_TICK_RATE);
+
+      for (let iter = 0; iter < DOCK_N_ITER; iter++) {
+        for (let wi = 0; wi < 3; wi++) {
+          const w = DOCK_WALLS[wi];
+          const sat = dockWallSat(hdx, hdy, w.cx, w.cy, w.hx, w.hy, lx, ly);
+          if (!sat) continue;
+          const { pen, nx, ny, cx, cy } = sat;
+
+          // Positional correction (Baumgarte-style spreading, dt-scaled)
+          const corr = DOCK_BAUMGARTE * Math.max(pen - DOCK_SLOP, 0) * corrScale;
+          if (corr > 0) {
+            lx += nx * corr; ly += ny * corr;
+            for (let vi = 0; vi < N; vi++) { hdx[vi] += nx * corr; hdy[vi] += ny * corr; }
+            totalPushX += nx * corr; totalPushY += ny * corr;
+          }
+
+          // Lever arm from ship origin to contact point
+          const rx = cx - lx, ry = cy - ly;
+
+          // Velocity at contact: v_cm + ω×r
+          const vcX = curVx + curW * -ry;
+          const vcY = curVy + curW *  rx;
+          const vcN = vcX * nx + vcY * ny;
+
+          // ── Normal impulse with Baumgarte velocity bias ──
+          const rxn = rx * ny - ry * nx;
+          const denom = invMass + rxn * rxn * invInertia;
+          if (denom < 1e-10) continue;
+
+          // bias = β / dt_tick × pen — a target separation velocity, defined
+          // against the SERVER tick so it doesn't blow up at small client dt.
+          const bias = DOCK_BAUMGARTE * SERVER_TICK_RATE * Math.max(pen - DOCK_SLOP, 0);
+
+          const dP = (-(1 + DOCK_RESTITUTION) * vcN + bias) / denom;
+          const PnNew = Math.max(P_n[wi] + dP, 0);
+          const J = PnNew - P_n[wi];
+          P_n[wi] = PnNew;
+
+          curVx += J * nx * invMass;
+          curVy += J * ny * invMass;
+          curW  += (rx * (J * ny) - ry * (J * nx)) * invInertia;
+
+          // ── Friction impulse (Coulomb, clamped against accumulated P_n) ──
+          const vcX2 = curVx + curW * -ry;
+          const vcY2 = curVy + curW *  rx;
+          const vcN2 = vcX2 * nx + vcY2 * ny;
+          const vtX = vcX2 - vcN2 * nx;
+          const vtY = vcY2 - vcN2 * ny;
+          const vtLen = Math.sqrt(vtX * vtX + vtY * vtY);
+          if (vtLen > 0.001) {
+            const tx = vtX / vtLen, ty = vtY / vtLen;
+            const rxt = rx * ty - ry * tx;
+            const denomT = invMass + rxt * rxt * invInertia;
+            if (denomT > 1e-10) {
+              const dPf = -vtLen / denomT;
+              const PfMax = DOCK_WALL_FRICTION * P_n[wi];
+              let PfNew = P_f[wi] + dPf;
+              if (PfNew >  PfMax) PfNew =  PfMax;
+              if (PfNew < -PfMax) PfNew = -PfMax;
+              const Jf = PfNew - P_f[wi];
+              P_f[wi] = PfNew;
+              curVx += Jf * tx * invMass;
+              curVy += Jf * ty * invMass;
+              curW  += (rx * (Jf * ty) - ry * (Jf * tx)) * invInertia;
+            }
+          }
+        }
+      }
+
+      // ── Equal-and-opposite reaction pass: zero any residual approach ──
+      for (let wi = 0; wi < 3; wi++) {
+        if (P_n[wi] <= 0) continue;
+        const w = DOCK_WALLS[wi];
+        const sat = dockWallSat(hdx, hdy, w.cx, w.cy, w.hx, w.hy, lx, ly);
+        if (!sat) continue;
+
+        const rx = sat.cx - lx, ry = sat.cy - ly;
+        const vcX = curVx + curW * -ry;
+        const vcY = curVy + curW *  rx;
+        const vcN = vcX * sat.nx + vcY * sat.ny;
+
+        if (vcN < 0) {
+          const rxn = rx * sat.ny - ry * sat.nx;
+          const denom = invMass + rxn * rxn * invInertia;
+          if (denom < 1e-10) continue;
+          const J = -vcN / denom;
+          curVx += J * sat.nx * invMass;
+          curVy += J * sat.ny * invMass;
+          curW  += rxn * J * invInertia;
+          P_n[wi] += J;
+        }
+      }
+
+      // ── Angular velocity cap + extra in-dock angular drag ──
+      // The server limits ω so the fastest hull vertex can't sweep further than
+      // its clearance to the nearest inner wall in one SERVER tick, and bleeds
+      // angular momentum at ×0.80/tick while inside the dock's broad phase.
+      {
+        const dtTick = 1 / SERVER_TICK_RATE;
+        const aiCap = DOCK_HW - DOCK_ARM_T;   // 120 px inner half-width
+        const biCap = DOCK_HH - DOCK_BACK_T;  // 395 px inner half-height
+
+        let omegaMax = 1e10;
+        for (let vi = 0; vi < N; vi++) {
+          const dvx = hdx[vi] - lx, dvy = hdy[vi] - ly;
+          const R = Math.sqrt(dvx * dvx + dvy * dvy);
+          if (R < 0.5) continue;
+
+          let minCl = 1e10;
+          if (hdx[vi] > -aiCap) minCl = Math.min(minCl, hdx[vi] + aiCap);
+          if (hdx[vi] <  aiCap) minCl = Math.min(minCl, aiCap - hdx[vi]);
+          if (hdy[vi] > -biCap && Math.abs(hdx[vi]) < aiCap) {
+            minCl = Math.min(minCl, hdy[vi] + biCap);
+          }
+          if (minCl < 0) minCl = 0;
+
+          const wLim = minCl / (R * dtTick);
+          if (wLim < omegaMax) omegaMax = wLim;
+        }
+        if (omegaMax < DOCK_OMEGA_FLOOR) omegaMax = DOCK_OMEGA_FLOOR;
+
+        curW *= Math.pow(DOCK_ANGULAR_EXTRA_DRAG, dt * SERVER_TICK_RATE);
+        if (curW >  omegaMax) curW =  omegaMax;
+        if (curW < -omegaMax) curW = -omegaMax;
+      }
+
+      // ── Write back position (dock-local → world) ──
+      if (totalPushX * totalPushX + totalPushY * totalPushY > 0.0001) {
+        ship.position = Vec2.from(
+          dock.x + lx * dc - ly * ds,
+          dock.y + lx * ds + ly * dc,
+        );
+      }
+
+      // ── Write back velocity delta (rotate dock-local → world) ──
+      const dvX = curVx - vxDl, dvY = curVy - vyDl, dW = curW - omega0;
+      if (dvX * dvX + dvY * dvY > 1e-8 || Math.abs(dW) > 1e-8) {
+        const dvwX = dvX * dc - dvY * ds;
+        const dvwY = dvX * ds + dvY * dc;
+        ship.velocity = Vec2.from(ship.velocity.x + dvwX, ship.velocity.y + dvwY);
+        ship.angularVelocity = ship.angularVelocity + dW;
+      }
+    }
+  }
+}
+
+/** Minimal island shape needed for ship-island collision prediction. */
+export interface PredictIsland {
+  vertices?: readonly { x: number; y: number }[];
+}
+
+/**
+ * Rigid-body impulse at a ship-island contact point.
+ * Direct port of server apply_island_impulse(): normal impulse with e = 0.15
+ * followed by a Coulomb friction impulse (μ = 0.75), both with torque response.
+ */
+function applyIslandImpulse(
+  ship: Ship,
+  nx: number, ny: number,    // pushout normal (island → ship)
+  cpX: number, cpY: number,  // contact point (world px, pre-pushout vertex)
+): void {
+  let vx = ship.velocity.x, vy = ship.velocity.y;
+  let omega = ship.angularVelocity;
+
+  // Lever arm uses the post-pushout ship position, matching server call order
+  const rx = cpX - ship.position.x, ry = cpY - ship.position.y;
+  const vcX = vx + omega * -ry;
+  const vcY = vy + omega *  rx;
+  const vcN = vcX * nx + vcY * ny;
+  if (vcN >= 0) return; // already separating
+
+  const invM = 1 / (ship.mass > 0 ? ship.mass : 5000);
+  const invI = 1 / SHIP_INERTIA_PX;
+
+  // Normal impulse
+  const rxn = rx * ny - ry * nx;
+  const denom = invM + rxn * rxn * invI;
+  if (denom <= 1e-10) return;
+
+  let Jn = -(1 + ISLAND_RESTITUTION) * vcN / denom;
+  if (Jn < 0) Jn = 0;
+  vx    += Jn * nx * invM;
+  vy    += Jn * ny * invM;
+  omega += rxn * Jn * invI;
+
+  // Friction impulse (Coulomb, clamped by μ·Jn)
+  const vcX2 = vx + omega * -ry;
+  const vcY2 = vy + omega *  rx;
+  const vcN2 = vcX2 * nx + vcY2 * ny;
+  const vtX = vcX2 - vcN2 * nx;
+  const vtY = vcY2 - vcN2 * ny;
+  const vtLen = Math.sqrt(vtX * vtX + vtY * vtY);
+  if (vtLen > 0.001) {
+    const tx = vtX / vtLen, ty = vtY / vtLen;
+    const rxt = rx * ty - ry * tx;
+    const denomT = invM + rxt * rxt * invI;
+    if (denomT > 1e-10) {
+      let Jf = -vtLen / denomT;
+      const JfMax = ISLAND_FRICTION * Jn;
+      Jf = Math.max(-JfMax, Math.min(JfMax, Jf));
+      vx    += Jf * tx * invM;
+      vy    += Jf * ty * invM;
+      omega += rxt * Jf * invI;
+    }
+  }
+
+  ship.velocity = Vec2.from(vx, vy);
+  ship.angularVelocity = omega;
+}
+
 /**
  * Predict ship-island collision responses.
- * For polygon islands (with `vertices`): push hull vertices out and reflect
- * velocity. For circular bump-islands (no `vertices`): skipped — server data
- * doesn't expose the beach radius to the client in IslandDef.
+ * For polygon islands (with `vertices`): push the deepest hull vertex out and
+ * apply the server's contact-point impulse (handle_island_collisions →
+ * apply_island_impulse). Circular bump-islands (no `vertices`) are skipped —
+ * server data doesn't expose the beach radius to the client.
  *
  * @param ships   - Mutable ship array from the cloned world state
  * @param islands - Island definitions received from the server ISLANDS message
  */
-export function predictIslandCollisions(ships: Ship[], islands: IslandDef[]): void {
+export function predictIslandCollisions(ships: Ship[], islands: readonly PredictIsland[]): void {
   if (!islands || islands.length === 0) return;
 
   for (const isl of islands) {
@@ -459,6 +892,7 @@ export function predictIslandCollisions(ships: Ship[], islands: IslandDef[]): vo
       // Narrow phase: find deepest hull vertex inside island polygon
       const shipHull = hullToWorld(ship);
       let maxPen = 0, pushNx = 0, pushNy = 0;
+      let cpX = 0, cpY = 0; // contact point = deepest penetrating vertex
 
       for (const v of shipHull) {
         if (!pointInPoly(v.x, v.y, islandPoly)) continue;
@@ -472,25 +906,19 @@ export function predictIslandCollisions(ships: Ship[], islands: IslandDef[]): vo
           const outDir = vVec.sub(nearest);
           const len = outDir.length();
           if (len > 1e-6) { pushNx = outDir.x / len; pushNy = outDir.y / len; }
+          cpX = v.x; cpY = v.y;
         }
       }
 
       if (maxPen <= 0) continue;
 
-      // Push ship out of island
+      // Push ship out of island (server pushes by full depth, then impulses)
       ship.position = Vec2.from(
         ship.position.x + pushNx * maxPen,
         ship.position.y + pushNy * maxPen,
       );
 
-      // Reflect velocity (e = 0.3, matching server apply_island_impulse)
-      const vn = ship.velocity.x * pushNx + ship.velocity.y * pushNy;
-      if (vn < 0) {
-        ship.velocity = Vec2.from(
-          ship.velocity.x - (1 + SHIP_RESTITUTION) * vn * pushNx,
-          ship.velocity.y - (1 + SHIP_RESTITUTION) * vn * pushNy,
-        );
-      }
+      applyIslandImpulse(ship, pushNx, pushNy, cpX, cpY);
     }
   }
 }

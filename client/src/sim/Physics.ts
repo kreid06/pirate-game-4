@@ -2,16 +2,15 @@ import { Vec2 } from '../common/Vec2.js';
 import { AngleUtils } from '../common/AngleUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
 import { WorldState, InputFrame, Ship, Player, PhysicsConfig } from './Types.js';
-import { CollisionContext, resolveIslandCollisions, isInsideIsland } from './IslandCollisions.js';
+import { CollisionContext, resolveIslandCollisions, isInsideIsland, resolveDockCollisions, isDockPointOnSurface } from './IslandCollisions.js';
 import { CollisionSystem, CollisionResult } from './CollisionSystem.js';
 import { predictShipCollisions, predictIslandCollisions } from './PhysicsCollisionPredict.js';
+import { ModuleKind } from './modules.js';
 import { 
   CarrierDetectionState, 
   CarrierChangeEvent,
-  createCarrierDetectionState, 
-  updateCarrierDetection 
+  createCarrierDetectionState 
 } from './CarrierDetection.js';
-
 /**
  * Action bit flags for player input
  */
@@ -218,57 +217,92 @@ function updatePlayerWithDetection(
   collisionCtx?: CollisionContext | null
 ): CarrierChangeEvent[] {
   // If player is mounted to a module, lock their position and prevent movement
-  if (player.isMounted && player.mountedModuleId && player.mountOffset) {
+  if (player.isMounted) {
     const carrierShip = ships.find(ship => ship.id === player.carrierId);
     if (carrierShip) {
-      const module = carrierShip.modules.find(m => m.id === player.mountedModuleId);
-      if (module) {
-        // Lock player position to module + offset
-        const mountLocalPos = Vec2.from(
-          module.localPos.x + player.mountOffset.x,
-          module.localPos.y + player.mountOffset.y
-        );
-        player.localPosition = mountLocalPos;
-        
-        // Convert to world position
-        const cos = Math.cos(carrierShip.rotation);
-        const sin = Math.sin(carrierShip.rotation);
-        const worldX = carrierShip.position.x + (mountLocalPos.x * cos - mountLocalPos.y * sin);
-        const worldY = carrierShip.position.y + (mountLocalPos.x * sin + mountLocalPos.y * cos);
-        player.position = Vec2.from(worldX, worldY);
-        
-        // Match ship velocity
-        player.velocity = carrierShip.velocity.add(
-          mountLocalPos.perp().mul(carrierShip.angularVelocity)
-        );
-        
-        return []; // No carrier events when mounted
+      // Determine ship-local mount position in priority order:
+      //   1. localPosition — set from server snapshot (local_x/local_y fields). This is
+      //      the canonical position used by server's update_mounted_players_on_ship(). Use
+      //      it whenever available so prediction exactly matches server after a rollback.
+      //   2. module.localPos + mountOffset — one-time mount message data (may be absent
+      //      if the mount happened before this session or the message was lost).
+      //   3. Reverse-transform the current world position — guarantees we always have a
+      //      valid local position even on the first prediction tick after rollback.
+      let lx: number;
+      let ly: number;
+
+      if (player.localPosition) {
+        lx = player.localPosition.x;
+        ly = player.localPosition.y;
+      } else if (player.mountedModuleId && player.mountOffset) {
+        const module = carrierShip.modules.find(m => m.id === player.mountedModuleId);
+        if (module) {
+          lx = module.localPos.x + player.mountOffset.x;
+          ly = module.localPos.y + player.mountOffset.y;
+        } else {
+          // Module not found — fall through to reverse-transform below
+          lx = NaN; ly = NaN;
+        }
+      } else {
+        lx = NaN; ly = NaN;
       }
+
+      if (isNaN(lx)) {
+        // Reverse-transform world → local so we never lose the position
+        const cosN = Math.cos(-carrierShip.rotation);
+        const sinN = Math.sin(-carrierShip.rotation);
+        const dx = player.position.x - carrierShip.position.x;
+        const dy = player.position.y - carrierShip.position.y;
+        lx = dx * cosN - dy * sinN;
+        ly = dx * sinN + dy * cosN;
+      }
+
+      // Persist to localPosition so subsequent prediction ticks keep using the same
+      // anchor without re-deriving it. Mirrors server's stored local_x/local_y.
+      player.localPosition = Vec2.from(lx, ly);
+
+      // Convert local → world using the CURRENT ship transform (same as server's
+      // ship_local_to_world inside update_mounted_players_on_ship each tick).
+      const cosF = Math.cos(carrierShip.rotation);
+      const sinF = Math.sin(carrierShip.rotation);
+      player.position = Vec2.from(
+        carrierShip.position.x + lx * cosF - ly * sinF,
+        carrierShip.position.y + lx * sinF + ly * cosF,
+      );
+
+      // Velocity = ship translational + rotational component at the player's arm
+      player.velocity = carrierShip.velocity.add(
+        Vec2.from(lx, ly).perp().mul(carrierShip.angularVelocity),
+      );
+
+      return []; // No carrier events when mounted
     }
   }
   
-  // Get or create detection state for this player
+  // ── Carrier state is SERVER-AUTHORITATIVE ─────────────────────────────────
+  // The server only ever boards a player via:
+  //   1. Ladder interact (E at an extended ladder)   — module_interactions.c
+  //   2. Stepping onto a scaffolded ship from a dock — mirrored by
+  //      tryBoardScaffoldedShip() below
+  //   3. Respawn / teleport / admin actions
+  // There is NO "swim into the hull → walk on deck" transition server-side.
+  // The old geometric auto-boarding (updateCarrierDetection + plank-aware hull
+  // containment) let the client board any ship just by swimming into it, while
+  // the server kept the player SWIMMING — a hard desync that also corrupted the
+  // reported positions the server adopts. We now branch purely on the
+  // carrierId/onDeck flags merged from server snapshots; boarding transitions
+  // (ladder, grapple, etc.) arrive within one RTT of the interaction.
+  const events: CarrierChangeEvent[] = [];
+  const newCarrierId = player.carrierId ?? 0;
+  player.onDeck = newCarrierId > 0;
+
+  // Keep the detection-state map coherent for the scaffold-boarding mirror.
   let detectionState = carrierDetectionMap.get(player.id);
   if (!detectionState) {
     detectionState = createCarrierDetectionState();
     carrierDetectionMap.set(player.id, detectionState);
   }
-  
-  // Update carrier detection
-  const { newState, events } = updateCarrierDetection(
-    player, 
-    ships, 
-    detectionState, 
-    currentTime
-  );
-  
-  // Store updated detection state
-  carrierDetectionMap.set(player.id, newState);
-  
-  // Update player's carrierId based on detection result
-  const newCarrierId = newState.currentCarrierId || 0;
-  player.carrierId = newCarrierId;
-  player.onDeck = newCarrierId > 0;
+  detectionState.currentCarrierId = newCarrierId > 0 ? newCarrierId : null;
   
   // Apply physics based on carrier status
   const carrierShip = ships.find(ship => ship.id === newCarrierId);
@@ -279,11 +313,113 @@ function updatePlayerWithDetection(
     // On land the server uses DIRECT-position walking (no acceleration/drag), not swim
     // physics. Mirror that here or the prediction constantly diverges from the server.
     updatePlayerOnLand(player, inputFrame, dt, collisionCtx);
+  } else if ((player.onDockId ?? 0) > 0) {
+    // Dock/shipyard walking: server uses ws_player_walk_target (semi-authority) + direct
+    // position — same model as island walking. Without this the client used swimming
+    // physics (acceleration + drag), creating a major physics mismatch and constant rollbacks.
+
+    // Replicate server's instant scaffolded-ship boarding (websocket_server.c:13235-13250).
+    // The server boards the player immediately when they step into the ship hull polygon, but
+    // CarrierDetection has a 2-tick confirmation window — if we don't short-circuit here the
+    // client lags behind the server by 2+ ticks, triggering a carrierId mismatch rollback
+    // (jump/teleport) every time the player steps from dock onto the scaffolded ship deck.
+    if (collisionCtx && tryBoardScaffoldedShip(player, ships, carrierDetectionMap, collisionCtx, inputFrame, dt)) {
+      return events; // Player boarded the ship this tick — no dock physics needed
+    }
+
+    // Remember the dock ID before the move (updatePlayerOnLand never clears it).
+    const currentDockId = player.onDockId ?? 0;
+
+    updatePlayerOnLand(player, inputFrame, dt, collisionCtx);
+
+    // After moving, mirror server's dock_point_on_surface() exit check
+    // (websocket_server.c:13218). If the new position is off the dock surface the server
+    // clears on_dock_id and transitions to island/swim in the same tick. Without this
+    // mirror the client keeps predicting dock physics for the full RTT, producing
+    // temporary rubberbanding when walking back onto the island.
+    if (collisionCtx && currentDockId > 0) {
+      const dock = collisionCtx.structures.find(s => s.id === currentDockId && s.type === 'shipyard');
+      if (dock && !isDockPointOnSurface(player.position, dock)) {
+        player.onDockId = 0;
+        // Server immediately transitions to SWIMMING, then island detection fires next
+        // tick. If the dock sits on an island (which is always the case), pre-set
+        // onIslandId so the client switches to island walking in the same tick and
+        // avoids one extra tick of swim physics.
+        if ((dock.islandId ?? 0) > 0) {
+          player.onIslandId = dock.islandId;
+        }
+      }
+    }
   } else {
     updatePlayerOffDeck(player, ships, inputFrame, dt);
   }
   
   return events;
+}
+
+/**
+ * Instant dock-to-ship boarding detection — mirrors websocket_server.c:13235-13250.
+ *
+ * While the player is on the dock and a ship is being scaffolded inside, the server
+ * immediately boards the player as soon as they step inside the ship hull polygon.
+ * The generic CarrierDetection has a 2-tick confirmation delay which would cause a
+ * carrierId mismatch (→ rollback jump) on every dock→ship step.
+ *
+ * Returns true and updates player state if boarding occurred; returns false otherwise.
+ */
+function tryBoardScaffoldedShip(
+  player: Player,
+  ships: Ship[],
+  carrierDetectionMap: Map<number, CarrierDetectionState>,
+  collisionCtx: CollisionContext,
+  inputFrame: InputFrame,
+  dt: number,
+): boolean {
+  const dock = collisionCtx.structures.find(
+    s => s.id === player.onDockId && s.type === 'shipyard',
+  );
+  if (!dock?.construction || dock.construction.phase !== 'building') return false;
+
+  const scaffoldedShipId = dock.construction.scaffoldedShipId;
+  if (!scaffoldedShipId) return false;
+
+  const scaffoldedShip = ships.find(s => s.id === scaffoldedShipId);
+  if (!scaffoldedShip || scaffoldedShip.hull.length < 3) return false;
+
+  // Transform player world position to ship-local coordinates (same as server's ship_world_to_local).
+  const cosN = Math.cos(-scaffoldedShip.rotation);
+  const sinN = Math.sin(-scaffoldedShip.rotation);
+  const dx = player.position.x - scaffoldedShip.position.x;
+  const dy = player.position.y - scaffoldedShip.position.y;
+  const slx = dx * cosN - dy * sinN;
+  const sly = dx * sinN + dy * cosN;
+
+  // Point-in-polygon test on the ship hull (mirrors server is_outside_deck).
+  const hull = scaffoldedShip.hull;
+  let inside = false;
+  for (let i = 0, j = hull.length - 1; i < hull.length; j = i++) {
+    const ax = hull[j].x, ay = hull[j].y;
+    const bx = hull[i].x, by = hull[i].y;
+    if ((ay > sly) !== (by > sly)) {
+      const xi = ax + (sly - ay) * (bx - ax) / (by - ay);
+      if (slx < xi) inside = !inside;
+    }
+  }
+  if (!inside) return false;
+
+  // Player is inside the scaffolded ship hull — board instantly (zero-delay).
+  player.onDockId = 0;
+  player.carrierId = scaffoldedShip.id;
+  player.onDeck   = true;
+
+  // Sync CarrierDetection state so it doesn't fight the boarding next tick.
+  const detState = carrierDetectionMap.get(player.id);
+  if (detState) {
+    detState.currentCarrierId = scaffoldedShip.id;
+  }
+
+  updatePlayerOnDeck(player, scaffoldedShip, inputFrame, dt);
+  return true;
 }
 
 /**
@@ -299,29 +435,56 @@ function updatePlayerOnLand(
   dt: number,
   collisionCtx?: CollisionContext | null
 ): void {
-  const isSprinting = (inputFrame.actions & PlayerActions.SPRINT) !== 0;
-  const walkSpeed = isSprinting
+  // Apply server-computed carry-weight speed modifier.
+  // speedMult = max(0.3, 1 - carry_ratio * 0.5); canSprint = carry_ratio < 0.85.
+  // Absent when server hasn't sent them yet → default to unencumbered (1.0 / true).
+  const speedMult  = player.speedMult  ?? 1.0;
+  const canSprint  = player.canSprint  ?? true;
+  const isSprinting = canSprint && (inputFrame.actions & PlayerActions.SPRINT) !== 0;
+  const walkSpeed = (isSprinting
     ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT
-    : PhysicsConfig.PLAYER_WALK_SPEED;
+    : PhysicsConfig.PLAYER_WALK_SPEED) * speedMult;
+
+  const hasInput = inputFrame.movement.lengthSq() > 0.0001;
 
   // Direct position integration (input is already in world space from the camera transform).
-  player.position = player.position.add(inputFrame.movement.mul(walkSpeed * dt));
+  if (hasInput) {
+    player.position = player.position.add(inputFrame.movement.mul(walkSpeed * dt));
+  }
 
   // Client-side collision resolution — mirrors server's island collision block.
-  // Only runs when we have geometry data and the player is on a known island.
-  if (collisionCtx && (player.onIslandId ?? 0) > 0) {
+  // Only fires when the player moved this tick. When stationary the server's position
+  // is already collision-valid; re-resolving it would create a systematic offset whenever
+  // the player is standing within PLAYER_R + OBJ_R of an obstacle (tree, wall, boulder).
+  if (hasInput && collisionCtx && (player.onIslandId ?? 0) > 0) {
     const island = collisionCtx.islands.find(i => i.id === player.onIslandId);
     if (island) {
-      player.position = resolveIslandCollisions(player.position, island, collisionCtx);
-
-      // Island boundary: if the collision-resolved position is still outside the polygon,
-      // don't override the server transition — just clamp to avoid drifting further out.
-      // The server handles the actual island→swim state transition authoritatively.
+      // Island boundary — mirrors the server's island→swim transition (websocket_server.c):
+      // when the new position leaves the island polygon, the server clears on_island_id,
+      // switches to SWIMMING, keeps the position, and carries the walk velocity into the
+      // swim. The client MUST do the same. With client semi-authority the server adopts
+      // our reported position — if we clamped at the shoreline (old behaviour) the server
+      // would only ever see inside-the-island positions and NEITHER side would ever
+      // transition: the player would be permanently stuck on land.
       if (!isInsideIsland(player.position, island)) {
-        // Keep previous position so we don't predict ourselves into the water.
-        // The server will correct our state (onIslandId → 0) via reconciliation.
-        player.position = player.position.sub(inputFrame.movement.mul(walkSpeed * dt));
+        player.onIslandId = 0;
+        // Server: sim velocity = movement × walk_speed — swim drag takes over next tick.
+        player.velocity = inputFrame.movement.mul(walkSpeed);
+        return;
       }
+
+      // Still on the island — resolve wall/tree/boulder collisions.
+      player.position = resolveIslandCollisions(player.position, island, collisionCtx);
+    }
+  }
+
+  // Dock U-wall OBB pushout — mirrors server dock_apply_player_collision() (dock_physics.c).
+  // Same guard: only resolves when the player has input so a stationary player at a
+  // server-validated position doesn't get pushed by 10-12 px every tick.
+  if (hasInput && collisionCtx && (player.onDockId ?? 0) > 0) {
+    const dock = collisionCtx.structures.find(s => s.id === player.onDockId && s.type === 'shipyard');
+    if (dock) {
+      player.position = resolveDockCollisions(player.position, dock);
     }
   }
 
@@ -350,130 +513,269 @@ export function initializeCarrierDetection(world: WorldState): void {
 /**
  * Enhanced carrier physics implementation with better rotation handling
  */
-function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, dt: number): void {
-  // Step 1: Enhanced ship motion deltas with improved rotation handling
-  const prevShipPos = ship.position.sub(ship.velocity.mul(dt));
-  const prevShipRot = AngleUtils.wrap(ship.rotation - ship.angularVelocity * dt);
-  
-  const deltaRot = AngleUtils.diff(ship.rotation, prevShipRot);
-  
-  // Step 2: Enhanced carrier motion with proper rotation around ship pivot
-  // Position relative to ship center at previous time
-  const relativePos = player.position.sub(prevShipPos);
-  
-  // For high angular velocities, use more accurate rotation
-  let rotatedRelativePos: Vec2;
-  if (Math.abs(deltaRot) > 0.1) {
-    // High rotation: use exact rotation matrix
-    rotatedRelativePos = relativePos.rotate(deltaRot);
-  } else {
-    // Low rotation: use linear approximation for stability
-    const tangentialVel = relativePos.perp().mul(ship.angularVelocity * dt);
-    rotatedRelativePos = relativePos.add(tangentialVel);
-  }
-  
-  // New carried position with momentum preservation
-  const carriedPosition = ship.position.add(rotatedRelativePos);
-  
-  // Step 3: Apply player input (keep in world coordinates - this was working correctly!)
-  const isSprinting = (inputFrame.actions & PlayerActions.SPRINT) !== 0;
-  const walkSpeed = isSprinting ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT : PhysicsConfig.PLAYER_WALK_SPEED;
-  const inputLocal = inputFrame.movement.mul(walkSpeed);
-  // Input is already in world coordinates due to camera transformation - don't "enhance" what works!
-  const inputWorld = inputLocal;
-  
-  // Step 4: Enhanced ice-drift damping with ship momentum preservation
-  const shipVelAtPlayer = ship.velocity.add(relativePos.perp().mul(ship.angularVelocity));
-  const relativeVel = player.velocity.sub(shipVelAtPlayer);
-  
-  // Improved exponential decay with frame-rate independence
-  const lambda = Math.log(2) / PhysicsConfig.ICE_DRIFT_HALF_LIFE;
-  const dampingFactor = Math.exp(-lambda * dt);
-  const dampedRelativeVel = relativeVel.mul(dampingFactor);
-  
-  // Calculate new velocity with better momentum conservation
-  const baseVelocity = shipVelAtPlayer.add(dampedRelativeVel);
-  const inputVelocityChange = inputWorld.mul(dt);
-  player.velocity = baseVelocity.add(inputVelocityChange);
-  
-  // Step 5: Position after input with input buffering for smoothness
-  const newPosition = carriedPosition.add(inputWorld.mul(dt));
-  
-  // Step 6: Enhanced plank-based containment system  
-  // Use individual plank modules instead of solid ship deck
-  const epsilon = PhysicsConfig.EPS_FACTOR * player.radius;
-  
-  // When in updatePlayerOnDeck, we need to be careful about collision modes:
-  // - If player is clearly inside ship bounds, enable containment (prevent exit)
-  // - If player is at the edge/outside, allow normal collision but no special ladder entry
-  const isJumping = (inputFrame.actions & PlayerActions.JUMP) !== 0;
+// ── Ship-deck collision radii — must match server module_collision_radius() ──
+const SHIP_MODULE_RADII: Partial<Record<ModuleKind, number>> = {
+  'helm':           10,
+  'steering-wheel': 10,
+  'mast':           14,
+  'cannon':         13,
+  'swivel':         10,
+  'chest':          12,
+};
 
-  // Special case: If player is jumping and near the ship edge, help them exit
-  if (isJumping) {
-    const distanceToShipCenter = carriedPosition.sub(ship.position).length();
-    const shipRadius = 120; // Approximate ship radius
-    
-    if (distanceToShipCenter > shipRadius * 0.7) {
-      // Player is jumping near the ship edge - bias them toward exiting
-      console.log(`Player ${player.id} jumping near ship edge - assisting exit`);
-      // Apply outward force to help them clear the ship
-      const awayFromShip = carriedPosition.sub(ship.position).normalize();
-      const exitBoost = awayFromShip.mul(PhysicsConfig.PLAYER_WALK_SPEED * 0.5 * dt);
-      player.position = carriedPosition.add(inputWorld.mul(dt)).add(exitBoost);
-      return; // Skip collision detection to allow clean exit
+// Matches server: PLAYER_RADIUS + PLANK_THICKNESS = 8 + 10
+const DECK_INSET = 18;
+const DECK_PLAYER_R = 8;
+
+/**
+ * Resolve on-deck collisions in ship-local coordinates.
+ * Mirrors server resolve_player_module_collisions + ramp + resolve_player_hull_containment.
+ * All coordinates are in ship-local client pixels (identical to server client-px local space).
+ */
+function resolveShipDeckCollisions(
+  lx: number, ly: number,
+  playerDeckLevel: number,
+  mountedModuleId: number | undefined,
+  ship: Ship
+): { lx: number; ly: number } {
+  // ── 1. Module circle push-out ─────────────────────────────────────────────
+  for (const mod of ship.modules) {
+    if (mod.id === mountedModuleId) continue;
+
+    // Ramps handled separately below.
+    if (mod.kind === 'ramp') continue;
+
+    // Planks are boundary walls — skip here; hull containment handles the boundary.
+    if (mod.kind === 'plank') continue;
+
+    const modRadius = SHIP_MODULE_RADII[mod.kind] ?? 0;
+    if (modRadius <= 0) continue;
+
+    // Per-deck filtering — mirrors server logic exactly:
+    //   lower deck (0): masts (deck-independent=255) + cannons + deckId=0 modules
+    //   upper deck (1): skip deckId=0 modules; everything else collides
+    if (playerDeckLevel === 0) {
+      if (mod.kind !== 'mast' && mod.kind !== 'cannon' && mod.deckId !== 0) continue;
+    } else if (playerDeckLevel === 1) {
+      if (mod.deckId === 0) continue;
+    }
+
+    const mx = mod.localPos.x;
+    const my = mod.localPos.y;
+    const dx = lx - mx;
+    const dy = ly - my;
+    const distSq = dx * dx + dy * dy;
+    const minDist = DECK_PLAYER_R + modRadius;
+
+    if (distSq < minDist * minDist) {
+      const dist = Math.sqrt(distSq);
+      if (dist < 0.001) {
+        lx += minDist;
+      } else {
+        const overlap = minDist - dist;
+        lx += (dx / dist) * overlap;
+        ly += (dy / dist) * overlap;
+      }
     }
   }
 
-  // Use hull polygon collision system with plank-aware gaps
-  // Healthy planks block movement, destroyed planks create gaps players can walk through
-  const collisionResult = sweptCircleVsHealthyHull(
-    carriedPosition,
-    newPosition,
-    player.radius,
-    player.velocity,
-    ship,
-    epsilon,
-    dt
-  );
-  
-  if (collisionResult.collided) {
-    // Apply collision result with sliding
-    player.position = collisionResult.newPosition;
-    player.velocity = collisionResult.newVelocity;
-    
-    // Add sliding friction for more realistic feel
-    const slideFriction = 0.95;
-    player.velocity = player.velocity.mul(slideFriction);
-  } else {
-    // No collision detected by plank system - allow movement
-    player.position = newPosition;
-    
-    // Check if player moved through a gap and should now be swimming
-    // This happens when planks are destroyed creating openings
-    const playerNowOutsideShip = !isPlayerInsideShipBounds(player.position, ship);
-    if (playerNowOutsideShip && player.onDeck) {
-      // Player fell through a gap - they should now be swimming
-      // Note: The carrier detection system will handle the actual onDeck state change
-      // This just ensures smooth position transition
-      console.log(`Player ${player.id} fell through plank gap at position ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}!`);
+  // ── 2. Ramp U-shape (lower deck only) ────────────────────────────────────
+  if (playerDeckLevel === 0) {
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'ramp') continue;
+      if (mod.id === mountedModuleId) continue;
+      // Skip destroyed ramps (DAMAGED flag = health 0 approximation).
+      if (mod.stateBits & 4 /* ModuleStateBits.DAMAGED */) continue;
+
+      const rampX = mod.localPos.x;
+      const rampY = mod.localPos.y;
+      const rampRot = mod.localRot;
+      const dx = lx - rampX;
+      const dy = ly - rampY;
+      const cr = Math.cos(-rampRot);
+      const sr = Math.sin(-rampRot);
+      let rlx = dx * cr - dy * sr;
+      let rly = dx * sr + dy * cr;
+
+      const HX = 22;
+      const HY = 22;
+      // Three walls: −X, +Y, −Y (open on +X side).
+      const walls: [number, number, number, number][] = [
+        [-HX, -HY, -HX,  HY],
+        [-HX,  HY,  HX,  HY],
+        [-HX, -HY,  HX, -HY],
+      ];
+
+      for (const [ax, ay, bx, by] of walls) {
+        let cx: number, cy: number;
+        if (ax === bx) {
+          cx = ax;
+          const lo = Math.min(ay, by), hi = Math.max(ay, by);
+          cy = Math.max(lo, Math.min(hi, rly));
+        } else {
+          cy = ay;
+          const lo = Math.min(ax, bx), hi = Math.max(ax, bx);
+          cx = Math.max(lo, Math.min(hi, rlx));
+        }
+        const ddx = rlx - cx;
+        const ddy = rly - cy;
+        const d2 = ddx * ddx + ddy * ddy;
+        if (d2 < DECK_PLAYER_R * DECK_PLAYER_R) {
+          const d = Math.sqrt(d2);
+          if (d > 0.001) {
+            const push = DECK_PLAYER_R - d;
+            rlx += (ddx / d) * push;
+            rly += (ddy / d) * push;
+          } else {
+            if (ax === bx) rlx += ax > 0 ? DECK_PLAYER_R : -DECK_PLAYER_R;
+            else           rly += ay > 0 ? DECK_PLAYER_R : -DECK_PLAYER_R;
+          }
+        }
+      }
+
+      // Rotate corrected ramp-local position back to ship-local.
+      const bc = Math.cos(rampRot);
+      const bs = Math.sin(rampRot);
+      lx = rampX + rlx * bc - rly * bs;
+      ly = rampY + rlx * bs + rly * bc;
     }
   }
+
+  // ── 3. Hull polygon containment (lower deck only, 2 passes) ──────────────
+  if (playerDeckLevel === 0 && ship.hull.length >= 3) {
+    const hull = ship.hull;
+    const nv = hull.length;
+
+    // Determine polygon winding (CCW = positive signed area → CCW sign = +1).
+    let signedArea2 = 0;
+    for (let i = 0, j = nv - 1; i < nv; j = i++) {
+      signedArea2 += hull[j].x * hull[i].y - hull[i].x * hull[j].y;
+    }
+    const ccwSign = signedArea2 >= 0 ? 1 : -1;
+
+    for (let iter = 0; iter < 2; iter++) {
+      const px = lx, py = ly;
+
+      // Point-in-polygon ray cast (+x ray).
+      let inside = false;
+      for (let i = 0, j = nv - 1; i < nv; j = i++) {
+        const ax = hull[j].x, ay = hull[j].y;
+        const bx = hull[i].x, by = hull[i].y;
+        if ((ay > py) !== (by > py)) {
+          const xi = ax + (py - ay) * (bx - ax) / (by - ay);
+          if (px < xi) inside = !inside;
+        }
+      }
+
+      // Find closest edge and its inward normal.
+      let bestDist2 = 1e30;
+      let bestCx = px, bestCy = py;
+      let bestNx = 0, bestNy = 0;
+      for (let i = 0, j = nv - 1; i < nv; j = i++) {
+        const ax = hull[j].x, ay = hull[j].y;
+        const bx = hull[i].x, by = hull[i].y;
+        const ex = bx - ax, ey = by - ay;
+        const elen2 = ex * ex + ey * ey;
+        if (elen2 < 0.0001) continue;
+        let t = ((px - ax) * ex + (py - ay) * ey) / elen2;
+        t = Math.max(0, Math.min(1, t));
+        const cx2 = ax + t * ex;
+        const cy2 = ay + t * ey;
+        const ddx = px - cx2, ddy = py - cy2;
+        const d2 = ddx * ddx + ddy * ddy;
+        if (d2 < bestDist2) {
+          bestDist2 = d2;
+          bestCx = cx2; bestCy = cy2;
+          const elen = Math.sqrt(elen2);
+          bestNx = -ey * ccwSign / elen;
+          bestNy =  ex * ccwSign / elen;
+        }
+      }
+
+      const dist = Math.sqrt(bestDist2);
+      if (!inside) {
+        lx = bestCx + bestNx * DECK_INSET;
+        ly = bestCy + bestNy * DECK_INSET;
+      } else if (dist < DECK_INSET) {
+        const push = DECK_INSET - dist;
+        lx = px + bestNx * push;
+        ly = py + bestNy * push;
+      }
+    }
+  }
+
+  return { lx, ly };
 }
 
 /**
- * Quick check if player is inside the basic ship bounds (for gap detection)
+ * On-deck movement — LOCAL-ANCHOR model, exact mirror of the server's on-ship branch
+ * (websocket_server.c "ON-SHIP MOVEMENT (LOCAL COORDINATES)"):
+ *
+ *   1. The player's state on deck is their ship-local position (local_x/local_y).
+ *   2. World-space input is rotated into ship-local space and integrated directly
+ *      (no velocity, no acceleration, no drift damping).
+ *   3. Collisions are resolved in local space.
+ *   4. World position is DERIVED from the ship transform — the player is rigidly
+ *      carried by the ship. We never integrate the player's world position while
+ *      the ship moves; only the ship is predicted, the player rides it.
+ *   5. Velocity stays zero — the server never sets velocity in this branch, so the
+ *      snapshot always reports (0,0). The old world-space "ice drift" model invented
+ *      a phantom decaying velocity that diverged from the server every tick.
  */
-function isPlayerInsideShipBounds(playerPos: Vec2, ship: Ship): boolean {
-  // Transform player position to ship-local coordinates
-  const localPos = playerPos.sub(ship.position).rotate(-ship.rotation);
-  
-  // Use more accurate hull polygon check instead of simple rectangle
-  // This provides better detection for curved hull shapes
-  const epsilon = 10; // Small buffer for floating-point precision
-  const inside = PolygonUtils.pointInPolygon(localPos, ship.hull, epsilon);
-  
-  return inside;
+function updatePlayerOnDeck(player: Player, ship: Ship, inputFrame: InputFrame, dt: number): void {
+  const cosR = Math.cos(ship.rotation);
+  const sinR = Math.sin(ship.rotation);
+
+  // Ship-local anchor: prefer localPosition (seeded from the server's local_x/local_y
+  // snapshot fields), else derive it from the current world position once.
+  let lx: number;
+  let ly: number;
+  if (player.localPosition) {
+    lx = player.localPosition.x;
+    ly = player.localPosition.y;
+  } else {
+    const dx = player.position.x - ship.position.x;
+    const dy = player.position.y - ship.position.y;
+    lx =  dx * cosR + dy * sinR;
+    ly = -dx * sinR + dy * cosR;
+  }
+
+  // Mirror the server's carry-weight penalty (speed_mult) and sprint block (can_sprint).
+  const speedMult  = player.speedMult  ?? 1.0;
+  const canSprint  = player.canSprint  ?? true;
+  const isSprinting = canSprint && (inputFrame.actions & PlayerActions.SPRINT) !== 0;
+  const walkSpeed = (isSprinting
+    ? PhysicsConfig.PLAYER_WALK_SPEED * PhysicsConfig.PLAYER_SPRINT_MULT
+    : PhysicsConfig.PLAYER_WALK_SPEED) * speedMult;
+
+  const hasInput = inputFrame.movement.lengthSq() > 0.0001;
+  if (hasInput) {
+    // Rotate world-space input into ship-local space (server: local_move_x = mx·cos + my·sin).
+    const localMoveX =  inputFrame.movement.x * cosR + inputFrame.movement.y * sinR;
+    const localMoveY = -inputFrame.movement.x * sinR + inputFrame.movement.y * cosR;
+
+    lx += localMoveX * walkSpeed * dt;
+    ly += localMoveY * walkSpeed * dt;
+
+    // Server-matching collision resolution in ship-local space.
+    // Mirrors: resolve_player_module_collisions + ramp U-shape + resolve_player_hull_containment.
+    const resolved = resolveShipDeckCollisions(lx, ly, player.deckId, player.mountedModuleId, ship);
+    lx = resolved.lx;
+    ly = resolved.ly;
+  }
+
+  player.localPosition = Vec2.from(lx, ly);
+
+  // World position derived from the ship transform (server: ship_local_to_world).
+  player.position = Vec2.from(
+    ship.position.x + lx * cosR - ly * sinR,
+    ship.position.y + lx * sinR + ly * cosR,
+  );
+
+  // Server never writes velocity in the on-deck branch → snapshots report (0,0).
+  player.velocity = Vec2.zero();
 }
+
 
 /**
  * Enhanced free movement when player is not on deck
@@ -510,33 +812,40 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
   // Calculate intended new position
   const intendedPosition = player.position.add(player.velocity.mul(dt));
   
-  // Check collision with all nearby ships for swimming players
+  // Hull collision for non-boarded players — crossing rejection + contact pushout.
+  // The previous swept-only test (sweptCircleVsHealthyHull) failed under SUSTAINED
+  // contact: once the player was already touching the hull, the sweep detected no
+  // new crossing and let the position sink a little deeper every tick until it
+  // tunnelled through. This static resolver runs every tick, uses the PREVIOUS
+  // position to decide which side of the hull the player belongs on, and mirrors
+  // the server's resolve_swimmer_ship_hull_collision exactly.
   let finalPosition = intendedPosition;
   let finalVelocity = player.velocity;
-  
+
   for (const ship of ships) {
-    const epsilon = PhysicsConfig.EPS_FACTOR * player.radius;
-    
-    // Check if this ship is close enough to matter (performance optimization)
     const distanceToShip = player.position.distanceTo(ship.position);
     const maxRelevantDistance = 400; // Generous bounding check
     if (distanceToShip > maxRelevantDistance) continue;
-    
-    // Use hull polygon collision for swimming players with plank-aware gaps
-    const collisionResult = sweptCircleVsHealthyHull(
-      player.position,
+
+    const resolved = resolveSwimmerHullCollision(
+      player.position,   // previous (collision-valid) position
       finalPosition,
       player.radius,
-      finalVelocity,
-      ship,
-      epsilon,
-      dt
+      ship
     );
-    
-    if (collisionResult.collided) {
-      finalPosition = collisionResult.newPosition;
-      finalVelocity = collisionResult.newVelocity;
-      break; // Only handle one collision per frame for simplicity
+    if (resolved) {
+      finalPosition = resolved;
+      // Cancel the velocity component pointing into the hull so drag doesn't
+      // re-penetrate next tick (same projection as the server applies).
+      const pushDir = resolved.sub(intendedPosition);
+      const pushLen = pushDir.length();
+      if (pushLen > 0.0001) {
+        const n = pushDir.mul(1 / pushLen);
+        const into = finalVelocity.dot(n);
+        if (into < 0) {
+          finalVelocity = finalVelocity.sub(n.mul(into));
+        }
+      }
     }
   }
   
@@ -911,6 +1220,147 @@ function createHealthyHullSegments(ship: Ship): Array<{start: Vec2, end: Vec2, p
 }
 
 /**
+ * Static hull collision resolver for NON-boarded players (swimmers).
+ * Mirrors the server's resolve_swimmer_ship_hull_collision().
+ *
+ * Robust against sustained contact: which side of the hull the player belongs
+ * on is decided from the PREVIOUS (collision-valid) position, so pressing into
+ * the hull can never flip the wall — alive edges reject crossings outright and
+ * push the contact circle back to the legal side every tick. Edges whose plank
+ * is destroyed are passable in both directions (hull breach).
+ *
+ * Returns the corrected world position, or null when no contact occurred.
+ */
+function resolveSwimmerHullCollision(
+  prevPos: Vec2,
+  newPos: Vec2,
+  radius: number,
+  ship: Ship
+): Vec2 | null {
+  const hull = ship.hull;
+  const n = hull.length;
+  if (n < 3) return null;
+
+  // Plank-alive lookup per hull edge (same mapping as createHealthyHullSegments).
+  const planks = ship.modules.filter(m =>
+    m.kind === 'plank' && m.moduleData && m.moduleData.kind === 'plank'
+  );
+  const plankHealthMap = new Map<number, number>();
+  for (const plank of planks) {
+    const data = plank.moduleData as any;
+    const idx = data.segmentIndex ?? (plank.id - 100);
+    plankHealthMap.set(idx, data.health);
+  }
+  const edgeAlive = (i: number): boolean => {
+    if (planks.length === 0) return true; // no plank modules: solid hull
+    const health = plankHealthMap.get(mapHullEdgeToPlankIndex(i, planks.length)) ?? 100;
+    return health > 0;
+  };
+
+  // Work in ship-local space so the hull stays static.
+  const cosL = Math.cos(-ship.rotation), sinL = Math.sin(-ship.rotation);
+  const toLocalX = (v: Vec2) => (v.x - ship.position.x) * cosL - (v.y - ship.position.y) * sinL;
+  const toLocalY = (v: Vec2) => (v.x - ship.position.x) * sinL + (v.y - ship.position.y) * cosL;
+  const ox = toLocalX(prevPos), oy = toLocalY(prevPos);
+  let px = toLocalX(newPos),  py = toLocalY(newPos);
+
+  // Polygon winding → outward normal orientation.
+  let area2 = 0;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    area2 += hull[j].x * hull[i].y - hull[i].x * hull[j].y;
+  }
+  const ccw = area2 >= 0 ? 1 : -1;
+
+  // Which side did the player legally occupy last tick? (breaches are the only
+  // legal way for this to change)
+  let insidePrev = false;
+  for (let i = 0, j = n - 1; i < n; j = i++) {
+    const a = hull[j], b = hull[i];
+    if ((a.y > oy) !== (b.y > oy)) {
+      const xi = a.x + (oy - a.y) * (b.x - a.x) / (b.y - a.y);
+      if (ox < xi) insidePrev = !insidePrev;
+    }
+  }
+  const sideSign = insidePrev ? -1 : 1;
+
+  let moved = false;
+
+  // Pass 1: crossing rejection — if the old→new motion segment crosses an alive
+  // edge, clamp to the earliest crossing point pushed back to the legal side.
+  let bestT = Infinity;
+  let bestEdge = -1;
+  const mx = px - ox, my = py - oy;
+  if (mx * mx + my * my > 1e-9) {
+    for (let i = 0; i < n; i++) {
+      if (!edgeAlive(i)) continue;
+      const a = hull[i], b = hull[(i + 1) % n];
+      const ex = b.x - a.x, ey = b.y - a.y;
+      const denom = mx * ey - my * ex;
+      if (Math.abs(denom) < 1e-9) continue; // parallel
+      const t = ((a.x - ox) * ey - (a.y - oy) * ex) / denom;
+      const u = ((a.x - ox) * my - (a.y - oy) * mx) / denom;
+      if (t >= 0 && t <= 1 && u >= 0 && u <= 1 && t < bestT) {
+        bestT = t;
+        bestEdge = i;
+      }
+    }
+  }
+  if (bestEdge >= 0) {
+    const a = hull[bestEdge], b = hull[(bestEdge + 1) % n];
+    const ex = b.x - a.x, ey = b.y - a.y;
+    const elen = Math.hypot(ex, ey);
+    // Outward normal of this edge, oriented to the player's legal side.
+    const nx = (ey / elen) * ccw * sideSign;
+    const ny = (-ex / elen) * ccw * sideSign;
+    px = ox + mx * bestT + nx * radius;
+    py = oy + my * bestT + ny * radius;
+    moved = true;
+  }
+
+  // Pass 2: contact pushout (two iterations so corners settle).
+  for (let iter = 0; iter < 2; iter++) {
+    for (let i = 0; i < n; i++) {
+      if (!edgeAlive(i)) continue;
+      const a = hull[i], b = hull[(i + 1) % n];
+      const ex = b.x - a.x, ey = b.y - a.y;
+      const elen2 = ex * ex + ey * ey;
+      if (elen2 < 0.0001) continue;
+      let t = ((px - a.x) * ex + (py - a.y) * ey) / elen2;
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      const cx = a.x + t * ex, cy = a.y + t * ey;
+      const vx = px - cx, vy = py - cy;
+      const d2 = vx * vx + vy * vy;
+      if (d2 >= radius * radius) continue;
+
+      const elen = Math.sqrt(elen2);
+      const nx = (ey / elen) * ccw * sideSign; // legal-side normal
+      const ny = (-ex / elen) * ccw * sideSign;
+      const s = vx * nx + vy * ny;
+      const d = Math.sqrt(d2);
+      if (s >= 0 && d > 0.001) {
+        // Shallow contact on the legal side: push directly away from the edge.
+        const push = radius - d;
+        px += (vx / d) * push;
+        py += (vy / d) * push;
+      } else {
+        // Center slipped to (or past) the wrong side: snap back to the legal side.
+        px = cx + nx * radius;
+        py = cy + ny * radius;
+      }
+      moved = true;
+    }
+  }
+
+  if (!moved) return null;
+
+  const cosW = Math.cos(ship.rotation), sinW = Math.sin(ship.rotation);
+  return Vec2.from(
+    px * cosW - py * sinW + ship.position.x,
+    px * sinW + py * cosW + ship.position.y,
+  );
+}
+
+/**
  * Check collision against healthy hull segments
  * Only segments with healthy planks provide collision
  * Destroyed planks create gaps that players can pass through
@@ -1210,4 +1660,5 @@ function applyCollisionDamageToShip(ship: Ship, contactPoint: Vec2, baseDamage: 
       }
     }
   }
+}
 }
