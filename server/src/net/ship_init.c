@@ -622,6 +622,7 @@ static int find_ship_slot(uint16_t ship_id);
 /* Maximum distance (client pixels) to scan for an enemy.
  * ~800 px ≈ 4-5 ship lengths — about half a screen width at normal zoom. */
 #define GHOST_ATTACK_RANGE      2400.0f
+#define GHOST_WAKE_RADIUS       6000.0f  /* non-ghost must be closer than this to wake ghost AI */
 /* Wander: new random heading every N seconds */
 #define GHOST_WANDER_INTERVAL_S 5.0f
 /* Top speed (client-px / s) while chasing — a bit slower than a player ship */
@@ -665,6 +666,24 @@ typedef struct {
 static GhostFleet ghost_fleets[MAX_GHOST_FLEETS];
 static int ghost_fleet_count = 0;
 
+/* ── Spawn queue ─────────────────────────────────────────────────────────── */
+/* Zones whose timers have fired are enqueued here instead of being spawned
+ * immediately.  The queue drains whenever a free fleet slot exists — either
+ * at the top of each tick or the moment a fleet fully sinks.  This prevents
+ * the "table full" spam and keeps fleet creation latency smooth. */
+#define MAX_SPAWN_QUEUE 128
+
+typedef struct {
+    int spawn_idx;
+    int fleet_size;
+    int level;
+} SpawnQueueEntry;
+
+static SpawnQueueEntry spawn_queue[MAX_SPAWN_QUEUE];
+static int spawn_queue_head = 0; /* next entry to consume */
+static int spawn_queue_tail = 0; /* next slot to insert  */
+static int spawn_queue_len  = 0;
+
 /* Wedge formation: local offsets (units of GHOST_FLEET_SPACING).
  * lx = forward axis (positive = ahead), ly = lateral (positive = left).
  *
@@ -703,11 +722,40 @@ static bool ghost_spawns_enabled = false;
 static int ghost_global_max_cap = 0;
 
 void tick_ghost_ships(float dt) {
+    /* ── Global fast-path: skip all AI when no non-ghost ships are alive.
+     * This keeps the server idle when no players are connected. */
+    bool any_non_ghost = false;
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip *c = &ships[s];
+        if (c->active && !c->is_sinking && c->ship_type != SHIP_TYPE_GHOST) {
+            any_non_ghost = true;
+            break;
+        }
+    }
+    if (!any_non_ghost) return;
+
     for (int s = 0; s < ship_count; s++) {
         SimpleShip* ship = &ships[s];
         if (!ship->active) continue;
         if (ship->ship_type != SHIP_TYPE_GHOST) continue;
         if (ship->is_sinking) continue;
+
+        /* ── Per-ship dormancy: skip AI until a non-ghost ship enters wake radius.
+         * This avoids running O(n) scans and movement math for ghosts in empty
+         * regions of the map. */
+        bool wake = false;
+        for (int t = 0; t < ship_count; t++) {
+            SimpleShip *cand = &ships[t];
+            if (!cand->active || cand->is_sinking) continue;
+            if (cand->ship_type == SHIP_TYPE_GHOST) continue;
+            float dx = cand->x - ship->x;
+            float dy = cand->y - ship->y;
+            if (dx * dx + dy * dy <= GHOST_WAKE_RADIUS * GHOST_WAKE_RADIUS) {
+                wake = true;
+                break;
+            }
+        }
+        if (!wake) continue;
 
         /* ── 1. Find nearest enemy (COMPANY_PIRATES or any non-NAVY ship) ── */
         SimpleShip* target = NULL;
@@ -1051,9 +1099,14 @@ void load_ghost_spawns(const char *path) {
     }
     /* Initialise fleet table */
     memset(ghost_fleets, 0, sizeof(ghost_fleets));
-    ghost_fleet_count   = 0;
-    ghost_spawn_count   = 0;
+    ghost_fleet_count    = 0;
+    ghost_spawn_count    = 0;
     ghost_spawns_enabled = false;
+
+    /* Reset spawn queue */
+    spawn_queue_head = 0;
+    spawn_queue_tail = 0;
+    spawn_queue_len  = 0;
 
     if (!path) path = GHOST_SPAWNS_PATH;
 
@@ -1135,6 +1188,10 @@ uint32_t websocket_server_create_ghost_ship_level(float x, float y, int level, i
     return ship_id;
 }
 
+/* Forward declarations: ghost_ship_sunk uses these, which are defined later */
+static void enqueue_spawn(int spawn_idx, int fleet_size, int level);
+static bool try_drain_spawn_queue(void);
+
 /* ghost_ship_sunk — call this when a ghost ship completes its sink animation.
  * Frees the spawn-point slot, updates fleet membership, and starts the
  * respawn timer when the fleet has fully sunk. */
@@ -1173,6 +1230,8 @@ void ghost_ship_sunk(uint16_t ship_id) {
                 if (sp->active_count < sp->count_min && sp->respawn_timer <= 0.0f)
                     sp->respawn_timer = sp->respawn_delay_s;
             }
+            /* Fleet slot freed — immediately try to spawn a queued fleet */
+            try_drain_spawn_queue();
         }
     } else {
         /* Manual / unfleeted ship — start timer immediately */
@@ -1203,7 +1262,9 @@ static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
     }
     if (fi < 0) {
         if (ghost_fleet_count >= MAX_GHOST_FLEETS) {
-            log_warn("ghost_fleets: table full, cannot spawn fleet");
+            /* Should not happen — callers check for a free slot first.
+             * Re-enqueue so the spawn retries when a slot frees up. */
+            enqueue_spawn(spawn_idx, fleet_size, level);
             return;
         }
         fi = ghost_fleet_count++;
@@ -1260,11 +1321,74 @@ static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
              spn->id, spn->label, fi, fleet->ship_count, level, lead_x, lead_y);
 }
 
+/* ── Spawn queue helpers ─────────────────────────────────────────────────── */
+
+static int count_global_active_ghosts(void) {
+    int n = 0;
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active && ships[s].ship_type == SHIP_TYPE_GHOST && !ships[s].is_sinking)
+            n++;
+    }
+    return n;
+}
+
+static bool spawn_zone_in_queue(int spawn_idx) {
+    int i = spawn_queue_head;
+    for (int n = 0; n < spawn_queue_len; n++) {
+        if (spawn_queue[i].spawn_idx == spawn_idx) return true;
+        i = (i + 1) % MAX_SPAWN_QUEUE;
+    }
+    return false;
+}
+
+static void enqueue_spawn(int spawn_idx, int fleet_size, int level) {
+    if (spawn_queue_len >= MAX_SPAWN_QUEUE) return; /* silently drop — very unlikely */
+    spawn_queue[spawn_queue_tail].spawn_idx  = spawn_idx;
+    spawn_queue[spawn_queue_tail].fleet_size = fleet_size;
+    spawn_queue[spawn_queue_tail].level      = level;
+    spawn_queue_tail = (spawn_queue_tail + 1) % MAX_SPAWN_QUEUE;
+    spawn_queue_len++;
+}
+
+/* Attempt to spawn the oldest queued fleet entry.
+ * Returns true when a spawn was issued so callers can loop until empty. */
+static bool try_drain_spawn_queue(void) {
+    if (spawn_queue_len == 0) return false;
+
+    /* Need a free fleet slot */
+    bool has_slot = false;
+    for (int i = 0; i < ghost_fleet_count; i++) {
+        if (!ghost_fleets[i].active) { has_slot = true; break; }
+    }
+    if (!has_slot && ghost_fleet_count >= MAX_GHOST_FLEETS) return false;
+
+    int global_active = count_global_active_ghosts();
+    if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) return false;
+
+    SpawnQueueEntry e = spawn_queue[spawn_queue_head];
+    spawn_queue_head  = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
+    spawn_queue_len--;
+
+    int fleet_size = e.fleet_size;
+    if (ghost_global_max_cap > 0) {
+        int headroom = ghost_global_max_cap - global_active;
+        if (headroom <= 0) return false;
+        if (fleet_size > headroom) fleet_size = headroom;
+    }
+
+    spawn_ghost_fleet(e.spawn_idx, fleet_size, e.level);
+    return true;
+}
+
 /* tick_ghost_spawn_points — called each server tick.
  * Counts active ghost ships per spawn point and spawns a fresh fleet when
  * the zone is clear (active_count == 0) and the respawn timer expires. */
 void tick_ghost_spawn_points(float dt) {
     if (!ghost_spawns_enabled || ghost_spawn_count == 0) return;
+
+    /* Drain any queued spawns that were waiting for a free fleet slot */
+    while (try_drain_spawn_queue())
+        ;
 
     /* Recount active ships for each spawn zone and the global total */
     for (int sp = 0; sp < ghost_spawn_count; sp++)
@@ -1280,9 +1404,6 @@ void tick_ghost_spawn_points(float dt) {
             ghost_spawns[sp_idx].active_count++;
     }
 
-    /* Respect the global cap before attempting any zone spawn */
-    if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) return;
-
     for (int sp = 0; sp < ghost_spawn_count; sp++) {
         GhostSpawnPoint *spn = &ghost_spawns[sp];
         if (!spn->enabled) continue;
@@ -1293,6 +1414,9 @@ void tick_ghost_spawn_points(float dt) {
             continue;
         }
 
+        /* Don't enqueue the same zone twice */
+        if (spawn_zone_in_queue(sp)) continue;
+
         /* Count down respawn timer */
         if (spn->respawn_timer > 0.0f) {
             spn->respawn_timer -= dt;
@@ -1300,10 +1424,13 @@ void tick_ghost_spawn_points(float dt) {
             spn->respawn_timer = 0.0f;
         }
 
+        /* Respect the global cap — stop queuing when already at limit */
+        if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) break;
+
         /* Roll fleet size in [count_min, count_max] and a single level for
          * the whole fleet in [level_min, level_max]. */
-        int size_range  = spn->count_max - spn->count_min;
-        int fleet_size  = spn->count_min + (size_range > 0
+        int size_range = spn->count_max - spn->count_min;
+        int fleet_size = spn->count_min + (size_range > 0
             ? ((int)(spn->x * 7 + (float)get_time_ms() * 0.1f) % (size_range + 1)) : 0);
 
         int level_range = spn->level_max - spn->level_min;
@@ -1312,16 +1439,19 @@ void tick_ghost_spawn_points(float dt) {
 
         if (fleet_size < 1) fleet_size = 1;
 
-        /* Clamp fleet size to whatever headroom remains under the global cap */
         if (ghost_global_max_cap > 0) {
             int headroom = ghost_global_max_cap - global_active;
-            if (headroom <= 0) break; /* no room — stop processing zones */
+            if (headroom <= 0) break;
             if (fleet_size > headroom) fleet_size = headroom;
         }
 
-        global_active += fleet_size; /* optimistic update for subsequent zone checks */
-        spawn_ghost_fleet(sp, fleet_size, lvl);
+        global_active += fleet_size; /* optimistic accounting for subsequent zones */
+        enqueue_spawn(sp, fleet_size, lvl);
     }
+
+    /* Immediately drain newly queued entries if slots are available */
+    while (try_drain_spawn_queue())
+        ;
 }
 
 /* ghost_spawns_to_json — serialise the spawn-point config to JSON.
