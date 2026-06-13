@@ -116,9 +116,14 @@ export class PredictionEngine {
   
   // Forced server correction: there is NO movement-prediction reconciliation (the client has
   // semi-authority — the server adopts our position). The only correction is for deliberate
-  // server moves the client can't know about (teleport, respawn, forced dismount): when the
-  // server places us further than this many units from the running prediction, adopt it.
-  private static readonly FORCED_CORRECTION_THRESHOLD = 60.0;
+  // server moves the client can't know about (teleport, respawn, forced dismount, cannon
+  // knockback): when the server places us further than this many units from the running
+  // prediction, adopt it.
+  //
+  // Must be LESS THAN SMOOTH_ERROR_MAX so that medium corrections (e.g. 20–60 px cannon
+  // knockback) go through the smooth visual-offset path rather than being ignored outright.
+  // Setting this equal to SMOOTH_ERROR_MAX makes the smooth path unreachable (dead code).
+  private static readonly FORCED_CORRECTION_THRESHOLD = 20.0;
   
   // Input validation
   private inputValidation: InputValidationMetrics = {
