@@ -13,4 +13,15 @@ export default defineConfig({
       '@tools': path.resolve(process.cwd(), 'src/tools'),
     },
   },
+  server: {
+    proxy: {
+      /* Forward /admin/* → local admin server so the world editor works in dev
+       * without CORS issues. The admin server always binds to 127.0.0.1:8081. */
+      '/admin': {
+        target: 'http://127.0.0.1:8081',
+        changeOrigin: true,
+        rewrite: (p) => p.replace(/^\/admin/, ''),
+      },
+    },
+  },
 })

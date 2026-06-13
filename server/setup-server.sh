@@ -17,7 +17,7 @@ sudo chown -R $USER:$USER /opt/pirate-game
 # 2. Install dependencies
 echo "📦 Installing dependencies..."
 sudo apt-get update
-sudo apt-get install -y libssl3 libjson-c5 nginx certbot python3-certbot-nginx
+sudo apt-get install -y libssl3 libjson-c5 nginx certbot python3-certbot-nginx apache2-utils
 
 # Install Node.js (for auth server) if not present
 if ! command -v node &> /dev/null; then
@@ -59,6 +59,7 @@ WorkingDirectory=/opt/pirate-game
 ExecStart=/opt/pirate-game/bin/pirate-server
 Restart=always
 RestartSec=10
+EnvironmentFile=/opt/pirate-game/config/auth.env
 StandardOutput=append:/opt/pirate-game/logs/server.log
 StandardError=append:/opt/pirate-game/logs/error.log
 
@@ -104,7 +105,7 @@ if command -v ufw &> /dev/null; then
     sudo ufw allow 80/tcp comment 'HTTP nginx'
     sudo ufw allow 443/tcp comment 'HTTPS nginx'
     sudo ufw allow 8082/tcp comment 'Game WebSocket'
-    sudo ufw allow 8081/tcp comment 'Game Admin Panel'
+    # Admin panel (port 8081) binds to 127.0.0.1 — proxied via nginx /admin/ with Basic Auth
     sudo ufw allow 8080/udp comment 'Game UDP future'
     # Auth server listens on loopback only — nginx proxies /auth/ to it
     echo "✅ UFW rules added (including SSH)"
@@ -130,7 +131,7 @@ else
         sudo ufw allow 80/tcp comment 'HTTP nginx'
         sudo ufw allow 443/tcp comment 'HTTPS nginx'
         sudo ufw allow 8082/tcp comment 'Game WebSocket'
-        sudo ufw allow 8081/tcp comment 'Game Admin Panel'
+        # Admin panel (port 8081) binds to 127.0.0.1 — proxied via nginx /admin/ with Basic Auth
         sudo ufw allow 8080/udp comment 'Game UDP future'
         # Auth server proxied via nginx — no direct public port needed
         
@@ -165,7 +166,7 @@ else
         sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment "HTTP (nginx)"
         sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT -m comment --comment "HTTPS (nginx)"
         sudo iptables -A INPUT -p tcp --dport 8082 -j ACCEPT -m comment --comment "Game WebSocket"
-        sudo iptables -A INPUT -p tcp --dport 8081 -j ACCEPT -m comment --comment "Admin Panel"
+        # Admin panel (port 8081) binds to 127.0.0.1 — proxied via nginx /admin/ with Basic Auth
         sudo iptables -A INPUT -p udp --dport 8080 -j ACCEPT -m comment --comment "UDP (future)"
         # Auth server proxied via nginx — no direct public port needed
         
@@ -181,7 +182,18 @@ echo ""
 echo "✅ Setup complete!"
 echo ""
 
-# 8. Configure nginx reverse proxy
+# 8. Generate admin panel credentials
+echo ""
+echo "🔐 Setting up admin panel credentials..."
+read -p "Enter admin panel username: " ADMIN_USER
+read -s -p "Enter admin panel password: " ADMIN_PASS
+echo ""
+sudo htpasswd -bc /opt/pirate-game/config/admin.htpasswd "$ADMIN_USER" "$ADMIN_PASS"
+sudo chmod 640 /opt/pirate-game/config/admin.htpasswd
+echo "✅ Admin credentials saved to /opt/pirate-game/config/admin.htpasswd"
+echo "   Access the panel at: https://YOUR_DOMAIN/admin/"
+
+# 9. Configure nginx reverse proxy
 echo "🌐 Configuring nginx reverse proxy..."
 read -p "Enter your domain name (or server IP if no domain, e.g. example.com): " SERVER_DOMAIN
 
@@ -200,6 +212,20 @@ server {
     # Proxy auth API to Node.js auth server (loopback)
     location /auth/ {
         proxy_pass http://127.0.0.1:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # Admin panel — password-protected, proxied to loopback-only admin HTTP server.
+    # Port 8081 is NOT open in the firewall; nginx is the only entry point.
+    location /admin/ {
+        auth_basic "Pirate Game Admin";
+        auth_basic_user_file /opt/pirate-game/config/admin.htpasswd;
+
+        proxy_pass http://127.0.0.1:8081/;
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
@@ -242,14 +268,14 @@ echo ""
 echo "Firewall ports opened:"
 echo "  - 22/tcp:   SSH"
 echo "  - 80/tcp:   HTTP (nginx, redirect to HTTPS)"
-echo "  - 443/tcp:  HTTPS (nginx — proxies /auth/ and /ws)"
+echo "  - 443/tcp:  HTTPS (nginx — proxies /auth/, /admin/, and /ws)"
 echo "  - 8082/tcp: WebSocket (game traffic, direct)"
-echo "  - 8081/tcp: Admin panel"
 echo "  - 8080/udp: UDP traffic (future feature)"
-echo "  - 3001/tcp: Auth server (loopback only — proxied via nginx)"
+echo "  - 3001/tcp: Auth server (loopback only — proxied via nginx /auth/)"
+echo "  - 8081/tcp: Admin panel (loopback only — proxied via nginx /admin/ with Basic Auth)"
 echo ""
 echo "Next steps:"
-echo "1. Edit /opt/pirate-game/config/auth.env — verify JWT_SECRET is set by CI"
+echo "1. Edit /opt/pirate-game/config/auth.env — verify JWT_SECRET is set"
 echo "2. Make sure GitHub secrets are set: AUTH_JWT_SECRET, AUTH_CORS_ORIGINS"
 echo "3. Update VITE_AUTH_URL in deploy-client.yml to use your domain (if not already)"
 echo "4. Push code to main branch — GitHub Actions will deploy both servers"
@@ -258,4 +284,5 @@ echo "6. Start auth server:  sudo systemctl start pirate-auth"
 echo "7. Check status:       sudo systemctl status pirate-server pirate-auth nginx"
 echo "8. View game logs:     sudo journalctl -u pirate-server -f"
 echo "9. View auth logs:     sudo journalctl -u pirate-auth -f"
-echo "10. Access admin panel: http://your-server-ip:8081"
+echo "10. Access admin panel: https://${SERVER_DOMAIN}/admin/"
+echo "    (username/password set during this setup — re-run htpasswd to change)"

@@ -2318,6 +2318,7 @@ int websocket_server_init(uint16_t port) {
     islands_generate_zone_resources();
     islands_generate_trees();
     islands_build_grid();
+    load_ghost_spawns("data/ghost_spawns.json");
 
     memset(&ws_server, 0, sizeof(ws_server));
     ws_server.port = port;
@@ -8777,6 +8778,8 @@ void websocket_server_tick(float dt) {
                         for (int sv = 0; sv < n_survivors; sv++) {
                             spawn_unclaimed_npc(sinking_ship->x, sinking_ship->y, sv);
                         }
+                        /* Notify spawn-point system so the slot can respawn */
+                        ghost_ship_sunk(sinking_ship->ship_id);
                     }
 
                     /* Broadcast SHIP_SINKING so clients start the animation immediately */
@@ -9394,6 +9397,9 @@ void websocket_server_tick(float dt) {
 
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);
+
+    // ===== TICK GHOST SPAWN POINTS (configured respawn system) =====
+    tick_ghost_spawn_points(dt);
 
     // ===== TICK RESOURCE RESPAWNS =====
     tick_resource_respawn();

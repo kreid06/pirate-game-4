@@ -90,6 +90,9 @@ int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y);
 int admin_api_set_player_company(struct HttpResponse* resp, uint32_t player_id, uint8_t company_id);
 int admin_api_islands(struct HttpResponse* resp);
 int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t body_len);
+int admin_api_get_ghost_spawns(struct HttpResponse *resp);
+int admin_api_save_ghost_spawns(struct HttpResponse *resp, const char *body, size_t body_len);
+int admin_api_save_island_positions(struct HttpResponse *resp, const char *body, size_t body_len);
 
 // Static content serving
 int admin_serve_dashboard(struct HttpResponse* resp);

@@ -3,6 +3,7 @@
 #include "sim/island.h"
 #include "net/network.h"
 #include "net/websocket_server.h"
+#include "net/ship_init.h"
 #include "input_validation.h"
 #include "util/log.h"
 #include "util/time.h"
@@ -858,8 +859,8 @@ int admin_api_islands(struct HttpResponse* resp) {
         if (ii > 0)
             ISL_APPEND(",");
 
-        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\"",
-            isl->id, isl->x, isl->y, isl->preset);
+        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"rotation_deg\":%.4f,\"preset\":\"%s\"",
+            isl->id, isl->x, isl->y, isl->rotation_deg, isl->preset);
 
         if (isl->vertex_count > 0) {
             /* Polygon island — emit shape vertices as local offsets from centre */
@@ -1054,6 +1055,103 @@ int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t b
     resp->status_code = 200;
     resp->content_type = "application/json";
     resp->body = save_resp_buf;
+    resp->body_length = (size_t)len;
+    return 0;
+}
+
+/* ── Ghost spawn-point API ──────────────────────────────────────────────── */
+
+static char ghost_spawn_json_buf[65536];
+
+int admin_api_get_ghost_spawns(struct HttpResponse *resp) {
+    int written = ghost_spawns_to_json(ghost_spawn_json_buf, sizeof(ghost_spawn_json_buf));
+    if (written < 0) {
+        resp->status_code = 500;
+        resp->content_type = "application/json";
+        resp->body = "{\"error\":\"buffer overflow\"}";
+        resp->body_length = 26;
+        return -1;
+    }
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = ghost_spawn_json_buf;
+    resp->body_length = (size_t)written;
+    return 0;
+}
+
+int admin_api_save_ghost_spawns(struct HttpResponse *resp, const char *body, size_t body_len) {
+    static char save_gs_buf[256];
+    const char *path = "data/ghost_spawns.json";
+
+    /* Validate that body is parseable JSON before writing */
+    json_object *test = json_tokener_parse(body);
+    if (!test) {
+        int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"error\":\"invalid JSON\"}");
+        resp->status_code = 400;
+        resp->content_type = "application/json";
+        resp->body = save_gs_buf;
+        resp->body_length = (size_t)len;
+        return -1;
+    }
+    json_object_put(test);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"error\":\"cannot write %s\"}", path);
+        resp->status_code = 500;
+        resp->content_type = "application/json";
+        resp->body = save_gs_buf;
+        resp->body_length = (size_t)len;
+        return -1;
+    }
+    fwrite(body, 1, body_len, f);
+    fclose(f);
+
+    /* Hot-reload */
+    load_ghost_spawns(path);
+
+    int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"ok\":true}");
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = save_gs_buf;
+    resp->body_length = (size_t)len;
+    return 0;
+}
+
+/* ── Island positions API ───────────────────────────────────────────────── */
+/* Saves the full islands.json (positions + rotations) from the world editor.
+ * Body must be a JSON object: { "islands": [ { "id", "x", "y", "rotation_deg", "template" }, … ] } */
+int admin_api_save_island_positions(struct HttpResponse *resp, const char *body, size_t body_len) {
+    static char save_ip_buf[256];
+    const char *path = "data/islands/islands.json";
+
+    json_object *root = json_tokener_parse(body);
+    if (!root) {
+        int len = snprintf(save_ip_buf, sizeof(save_ip_buf), "{\"error\":\"invalid JSON\"}");
+        resp->status_code = 400;
+        resp->content_type = "application/json";
+        resp->body = save_ip_buf;
+        resp->body_length = (size_t)len;
+        return -1;
+    }
+    json_object_put(root);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        int len = snprintf(save_ip_buf, sizeof(save_ip_buf), "{\"error\":\"cannot write %s\"}", path);
+        resp->status_code = 500;
+        resp->content_type = "application/json";
+        resp->body = save_ip_buf;
+        resp->body_length = (size_t)len;
+        return -1;
+    }
+    fwrite(body, 1, body_len, f);
+    fclose(f);
+
+    int len = snprintf(save_ip_buf, sizeof(save_ip_buf), "{\"ok\":true}");
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = save_ip_buf;
     resp->body_length = (size_t)len;
     return 0;
 }
