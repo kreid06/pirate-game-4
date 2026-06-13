@@ -76,14 +76,33 @@ const MIN_DRAG = 0.60;    // drag floor (prevents over-damping in extreme cases)
 // constantly lags behind and gets dragged forward by corrections (rubberbanding
 // while sailing). Drag must be scaled to elapsed time: factor^(dt × 30).
 const SERVER_TICK_RATE = 30;
+const SIM_TICK = 1 / SERVER_TICK_RATE; // fixed physics step — MUST match server cadence
 
-// Correction blend: how quickly we snap toward authoritative state after divergence.
-// Expressed as seconds to complete the correction interpolation.
-const CORRECTION_DURATION  = 0.12; // seconds — fast enough to not feel laggy
-const CORRECTION_SNAP_POS  = 50;   // px  — snap immediately above this divergence
-const CORRECTION_SNAP_ROT  = 0.30; // rad — snap immediately above this divergence
-const CORRECTION_BLEND_POS = 5;    // px  — ignore correction below this threshold
-const CORRECTION_BLEND_ROT = 0.05; // rad — ignore correction below this threshold
+// Server slews each manned mast's angle toward desired_sail_angle at this rate
+// (websocket_server.c MAX_UNMANNED_SAIL_TURN_RATE, same as rigger NPCs).
+const SAIL_TURN_RATE = 1.2; // rad/s
+
+// POSITION correction thresholds. Position snaps the PHYSICS state instantly and
+// folds the visual jump into a decaying render offset (see getRenderErrorOffset).
+// (ROTATION uses no thresholds — its rendered heading is a damped follow of the
+// physics heading, see getRenderRotation — so it has no snap/blend constant.)
+const CORRECTION_SNAP_POS  = 50;   // px  — above this: hard pop, position offset cleared
+const CORRECTION_BLEND_POS = 5;    // px  — below this on BOTH channels: leave physics untouched
+const CORRECTION_BLEND_ROT = 0.01; // rad — below this on BOTH channels: leave physics untouched
+
+// Decaying-offset ease time constant for POSITION corrections.
+const ERR_DECAY_TAU_POS = 0.08; // s — position ease (~250 ms to settle)
+
+// Render-heading damped-follow time constant. The rendered rotation eases toward
+// the predicted physics rotation with this τ every frame (never snaps). Smaller =
+// tighter/more responsive, larger = smoother/laggier. 0.10 s lags a full-speed
+// turn (~0.34 rad/s) by ~0.034 rad (~2°) — imperceptible — while killing all snaps.
+const RENDER_ROT_FOLLOW_TAU = 0.10; // s
+
+// Above this instantaneous heading gap the follow snaps instead of easing, so a
+// genuine teleport / carrier swap doesn't spin the ship for a second. Normal-play
+// corrections are <0.1 rad, far below this, so they always ease.
+const RENDER_ROT_SNAP = Math.PI / 2; // rad (90°)
 
 // ─── Control state ──────────────────────────────────────────────────────────
 export interface ShipControlState {
@@ -107,10 +126,28 @@ export interface ShipControlState {
 export class ShipPredictor {
   private authoritativeShip: Ship | null = null;
   private predictedShip: Ship | null = null;
+  // Snapshot of predictedShip taken at the START of each step(), before physics advance.
+  // Used by renderFrame to sub-tick lerp prev→current with the accumulator alpha, identical
+  // to how the player prediction uses prevPredictedWorldState. Without this, the ship renders
+  // at discrete 120 Hz positions and appears choppy at any display rate below 120 fps.
+  private prevPredictedShip: Ship | null = null;
 
-  // Smooth correction from predicted → authoritative when diverged
-  private correctionTarget: Ship | null = null;
-  private correctionProgress = 0; // 0 → 1 over CORRECTION_DURATION
+  // Decaying render-time POSITION error offset (same technique as the player
+  // prediction's localRenderErrorOffset). When a correction arrives, the PHYSICS
+  // state snaps to the corrected pose immediately (so the simulation never
+  // accumulates error and velocity is exact from the next tick), while the VISUAL
+  // discrepancy is folded into this offset and eased out exponentially every frame.
+  private renderErrOffsetPos = Vec2.zero();
+
+  // Smoothed render HEADING. Rotation is NOT corrected via a snap+offset like
+  // position — that always popped on big corrections (the offset got cleared) and
+  // the front-loaded exponential decay still read as a "snap". Instead the rendered
+  // heading is a critically-damped follow of the predicted physics heading: every
+  // render frame it eases toward the (sub-tick-interpolated) physics rotation, so it
+  // is mathematically incapable of a discontinuity. Ships yaw slowly (~0.34 rad/s at
+  // most), so the follow lag is only ~2° — invisible — while position stays fully
+  // predicted. null until the first frame seeds it from the physics heading.
+  private smoothRenderRot: number | null = null;
 
   // Island definitions for shallow-water drag (fed by ClientApplication)
   private islands: readonly ShallowDragIsland[] = [];
@@ -119,6 +156,23 @@ export class ShipPredictor {
   // shipyard docks — collision impulse partners for the predicted ship.
   private otherShips: Ship[] = [];
   private docks: readonly DockStructure[] = [];
+
+  // Fixed-step accumulator. The physics MUST advance in whole 1/30 s ticks:
+  // the server's "blend velocity toward target, then multiply by drag" pair does
+  // not commute across step sizes, so integrating at 120 Hz (even with
+  // rate-corrected exponents) settles at a measurably different equilibrium
+  // speed than the server. That few-percent cruise-speed gap re-triggers the
+  // correction blend on nearly every snapshot while sails are open — the
+  // visible choppiness. Stepping at exactly dt = 1/30 makes simulateShip
+  // bit-for-bit equivalent to the server formulas.
+  private tickAccumulator = 0;
+
+  // Predicted per-mast sail angles (radians), keyed by module id. Server slews
+  // each manned mast toward desired_sail_angle at SAIL_TURN_RATE; the snapshot
+  // angle is RTT-stale while rotating. Re-seeded from every snapshot, slewed
+  // locally toward the helmsman's last sail-angle control input.
+  private predictedMastAngles = new Map<number, number>();
+  private desiredSailAngleRad: number | null = null;
 
   private controlState: ShipControlState = {
     sailOpenness:      0,
@@ -161,33 +215,133 @@ export class ShipPredictor {
       return;
     }
 
+    // Re-seed predicted mast angles from the fresh snapshot. The slew below
+    // (and in step) then extrapolates them toward the helmsman's desired angle,
+    // covering the snapshot-age staleness while sails rotate.
+    this.predictedMastAngles.clear();
+    for (const mod of ship.modules) {
+      if (mod.kind === 'mast' && mod.moduleData) {
+        const md = mod.moduleData as { angle?: number };
+        this.predictedMastAngles.set(mod.id, md.angle ?? 0);
+      }
+    }
+
     // Forward-project the authoritative state to "now" using the same physics
     // step the prediction runs, in ≤ one-server-tick substeps. The other-ship
     // clones (fed via setOtherShips just before this call) are equally stale,
     // so dead-reckon them forward by the same age in lockstep.
     const projected = this.cloneShip(ship);
     let remaining = Math.max(0, Math.min(0.5, snapshotAgeMs / 1000));
-    const maxSub = 1 / SERVER_TICK_RATE;
+    const maxSub = SIM_TICK;
     while (remaining > 1e-4) {
       const sub = Math.min(maxSub, remaining);
       this.advanceOtherShips(sub);
+      this.advanceSailAngles(sub);
       this.simulateShip(projected, sub);
       remaining -= sub;
     }
 
-    const posDiff = projected.position.sub(this.predictedShip.position).length();
-    const rotDiff = Math.abs(this.angleDiff(projected.rotation, this.predictedShip.rotation));
+    // dPos / dRot = projected − predicted (how far the corrected pose is AHEAD of the
+    // current prediction). angleDiff(a, b) = b − a, so pass (predicted, projected).
+    const dPos    = projected.position.sub(this.predictedShip.position);
+    const dRot    = this.angleDiff(this.predictedShip.rotation, projected.rotation);
+    const posDiff = dPos.length();
+    const rotDiff = Math.abs(dRot);
 
-    if (posDiff > CORRECTION_SNAP_POS || rotDiff > CORRECTION_SNAP_ROT) {
-      // Large divergence — hard snap
-      this.predictedShip = projected;
-      this.correctionTarget = null;
-    } else if (posDiff > CORRECTION_BLEND_POS || rotDiff > CORRECTION_BLEND_ROT) {
-      // Small divergence — start a smooth blend
-      this.correctionTarget   = projected;
-      this.correctionProgress = 0;
+    // Below threshold on BOTH channels → prediction is accurate enough, leave it.
+    if (posDiff <= CORRECTION_BLEND_POS && rotDiff <= CORRECTION_BLEND_ROT) {
+      return;
     }
-    // Below threshold → prediction is accurate enough, keep it unchanged
+
+    // Adopt the forward-projected server pose as the new PHYSICS state (so the next
+    // tick advances on the server's trajectory). POSITION folds its visual jump into
+    // a decaying offset so the on-screen position stays continuous; ROTATION does NOT
+    // use an offset at all — the rendered heading is a damped follow of this physics
+    // heading (see getRenderRotation / smoothRenderRot), which can never pop. Snapping
+    // the physics rotation here is therefore invisible: the follow just eases toward
+    // the new heading. This split is why rotation no longer "snaps due to correction".
+
+    // Keep the prev→current sub-tick lerp segment on the new trajectory; otherwise
+    // the lerp would mix the old and new trajectories for one tick (a one-frame wobble).
+    if (this.prevPredictedShip) {
+      this.prevPredictedShip.position        = this.prevPredictedShip.position.add(dPos);
+      this.prevPredictedShip.rotation       += dRot;
+      this.prevPredictedShip.velocity        = Vec2.from(projected.velocity.x, projected.velocity.y);
+      this.prevPredictedShip.angularVelocity = projected.angularVelocity;
+    }
+
+    // ── Position channel — snap physics, ease the render offset ───────────
+    if (posDiff > CORRECTION_SNAP_POS) {
+      // Teleport / heavy desync — hard pop (intended), clear the offset.
+      this.renderErrOffsetPos = Vec2.zero();
+    } else if (posDiff > CORRECTION_BLEND_POS) {
+      // Ease: cancel the physics jump, then clamp runaway same-sign accumulation.
+      let offPos = this.renderErrOffsetPos.sub(dPos);
+      if (offPos.length() > CORRECTION_SNAP_POS) offPos = Vec2.zero();
+      this.renderErrOffsetPos = offPos;
+    }
+
+    this.predictedShip = projected;
+  }
+
+  /**
+   * Decaying visual POSITION error offset, advanced by `dtSeconds` (call once per
+   * render frame). The renderer ADDS this to the lerped predicted position so
+   * position corrections ease in smoothly instead of stepping per physics tick.
+   * (Rotation is handled separately by getRenderRotation — see that method.)
+   */
+  getRenderErrorOffset(dtSeconds: number): { pos: Vec2; rot: number } {
+    const result = { pos: this.renderErrOffsetPos.clone(), rot: 0 };
+    if (dtSeconds > 0) {
+      const decayPos = Math.exp(-dtSeconds / ERR_DECAY_TAU_POS);
+      this.renderErrOffsetPos = this.renderErrOffsetPos.mul(decayPos);
+      // Kill sub-pixel remnants so the offset reaches exactly zero.
+      if (this.renderErrOffsetPos.lengthSq() < 0.01) this.renderErrOffsetPos = Vec2.zero();
+    }
+    return result;
+  }
+
+  /**
+   * Rendered ship heading: a critically-damped follow of the predicted physics
+   * heading. Call once per render frame. Unlike position, rotation is NOT corrected
+   * via snap+decaying-offset (that popped whenever the offset was cleared and the
+   * front-loaded decay still read as a "snap"). Instead the rendered heading always
+   * eases toward the sub-tick-interpolated physics heading, so it is mathematically
+   * incapable of a discontinuity. Ships yaw slowly, so the follow lag (~2° at full
+   * turn rate) is invisible while position remains fully predicted.
+   *
+   * @param extraDtSeconds Render-frame time elapsed beyond the last step() (the
+   *   engine's sub-client-tick remainder), used for the prev→current physics lerp.
+   * @param frameDtSeconds This render frame's delta time, drives the ease rate.
+   */
+  getRenderRotation(extraDtSeconds: number, frameDtSeconds: number): number {
+    if (!this.predictedShip) return this.smoothRenderRot ?? 0;
+
+    // Sub-tick-interpolated physics heading = the target the render eases toward.
+    // angleDiff(a, b) = shortest (b − a), so angleDiff(prev, predicted) = predicted − prev.
+    const alpha = this.getSubTickAlpha(extraDtSeconds);
+    const prev  = this.prevPredictedShip ?? this.predictedShip;
+    let target  = prev.rotation + this.angleDiff(prev.rotation, this.predictedShip.rotation) * alpha;
+    target = this.wrapAngle(target);
+
+    // First frame (or after a reset): seed directly, no ease.
+    if (this.smoothRenderRot === null) {
+      this.smoothRenderRot = target;
+      return target;
+    }
+
+    // delta = shortest arc FROM smoothRenderRot TO target = angleDiff(smooth, target).
+    // (Swapping the args inverts the sign and makes the follow diverge — the heading
+    // runs away from the target and wraps around forever, i.e. the ship spins.)
+    const delta = this.angleDiff(this.smoothRenderRot, target);
+    if (Math.abs(delta) > RENDER_ROT_SNAP) {
+      // Genuine teleport / carrier swap — snap rather than spin for a second.
+      this.smoothRenderRot = target;
+    } else if (frameDtSeconds > 0) {
+      const k = 1 - Math.exp(-frameDtSeconds / RENDER_ROT_FOLLOW_TAU);
+      this.smoothRenderRot = this.wrapAngle(this.smoothRenderRot + delta * k);
+    }
+    return this.smoothRenderRot;
   }
 
   // ── Control input tracking ──────────────────────────────────────────────
@@ -209,6 +363,16 @@ export class ShipPredictor {
   /** Called when the helmsman's reverse-thrust key changes state. */
   onReverseThrust(active: boolean): void {
     this.controlState.reverseThrust = active;
+  }
+
+  /**
+   * Called when SHIP_SAIL_ANGLE_CONTROL is sent to the server (degrees, −60…+60).
+   * The server slews each manned mast toward this at SAIL_TURN_RATE; mirroring the
+   * slew locally keeps the predicted sail-to-wind alignment (and thus thrust) in
+   * sync while the sails rotate, instead of lagging by the snapshot age.
+   */
+  onSailAngleControl(desiredAngleDeg: number): void {
+    this.desiredSailAngleRad = desiredAngleDeg * Math.PI / 180;
   }
 
   /**
@@ -264,6 +428,24 @@ export class ShipPredictor {
   step(dt: number): void {
     if (!this.predictedShip) return;
 
+    // Fixed-step accumulator: physics ONLY advances in whole server ticks (1/30 s)
+    // so the blend+drag composition is identical to the server's (see field docs).
+    // The leftover fraction drives the renderer's sub-tick lerp via getSubTickAlpha.
+    this.tickAccumulator += dt;
+    // Cap after tab-out / long stalls — don't grind through seconds of catch-up.
+    if (this.tickAccumulator > 0.25) this.tickAccumulator = 0.25;
+
+    while (this.tickAccumulator >= SIM_TICK) {
+      this.tickAccumulator -= SIM_TICK;
+      // Snapshot before advancing so renderFrame can lerp prev→current.
+      this.prevPredictedShip = this.cloneShip(this.predictedShip);
+      this.advanceTick(SIM_TICK);
+    }
+  }
+
+  /** One whole physics tick (dt = SIM_TICK), exactly mirroring a server tick. */
+  private advanceTick(dt: number): void {
+    if (!this.predictedShip) return;
     const ctrl = this.controlState;
 
     // ── 1. Rudder smoothing (websocket_server.c, runs every 200ms but we apply
@@ -275,50 +457,12 @@ export class ShipPredictor {
                            Math.min( MAX_RUDDER_ANGLE, ctrl.rudderAngle + rudderChange));
 
     // ── 2-6. Shared physics core (also used to forward-project snapshots) ──
-    // Dead-reckon the other-ship clones exactly once per step, then simulate.
+    // Dead-reckon the other-ship clones exactly once per tick, then simulate.
+    // Corrections are NOT blended here: onServerShip snaps the physics state and
+    // folds the visual delta into the decaying render error offset instead.
     this.advanceOtherShips(dt);
+    this.advanceSailAngles(dt);
     this.simulateShip(this.predictedShip, dt);
-
-    // ── 7. Smooth correction blend ────────────────────────────────────────
-    const ship = this.predictedShip;
-    if (this.correctionTarget) {
-      // CRITICAL: advance the correction target through the SAME physics as the
-      // predicted ship. The target is the server state forward-projected to the
-      // snapshot's arrival time — if left frozen, every blend step pulls the
-      // predicted ship backwards toward a stale position (≈ speed × blend age),
-      // which reads as constant lag/rubberbanding whenever small corrections
-      // are active (e.g. tacking through the wind, where transient divergence
-      // keeps restarting the blend on every snapshot).
-      this.simulateShip(this.correctionTarget, dt);
-
-      this.correctionProgress = Math.min(1.0, this.correctionProgress + dt / CORRECTION_DURATION);
-      const alpha = this.smoothStep(this.correctionProgress);
-
-      ship.position = Vec2.from(
-        ship.position.x + (this.correctionTarget.position.x - ship.position.x) * alpha,
-        ship.position.y + (this.correctionTarget.position.y - ship.position.y) * alpha,
-      );
-      ship.rotation = this.lerpAngle(ship.rotation, this.correctionTarget.rotation, alpha);
-
-      // Blend kinematics too. Velocity error is the SOURCE of repeated position
-      // divergence — snapshots arrive faster than CORRECTION_DURATION, so the
-      // old "snap velocity at completion" never ran and Δv persisted forever,
-      // re-diverging the position right after every partial correction.
-      ship.velocity = Vec2.from(
-        ship.velocity.x + (this.correctionTarget.velocity.x - ship.velocity.x) * alpha,
-        ship.velocity.y + (this.correctionTarget.velocity.y - ship.velocity.y) * alpha,
-      );
-      ship.angularVelocity +=
-        (this.correctionTarget.angularVelocity - ship.angularVelocity) * alpha;
-
-      if (this.correctionProgress >= 1.0) {
-        // Blend complete — snap remaining delta and clear
-        ship.velocity        = Vec2.from(this.correctionTarget.velocity.x, this.correctionTarget.velocity.y);
-        ship.angularVelocity = this.correctionTarget.angularVelocity;
-        this.correctionTarget   = null;
-        this.correctionProgress = 0;
-      }
-    }
   }
 
   /**
@@ -353,7 +497,10 @@ export class ShipPredictor {
         if (seQ8 !== undefined && seQ8 > 256) eff *= seQ8 / 256;
         totalEff += eff;
 
-        const sailWorld = (md.angle ?? 0) + ship.rotation + Math.PI / 2;
+        // Prefer the locally-slewed mast angle (mirrors the server's 1.2 rad/s
+        // slew toward the helm's desired angle) over the RTT-stale snapshot value.
+        const mastAngle = this.predictedMastAngles.get(mod.id) ?? md.angle ?? 0;
+        const sailWorld = mastAngle + ship.rotation + Math.PI / 2;
         let diff = sailWorld - ctrl.windAngle;
         while (diff >  Math.PI) diff -= 2 * Math.PI;
         while (diff < -Math.PI) diff += 2 * Math.PI;
@@ -477,6 +624,28 @@ export class ShipPredictor {
   }
 
   /**
+   * Slew predicted mast angles toward the helm's desired sail angle, mirroring
+   * the server (websocket_server.c: MAX_UNMANNED_SAIL_TURN_RATE = 1.2 rad/s).
+   * Must be called exactly once per time advance (like advanceOtherShips) —
+   * NOT from simulateShip, which also runs on the correction-blend target.
+   * No-op until the helmsman has sent a sail-angle control; the map is then
+   * re-seeded from every snapshot, so a wrong guess (e.g. no rigger manning
+   * the mast, where the server freezes the sail) only persists for one
+   * snapshot interval.
+   */
+  private advanceSailAngles(dt: number): void {
+    if (this.desiredSailAngleRad === null) return;
+    const maxStep = SAIL_TURN_RATE * dt;
+    for (const [id, cur] of this.predictedMastAngles) {
+      let diff = this.desiredSailAngleRad - cur;
+      while (diff >  Math.PI) diff -= 2 * Math.PI;
+      while (diff < -Math.PI) diff += 2 * Math.PI;
+      const step = Math.max(-maxStep, Math.min(maxStep, diff));
+      this.predictedMastAngles.set(id, cur + step);
+    }
+  }
+
+  /**
    * Port of island_shallow_water_depth (island.h) for polygon islands with an
    * explicit shallow polygon: 0 outside the shallow ring / inside the island,
    * 1.0 right at the sand boundary, linear gradient between. Islands without
@@ -552,6 +721,30 @@ export class ShipPredictor {
     return this.predictedShip;
   }
 
+  /**
+   * Returns the predicted ship state from one physics tick (1/30 s) ago.
+   * Pair with getPredictedShip() and lerp by getSubTickAlpha() to render the
+   * ship smoothly between the fixed 30 Hz physics ticks.
+   */
+  getPrevPredictedShip(): Ship | null {
+    return this.prevPredictedShip ?? this.predictedShip;
+  }
+
+  /**
+   * Fraction (0–1) of the current physics tick already elapsed. Use as the lerp
+   * factor between getPrevPredictedShip() and getPredictedShip() when rendering.
+   * The predictor's physics deliberately advances in whole 1/30 s server ticks
+   * (see tickAccumulator docs), so the renderer must use THIS alpha — not the
+   * client's 120 Hz fixed-step alpha — to bridge the 33 ms position steps.
+   *
+   * @param extraDtSeconds Render-frame time already elapsed beyond the last
+   *   step() call (the engine's sub-client-tick remainder), so the lerp stays
+   *   smooth past the 120 Hz step quantization.
+   */
+  getSubTickAlpha(extraDtSeconds = 0): number {
+    return Math.min(1, (this.tickAccumulator + extraDtSeconds) / SIM_TICK);
+  }
+
   /** Returns the last authoritative server state (unmodified). */
   getAuthoritativeShip(): Ship | null {
     return this.authoritativeShip;
@@ -587,16 +780,5 @@ export class ShipPredictor {
     a = a % TWO_PI;
     if (a < 0) a += TWO_PI;
     return a;
-  }
-
-  /** Spherical linear interpolation for angles. */
-  private lerpAngle(from: number, to: number, t: number): number {
-    return this.wrapAngle(from + this.angleDiff(from, to) * t);
-  }
-
-  /** Quintic ease-in-out for smooth correction blending. */
-  private smoothStep(t: number): number {
-    t = Math.max(0, Math.min(1, t));
-    return t * t * t * (t * (t * 6 - 15) + 10);
   }
 }

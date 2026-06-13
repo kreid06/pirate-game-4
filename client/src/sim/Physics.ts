@@ -1153,15 +1153,96 @@ function mapCollisionToPlankIndex(ship: Ship, collisionPoint: Vec2, totalPlanks:
 }
 
 /**
- * Get the plank index for a given hull edge index
- * Assumes 1:1 mapping between hull edges and planks
- * 
- * @param hullEdgeIndex - Index of the hull edge (0-based)
- * @param totalPlanks - Total number of planks
- * @returns Plank index corresponding to this hull edge
+ * Map a hull edge — identified by its DESTINATION vertex index in the polygon
+ * loop — to one of the 10 brigantine plank slots (0-9).
+ *
+ * Direct port of server hull_edge_to_plank_slot() (websocket_server.c).
+ * Vertex layout for the brigantine hull (client builds 48 verts, server uses 47;
+ * the extra trailing port vertex falls into the same slot-9 range):
+ *   0..12  — bow curve      → slot 0 (bow_port; twin = slot 1)
+ *   13..24 — stbd straight  → slots 2/3/4 (4 edges each)
+ *   25..36 — stern curve    → slot 5 (stern_stbd; twin = slot 6)
+ *   37..   — port straight  → slots 7/8/9 (+ closing edge dest=0 → slot 9)
  */
-function mapHullEdgeToPlankIndex(hullEdgeIndex: number, totalPlanks: number): number {
-  return hullEdgeIndex % totalPlanks;
+function hullEdgeToPlankSlot(edgeDestIndex: number, nv: number): number {
+  if (edgeDestIndex >= 1  && edgeDestIndex <= 12) return 0; // bow curve
+  if (edgeDestIndex >= 13 && edgeDestIndex <= 16) return 2; // stbd seg 0
+  if (edgeDestIndex >= 17 && edgeDestIndex <= 20) return 3; // stbd seg 1
+  if (edgeDestIndex >= 21 && edgeDestIndex <= 24) return 4; // stbd seg 2
+  if (edgeDestIndex >= 25 && edgeDestIndex <= 36) return 5; // stern curve
+  if (edgeDestIndex >= 37 && edgeDestIndex <= 40) return 7; // port seg 0
+  if (edgeDestIndex >= 41 && edgeDestIndex <= 44) return 8; // port seg 1
+  if (edgeDestIndex === 0 || (edgeDestIndex >= 45 && edgeDestIndex < nv)) return 9; // port seg 2 + close
+  return -1;
+}
+
+/**
+ * Twin plank slot for the bow/stern dual-plank sections, or -1.
+ * Port of server hull_plank_twin_slot(): those curves carry TWO planks
+ * (port+stbd faces) and are only breached when both are destroyed.
+ */
+function hullPlankTwinSlot(slot: number): number {
+  if (slot === 0) return 1; // bow_port ↔ bow_stbd
+  if (slot === 5) return 6; // stern_stbd ↔ stern_port
+  return -1;
+}
+
+/**
+ * Resolve a plank module to its server slot number (0-9) from the template's
+ * sectionName/segmentIndex (set in PlankSegments.createCompleteHullSegments,
+ * which mirrors the server's PLANK_KEYS table). Returns null when unknown.
+ */
+function plankModuleToSlot(data: { sectionName?: string; segmentIndex?: number }): number | null {
+  switch (data.sectionName) {
+    case 'bow_port':        return 0;
+    case 'bow_starboard':   return 1;
+    case 'starboard_side':  return 2 + (data.segmentIndex ?? 0); // segs 0-2 → slots 2-4
+    case 'stern_starboard': return 5;
+    case 'stern_port':      return 6;
+    case 'port_side':       return 7 + (data.segmentIndex ?? 0); // segs 0-2 → slots 7-9
+    default:                return null;
+  }
+}
+
+/**
+ * Build plank health keyed by SERVER SLOT (0-9).
+ * Falls back to template array order when sectionName is missing — the
+ * template emits planks in exact slot order 0-9.
+ * Returns null when the ship has no plank modules (solid hull).
+ */
+function buildPlankSlotHealth(ship: Ship): Map<number, number> | null {
+  const planks = ship.modules.filter(m =>
+    m.kind === 'plank' && m.moduleData && m.moduleData.kind === 'plank'
+  );
+  if (planks.length === 0) return null;
+
+  const slotHealth = new Map<number, number>();
+  planks.forEach((plank, order) => {
+    const data = plank.moduleData as { sectionName?: string; segmentIndex?: number; health?: number };
+    const slot = plankModuleToSlot(data) ?? order;
+    slotHealth.set(slot, data.health ?? 0);
+  });
+  return slotHealth;
+}
+
+/**
+ * True when the hull edge ending at vertex `edgeDestIndex` is guarded by at
+ * least one living plank. Mirrors server hull_section_plank_alive(): bow and
+ * stern sections check BOTH covering planks; a missing slot counts as dead
+ * (the server treats an absent plank module as a breach).
+ */
+function hullEdgeAlive(
+  edgeDestIndex: number,
+  nv: number,
+  slotHealth: Map<number, number> | null
+): boolean {
+  if (!slotHealth) return true; // no plank modules: solid hull
+  const slot = hullEdgeToPlankSlot(edgeDestIndex, nv);
+  if (slot < 0) return true;    // unknown edge → treat as solid (server parity)
+  if ((slotHealth.get(slot) ?? 0) > 0) return true;
+  const twin = hullPlankTwinSlot(slot);
+  if (twin >= 0 && (slotHealth.get(twin) ?? 0) > 0) return true;
+  return false;                 // all covering planks gone — hull breach
 }
 
 /**
@@ -1173,49 +1254,27 @@ function mapHullEdgeToPlankIndex(hullEdgeIndex: number, totalPlanks: number): nu
  */
 function createHealthyHullSegments(ship: Ship): Array<{start: Vec2, end: Vec2, plankIndex: number}> {
   const segments: Array<{start: Vec2, end: Vec2, plankIndex: number}> = [];
-  
-  // Get all plank modules and build health map
-  const planks = ship.modules.filter(m => 
-    m.kind === 'plank' && 
-    m.moduleData && 
-    m.moduleData.kind === 'plank'
-  );
-  
-  // Build plank health lookup by index
-  const plankHealthMap = new Map<number, number>();
-  for (const plank of planks) {
-    if (plank.moduleData && plank.moduleData.kind === 'plank') {
-      // Use segmentIndex if available, otherwise calculate from module ID
-      const plankIndex = plank.moduleData.segmentIndex ?? (plank.id - 100);
-      plankHealthMap.set(plankIndex, plank.moduleData.health);
-    }
-  }
-  
+
+  // Plank health keyed by server slot (0-9), section-aware like the server.
+  const slotHealth = buildPlankSlotHealth(ship);
+
   // Transform hull to world coordinates
   const hullWorld = ship.hull.map(p => p.rotate(ship.rotation).add(ship.position));
-  
-  // Create segments only for healthy planks
-  for (let i = 0; i < hullWorld.length; i++) {
-    const startPoint = hullWorld[i];
-    const endPoint = hullWorld[(i + 1) % hullWorld.length];
-    const plankIndex = mapHullEdgeToPlankIndex(i, planks.length);
-    
-    // Check if this plank is healthy (health > 0)
-    const plankHealth = plankHealthMap.get(plankIndex) ?? 100;
-    
-    if (plankHealth > 0) {
-      // Plank is healthy - add collision segment
-      segments.push({
-        start: startPoint,
-        end: endPoint,
-        plankIndex: plankIndex
-      });
-    } else {
-      // Plank is destroyed - skip this segment (creates a gap)
-      // Players can walk/fall through here
-    }
+  const n = hullWorld.length;
+
+  // Create segments only for hull edges guarded by a living plank.
+  // Edges are keyed by their DESTINATION vertex index, matching the server.
+  for (let i = 0; i < n; i++) {
+    const destIndex = (i + 1) % n;
+    if (!hullEdgeAlive(destIndex, n, slotHealth)) continue; // breach — gap
+
+    segments.push({
+      start: hullWorld[i],
+      end: hullWorld[destIndex],
+      plankIndex: hullEdgeToPlankSlot(destIndex, n),
+    });
   }
-  
+
   return segments;
 }
 
@@ -1241,21 +1300,13 @@ function resolveSwimmerHullCollision(
   const n = hull.length;
   if (n < 3) return null;
 
-  // Plank-alive lookup per hull edge (same mapping as createHealthyHullSegments).
-  const planks = ship.modules.filter(m =>
-    m.kind === 'plank' && m.moduleData && m.moduleData.kind === 'plank'
-  );
-  const plankHealthMap = new Map<number, number>();
-  for (const plank of planks) {
-    const data = plank.moduleData as any;
-    const idx = data.segmentIndex ?? (plank.id - 100);
-    plankHealthMap.set(idx, data.health);
-  }
-  const edgeAlive = (i: number): boolean => {
-    if (planks.length === 0) return true; // no plank modules: solid hull
-    const health = plankHealthMap.get(mapHullEdgeToPlankIndex(i, planks.length)) ?? 100;
-    return health > 0;
-  };
+  // Plank health keyed by server slot (0-9). Edges are keyed by their
+  // DESTINATION vertex index — the same convention as the server's
+  // `for (i, j=i-1)` loop passing `i` to hull_edge_to_plank_slot(). Our loops
+  // below walk edges as (i → i+1), so the edge key is (i + 1) % n.
+  const slotHealth = buildPlankSlotHealth(ship);
+  const edgeAlive = (i: number): boolean =>
+    hullEdgeAlive((i + 1) % n, n, slotHealth);
 
   // Work in ship-local space so the hull stays static.
   const cosL = Math.cos(-ship.rotation), sinL = Math.sin(-ship.rotation);
@@ -1660,5 +1711,4 @@ function applyCollisionDamageToShip(ship: Ship, contactPoint: Vec2, baseDamage: 
       }
     }
   }
-}
 }

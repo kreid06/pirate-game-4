@@ -459,8 +459,14 @@ export class ClientApplication {
 
       // Mirror deck-level transitions to the server so its per-deck collision
       // filter (lower deck = only masts block movement) stays in sync.
+      // Also update the prediction engine immediately so the physics collision
+      // resolver uses the correct deck-filter on the very next tick, without
+      // waiting for the server echo (which would arrive one RTT later and let
+      // the player walk through ramp walls / fall through upper-deck floors
+      // for the duration of that round trip).
       this.renderSystem.onDeckLevelChange = (deckLevel: number) => {
         this.networkManager.sendPlayerSetDeck(deckLevel);
+        this.predictionEngine.setLocalPlayerDeckLevel(deckLevel);
       };
 
       // Initialize rename dialog (needs canvas to position the HTML input overlay)
@@ -1608,6 +1614,10 @@ export class ClientApplication {
       };
       this.inputManager.onShipSailAngleControl = (desiredAngle) => {
         this.networkManager.sendShipSailAngleControl(desiredAngle);
+        // Mirror into the ship predictor so it can slew the predicted mast angle
+        // (1.2 rad/s, same as server) instead of using the RTT-stale snapshot
+        // angle — keeps predicted wind-alignment thrust in sync while rotating.
+        this.shipPredictor?.onSailAngleControl(desiredAngle);
       };
       
       // Cannon control callbacks
@@ -3884,8 +3894,11 @@ export class ClientApplication {
     
     // Update prediction engine (client-side simulation)
     if (this.authoritativeWorldState && this.state === ClientState.IN_GAME) {
-      // Step the ship predictor every fixed tick (mirrors server physics rate)
-      this.shipPredictor?.step(dt);
+      // Step the ship predictor every fixed tick (mirrors server physics rate).
+      // Skipped when ship prediction is disabled — ships then use pure interpolation.
+      if (this.config.prediction.enableShipPrediction) {
+        this.shipPredictor?.step(dt);
+      }
 
       // Snapshot previous state for sub-tick position lerp in renderFrame
       this.prevPredictedWorldState = this.predictedWorldState;
@@ -4113,21 +4126,57 @@ export class ClientApplication {
     
     // Splice ShipPredictor output — use physics-accurate predicted position/rotation/velocity
     // for the local player's ship, same pattern as the player prediction splice above.
-    if (predictionEnabled && assignedPlayerId !== null && worldToRender) {
+    // Sub-tick lerp (same alpha as the local player) eliminates the staircase jitter that
+    // would otherwise appear when the fixed 120 Hz sim step advances at a different rate
+    // than the display frame rate.
+    if (predictionEnabled && this.config.prediction.enableShipPrediction
+        && assignedPlayerId !== null && worldToRender) {
       const predictedShip = this.shipPredictor?.getPredictedShip();
+      const prevShip      = this.shipPredictor?.getPrevPredictedShip();
       if (predictedShip) {
         const myPlayerIdx = worldToRender.players.findIndex(p => p.id === assignedPlayerId);
         const myPlayer = myPlayerIdx >= 0 ? worldToRender.players[myPlayerIdx] : undefined;
         if (myPlayer?.carrierId) {
           const shipIdx = worldToRender.ships.findIndex(s => s.id === myPlayer.carrierId);
           if (shipIdx >= 0) {
+            // Sub-tick lerp: blend prev→current to eliminate staircase micro-jitter.
+            // IMPORTANT: the ship predictor steps physics in fixed 1/30 s server
+            // ticks (exact server math), so use ITS tick fraction — the engine's
+            // 120 Hz `alpha` would leave visible 33 ms position steps. Feed the
+            // engine's sub-client-tick remainder in so frame pacing stays smooth.
+            const shipAlpha = this.shipPredictor?.getSubTickAlpha(
+              alpha * this.clientTickDuration / 1000,
+            ) ?? alpha;
+            // Decaying correction offset: the predictor snaps its PHYSICS pose to
+            // server corrections instantly and hands the visual delta back here to
+            // ease out over ~80 ms, so corrections glide instead of stepping per
+            // physics tick (the prior "blend into the physics state" jittered).
+            const shipErr = this.shipPredictor?.getRenderErrorOffset(_renderDt)
+              ?? { pos: Vec2.zero(), rot: 0 };
+            const renderPos = (prevShip
+              ? prevShip.position.lerp(predictedShip.position, shipAlpha)
+              : predictedShip.position).add(shipErr.pos);
+            // Rotation is a critically-damped follow of the physics heading (never
+            // snaps), not a snap+offset like position — ships yaw slowly enough that
+            // the ~2° follow lag is invisible, and this eliminates correction snaps.
+            const renderRot = this.shipPredictor?.getRenderRotation(
+              alpha * this.clientTickDuration / 1000,
+              _renderDt,
+            ) ?? predictedShip.rotation;
+            const renderVel = prevShip
+              ? prevShip.velocity.lerp(predictedShip.velocity, shipAlpha)
+              : predictedShip.velocity;
+            const renderAngVel = prevShip
+              ? prevShip.angularVelocity + (predictedShip.angularVelocity - prevShip.angularVelocity) * shipAlpha
+              : predictedShip.angularVelocity;
+
             const newShips = worldToRender.ships.slice();
             newShips[shipIdx] = {
               ...worldToRender.ships[shipIdx], // keep server data (modules, health, etc.)
-              position:        predictedShip.position,
-              velocity:        predictedShip.velocity,
-              rotation:        predictedShip.rotation,
-              angularVelocity: predictedShip.angularVelocity,
+              position:        renderPos,
+              velocity:        renderVel,
+              rotation:        renderRot,
+              angularVelocity: renderAngVel,
             };
             worldToRender = { ...worldToRender, ships: newShips };
 
@@ -4145,16 +4194,54 @@ export class ClientApplication {
               anchor = prevLocalPlayer.localPosition.lerp(anchor, alpha);
             }
             if (anchor) {
-              const cosR = Math.cos(predictedShip.rotation);
-              const sinR = Math.sin(predictedShip.rotation);
+              const cosR = Math.cos(renderRot);
+              const sinR = Math.sin(renderRot);
               const anchoredPos = Vec2.from(
-                predictedShip.position.x + anchor.x * cosR - anchor.y * sinR,
-                predictedShip.position.y + anchor.x * sinR + anchor.y * cosR,
+                renderPos.x + anchor.x * cosR - anchor.y * sinR,
+                renderPos.y + anchor.x * sinR + anchor.y * cosR,
               ).add(_renderErrorOffset);
               const newPlayers = worldToRender.players.slice();
               newPlayers[myPlayerIdx] = { ...myPlayer, position: anchoredPos };
               worldToRender = { ...worldToRender, players: newPlayers };
             }
+          }
+        }
+      }
+    }
+
+    // Ship prediction DISABLED (default): the local player's ship renders from pure
+    // server-snapshot interpolation (already in worldToRender). We only re-anchor the
+    // local on-deck player onto that interpolated hull. The player splice above set their
+    // world position from the PREDICTION engine, which derived it against its own
+    // (RTT-old server-snapshot) copy of the ship — not the interpolated pose drawn here —
+    // so without this they'd slide/lag relative to the deck while the ship moves. The
+    // ship-local anchor (localPosition) stays client-predicted so walking is responsive;
+    // we just compose it with the rendered (interpolated) ship transform.
+    if (predictionEnabled && !this.config.prediction.enableShipPrediction
+        && assignedPlayerId !== null && worldToRender) {
+      const myPlayerIdx = worldToRender.players.findIndex(p => p.id === assignedPlayerId);
+      const myPlayer = myPlayerIdx >= 0 ? worldToRender.players[myPlayerIdx] : undefined;
+      if (myPlayer?.carrierId) {
+        const shipIdx = worldToRender.ships.findIndex(s => s.id === myPlayer.carrierId);
+        if (shipIdx >= 0) {
+          const interpShip = worldToRender.ships[shipIdx];
+          const predLocalPlayer = this.predictedWorldState?.players.find(p => p.id === assignedPlayerId);
+          const prevLocalPlayer = this.prevPredictedWorldState?.players.find(p => p.id === assignedPlayerId);
+          let anchor = predLocalPlayer?.localPosition;
+          if (anchor && prevLocalPlayer?.localPosition) {
+            // Sub-tick lerp of the local anchor (same alpha as the local player splice).
+            anchor = prevLocalPlayer.localPosition.lerp(anchor, alpha);
+          }
+          if (anchor) {
+            const cosR = Math.cos(interpShip.rotation);
+            const sinR = Math.sin(interpShip.rotation);
+            const anchoredPos = Vec2.from(
+              interpShip.position.x + anchor.x * cosR - anchor.y * sinR,
+              interpShip.position.y + anchor.x * sinR + anchor.y * cosR,
+            ).add(_renderErrorOffset);
+            const newPlayers = worldToRender.players.slice();
+            newPlayers[myPlayerIdx] = { ...myPlayer, position: anchoredPos };
+            worldToRender = { ...worldToRender, players: newPlayers };
           }
         }
       }
@@ -4867,8 +4954,9 @@ export class ClientApplication {
     // Update prediction engine with authoritative state
     this.predictionEngine.onAuthoritativeState(worldState);
 
-    // Feed ShipPredictor with server ship state + wind
-    if (this.shipPredictor) {
+    // Feed ShipPredictor with server ship state + wind.
+    // Skipped when ship prediction is disabled — ships then use pure interpolation.
+    if (this.shipPredictor && this.config.prediction.enableShipPrediction) {
       const myId = this.networkManager.getAssignedPlayerId();
       const myPlayer = worldState.players.find(p => p.id === myId);
       const playerShip = myPlayer?.carrierId ? worldState.ships.find(s => s.id === myPlayer.carrierId) : null;

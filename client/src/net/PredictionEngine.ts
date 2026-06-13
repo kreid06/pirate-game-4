@@ -335,6 +335,15 @@ export class PredictionEngine {
           localPosition: serverLocal.isMounted
             ? serverLocal.localPosition
             : (runningLocal.localPosition ?? serverLocal.localPosition),
+          // deckId: CLIENT semi-authority — the RenderSystem state machine transitions this
+          // immediately when the player enters/exits a ramp zone, then sends player_set_deck
+          // to the server. Until the server echoes back the new deck_level (one RTT later),
+          // the snapshot still carries the old deck. Overwriting with the stale server value
+          // every merge would apply the WRONG per-deck collision filter for the full RTT,
+          // letting players walk through ramp walls or fall through upper-deck floors.
+          // We keep the client's locally-transitioned value; forced corrections (teleport /
+          // respawn) set it directly in onAuthoritativeState's position-correction block.
+          deckId: runningLocal.deckId,
         }
       : { ...runningLocal };
 
@@ -421,6 +430,9 @@ export class PredictionEngine {
           runningLocal.localPosition = serverPlayer.localPosition
             ? serverPlayer.localPosition.clone()
             : undefined;
+          // Also adopt the server's deck level on a hard correction (teleport /
+          // respawn / forced dismount may land the player on a different deck).
+          runningLocal.deckId        = serverPlayer.deckId;
         }
       }
     }
@@ -428,6 +440,21 @@ export class PredictionEngine {
     // Clean up old prediction states
     this.cleanupOldStates(serverState.tick);
   }
+
+  /**
+   * Immediately update the local player's deckId in the running predicted state.
+   *
+   * Called by ClientApplication whenever the RenderSystem deck-level state machine
+   * transitions (fall through hole / climb ramp).  The state machine fires before
+   * the next prediction tick, so the collision resolver uses the correct per-deck
+   * filter without waiting for the server echo (one RTT later).
+   */
+  setLocalPlayerDeckLevel(deckLevel: number): void {
+    if (!this.runningPredicted || this.localPlayerId === null) return;
+    const local = this.runningPredicted.players.find(p => p.id === this.localPlayerId);
+    if (local) local.deckId = deckLevel;
+  }
+
   
   /**
    * Get interpolated state for rendering
