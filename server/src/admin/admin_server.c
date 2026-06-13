@@ -784,12 +784,13 @@ static const char* dashboard_html =
 "// Draw ships first (background layer)\n"
 "mapData.ships.forEach(ship => {\n"
 "const x = ship.x; const y = ship.y;\n"
+"const isGhost = ship.company_id === 99;\n"
 "ctx.save();\n"
 "ctx.translate(x, y);\n"
 "ctx.rotate(ship.rotation);\n"
 "// Draw ship hull polygon (if available)\n"
 "if (ship.hull && ship.hull.length > 0) {\n"
-"ctx.fillStyle = '#8B4513';\n"
+"ctx.fillStyle = isGhost ? 'rgba(180,80,255,0.55)' : '#8B4513';\n"
 "ctx.beginPath();\n"
 "ctx.moveTo(ship.hull[0].x, ship.hull[0].y);\n"
 "for (let i = 1; i < ship.hull.length; i++) {\n"
@@ -797,12 +798,12 @@ static const char* dashboard_html =
 "}\n"
 "ctx.closePath();\n"
 "ctx.fill();\n"
-"ctx.strokeStyle = '#654321';\n"
-"ctx.lineWidth = 2;\n"
+"ctx.strokeStyle = isGhost ? '#dd77ff' : '#654321';\n"
+"ctx.lineWidth = isGhost ? 3 : 2;\n"
 "ctx.stroke();\n"
 "} else {\n"
 "// Fallback to simple rectangle\n"
-"ctx.fillStyle = '#8B4513';\n"
+"ctx.fillStyle = isGhost ? 'rgba(180,80,255,0.55)' : '#8B4513';\n"
 "ctx.fillRect(-10, -8, 20, 16);\n"
 "}\n"
 "// Draw modules (cannons, masts, helm) on top of hull\n"
@@ -850,10 +851,12 @@ static const char* dashboard_html =
 "}\n"
 "ctx.restore();\n"
 "// Draw ship ID\n"
-"ctx.fillStyle = 'white';\n"
+"ctx.fillStyle = isGhost ? '#dd77ff' : 'white';\n"
 "ctx.font = 'bold 12px Arial';\n"
-"ctx.fillText('Ship '+ship.id, x+12, y-10);\n"
+"const shipLabel = isGhost ? '👻 Ghost #'+ship.id+(ship.npc_level?' Lv'+ship.npc_level:'') : '⚓ Ship '+ship.id;\n"
+"ctx.fillText(shipLabel, x+12, y-10);\n"
 "ctx.font = '10px Arial';\n"
+"ctx.fillStyle = isGhost ? '#dd77ff' : 'white';\n"
 "ctx.fillText('('+Math.round(x)+','+Math.round(y)+')', x+12, y+2);\n"
 "});\n"
 "// Draw players on top (foreground layer)\n"
@@ -889,7 +892,7 @@ static const char* dashboard_html =
 "ctx.restore();\n"
 "// Draw legend (outside pan area)\n"
 "ctx.fillStyle = 'rgba(0,0,0,0.7)';\n"
-"ctx.fillRect(10, 10, 180, 215);\n"
+"ctx.fillRect(10, 10, 180, 230);\n"
 "ctx.fillStyle = 'white';\n"
 "ctx.font = 'bold 12px Arial';\n"
 "ctx.fillText('Legend', 20, 25);\n"
@@ -958,6 +961,12 @@ static const char* dashboard_html =
 "ctx.strokeRect(20, 204, 8, 8);"
 "ctx.fillStyle = 'white';"
 "ctx.fillText('Navy territory', 38, 212);\n"
+"ctx.fillStyle = 'rgba(180,80,255,0.55)';\n"
+"ctx.fillRect(20, 218, 8, 8);\n"
+"ctx.strokeStyle = '#dd77ff'; ctx.lineWidth=1;\n"
+"ctx.strokeRect(20, 218, 8, 8);\n"
+"ctx.fillStyle = 'white';\n"
+"ctx.fillText('👻 Ghost ship', 38, 226);\n"
 "// Resize legend background to fit\n"
 "ctx.fillStyle = 'rgba(0,0,0,0.7)';\n"
 "// (already drawn at top, update height would require predraw — skip)\n"
@@ -1177,14 +1186,15 @@ int admin_server_init(struct AdminServer* admin, uint16_t port) {
         return -1;
     }
     
-    // Bind socket
+    // Bind socket — loopback only; the admin panel must never be reachable from
+    // the public internet.  Access it via SSH tunnel or a localhost nginx proxy.
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
     
     if (bind(admin->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        log_error("Failed to bind admin socket to port %u: %s", port, strerror(errno));
+        log_error("Failed to bind admin socket to 127.0.0.1:%u: %s", port, strerror(errno));
         close(admin->socket_fd);
         return -1;
     }
@@ -1196,7 +1206,7 @@ int admin_server_init(struct AdminServer* admin, uint16_t port) {
         return -1;
     }
     
-    log_info("Admin server initialized on port %u", port);
+    log_info("Admin server initialized on 127.0.0.1:%u (loopback only)", port);
     return 0;
 }
 
@@ -1402,6 +1412,9 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     } else if (strcmp(post_start, "/api/islands/positions") == 0) {
                         size_t blen = body ? strlen(body) : 0;
                         admin_api_save_island_positions(&resp, body, blen);
+                    } else if (strcmp(post_start, "/api/islands/reposition") == 0) {
+                        size_t blen = body ? strlen(body) : 0;
+                        admin_api_islands_reposition(&resp, body, blen);
                     } else if (strcmp(post_start, "/api/admin/ship") == 0) {
                         float x = 400.0f, y = 400.0f;
                         uint8_t company = 1; // COMPANY_PIRATES default
@@ -1417,14 +1430,17 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         admin_api_create_ship(&resp, x, y, company);
                     } else if (strcmp(post_start, "/api/admin/phantom-brig") == 0) {
                         float x = 400.0f, y = 400.0f;
+                        uint8_t level = 1;
                         if (body) {
                             char *p;
                             p = strstr(body, "\"x\"");
                             if (p) { p = strchr(p, ':'); if (p) x = (float)atof(p + 1); }
                             p = strstr(body, "\"y\"");
                             if (p) { p = strchr(p, ':'); if (p) y = (float)atof(p + 1); }
+                            p = strstr(body, "\"level\"");
+                            if (p) { p = strchr(p, ':'); if (p) { int lv = atoi(p + 1); if (lv >= 1 && lv <= 60) level = (uint8_t)lv; } }
                         }
-                        admin_api_create_phantom_brig(&resp, x, y);
+                        admin_api_create_phantom_brig(&resp, x, y, level);
                     } else if (strcmp(post_start, "/api/admin/player/company") == 0) {
                         uint32_t player_id = 0;
                         uint8_t company = 0;

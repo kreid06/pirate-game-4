@@ -181,6 +181,11 @@ export class PauseMenu {
           <div class="pm-settings-body" id="ps-tab-display" style="display:none">
 
             <label class="pm-setting-row">
+              <span class="pm-setting-label">Fullscreen</span>
+              <input class="pm-toggle" id="ps-fullscreen" type="checkbox" />
+            </label>
+
+            <label class="pm-setting-row">
               <span class="pm-setting-label">Antialiasing</span>
               <input class="pm-toggle" id="ps-antialiasing" type="checkbox" />
             </label>
@@ -740,6 +745,12 @@ export class PauseMenu {
 
     // Settings inputs — wire live changes
     this.wireSettingsInputs();
+
+    // Keep the fullscreen checkbox in sync if the user presses Escape to exit fullscreen
+    document.addEventListener('fullscreenchange', () => {
+      const cb = this.container.querySelector<HTMLInputElement>('#ps-fullscreen');
+      if (cb) cb.checked = !!document.fullscreenElement;
+    });
   }
 
   private showConvertForm(): void {
@@ -871,6 +882,8 @@ export class PauseMenu {
     this.setSlider('ps-sfx-vol',    Math.round((a.sfxVolume   ?? 0.8) * 100));
     this.setSlider('ps-music-vol',  Math.round((a.musicVolume  ?? 0.7) * 100));
 
+    (this.container.querySelector<HTMLInputElement>('#ps-fullscreen')!).checked =
+      !!document.fullscreenElement;
     (this.container.querySelector<HTMLInputElement>('#ps-antialiasing')!).checked =
       g.antialiasing ?? true;
     (this.container.querySelector<HTMLSelectElement>('#ps-particle-quality')!).value =
@@ -1154,7 +1167,7 @@ export class PauseMenu {
     onSlider('ps-sfx-vol',    'ps-sfx-vol-val');
     onSlider('ps-music-vol',  'ps-music-vol-val');
 
-    for (const id of ['ps-antialiasing', 'ps-particle-quality', 'ps-fps-cap']) {
+    for (const id of ['ps-fullscreen', 'ps-antialiasing', 'ps-particle-quality', 'ps-fps-cap']) {
       this.container.querySelector(`#${id}`)!.addEventListener('change', () => this.markDirty());
     }
   }
@@ -1164,6 +1177,7 @@ export class PauseMenu {
     const masterVol       = parseInt((this.container.querySelector<HTMLInputElement>('#ps-master-vol')!).value, 10) / 100;
     const sfxVol          = parseInt((this.container.querySelector<HTMLInputElement>('#ps-sfx-vol')!).value, 10) / 100;
     const musicVol        = parseInt((this.container.querySelector<HTMLInputElement>('#ps-music-vol')!).value, 10) / 100;
+    const wantFullscreen  = (this.container.querySelector<HTMLInputElement>('#ps-fullscreen')!).checked;
     const antialiasing    = (this.container.querySelector<HTMLInputElement>('#ps-antialiasing')!).checked;
     const particleQuality = (this.container.querySelector<HTMLSelectElement>('#ps-particle-quality')!).value as GameSettings['particleQuality'];
     const targetFPS       = parseInt((this.container.querySelector<HTMLSelectElement>('#ps-fps-cap')!).value, 10);
@@ -1180,6 +1194,13 @@ export class PauseMenu {
       cfg.input.keyBindings.set(action, code);
     }
     ClientConfigManager.save(cfg);
+
+    // Apply fullscreen via browser API (not stored in config — browser state)
+    if (wantFullscreen && !document.fullscreenElement) {
+      document.documentElement.requestFullscreen().catch(() => {});
+    } else if (!wantFullscreen && document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    }
 
     this.hasUnsavedChanges = false;
     const applyBtn = this.container.querySelector<HTMLButtonElement>('#pm-settings-apply')!;

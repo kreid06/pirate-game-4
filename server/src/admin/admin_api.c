@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <json-c/json.h>
 
 // Static buffer for JSON responses (to avoid dynamic allocation)
@@ -284,8 +285,20 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
     if (!resp || !sim) return -1;
 
     int offset = 0;
+
+    // Count ghost ships for dashboard
+    uint32_t ghost_count = 0;
+    for (uint32_t i = 0; i < sim->ship_count; i++) {
+        if (sim->ships[i].id != 0 && sim->ships[i].company_id == COMPANY_GHOST) ghost_count++;
+    }
+    // Fetch simple ships for npc_level lookup
+    SimpleShip* ws_ships = NULL;
+    int ws_ship_count = 0;
+    websocket_server_get_ships(&ws_ships, &ws_ship_count);
+
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
-        "{\n  \"world\": {\n    \"width\": 1000,\n    \"height\": 1000\n  },\n");
+        "{\n  \"world\": {\n    \"width\": 1000,\n    \"height\": 1000\n  },\n  \"ghost_count\": %u,\n",
+        ghost_count);
 
     // Ships
     offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
@@ -301,6 +314,12 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
         float rotation = (float)ship->rotation / 65536.0f;
         float vel_x = SERVER_TO_CLIENT((float)ship->velocity.x / 65536.0f);
         float vel_y = SERVER_TO_CLIENT((float)ship->velocity.y / 65536.0f);
+
+        // Look up npc_level from websocket simple ships
+        uint8_t npc_level = 0;
+        for (int ws = 0; ws_ships && ws < ws_ship_count; ws++) {
+            if (ws_ships[ws].ship_id == ship->id) { npc_level = ws_ships[ws].npc_level; break; }
+        }
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
             "    {\n"
@@ -311,8 +330,11 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
             "      \"rotation\": %.2f,\n"
             "      \"velocity\": {\"x\": %.2f, \"y\": %.2f},\n"
             "      \"health\": %u,\n"
+            "      \"company_id\": %u,\n"
+            "      \"npc_level\": %u,\n"
             "      \"hull\": [",
-            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health)
+            ship->id, pos_x, pos_y, rotation, vel_x, vel_y, Q16_TO_INT(ship->hull_health),
+            ship->company_id, npc_level
         );
         
         // Add hull vertices (scale back to client coordinates)
@@ -480,7 +502,8 @@ int admin_api_map_data(struct HttpResponse* resp, const struct Sim* sim) {
                     ps[si].type == STRUCT_SHIPYARD        ? "shipyard" :
                     ps[si].type == STRUCT_FLAG_FORT       ? "flag_fort" :
                     ps[si].type == STRUCT_CLAIM_FLAG      ? "claim_flag" :
-                    ps[si].type == STRUCT_COMPANY_FORTRESS? "company_fortress" : "unknown";
+                    ps[si].type == STRUCT_COMPANY_FORTRESS? "company_fortress" :
+                    ps[si].type == STRUCT_CHEST           ? "chest" : "unknown";
                 /* Base fields for all structures — claim_orphaned included for all
                  * because the BFS graph sweep sets it on any disconnected structure */
                 offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
@@ -651,6 +674,8 @@ int admin_api_websocket_entities(struct HttpResponse* resp) {
             case PLAYER_STATE_WALKING: state_str = "WALKING"; break;
             case PLAYER_STATE_SWIMMING: state_str = "SWIMMING"; break;
             case PLAYER_STATE_FALLING: state_str = "FALLING"; break;
+            case PLAYER_STATE_IDLE: state_str = "IDLE"; break;
+            default: break;
         }
         
         offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset,
@@ -783,10 +808,12 @@ int admin_api_create_ship(struct HttpResponse* resp, float x, float y, uint8_t c
     return 0;
 }
 
-int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y) {
+int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y, uint8_t level) {
     if (!resp) return -1;
+    if (level < 1)  level = 1;
+    if (level > 60) level = 60;
 
-    uint32_t new_id = websocket_server_create_ghost_ship(x, y);
+    uint32_t new_id = websocket_server_create_ghost_ship(x, y, level);
 
     int len;
     if (new_id == 0) {
@@ -798,8 +825,8 @@ int admin_api_create_phantom_brig(struct HttpResponse* resp, float x, float y) {
         resp->status_code = 200;
         resp->content_type = "application/json";
         len = snprintf(json_buffer, sizeof(json_buffer),
-            "{\"success\":true,\"shipId\":%u,\"x\":%.1f,\"y\":%.1f,\"name\":\"Phantom Brig\"}",
-            new_id, x, y);
+            "{\"success\":true,\"shipId\":%u,\"x\":%.1f,\"y\":%.1f,\"name\":\"Phantom Brig\",\"level\":%u}",
+            new_id, x, y, (unsigned)level);
     }
 
     if (len < 0 || len >= (int)sizeof(json_buffer)) return -1;
@@ -861,6 +888,8 @@ int admin_api_islands(struct HttpResponse* resp) {
 
         ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"rotation_deg\":%.4f,\"preset\":\"%s\"",
             isl->id, isl->x, isl->y, isl->rotation_deg, isl->preset);
+        if (isl->template_name[0] != '\0')
+            ISL_APPEND(",\"template\":\"%s\"", isl->template_name);
 
         if (isl->vertex_count > 0) {
             /* Polygon island — emit shape vertices as local offsets from centre */
@@ -1059,7 +1088,7 @@ int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t b
     return 0;
 }
 
-/* ── Ghost spawn-point API ──────────────────────────────────────────────── */
+/* ── Ghost spawn-point API (world editor) ───────────────────────────────── */
 
 static char ghost_spawn_json_buf[65536];
 
@@ -1083,7 +1112,6 @@ int admin_api_save_ghost_spawns(struct HttpResponse *resp, const char *body, siz
     static char save_gs_buf[256];
     const char *path = "data/ghost_spawns.json";
 
-    /* Validate that body is parseable JSON before writing */
     json_object *test = json_tokener_parse(body);
     if (!test) {
         int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"error\":\"invalid JSON\"}");
@@ -1107,7 +1135,6 @@ int admin_api_save_ghost_spawns(struct HttpResponse *resp, const char *body, siz
     fwrite(body, 1, body_len, f);
     fclose(f);
 
-    /* Hot-reload */
     load_ghost_spawns(path);
 
     int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"ok\":true}");
@@ -1118,9 +1145,132 @@ int admin_api_save_ghost_spawns(struct HttpResponse *resp, const char *body, siz
     return 0;
 }
 
-/* ── Island positions API ───────────────────────────────────────────────── */
-/* Saves the full islands.json (positions + rotations) from the world editor.
- * Body must be a JSON object: { "islands": [ { "id", "x", "y", "rotation_deg", "template" }, … ] } */
+/* ── Island reposition endpoint ──────────────────────────────────────────── */
+/* ── Island reposition endpoint ──────────────────────────────────────────── *
+ * POST /api/islands/reposition                                                *
+ * Body: [{id, x, y}, ...]                                                    *
+ * Updates the centre positions in data/islands/islands.json.                 */
+static char reposition_resp_buf[512];
+
+int admin_api_islands_reposition(struct HttpResponse *resp, const char *body, size_t body_len)
+{
+    if (!resp || !body || body_len == 0) {
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"empty body\"}";
+        resp->body_length = 22;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    struct json_object *arr = json_tokener_parse(body);
+    if (!arr || !json_object_is_type(arr, json_type_array)) {
+        if (arr) json_object_put(arr);
+        resp->status_code = 400;
+        resp->body = (char *)"{\"error\":\"expected JSON array\"}";
+        resp->body_length = 30;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    /* Load the current islands.json */
+    const char *islands_path = "data/islands/islands.json";
+    struct json_object *islands_arr = NULL;
+    {
+        FILE *f = fopen(islands_path, "r");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long fsz = ftell(f);
+            rewind(f);
+            if (fsz > 0 && fsz < 65536) {
+                char *buf = (char *)malloc((size_t)fsz + 1);
+                if (buf) {
+                    fread(buf, 1, (size_t)fsz, f);
+                    buf[fsz] = '\0';
+                    islands_arr = json_tokener_parse(buf);
+                    free(buf);
+                }
+            }
+            fclose(f);
+        }
+    }
+
+    if (!islands_arr || !json_object_is_type(islands_arr, json_type_array)) {
+        if (islands_arr) json_object_put(islands_arr);
+        json_object_put(arr);
+        resp->status_code = 500;
+        resp->body = (char *)"{\"error\":\"cannot read islands.json\"}";
+        resp->body_length = 36;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    /* Apply the requested position/rotation changes */
+    int updates = 0;
+    int count = (int)json_object_array_length(arr);
+    for (int i = 0; i < count; i++) {
+        struct json_object *entry = json_object_array_get_idx(arr, i);
+        struct json_object *id_j = NULL, *x_j = NULL, *y_j = NULL, *rot_j = NULL;
+        json_object_object_get_ex(entry, "id",           &id_j);
+        json_object_object_get_ex(entry, "x",            &x_j);
+        json_object_object_get_ex(entry, "y",            &y_j);
+        json_object_object_get_ex(entry, "rotation_deg", &rot_j);
+        if (!id_j) continue;
+        int target_id = json_object_get_int(id_j);
+
+        int n = (int)json_object_array_length(islands_arr);
+        for (int k = 0; k < n; k++) {
+            struct json_object *isle = json_object_array_get_idx(islands_arr, k);
+            struct json_object *isle_id = NULL;
+            json_object_object_get_ex(isle, "id", &isle_id);
+            if (!isle_id || json_object_get_int(isle_id) != target_id) continue;
+
+            /* Update centre position (x, y) if provided */
+            if (x_j && y_j) {
+                double nx = json_object_get_double(x_j);
+                double ny = json_object_get_double(y_j);
+                struct json_object *centre = NULL;
+                if (!json_object_object_get_ex(isle, "centre", &centre)) {
+                    centre = json_object_new_object();
+                    json_object_object_add(isle, "centre", centre);
+                }
+                json_object_object_add(centre, "x", json_object_new_double(nx));
+                json_object_object_add(centre, "y", json_object_new_double(ny));
+            }
+
+            /* Update rotation_deg if provided */
+            if (rot_j) {
+                double new_rot = fmod(json_object_get_double(rot_j) + 360.0, 360.0);
+                json_object_object_add(isle, "rotation_deg", json_object_new_double(new_rot));
+            }
+
+            updates++;
+            break;
+        }
+    }
+
+    /* Write back */
+    int rc = json_object_to_file_ext(islands_path, islands_arr, JSON_C_TO_STRING_PRETTY);
+    json_object_put(islands_arr);
+    json_object_put(arr);
+
+    if (rc != 0) {
+        resp->status_code = 500;
+        resp->body = (char *)"{\"error\":\"failed to write islands.json\"}";
+        resp->body_length = 40;
+        resp->content_type = "application/json";
+        return -1;
+    }
+
+    int len = snprintf(reposition_resp_buf, sizeof(reposition_resp_buf),
+                       "{\"ok\":true,\"updated\":%d}", updates);
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = reposition_resp_buf;
+    resp->body_length = (size_t)len;
+    return 0;
+}
+
+/* ── Island positions API (world editor full-save) ──────────────────────── */
 int admin_api_save_island_positions(struct HttpResponse *resp, const char *body, size_t body_len) {
     static char save_ip_buf[256];
     const char *path = "data/islands/islands.json";
@@ -1155,3 +1305,4 @@ int admin_api_save_island_positions(struct HttpResponse *resp, const char *body,
     resp->body_length = (size_t)len;
     return 0;
 }
+

@@ -8,7 +8,8 @@
  * Sections:
  *  • Identity      — ship ID, company, speed, heading
  *  • Hull & Ammo   — hullHealth bar, cannonAmmo
- *  • Modules       — grouped count by kind with health summary
+ *  • Stats         — health, water ingress, cargo weight
+ *  • Progression   — ship XP and upgradeable attributes
  *  • Crew          — NPCs aboard (count + role breakdown)
  */
 
@@ -32,8 +33,9 @@ import {
   SHIP_ATTR_CAPS,
   SHIP_LEVEL_TOTAL_POINT_CAP,
   SHIP_LEVEL_XP_BASE,
+  WeaponGroupState,
 } from '../../sim/Types.js';
-import { ShipModule, CannonModuleData, MastModuleData, PlankModuleData } from '../../sim/modules.js';
+import { computeInventoryWeight } from '../../sim/Inventory.js';
 
 // ── Shared palette ────────────────────────────────────────────────────────────
 
@@ -87,6 +89,9 @@ export class ShipMenu {
   /** Called when the player clicks an affordable upgrade row. */
   public onUpgradeRequest?: (shipId: number, attribute: string) => void;
 
+  /** Called when the player confirms deck demolish from the decks section. */
+  public onDemolishDeck?: (shipId: number, moduleId: number, deckLevel: number) => void;
+
   /** Called when the player clicks an NPC row in the crew section. */
   public onNpcClick?: (npc: import('../../sim/Types.js').Npc) => void;
 
@@ -99,9 +104,23 @@ export class ShipMenu {
   /** Called when the player clicks Rename in settings — opens the rename dialog. */
   public onRenameRequest?: (shipId: number, currentName: string) => void;
 
+  /** Called when the player clicks Release Ship — caller shows confirm dialog. */
+  public onReleaseShipRequest?: (shipId: number, shipyardId: number) => void;
+
+  /** Set to the shipyard structure ID when this ship is currently scaffolded there, 0 otherwise. */
+  public scaffoldedAtShipyardId = 0;
+
+  /** Called when the player clicks a weapon group name row — prompt to rename. */
+  public onGroupRename?: (shipId: number, groupIndex: number, currentName: string) => void;
+
+  /** Current weapon group state (set each frame by UIManager before render). */
+  public controlGroups: Map<number, WeaponGroupState> = new Map();
+
   /** Hit areas for attribute rows populated each render frame. */
   private _upgradeHitAreas: Array<{ attr: number; serverName: string; x: number; y: number; w: number; h: number; affordable: boolean }> = [];
   private _npcHitAreas: Array<{ npc: import('../../sim/Types.js').Npc; x: number; y: number; w: number; h: number }> = [];
+  private _deckDemolishAreas: Array<{ moduleId: number; deckLevel: number; x: number; y: number; w: number; h: number }> = [];
+  private _groupRenameAreas:  Array<{ groupIndex: number; x: number; y: number; w: number; h: number }> = [];
   private _panelX = 0;
   private _panelY = 0;
   private _currentShipId = 0;
@@ -112,11 +131,17 @@ export class ShipMenu {
   private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
   private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
+  private _releaseBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _currentShipName = '';
+
+  /** Current vertical scroll offset (px) for the crew section. */
+  private _crewScrollY = 0;
+  /** Bounds of the scrollable crew area — for wheel hit-testing. */
+  private _crewScrollBounds: { x: number; y: number; w: number; h: number } | null = null;
 
   toggle(): void { this.visible = !this.visible; if (!this.visible) this._settingsOpen = false; }
   open():   void { this.visible = true;  }
-  close():  void { this.visible = false; this._settingsOpen = false; }
+  close():  void { this.visible = false; this._settingsOpen = false; this._crewScrollY = 0; }
 
   /**
    * Handle a canvas click while the menu is visible.
@@ -144,6 +169,14 @@ export class ShipMenu {
           return true;
         }
       }
+      // Weapon group rename rows
+      for (const area of this._groupRenameAreas) {
+        if (x >= area.x && x <= area.x + area.w && y >= area.y && y <= area.y + area.h) {
+          const grp = this.controlGroups.get(area.groupIndex);
+          this.onGroupRename?.(this._currentShipId, area.groupIndex, grp?.name ?? '');
+          return true;
+        }
+      }
       if (this._unclaimBtnArea) {
         const u = this._unclaimBtnArea;
         if (x >= u.x && x <= u.x + u.w && y >= u.y && y <= u.y + u.h) {
@@ -160,6 +193,14 @@ export class ShipMenu {
           return true;
         }
       }
+      if (this._releaseBtnArea) {
+        const r = this._releaseBtnArea;
+        if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
+          this._settingsOpen = false;
+          this.onReleaseShipRequest?.(this._currentShipId, this.scaffoldedAtShipyardId);
+          return true;
+        }
+      }
       // Any click while settings open — consume
       return true;
     }
@@ -169,6 +210,14 @@ export class ShipMenu {
       if (x >= area.x && x <= area.x + area.w &&
           y >= area.y && y <= area.y + area.h) {
         this.onNpcClick?.(area.npc);
+        return true;
+      }
+    }
+    // Check deck demolish button hit areas
+    for (const area of this._deckDemolishAreas) {
+      if (x >= area.x && x <= area.x + area.w &&
+          y >= area.y && y <= area.y + area.h) {
+        this.onDemolishDeck?.(this._currentShipId, area.moduleId, area.deckLevel);
         return true;
       }
     }
@@ -189,6 +238,27 @@ export class ShipMenu {
     // Click outside panel — let caller close the menu
     return false;
   }
+
+  /**
+   * Handle mouse-wheel scroll.  Returns true if consumed.
+   * Routes to the crew list scrollable area when the pointer is over it.
+   */
+  handleWheel(deltaY: number, x: number, y: number): boolean {
+    if (!this.visible) return false;
+    const b = this._crewScrollBounds;
+    if (b && x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+      this._crewScrollY = Math.max(0,
+        Math.min(this._crewScrollMaxY, this._crewScrollY + deltaY * 0.4));
+      return true;
+    }
+    // Consume wheel inside panel so the game camera doesn't zoom
+    if (x >= this._panelX && x <= this._panelX + PANEL_W &&
+        y >= this._panelY && y <= this._panelY + PANEL_H) {
+      return true;
+    }
+    return false;
+  }
+  private _crewScrollMaxY = 0;
 
   render(
     ctx:        CanvasRenderingContext2D,
@@ -242,9 +312,11 @@ export class ShipMenu {
     this._currentShipName = ship.shipName ?? '';
     cur = this._identity(ctx, px, cur, ship, worldState.companies ?? []);
     cur = this._hullAmmo(ctx, px, cur, ship);
-    cur = this._modulesSection(ctx, px, cur, ship.modules);
+    cur = this._statsSection(ctx, px, cur, ship, worldState);
+    cur = this._decksSection(ctx, px, cur, ship);
     cur = this._progressionSection(ctx, px, cur, ship.id, ship.levelStats);
-    this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3);
+    const crewMaxH = py + PANEL_H - cur - 4;
+    this._crewSection(ctx, px, cur, worldState, ship.id, ship.shipType ?? 3, Math.max(60, crewMaxH));
 
     // Render settings overlay on top if open
     if (this._settingsOpen) {
@@ -306,13 +378,16 @@ export class ShipMenu {
     shipCompany:  number,
     myCompany:    number,
   ): void {
-    const OW = 320;
-    const OH = 220;
+    const OW = 360;
+    const GRP_ROW_H = 26;
+    const GRP_COUNT = 10;
+    const showRelease = this.scaffoldedAtShipyardId !== 0;
+    const OH = 38 + 8 + 38 + 12 + 38 + 12 + (showRelease ? 40 : 0) + 20 + GRP_COUNT * GRP_ROW_H + 14;
     const ox = px + Math.round((PANEL_W - OW) / 2);
     const oy = py + Math.round((PANEL_H - OH) / 2);
 
     // Backdrop
-    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillStyle = 'rgba(0,0,0,0.72)';
     ctx.fillRect(px, py, PANEL_W, PANEL_H);
 
     // Panel
@@ -327,85 +402,132 @@ export class ShipMenu {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = GOLD;
-    ctx.fillText('⚙  SHIP SETTINGS', ox + 14, oy + 22);
+    ctx.fillText('⚙  SHIP SETTINGS', ox + 14, oy + 19);
 
     // Divider
-    ctx.strokeStyle = BORDER;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(ox, oy + 38);
-    ctx.lineTo(ox + OW, oy + 38);
-    ctx.stroke();
+    const div = (y: number) => {
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(ox + 8, y); ctx.lineTo(ox + OW - 8, y); ctx.stroke();
+    };
+    div(oy + 38);
 
     const isUnclaimed = shipCompany === COMPANY_UNCLAIMED;
     const isOwnShip   = !isUnclaimed && shipCompany === myCompany;
 
-    // Info text
-    ctx.font = '12px Georgia, serif';
-    ctx.fillStyle = TEXT_DIM;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'top';
-    if (isUnclaimed) {
-      ctx.fillText('This ship has no owner.', ox + 14, oy + 48);
-      ctx.fillText('Claim it to bring it under your flag.', ox + 14, oy + 64);
-    } else if (isOwnShip) {
-      ctx.fillText('Remove faction ownership from this ship.', ox + 14, oy + 48);
-      ctx.fillText('NPCs aboard keep their current company.', ox + 14, oy + 64);
-    } else {
-      ctx.fillText('You do not own this ship.', ox + 14, oy + 48);
-    }
-
     const btnW = OW - 28;
     const btnH = 30;
     const btnX = ox + 14;
-    const claimBtnY  = oy + OH - btnH - 14;
-    const renameBtnY = claimBtnY - btnH - 8;
-
-    // Reset hit areas
     this._renameBtnArea  = null;
     this._unclaimBtnArea = null;
     this._claimBtnArea   = null;
+    this._releaseBtnArea = null;
+    this._groupRenameAreas = [];
 
-    // RENAME SHIP button (always shown)
+    let cy = oy + 46;
+
+    // ── RENAME SHIP button ──────────────────────────────────────────────────
     const currentName = this._currentShipName || '(unnamed)';
     ctx.fillStyle = 'rgba(100,140,255,0.15)';
-    ctx.fillRect(btnX, renameBtnY, btnW, btnH);
-    ctx.strokeStyle = '#6699ff';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(btnX, renameBtnY, btnW, btnH);
+    ctx.fillRect(btnX, cy, btnW, btnH);
+    ctx.strokeStyle = '#6699ff'; ctx.lineWidth = 1;
+    ctx.strokeRect(btnX, cy, btnW, btnH);
     ctx.font = 'bold 13px Georgia, serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#aabbff';
-    ctx.fillText(`✏  RENAME SHIP  (${currentName})`, btnX + btnW / 2, renameBtnY + btnH / 2);
-    this._renameBtnArea = { x: btnX, y: renameBtnY, w: btnW, h: btnH };
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#aabbff';
+    ctx.fillText(`✏  RENAME SHIP  (${currentName})`, btnX + btnW / 2, cy + btnH / 2);
+    this._renameBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
+    cy += btnH + 10;
 
+    div(cy); cy += 10;
+
+    // ── CLAIM / UNCLAIM button ──────────────────────────────────────────────
     if (isUnclaimed) {
-      // CLAIM SHIP button (green)
       ctx.fillStyle = 'rgba(68,204,102,0.15)';
-      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
-      ctx.strokeStyle = '#44cc66';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
+      ctx.fillRect(btnX, cy, btnW, btnH);
+      ctx.strokeStyle = '#44cc66'; ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, cy, btnW, btnH);
       ctx.font = 'bold 13px Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#88ffaa';
-      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
-      this._claimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#88ffaa';
+      ctx.fillText('⚓  CLAIM SHIP', btnX + btnW / 2, cy + btnH / 2);
+      this._claimBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
     } else if (isOwnShip) {
-      // UNCLAIM SHIP button (red)
       ctx.fillStyle = 'rgba(255,85,68,0.15)';
-      ctx.fillRect(btnX, claimBtnY, btnW, btnH);
-      ctx.strokeStyle = '#ff5544';
-      ctx.lineWidth = 1;
-      ctx.strokeRect(btnX, claimBtnY, btnW, btnH);
+      ctx.fillRect(btnX, cy, btnW, btnH);
+      ctx.strokeStyle = '#ff5544'; ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, cy, btnW, btnH);
       ctx.font = 'bold 13px Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ff8877';
-      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, claimBtnY + btnH / 2);
-      this._unclaimBtnArea = { x: btnX, y: claimBtnY, w: btnW, h: btnH };
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ff8877';
+      ctx.fillText('⚓  UNCLAIM SHIP', btnX + btnW / 2, cy + btnH / 2);
+      this._unclaimBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
+    } else {
+      ctx.font = '12px Georgia, serif';
+      ctx.fillStyle = TEXT_DIM; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('You do not own this ship.', btnX + btnW / 2, cy + btnH / 2);
+    }
+    cy += btnH + 10;
+
+    // ── RELEASE SHIP button (only while docked at a shipyard) ───────────────
+    if (showRelease) {
+      div(cy); cy += 10;
+      ctx.fillStyle = 'rgba(255,140,0,0.15)';
+      ctx.fillRect(btnX, cy, btnW, btnH);
+      ctx.strokeStyle = '#ff8c00'; ctx.lineWidth = 1;
+      ctx.strokeRect(btnX, cy, btnW, btnH);
+      ctx.font = 'bold 13px Georgia, serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = '#ffb84d';
+      ctx.fillText('⚓  RELEASE SHIP', btnX + btnW / 2, cy + btnH / 2);
+      this._releaseBtnArea = { x: btnX, y: cy, w: btnW, h: btnH };
+      cy += btnH + 10;
+    }
+
+    div(cy); cy += 10;
+
+    // ── WEAPON GROUPS ───────────────────────────────────────────────────────
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText('WEAPON GROUPS  (click to rename)', btnX, cy + 8);
+    cy += 20;
+
+    for (let g = 0; g < GRP_COUNT; g++) {
+      const grp = this.controlGroups.get(g);
+      const gName    = grp?.name ?? '';
+      const gCannons = grp?.cannonIds.length ?? 0;
+      const isStripe = g % 2 === 0;
+
+      ctx.fillStyle = isStripe ? 'rgba(255,255,255,0.04)' : 'transparent';
+      ctx.fillRect(btnX, cy, btnW, GRP_ROW_H);
+
+      // Edit pencil hint on right edge
+      const pencilW = 18;
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = 'rgba(150,180,255,0.4)';
+      ctx.fillText('✏', btnX + btnW - 4, cy + GRP_ROW_H / 2);
+
+      // Cannon count
+      const countStr = `${gCannons}×🔫`;
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = gCannons > 0 ? '#c0b890' : '#556';
+      const countW = ctx.measureText(countStr).width + 6;
+      ctx.fillText(countStr, btnX + btnW - pencilW - 4, cy + GRP_ROW_H / 2);
+
+      // Group name — primary label, font scaled to fit available width
+      const displayName = gName.length > 0 ? gName : '(unnamed)';
+      const nameAreaW   = btnW - countW - pencilW - 12;
+      let fontSize = 13;
+      ctx.font = `${gName.length > 0 ? '' : 'italic '}${fontSize}px Georgia, serif`;
+      while (fontSize > 8 && ctx.measureText(displayName).width > nameAreaW) {
+        fontSize--;
+        ctx.font = `${gName.length > 0 ? '' : 'italic '}${fontSize}px Georgia, serif`;
+      }
+      ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = gName.length > 0 ? '#e8e0cc' : '#556';
+      ctx.fillText(displayName, btnX + 6, cy + GRP_ROW_H / 2);
+
+      this._groupRenameAreas.push({ groupIndex: g, x: btnX, y: cy, w: btnW - pencilW - 2, h: GRP_ROW_H });
+      cy += GRP_ROW_H;
     }
   }
 
@@ -427,12 +549,20 @@ export class ShipMenu {
     ctx.fillStyle = COMPANY_COLORS[co] ?? '#aaa';
     ctx.fillRect(px + PAD + 8, py + 10, 14, 14);
 
+    const _coName = COMPANY_NAMES[co] ?? companies.find(c => c.id === co)?.name ?? 'Unknown';
+    const _shipDisplayName = ship.shipName ? ship.shipName : `Ship #${ship.id}`;
+
+    // Ship name — main title
     ctx.font = 'bold 15px Georgia, serif';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'top';
     ctx.fillStyle = TEXT_HEAD;
-    const _coName = COMPANY_NAMES[co] ?? companies.find(c => c.id === co)?.name ?? 'Unknown';
-    ctx.fillText(`Ship #${ship.id}   — ${_coName}`, px + PAD + 30, py + 9);
+    ctx.fillText(_shipDisplayName, px + PAD + 30, py + 5);
+
+    // Ship #ID + company — subtitle
+    ctx.font = '11px Georgia, serif';
+    ctx.fillStyle = TEXT_DIM;
+    ctx.fillText(`Ship #${ship.id}  —  ${_coName}`, px + PAD + 30, py + 23);
 
     // Speed + heading
     const spd = Math.sqrt(ship.velocity.x ** 2 + ship.velocity.y ** 2);
@@ -441,7 +571,7 @@ export class ShipMenu {
     ctx.fillStyle = TEXT_MONO;
     ctx.fillText(
       `Speed: ${spd.toFixed(1)} u/s   Heading: ${deg.toFixed(1)}°`,
-      px + PAD + 30, py + 28
+      px + PAD + 30, py + 36
     );
 
     // World pos
@@ -454,6 +584,105 @@ export class ShipMenu {
     );
 
     return py + sectionH + 8;
+  }
+
+  private _decksSection(
+    ctx:  CanvasRenderingContext2D,
+    px:   number, py: number,
+    ship: NonNullable<ReturnType<WorldState['ships']['find']>>,
+  ): number {
+    this._deckDemolishAreas = [];
+    py = this._sectionHeader(ctx, px, py, 'DECKS', '');
+
+    const DECK_NAMES: Record<number, string> = { 0: 'Lower Deck', 1: 'Upper Deck' };
+    // Upper deck first (deckId=1), then lower (deckId=0)
+    for (const deckLevel of [1, 0]) {
+      const mod  = ship.modules.find(m => m.kind === 'deck' && m.deckId === deckLevel);
+      const isStripe = deckLevel === 0;
+
+      if (isStripe) {
+        ctx.fillStyle = BG_STRIPE;
+        ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H * 2);
+      }
+
+      // Row 1: label + HP bar + [Demolish] button
+      const barW    = PANEL_W - PAD * 2 - 104 - 80; // leave 80px for demolish btn
+      const barX    = px + PAD + 96;
+      const btnW    = 70;
+      const btnH    = ROW_H - 4;
+      const btnX    = px + PANEL_W - PAD - btnW;
+      const btnY    = py + 2;
+
+      ctx.font = '12px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = mod ? TEXT_DIM : '#445';
+      ctx.fillText(DECK_NAMES[deckLevel], px + PAD + 8, py + ROW_H / 2);
+
+      if (mod) {
+        const md       = (mod.moduleData as any) ?? {};
+        const hp       = Math.max(0, md.health    ?? 10000);
+        const maxHp    = Math.max(1, md.maxHealth ?? 10000);
+        const tgtHp    = Math.max(0, md.targetHealth ?? hp);
+        const hpPct    = hp    / maxHp;
+        const qualPct  = tgtHp / maxHp;
+
+        // HP bar
+        const barColor = hpPct >= 0.7 ? GREEN : hpPct >= 0.3 ? ORANGE : RED;
+        ctx.fillStyle = '#1a1a28';
+        ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+        ctx.fillStyle = barColor;
+        ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * hpPct), BAR_H);
+        // Quality overlay (lighter shade)
+        ctx.fillStyle = 'rgba(255,255,255,0.15)';
+        ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * qualPct), BAR_H);
+        ctx.strokeStyle = '#334';
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+
+        // HP% label inside bar
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'right';
+        ctx.fillStyle = TEXT_HEAD;
+        ctx.fillText(`${Math.round(hpPct * 100)}%`, barX + barW - 2, py + ROW_H / 2);
+
+        // Condition label (row 2)
+        const condLabel = qualPct >= 0.7 ? 'Good' : qualPct >= 0.3 ? 'Damaged' : 'Critical';
+        const condColor = qualPct >= 0.7 ? GREEN   : qualPct >= 0.3 ? ORANGE   : RED;
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText('Condition:', px + PAD + 8, py + ROW_H + ROW_H / 2);
+        ctx.fillStyle = condColor;
+        ctx.fillText(condLabel, barX, py + ROW_H + ROW_H / 2);
+        // Quality % next to condition
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText(`  (${Math.round(qualPct * 100)}% quality)`, barX + 48, py + ROW_H + ROW_H / 2);
+
+        // [Demolish] button
+        ctx.fillStyle = 'rgba(160,30,30,0.75)';
+        ctx.fillRect(btnX, btnY, btnW, btnH);
+        ctx.strokeStyle = '#cc3333';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(btnX, btnY, btnW, btnH);
+        ctx.font = 'bold 11px Georgia, serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#ffaaaa';
+        ctx.fillText('Demolish', btnX + btnW / 2, btnY + btnH / 2);
+        this._deckDemolishAreas.push({ moduleId: mod.id, deckLevel, x: btnX, y: btnY, w: btnW, h: btnH });
+
+        py += ROW_H * 2;
+      } else {
+        // Deck not installed
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'left';
+        ctx.fillStyle = '#445';
+        ctx.fillText('[ not installed ]', barX, py + ROW_H / 2);
+        py += ROW_H;
+      }
+    }
+    return py + 6;
   }
 
   private _hullAmmo(
@@ -515,98 +744,100 @@ export class ShipMenu {
     return py + 8;
   }
 
-  private _modulesSection(
-    ctx:     CanvasRenderingContext2D,
-    px:      number, py: number,
-    modules: ShipModule[],
+  private _statsSection(
+    ctx:        CanvasRenderingContext2D,
+    px:         number, py: number,
+    ship:       NonNullable<ReturnType<WorldState['ships']['find']>>,
+    worldState: WorldState,
   ): number {
-    // Group by kind, compute health summaries
-    const groups = new Map<string, { total: number; damaged: number; occupied: number }>();
-    for (const m of modules) {
-      if (m.kind === 'deck') continue; // skip deck as it's structural noise
-      const entry = groups.get(m.kind) ?? { total: 0, damaged: 0, occupied: 0 };
-      entry.total++;
-      if (m.occupiedBy != null) entry.occupied++;
+    py = this._sectionHeader(ctx, px, py, 'STATS', '');
 
-      // Health check
-      const md = m.moduleData;
-      if (md) {
-        const hp =
-          md.kind === 'cannon' ? (md as CannonModuleData).health :
-          md.kind === 'mast'   ? (md as MastModuleData).health :
-          md.kind === 'plank'  ? (md as PlankModuleData).health :
-          md.kind === 'helm' || md.kind === 'steering-wheel' ? (md as any).health :
-          null;
-        const maxHp =
-          md.kind === 'cannon' ? (md as CannonModuleData).maxHealth ?? 8000 :
-          md.kind === 'mast'   ? (md as MastModuleData).maxHealth ?? 15000 :
-          md.kind === 'plank'  ? (md as PlankModuleData).maxHealth ?? 10000 :
-          md.kind === 'helm' || md.kind === 'steering-wheel' ? (md as any).maxHealth ?? 10000 :
-          null;
-        if (hp !== null && maxHp !== null && hp / maxHp < 0.5) entry.damaged++;
+    const barW = PANEL_W - PAD * 2 - 104;
+    const barX = px + PAD + 96;
+
+    const rows: Array<{
+      label:    string;
+      pct:      number;
+      color:    string;
+      valueStr: string;
+      stripe:   boolean;
+    }> = [];
+
+    // Health
+    const health    = Math.max(0, Math.min(100, ship.hullHealth));
+    const hColor    = health > 60 ? GREEN : health > 30 ? ORANGE : RED;
+    rows.push({ label: 'Hull Health', pct: health / 100, color: hColor, valueStr: `${health.toFixed(0)}%`, stripe: false });
+
+    // Water Ingress (inverse of health)
+    const water     = Math.max(0, 100 - health);
+    const wColor    = water > 70 ? RED : water > 30 ? ORANGE : '#2266bb';
+    rows.push({ label: 'Water Ingress', pct: water / 100, color: wColor, valueStr: `${water.toFixed(0)}%`, stripe: true });
+
+    // Ship Weight — modules + bodies (75 kg each) + inventory
+    const SHIP_WEIGHT_CAP = 6000 + ((ship.levelStats?.levels?.[0] ?? 1) - 1) * 400;
+
+    const MODULE_KG: Record<string, number> = {
+      'cannon':         100,
+      'swivel':         180,
+      'mast':           150,
+      'helm':            20,
+      'steering-wheel':  20,
+      'plank':           30,
+      'deck':           200,
+      'ladder':           5,
+      'seat':            25,
+      'custom':          50,
+    };
+    const moduleKg = ship.modules.reduce((s, m) => {
+      if (m.kind === 'cannon') {
+        const snapIdx = (m.moduleData as any)?.gunportSnapIdx;
+        if (snapIdx !== undefined && snapIdx !== 255) {
+          const gp = ship.modules.find(gm => gm.kind === 'gunport' && (gm.moduleData as any)?.snapIndex === snapIdx);
+          return s + (gp ? ((gp.moduleData as any)?.isOpen ? 100 : 40) : 100);
+        }
+        return s + 100;
       }
+      return s + (MODULE_KG[m.kind] ?? 50);
+    }, 0);
 
-      groups.set(m.kind, entry);
-    }
+    const aboadPlayers = worldState.players.filter(p => p.carrierId === ship.id);
+    const aboardNpcs   = worldState.npcs.filter(n => n.shipId === ship.id);
+    const bodyKg       = (aboadPlayers.length + aboardNpcs.length) * 75;
+    const invKg        = aboadPlayers.reduce((s, p) => s + computeInventoryWeight(p.inventory), 0);
 
-    const kindOrder = ['helm', 'steering-wheel', 'cannon', 'mast', 'plank', 'ladder', 'seat', 'custom'];
-    const sorted = kindOrder
-      .filter(k => groups.has(k))
-      .concat([...groups.keys()].filter(k => !kindOrder.includes(k)));
+    const totalKg  = moduleKg + bodyKg + invKg;
+    const wPct     = Math.min(totalKg / SHIP_WEIGHT_CAP, 1);
+    const cColor   = wPct > 0.9 ? RED : wPct > 0.7 ? ORANGE : '#664422';
+    rows.push({ label: 'Ship Weight', pct: wPct, color: cColor, valueStr: `${totalKg} / ${SHIP_WEIGHT_CAP} kg`, stripe: false });
 
-    const count = sorted.length;
-    py = this._sectionHeader(ctx, px, py, 'MODULES', `${modules.filter(m => m.kind !== 'deck').length} installed`);
-
-    const colLabel = px + PAD + 8;
-    const colCount = px + PAD + 180;
-    const colOcc   = px + PAD + 240;
-    const colDmg   = px + PAD + 320;
-
-    // Column header
-    ctx.font = 'bold 11px Georgia, serif';
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    ctx.fillStyle = TEXT_DIM;
-    ctx.fillText('Module', colLabel, py + ROW_H / 2);
-    ctx.fillText('#', colCount, py + ROW_H / 2);
-    ctx.fillText('In use', colOcc, py + ROW_H / 2);
-    ctx.fillText('Damaged', colDmg, py + ROW_H / 2);
-    py += ROW_H;
-
-    for (let i = 0; i < sorted.length && i < 8; i++) {
-      const kind  = sorted[i];
-      const entry = groups.get(kind)!;
-
-      if (i % 2 === 1) {
+    for (const row of rows) {
+      if (row.stripe) {
         ctx.fillStyle = BG_STRIPE;
         ctx.fillRect(px + PAD, py, PANEL_W - PAD * 2, ROW_H);
       }
 
-      const label = kind.replace('-', ' ');
-      ctx.font = '13px Georgia, serif';
-      ctx.textAlign = 'left';
+      ctx.font         = '12px Georgia, serif';
+      ctx.textAlign    = 'left';
       ctx.textBaseline = 'middle';
+      ctx.fillStyle    = TEXT_DIM;
+      ctx.fillText(row.label, px + PAD + 8, py + ROW_H / 2);
+
+      // Track
+      ctx.fillStyle = '#1a1a28';
+      ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+      // Fill
+      ctx.fillStyle = row.color;
+      ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * row.pct), BAR_H);
+      // Border
+      ctx.strokeStyle = '#334';
+      ctx.lineWidth   = 0.8;
+      ctx.strokeRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
+      // Value
+      ctx.font      = '11px Georgia, serif';
+      ctx.textAlign = 'right';
       ctx.fillStyle = TEXT_HEAD;
-      ctx.fillText(label.charAt(0).toUpperCase() + label.slice(1), colLabel, py + ROW_H / 2);
+      ctx.fillText(row.valueStr, barX + barW - 2, py + ROW_H / 2);
 
-      ctx.fillStyle = TEXT_MONO;
-      ctx.fillText(String(entry.total), colCount, py + ROW_H / 2);
-
-      ctx.fillStyle = entry.occupied > 0 ? ORANGE : TEXT_DIM;
-      ctx.fillText(entry.occupied > 0 ? String(entry.occupied) : '—', colOcc, py + ROW_H / 2);
-
-      ctx.fillStyle = entry.damaged > 0 ? RED : TEXT_DIM;
-      ctx.fillText(entry.damaged > 0 ? String(entry.damaged) : '—', colDmg, py + ROW_H / 2);
-
-      py += ROW_H;
-    }
-
-    if (count > 8) {
-      ctx.font = '12px Georgia, serif';
-      ctx.fillStyle = TEXT_DIM;
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'top';
-      ctx.fillText(`  … and ${count - 8} more module types`, px + PAD, py + 2);
       py += ROW_H;
     }
 
@@ -619,6 +850,7 @@ export class ShipMenu {
     worldState: WorldState,
     shipId:     number,
     shipType:   number = 3,
+    maxH:       number = 300,
   ): void {
     this._npcHitAreas = [];
     const aboard  = worldState.npcs.filter(n => n.shipId === shipId);
@@ -637,12 +869,35 @@ export class ShipMenu {
           : '  No crew aboard.',
         px + PAD, py + 4,
       );
+      this._crewScrollBounds = null;
       return;
     }
 
     const ROLE_TAGS: Record<number, string> = { 0: 'Sailor', 1: 'Gunner', 2: 'Helm', 3: 'Rigger', 4: 'Repair' };
-    const NPC_ROW_H = 36;
-    const BAR_H_SM  = 5;
+    const NPC_ROW_H    = 36;
+    const BAR_H_SM     = 5;
+    const CREW_VISIBLE_H = Math.min(180, Math.max(NPC_ROW_H * 2, maxH - 28)); // 28 = section header + margin
+
+    // Calculate total content height
+    const totalH = aboard.length * NPC_ROW_H;
+    const needsScroll = totalH > CREW_VISIBLE_H;
+    const viewH  = needsScroll ? CREW_VISIBLE_H : totalH;
+
+    // Clamp scroll
+    this._crewScrollMaxY = Math.max(0, totalH - viewH);
+    this._crewScrollY    = Math.max(0, Math.min(this._crewScrollMaxY, this._crewScrollY));
+
+    // Store scroll area bounds for wheel routing
+    this._crewScrollBounds = { x: px + PAD, y: py, w: PANEL_W - PAD * 2, h: viewH };
+
+    // Clip to the visible crew area
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px, py, PANEL_W, viewH);
+    ctx.clip();
+
+    // Translate for scroll
+    ctx.translate(0, -this._crewScrollY);
 
     for (const npc of aboard) {
       const rowX = px + PAD;
@@ -697,9 +952,24 @@ export class ShipMenu {
       ctx.fillStyle = TEXT_DIM;
       ctx.fillText('▸', rowX + rowW, rowY + 4);
 
-      // Register hit area
-      this._npcHitAreas.push({ npc, x: rowX, y: rowY, w: rowW, h: NPC_ROW_H - 2 });
+      // Register hit area in screen-space (adjusted for scroll offset)
+      const screenRowY = rowY - this._crewScrollY;
+      this._npcHitAreas.push({ npc, x: rowX, y: screenRowY, w: rowW, h: NPC_ROW_H - 2 });
       py += NPC_ROW_H;
+    }
+
+    ctx.restore();
+
+    // Draw scrollbar track if needed
+    if (needsScroll) {
+      const sbX    = px + PANEL_W - PAD + 2;
+      const trackY = this._crewScrollBounds.y;
+      const sbH    = Math.max(20, Math.round((viewH / totalH) * viewH));
+      const sbY    = trackY + Math.round((this._crewScrollY / this._crewScrollMaxY) * (viewH - sbH));
+      ctx.fillStyle = '#223';
+      ctx.fillRect(sbX, trackY, 6, viewH);
+      ctx.fillStyle = '#556';
+      ctx.fillRect(sbX, sbY, 6, sbH);
     }
   }
 
@@ -804,7 +1074,7 @@ export class ShipMenu {
       const attrCap = ls.attrCaps[attr] ?? SHIP_ATTR_CAPS[attr] ?? 50;
       const attrMaxed = pts >= attrCap;
       const isMaxed   = attrMaxed || shipCapped;
-      const wip       = attr === SHIP_ATTR_WEIGHT || attr === SHIP_ATTR_CREW;
+      const wip       = attr === SHIP_ATTR_CREW;
 
       // Alternate stripe
       if (ii % 2 === 1) {
@@ -845,7 +1115,9 @@ export class ShipMenu {
       ctx.fillStyle = wip ? TEXT_DIM : TEXT_MONO;
       let effectStr = '';
       if (!wip) {
-        if (attr === SHIP_ATTR_DAMAGE) {
+        if (attr === SHIP_ATTR_WEIGHT) {
+          effectStr = `${6000 + pts * 400} kg cap`;
+        } else if (attr === SHIP_ATTR_DAMAGE) {
           const mult = 1.0 + 0.04 * pts;
           effectStr = `×${mult.toFixed(2)} dmg`;
         } else if (attr === SHIP_ATTR_RESISTANCE) {

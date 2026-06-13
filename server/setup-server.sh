@@ -56,6 +56,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=/opt/pirate-game
+EnvironmentFile=/opt/pirate-game/config/auth.env
 ExecStart=/opt/pirate-game/bin/pirate-server
 Restart=always
 RestartSec=10

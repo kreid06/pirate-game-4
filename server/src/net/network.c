@@ -121,7 +121,7 @@ int network_process_incoming(struct NetworkManager* net_mgr, struct Sim* sim) {
             // Unknown connection - might be handshake
             uint8_t packet_type = net_mgr->recv_buffer[0];
             
-            if (packet_type == PACKET_HANDSHAKE && received >= sizeof(struct HandshakePacket)) {
+            if (packet_type == PACKET_HANDSHAKE && (size_t)received >= sizeof(struct HandshakePacket)) {
                 const struct HandshakePacket* handshake = (const struct HandshakePacket*)net_mgr->recv_buffer;
                 network_handle_handshake(net_mgr, &from_addr, handshake, sim);
             } else {
@@ -153,7 +153,7 @@ int network_process_incoming(struct NetworkManager* net_mgr, struct Sim* sim) {
         
         switch (packet_type) {
             case PACKET_CLIENT_INPUT: {
-                if (received >= sizeof(struct CmdPacket)) {
+                if ((size_t)received >= sizeof(struct CmdPacket)) {
                     const struct CmdPacket* cmd = (const struct CmdPacket*)net_mgr->recv_buffer;
                     network_process_player_input(net_mgr, sim, conn->player_id, cmd);
                 }

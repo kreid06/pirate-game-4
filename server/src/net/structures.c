@@ -13,6 +13,7 @@
 #include "net/dock_physics.h"
 #include "net/cannon_fire.h"
 #include "net/crafting.h"
+#include "net/quality.h"
 #include "net/claim.h"
 #include "sim/island.h"
 #include "util/time.h"
@@ -254,6 +255,17 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
        Only wooden floors are rejected for water placement — other structures
        require a floor tile anyway, so the floor-edge/floor-centre checks
        below are sufficient to keep them on land. */
+    /* Parse optional under_construction flag (sent when client placed from schematic plan) */
+    bool req_schematic = false;
+    {
+        const char *uc = strstr(payload, "\"under_construction\":");
+        if (uc) {
+            const char *v = uc + 21;
+            while (*v == ' ') v++;
+            if (strncmp(v, "true", 4) == 0 || *v == '1') req_schematic = true;
+        }
+    }
+
     uint32_t target_island_id = 0;
     {
         for (int ii = 0; ii < ISLAND_COUNT; ii++) {
@@ -324,7 +336,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         required_item = ITEM_WALL;
     } else if (strcmp(stype, "door_frame") == 0) {
         stype_enum    = STRUCT_DOOR_FRAME;
-        required_item = ITEM_DOOR_FRAME;
+        required_item = ITEM_WALL;   /* door-frame is a T-cycle variant of the Wall item */
     } else if (strcmp(stype, "door") == 0) {
         stype_enum    = STRUCT_DOOR;
         required_item = ITEM_DOOR;
@@ -346,15 +358,21 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     } else if (strcmp(stype, "claim_flag") == 0) {
         stype_enum    = STRUCT_CLAIM_FLAG;
         required_item = ITEM_CLAIM_FLAG;
+    } else if (strcmp(stype, "chest") == 0) {
+        stype_enum    = STRUCT_CHEST;
+        required_item = ITEM_NONE;  /* built from raw resources via schematic */
+    } else if (strcmp(stype, "bed") == 0) {
+        stype_enum    = STRUCT_BED;
+        required_item = ITEM_BED;
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
         goto ps_send;
     }
 
-    /* Player must have the item somewhere in their inventory (skip for ITEM_NONE) */
+    /* Player must have the item somewhere in their inventory (skip for ITEM_NONE or schematic placement) */
     int found_slot = -1;
-    if (required_item != ITEM_NONE) {
+    if (required_item != ITEM_NONE && !req_schematic) {
         for (int s = 0; s < INVENTORY_SLOTS; s++) {
             if (player->inventory.slots[s].item == required_item &&
                 player->inventory.slots[s].quantity > 0) {
@@ -365,6 +383,41 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         if (found_slot < 0) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"place_structure_fail\",\"reason\":\"missing_item\"}");
+            goto ps_send;
+        }
+    }
+
+    /* ── Schematic resource cost table ────────────────────────────────────
+     * Matches client LAND_BUILD_PANEL_ENTRIES costs.  craft_count_item /
+     * craft_consume route ITEM_WOOD/FIBER/METAL/STONE to the res_* pool. */
+    /* Costs must match client LAND_BUILD_PANEL_ENTRIES in UIManager.ts */
+    static const struct { int wood, fiber, metal, stone; } SCHEMATIC_COST[14] = {
+        [STRUCT_WOODEN_FLOOR]     = { 40, 0,  0,   0 },
+        [STRUCT_WORKBENCH]        = { 12, 0,  0,   0 },
+        [STRUCT_WALL]             = { 20, 0,  0,   0 },
+        [STRUCT_DOOR_FRAME]       = { 20, 0,  0,   0 },
+        [STRUCT_DOOR]             = {  8, 0,  0,   0 },
+        [STRUCT_SHIPYARD]         = {250, 0,  0, 100 },
+        [STRUCT_WRECK]            = {  0, 0,  0,   0 },
+        [STRUCT_CEILING]          = { 25, 0,  0,   0 },
+        [STRUCT_CANNON]           = { 15, 0, 25,   0 },
+        [STRUCT_FLAG_FORT]        = {300, 0,  0, 200 },
+        [STRUCT_CLAIM_FLAG]       = {  5, 5,  0,   0 },
+        [STRUCT_COMPANY_FORTRESS] = {300, 0,  0, 200 },
+        [STRUCT_CHEST]            = { 12, 0,  0,   0 },
+        [STRUCT_BED]              = { 10, 5,  0,   0 },
+    };
+    if (req_schematic && (int)stype_enum < 14) {
+        int nw = SCHEMATIC_COST[stype_enum].wood;
+        int nf = SCHEMATIC_COST[stype_enum].fiber;
+        int nm = SCHEMATIC_COST[stype_enum].metal;
+        int ns = SCHEMATIC_COST[stype_enum].stone;
+        if (craft_count_item(player, ITEM_WOOD)  < nw ||
+            craft_count_item(player, ITEM_FIBER) < nf ||
+            craft_count_item(player, ITEM_METAL) < nm ||
+            craft_count_item(player, ITEM_STONE) < ns) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"missing_resources\"}");
             goto ps_send;
         }
     }
@@ -786,7 +839,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Workbench: centre point must fall inside the rotated floor tile (50x50 px)
+    /* Workbench / Chest: centre point must fall inside the rotated floor tile (50x50 px)
        AND that floor tile must belong to the same company as the placing player. */
     if (stype_enum == STRUCT_WORKBENCH) {
         bool has_floor     = false;
@@ -809,6 +862,51 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                     has_floor = true;
                 break;
             }
+        }
+        if (!has_floor) {
+            snprintf(response, sizeof(response), wrong_company
+                     ? "{\"type\":\"place_structure_fail\",\"reason\":\"wrong_company\"}"
+                     : "{\"type\":\"place_structure_fail\",\"reason\":\"needs_floor\"}");
+            goto ps_send;
+        }
+    }
+
+    /* Bed: centre point must fall inside a same-company floor tile (50x50 px).
+       Only one bed per floor tile is allowed. */
+    if (stype_enum == STRUCT_BED) {
+        bool has_floor     = false;
+        bool wrong_company = false;
+        bool bed_on_tile   = false;
+        const float HALF_TILE = 25.0f;
+        for (uint32_t si = 0; si < placed_structure_count; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_WOODEN_FLOOR) continue;
+            float rad = placed_structures[si].rotation * (float)M_PI / 180.0f;
+            float c   = cosf(-rad), s = sinf(-rad);
+            float ddx = px - placed_structures[si].x;
+            float ddy = py - placed_structures[si].y;
+            float lx  = ddx * c - ddy * s;
+            float ly  = ddx * s + ddy * c;
+            if (fabsf(lx) <= HALF_TILE && fabsf(ly) <= HALF_TILE) {
+                if (placed_structures[si].company_id != (uint8_t)player->company_id)
+                    wrong_company = true;
+                else
+                    has_floor = true;
+                break;
+            }
+        }
+        /* Also ensure no bed already exists at approximately this position */
+        for (uint32_t si = 0; si < placed_structure_count && !bed_on_tile; si++) {
+            if (!placed_structures[si].active) continue;
+            if (placed_structures[si].type != STRUCT_BED) continue;
+            float ddx = placed_structures[si].x - px;
+            float ddy = placed_structures[si].y - py;
+            if (ddx*ddx + ddy*ddy < 30.0f * 30.0f) bed_on_tile = true;
+        }
+        if (bed_on_tile) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
+            goto ps_send;
         }
         if (!has_floor) {
             snprintf(response, sizeof(response), wrong_company
@@ -1081,10 +1179,24 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Consume 1 item from the found slot */
+    QualityPayload place_quality;
+    memset(&place_quality, 0, sizeof(place_quality));
     if (found_slot >= 0) {
+        place_quality = player->inventory.slot_quality[found_slot];
         player->inventory.slots[found_slot].quantity--;
         if (player->inventory.slots[found_slot].quantity == 0)
             player->inventory.slots[found_slot].item = ITEM_NONE;
+    }
+    /* Consume resources from pool for schematic placements */
+    if (req_schematic && (int)stype_enum < 14) {
+        int nw = SCHEMATIC_COST[stype_enum].wood;
+        int nf = SCHEMATIC_COST[stype_enum].fiber;
+        int nm = SCHEMATIC_COST[stype_enum].metal;
+        int ns = SCHEMATIC_COST[stype_enum].stone;
+        if (nw > 0) craft_consume(player, ITEM_WOOD,  nw);
+        if (nf > 0) craft_consume(player, ITEM_FIBER, nf);
+        if (nm > 0) craft_consume(player, ITEM_METAL, nm);
+        if (ns > 0) craft_consume(player, ITEM_STONE, ns);
     }
 
     /* Add structure */
@@ -1096,20 +1208,53 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     placed_structures[placed_structure_count].x          = px;
     placed_structures[placed_structure_count].y          = py;
     placed_structures[placed_structure_count].company_id = (uint8_t)player->company_id;
-    placed_structures[placed_structure_count].max_hp     = 100;
-    placed_structures[placed_structure_count].hp         = 100;
-    placed_structures[placed_structure_count].target_hp  = 100;
+    /* Per-type initial HP */
+    uint32_t init_hp;
+    switch (stype_enum) {
+        case STRUCT_WOODEN_FLOOR: init_hp = 15000;  break;
+        case STRUCT_WALL:         init_hp = 10000;  break;
+        case STRUCT_CEILING:      init_hp = 10000;  break;
+        case STRUCT_DOOR_FRAME:   init_hp = 10000;  break;
+        case STRUCT_DOOR:         init_hp =  8000;  break;
+        case STRUCT_WORKBENCH:    init_hp =  6000;  break;
+        case STRUCT_CHEST:        init_hp =  4000;  break;
+        case STRUCT_BED:          init_hp =  3000;  break;
+        case STRUCT_SHIPYARD:     init_hp = 150000; break;
+        default:                  init_hp =    100; break;
+    }
+    placed_structures[placed_structure_count].max_hp     = init_hp;
+    placed_structures[placed_structure_count].under_construction = req_schematic;
+    if (req_schematic) {
+        /* Schematic placement: start at 10% HP and passively build up */
+        uint32_t start_hp = init_hp / 10;
+        if (start_hp < 1) start_hp = 1;
+        placed_structures[placed_structure_count].hp         = start_hp;
+        placed_structures[placed_structure_count].target_hp  = init_hp;
+    } else {
+        placed_structures[placed_structure_count].hp         = init_hp;
+        placed_structures[placed_structure_count].target_hp  = init_hp;
+    }
+    /* Apply source-item quality: store payload and scale HP by durability mult */
+    placed_structures[placed_structure_count].quality = place_quality;
+    if (place_quality.quality_q8 != 0) {
+        uint16_t dm_q8 = place_quality.stat_mult_q8[STAT_DURABILITY];
+        if (dm_q8 > 256) {  /* 256 = 1.00x; only scale up */
+            PlacedStructure* qs = &placed_structures[placed_structure_count];
+            qs->max_hp    = (uint32_t)(((uint64_t)qs->max_hp    * dm_q8) / 256);
+            qs->target_hp = (uint32_t)(((uint64_t)qs->target_hp * dm_q8) / 256);
+            qs->hp        = (uint32_t)(((uint64_t)qs->hp        * dm_q8) / 256);
+        }
+    }
     placed_structures[placed_structure_count].placer_id  = player->player_id;
-    strncpy(placed_structures[placed_structure_count].placer_name, player->name,
-            sizeof(placed_structures[placed_structure_count].placer_name) - 1);
-    placed_structures[placed_structure_count].placer_name[
-        sizeof(placed_structures[placed_structure_count].placer_name) - 1] = '\0';
+    snprintf(placed_structures[placed_structure_count].placer_name,
+             sizeof(placed_structures[placed_structure_count].placer_name),
+             "%s", player->name);
     placed_structures[placed_structure_count].open        = false;
     placed_structures[placed_structure_count].door_locked = (stype_enum == STRUCT_DOOR);
     placed_structures[placed_structure_count].rotation   =
         (stype_enum == STRUCT_WOODEN_FLOOR || stype_enum == STRUCT_WORKBENCH ||
          stype_enum == STRUCT_SHIPYARD || stype_enum == STRUCT_CEILING ||
-         stype_enum == STRUCT_CANNON) ? place_rotation : 0.0f;
+         stype_enum == STRUCT_CANNON || stype_enum == STRUCT_BED) ? place_rotation : 0.0f;
     /* Cannon: initialise aim angle to match the placement rotation so first fire goes the right way.
        The barrel points "up" in local space (−y), which corresponds to rotRad − π/2 in world space. */
     if (stype_enum == STRUCT_CANNON) {
@@ -1144,13 +1289,17 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
          * a claim flag); the client also renders it as its own non-merging
          * blob in the overlay. */
         PlacedStructure *ff = &placed_structures[placed_structure_count - 1];
-        ff->max_hp            = 500;
-        ff->hp                = (uint16_t)(500 * FLAG_FORT_INITIAL_HP_PCT);
+        ff->max_hp            = 100000;
+        ff->hp                = (uint32_t)(100000 * FLAG_FORT_INITIAL_HP_PCT);
         ff->target_hp         = ff->max_hp; /* heal ceiling; permanently reduced by combat damage */
         ff->fortress_complete = false;
         ff->claim_contested   = false;
         ff->claim_state       = CLAIM_FLAG_STATE_CONTEST;
         ff->claim_grace_ms    = 0.0f;
+        /* Flag forts manage their own HP progression through claim phases (claim.c).
+         * Clear under_construction so structure_repair_tick does not also passively
+         * heal the fort and bypass the CLAIMING → BUILDING → ACTIVE phase logic. */
+        ff->under_construction = false;
 
         /* Detect "placed in already-active friendly territory" — search for
          * any active (non-orphaned, fortress_complete) flag fort or company
@@ -1227,9 +1376,9 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                  ",\"cannon_aim_angle\":%.4f",
                  placed_structures[placed_structure_count - 1].cannon_aim_angle);
     }
-    uint16_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
-    uint16_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
-    uint16_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
+    uint32_t bcast_hp     = placed_structures[placed_structure_count - 1].hp;
+    uint32_t bcast_max_hp = placed_structures[placed_structure_count - 1].max_hp;
+    uint32_t bcast_target = placed_structures[placed_structure_count - 1].target_hp;
     /* Door: initial locked state (always true for new doors) */
     char door_lock_extra[32] = "";
     if (new_is_door) {
@@ -1315,13 +1464,88 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
         PlacedStructure *w = &placed_structures[i];
         if (!w->active || w->type != STRUCT_WRECK || w->id != sid) continue;
 
-        /* Range check — must be within 400 client units to salvage */
+        /* Range check — must be within STRUCT_INTERACT_R client units to salvage */
         float dx = player->x - w->x;
         float dy = player->y - w->y;
-        if (dx*dx + dy*dy > 400.0f * 400.0f) {
+        float range_sq = w->wreck_resource_cache
+            ? (float)(STRUCT_INTERACT_R * STRUCT_INTERACT_R)
+            : (400.0f * 400.0f);
+        if (dx*dx + dy*dy > range_sq) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"salvage_fail\",\"reason\":\"too_far\"}");
             goto si_send;
+        }
+
+        /* ── Chest-ruin: open as read-only chest UI ──────────────────── */
+        if (w->wreck_resource_cache) {
+            uint32_t total = (uint32_t)w->chest_wood + w->chest_fiber +
+                             w->chest_metal + w->chest_stone;
+            if (total == 0) {
+                /* Empty ruin — remove it */
+                w->active = false;
+                char bcast[64];
+                snprintf(bcast, sizeof(bcast),
+                         "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
+                websocket_server_broadcast(bcast);
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"salvage_fail\",\"reason\":\"empty\"}");
+                goto si_send;
+            }
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"land_chest_state\",\"structure_id\":%u"
+                     ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u"
+                     ",\"player_wood\":%u,\"player_fiber\":%u"
+                     ",\"player_metal\":%u,\"player_stone\":%u"
+                     ",\"read_only\":true}",
+                     (unsigned)w->id,
+                     (unsigned)w->chest_wood, (unsigned)w->chest_fiber,
+                     (unsigned)w->chest_metal, (unsigned)w->chest_stone,
+                     (unsigned)player->res_wood, (unsigned)player->res_fiber,
+                     (unsigned)player->res_metal, (unsigned)player->res_stone);
+            goto si_send;
+        }
+
+        /* ── Blueprint salvage: one schematic per interact into the persistent
+         *    schematic inventory (retained through death). ──────────────── */
+        if (w->wreck_bp_count > 0) {
+            int bslot = -1;
+            for (int bi = 0; bi < 6; bi++) {
+                if (w->wreck_bp_items[bi] != 0) { bslot = bi; break; }
+            }
+            if (bslot >= 0) {
+                ItemKind bitem = (ItemKind)w->wreck_bp_items[bslot];
+                uint8_t  bcr   = w->wreck_bp_crafts[bslot];
+                if (!schematic_add(player, bitem, bcr, &w->wreck_bp_quality[bslot])) {
+                    snprintf(response, sizeof(response),
+                             "{\"type\":\"salvage_fail\",\"reason\":\"schematics_full\"}");
+                    goto si_send;
+                }
+                int btier = quality_tier(quality_from_q8(w->wreck_bp_quality[bslot].quality_q8));
+                w->wreck_bp_items[bslot]  = 0;
+                w->wreck_bp_crafts[bslot] = 0;
+                w->wreck_bp_count--;
+
+                char bbcast[96];
+                if (w->wreck_loot_count == 0 && w->wreck_bp_count == 0) {
+                    w->active = false;
+                    snprintf(bbcast, sizeof(bbcast),
+                             "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
+                } else {
+                    snprintf(bbcast, sizeof(bbcast),
+                             "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u,\"bp_count\":%u}",
+                             (unsigned)w->id, (unsigned)w->wreck_loot_count, (unsigned)w->wreck_bp_count);
+                }
+                websocket_server_broadcast(bbcast);
+
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"salvage_blueprint\",\"item\":%u,\"tier\":%d,"
+                         "\"crafts\":%u,\"wreck_id\":%u,\"bp_remaining\":%u,\"loot_remaining\":%u}",
+                         (unsigned)bitem, btier,
+                         (unsigned)(bcr ? bcr : quality_item_max_crafts(bitem)),
+                         (unsigned)w->id, (unsigned)w->wreck_bp_count,
+                         (unsigned)w->wreck_loot_count);
+                goto si_send;
+            }
         }
 
         if (w->wreck_loot_count == 0) {
@@ -1335,7 +1559,6 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
                      "{\"type\":\"salvage_fail\",\"reason\":\"empty\"}");
             goto si_send;
         }
-
         /* Find the first non-empty loot slot */
         int slot = -1;
         for (int li = 0; li < 6; li++) {
@@ -1372,14 +1595,14 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
 
         /* Broadcast wreck state update */
         char bcast[96];
-        if (w->wreck_loot_count == 0) {
+        if (w->wreck_loot_count == 0 && w->wreck_bp_count == 0) {
             w->active = false;
             snprintf(bcast, sizeof(bcast),
                      "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)w->id);
         } else {
             snprintf(bcast, sizeof(bcast),
-                     "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u}",
-                     (unsigned)w->id, (unsigned)w->wreck_loot_count);
+                     "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u,\"bp_count\":%u}",
+                     (unsigned)w->id, (unsigned)w->wreck_loot_count, (unsigned)w->wreck_bp_count);
         }
         websocket_server_broadcast(bcast);
 
@@ -1413,6 +1636,24 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             snprintf(response, sizeof(response),
                      "{\"type\":\"crafting_open\",\"structure_id\":%u,\"structure_type\":\"workbench\"}",
                      sid);
+            goto si_send;
+        }
+        if (placed_structures[i].type == STRUCT_CHEST) {
+            if (placed_structures[i].company_id != 0 &&
+                player->company_id != 0 &&
+                placed_structures[i].company_id != player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"wrong_company\"}");
+                goto si_send;
+            }
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"land_chest_state\",\"structure_id\":%u"
+                     ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u}",
+                     sid,
+                     (unsigned)placed_structures[i].chest_wood,
+                     (unsigned)placed_structures[i].chest_fiber,
+                     (unsigned)placed_structures[i].chest_metal,
+                     (unsigned)placed_structures[i].chest_stone);
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_SHIPYARD) {
@@ -1502,6 +1743,39 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
                      placed_structures[i].rotation * (float)M_PI / 180.0f);
             goto si_send;
         }
+        if (placed_structures[i].type == STRUCT_BED) {
+            /* Company check: player must own this bed (same company or solo placer) */
+            if (placed_structures[i].company_id != 0 &&
+                player->company_id != 0 &&
+                placed_structures[i].company_id != player->company_id) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"structure_interact_fail\",\"reason\":\"wrong_company\"}");
+                goto si_send;
+            }
+            /* Cooldown check: 60 seconds between bed uses */
+            uint32_t now_bed = get_time_ms();
+            if (player->bed_last_use_ms != 0 &&
+                now_bed - player->bed_last_use_ms < 60000u) {
+                uint32_t remaining = 60000u - (now_bed - player->bed_last_use_ms);
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"bed_cooldown\",\"remaining_ms\":%u}",
+                         remaining);
+                goto si_send;
+            }
+            /* Set island respawn point and clear any ship respawn */
+            player->respawn_bed_id  = (uint16_t)placed_structures[i].id;
+            player->respawn_ship_id = 0;
+            player->bed_last_use_ms = now_bed;
+            log_info("🛏️  Player %u set respawn at island bed %u (%.1f,%.1f)",
+                     player->player_id, placed_structures[i].id,
+                     placed_structures[i].x, placed_structures[i].y);
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_used\",\"bed_id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                     placed_structures[i].id,
+                     placed_structures[i].x,
+                     placed_structures[i].y);
+            goto si_send;
+        }
         snprintf(response, sizeof(response),
                  "{\"type\":\"structure_interact_fail\",\"reason\":\"not_interactive\"}");
         goto si_send;
@@ -1517,17 +1791,255 @@ si_send:;
     if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
 }
 
+/*
+ * land_chest_transfer: deposit / withdraw resources between player pack and
+ * an island land chest (STRUCT_CHEST).
+ * Payload: { structure_id, item, quantity, direction:"deposit"|"withdraw" }
+ */
+void handle_land_chest_transfer(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+    uint32_t sid = 0;
+    int quantity = 0;
+    char item[32] = "";
+    char direction[16] = "";
+
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+    const char* qp = strstr(payload, "\"quantity\":");
+    if (qp) sscanf(qp + 11, "%d", &quantity);
+
+    /* Parse "item" string */
+    const char* ip = strstr(payload, "\"item\":\"");
+    if (ip) {
+        ip += 8;
+        size_t k = 0;
+        while (*ip && *ip != '"' && k < sizeof(item) - 1) item[k++] = *ip++;
+        item[k] = '\0';
+    }
+
+    /* Parse "direction" string */
+    const char* dp = strstr(payload, "\"direction\":\"");
+    if (dp) {
+        dp += 13;
+        size_t k = 0;
+        while (*dp && *dp != '"' && k < sizeof(direction) - 1) direction[k++] = *dp++;
+        direction[k] = '\0';
+    }
+
+    if (quantity <= 0 || sid == 0 || item[0] == '\0' || direction[0] == '\0') {
+        snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"bad_params\"}");
+        goto lct_send;
+    }
+
+    /* Find the chest structure — also accept chest-ruin wrecks (read-only) */
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (!placed_structures[i].active) continue;
+        if (placed_structures[i].id != sid) continue;
+
+        bool is_ruin = (placed_structures[i].type == STRUCT_WRECK &&
+                        placed_structures[i].wreck_resource_cache);
+        if (placed_structures[i].type != STRUCT_CHEST && !is_ruin) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"not_chest\"}");
+            goto lct_send;
+        }
+        /* Chest-ruin: deposits are forbidden */
+        if (is_ruin && strcmp(direction, "deposit") == 0) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"read_only\"}");
+            goto lct_send;
+        }
+        /* Company check (skip for ruins — anyone can loot) */
+        if (!is_ruin &&
+            placed_structures[i].company_id != 0 &&
+            player->company_id != 0 &&
+            placed_structures[i].company_id != player->company_id) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"wrong_company\"}");
+            goto lct_send;
+        }
+        /* Range check */
+        float dx = player->x - placed_structures[i].x;
+        float dy = player->y - placed_structures[i].y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"too_far\"}");
+            goto lct_send;
+        }
+
+        /* Select item pointers */
+        uint16_t* chest_field  = NULL;
+        uint16_t* player_field = NULL;
+        if      (strcmp(item, "wood")  == 0) { chest_field = &placed_structures[i].chest_wood;  player_field = &player->res_wood;  }
+        else if (strcmp(item, "fiber") == 0) { chest_field = &placed_structures[i].chest_fiber; player_field = &player->res_fiber; }
+        else if (strcmp(item, "metal") == 0) { chest_field = &placed_structures[i].chest_metal; player_field = &player->res_metal; }
+        else if (strcmp(item, "stone") == 0) { chest_field = &placed_structures[i].chest_stone; player_field = &player->res_stone; }
+        else {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"unknown_item\"}");
+            goto lct_send;
+        }
+
+        bool deposit = (strcmp(direction, "deposit") == 0);
+        int actual = 0;
+        if (deposit) {
+            int avail = (int)*player_field;
+            int cap   = LAND_CHEST_MAX - (int)*chest_field;
+            actual = quantity;
+            if (actual > avail) actual = avail;
+            if (actual > cap)   actual = cap;
+            if (actual <= 0) {
+                snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"no_space\"}");
+                goto lct_send;
+            }
+            *player_field -= (uint16_t)actual;
+            *chest_field  += (uint16_t)actual;
+        } else {
+            /* withdraw */
+            int avail = (int)*chest_field;
+            actual = quantity;
+            if (actual > avail) actual = avail;
+            if (actual <= 0) {
+                snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"chest_empty\"}");
+                goto lct_send;
+            }
+            *chest_field  -= (uint16_t)actual;
+            *player_field += (uint16_t)actual;
+
+            /* If the ruin is now fully emptied, despawn it */
+            if (is_ruin) {
+                uint32_t tot = (uint32_t)placed_structures[i].chest_wood +
+                               placed_structures[i].chest_fiber +
+                               placed_structures[i].chest_metal +
+                               placed_structures[i].chest_stone;
+                if (tot == 0) {
+                    placed_structures[i].active = false;
+                    char bcast[64];
+                    snprintf(bcast, sizeof(bcast),
+                             "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)sid);
+                    websocket_server_broadcast(bcast);
+                }
+            }
+        }
+
+        /* Respond with updated chest state + updated player inventory amounts */
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"land_chest_state\",\"structure_id\":%u"
+                 ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u"
+                 ",\"player_wood\":%u,\"player_fiber\":%u,\"player_metal\":%u,\"player_stone\":%u"
+                 "%s}",
+                 sid,
+                 (unsigned)placed_structures[i].chest_wood,
+                 (unsigned)placed_structures[i].chest_fiber,
+                 (unsigned)placed_structures[i].chest_metal,
+                 (unsigned)placed_structures[i].chest_stone,
+                 (unsigned)player->res_wood,
+                 (unsigned)player->res_fiber,
+                 (unsigned)player->res_metal,
+                 (unsigned)player->res_stone,
+                 is_ruin ? ",\"read_only\":true" : "");
+        goto lct_send;
+    }
+
+    snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"not_found\"}");
+
+lct_send:;
+    char frame[512];
+    size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
+void handle_land_chest_drop(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+    uint32_t sid = 0;
+    int quantity = 0;
+    char item[32] = "";
+
+    const char* sp = strstr(payload, "\"structure_id\":");
+    if (sp) sscanf(sp + 15, "%u", &sid);
+    const char* qp = strstr(payload, "\"quantity\":");
+    if (qp) sscanf(qp + 11, "%d", &quantity);
+    const char* ip = strstr(payload, "\"item\":\"");
+    if (ip) {
+        ip += 8;
+        size_t k = 0;
+        while (*ip && *ip != '"' && k < sizeof(item) - 1) item[k++] = *ip++;
+        item[k] = '\0';
+    }
+
+    if (quantity <= 0 || sid == 0 || item[0] == '\0') {
+        snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"bad_params\"}");
+        goto lcd_send;
+    }
+
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        if (!placed_structures[i].active) continue;
+        if (placed_structures[i].id != sid) continue;
+        if (placed_structures[i].type != STRUCT_CHEST) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"not_chest\"}");
+            goto lcd_send;
+        }
+        /* Company check */
+        if (placed_structures[i].company_id != 0 &&
+            player->company_id != 0 &&
+            placed_structures[i].company_id != player->company_id) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"wrong_company\"}");
+            goto lcd_send;
+        }
+        /* Range check */
+        float dx = player->x - placed_structures[i].x;
+        float dy = player->y - placed_structures[i].y;
+        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"too_far\"}");
+            goto lcd_send;
+        }
+        /* Select chest field */
+        uint16_t* chest_field = NULL;
+        if      (strcmp(item, "wood")  == 0) chest_field = &placed_structures[i].chest_wood;
+        else if (strcmp(item, "fiber") == 0) chest_field = &placed_structures[i].chest_fiber;
+        else if (strcmp(item, "metal") == 0) chest_field = &placed_structures[i].chest_metal;
+        else if (strcmp(item, "stone") == 0) chest_field = &placed_structures[i].chest_stone;
+        else {
+            snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"unknown_item\"}");
+            goto lcd_send;
+        }
+        uint16_t drop_qty = (uint16_t)quantity;
+        if (drop_qty > *chest_field) drop_qty = *chest_field;
+        *chest_field -= drop_qty;
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"land_chest_state\",\"structure_id\":%u"
+                 ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u"
+                 ",\"player_wood\":%u,\"player_fiber\":%u,\"player_metal\":%u,\"player_stone\":%u}",
+                 sid,
+                 (unsigned)placed_structures[i].chest_wood,
+                 (unsigned)placed_structures[i].chest_fiber,
+                 (unsigned)placed_structures[i].chest_metal,
+                 (unsigned)placed_structures[i].chest_stone,
+                 (unsigned)player->res_wood,
+                 (unsigned)player->res_fiber,
+                 (unsigned)player->res_metal,
+                 (unsigned)player->res_stone);
+        goto lcd_send;
+    }
+    snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"not_found\"}");
+
+lcd_send:;
+    char lcd_frame[512];
+    size_t lcd_flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), lcd_frame, sizeof(lcd_frame));
+    if (lcd_flen > 0 && lcd_flen < sizeof(lcd_frame)) send(client->fd, lcd_frame, lcd_flen, 0);
+}
+
 /* ── Helper: build shipyard_state JSON into buf (caller provides space) ── */
 static void build_shipyard_state_json(char* buf, size_t bufsz,
                                       const PlacedStructure* sy,
-                                      uint32_t ship_spawned) {
+                                      uint32_t ship_spawned,
+                                      uint32_t spawner_player_id) {
     const char* phase_str = sy->construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
     if (ship_spawned) {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
                  "\"phase\":\"%s\",\"modules_placed\":[],"
-                 "\"ship_spawned\":%u,\"scaffolded_ship_id\":%u}",
-                 sy->id, phase_str, ship_spawned, sy->scaffolded_ship_id);
+                 "\"ship_spawned\":%u,\"scaffolded_ship_id\":%u,"
+                 "\"spawner_player_id\":%u}",
+                 sy->id, phase_str, ship_spawned, sy->scaffolded_ship_id,
+                 spawner_player_id);
     } else {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
@@ -1558,6 +2070,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
         f += 10; int n = 0;
         while (f[n] && f[n] != '"' && n < 31) { module[n] = f[n]; n++; } module[n] = 0;
     }
+    (void)module; /* parsed for future use */
 
     /* Find shipyard */
     PlacedStructure* sy = NULL;
@@ -1648,7 +2161,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
         sy->modules_placed      = 0;
         sy->scaffolded_ship_id  = 0;
         char bcast[512];
-        build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id);
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id, player->player_id);
         websocket_server_broadcast(bcast);
         log_info("⚓ Shipyard %u: released ship %u", sid, released_id);
         return; /* broadcast sent */
@@ -1662,7 +2175,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
     /* Broadcast updated state to all clients */
     {
         char bcast[512];
-        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0);
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0, 0);
         websocket_server_broadcast(bcast);
     }
     return;
@@ -1688,7 +2201,7 @@ sya_send:;
  *
  * Safe to call from any code path (demolish, cannon hit, etc.).
  */
-void destroy_placed_structure(uint32_t structure_id) {
+void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y) {
     /* Find the target */
     uint32_t idx = UINT32_MAX;
     for (uint32_t i = 0; i < placed_structure_count; i++) {
@@ -1701,12 +2214,29 @@ void destroy_placed_structure(uint32_t structure_id) {
     PlacedStructureType dtype = placed_structures[idx].type;
     float fx = placed_structures[idx].x;
     float fy = placed_structures[idx].y;
+    uint8_t fisland = placed_structures[idx].island_id;
+
+    /* ── Chest ruin: capture resources before marking inactive ─────────── */
+    uint16_t chest_ruin_wood = 0, chest_ruin_fiber = 0;
+    uint16_t chest_ruin_metal = 0, chest_ruin_stone = 0;
+    if (dtype == STRUCT_CHEST) {
+        chest_ruin_wood  = placed_structures[idx].chest_wood;
+        chest_ruin_fiber = placed_structures[idx].chest_fiber;
+        chest_ruin_metal = placed_structures[idx].chest_metal;
+        chest_ruin_stone = placed_structures[idx].chest_stone;
+    }
 
     /* Mark primary dead and broadcast */
     placed_structures[idx].active = false;
-    char msg[192];
-    snprintf(msg, sizeof(msg),
-             "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
+    char msg[256];
+    if (!isnan(hit_x) && !isnan(hit_y)) {
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u"
+                 ",\"x\":%.1f,\"y\":%.1f}", structure_id, hit_x, hit_y);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "{\"type\":\"structure_demolished\",\"structure_id\":%u}", structure_id);
+    }
     websocket_server_broadcast(msg);
     log_info("🔨 Destroyed structure %u (type %d)", structure_id, (int)dtype);
 
@@ -1724,6 +2254,65 @@ void destroy_placed_structure(uint32_t structure_id) {
     }
     if (dtype == STRUCT_COMPANY_FORTRESS) {
         claim_on_fort_destroyed(structure_id);  /* same handler — drops IslandClaim if one exists */
+    }
+
+    /* ── Shipyard destroyed: release any scaffolded ship ──────────────── */
+    if (dtype == STRUCT_SHIPYARD) {
+        /* Find the shipyard in the (still-in-array) slot — already marked inactive
+         * but idx is still valid before the compact pass at the end. */
+        uint32_t rel_id = placed_structures[idx].scaffolded_ship_id;
+        if (rel_id != 0 && global_sim) {
+            for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                if (global_sim->ships[si].id == rel_id) {
+                    global_sim->ships[si].flags &= (uint16_t)~SHIP_FLAG_SCAFFOLDED;
+                    global_sim->ships[si].initial_plank_count = 10;
+                    log_info("⚓ Shipyard %u destroyed — released scaffolded ship %u",
+                             structure_id, rel_id);
+                    break;
+                }
+            }
+        }
+        placed_structures[idx].scaffolded_ship_id = 0;
+    }
+
+    /* ── Chest ruin: spawn resource wreck so items can be salvaged ─────── */
+    if (dtype == STRUCT_CHEST &&
+        (chest_ruin_wood + chest_ruin_fiber + chest_ruin_metal + chest_ruin_stone) > 0 &&
+        placed_structure_count < MAX_PLACED_STRUCTURES) {
+        PlacedStructure *w = &placed_structures[placed_structure_count];
+        memset(w, 0, sizeof(*w));
+        w->active               = true;
+        w->id                   = next_structure_id++;
+        w->type                 = STRUCT_WRECK;
+        w->x                    = fx;
+        w->y                    = fy;
+        w->island_id            = fisland;
+        w->wreck_resource_cache = true;
+        w->chest_wood           = chest_ruin_wood;
+        w->chest_fiber          = chest_ruin_fiber;
+        w->chest_metal          = chest_ruin_metal;
+        w->chest_stone          = chest_ruin_stone;
+        w->wreck_expires_ms     = get_time_ms() + 900000u; /* 15 min */
+        snprintf(w->placer_name, sizeof(w->placer_name), "chest_ruin");
+        placed_structure_count++;
+
+        uint32_t wreck_id  = w->id;
+        uint32_t wreck_exp = w->wreck_expires_ms;
+        char wbcast[256];
+        snprintf(wbcast, sizeof(wbcast),
+            "{\"type\":\"wreck_spawned\",\"id\":%u,\"x\":%.1f,\"y\":%.1f"
+            ",\"wreck_type\":\"chest_ruin\""
+            ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u"
+            ",\"expires_ms\":%u}",
+            wreck_id, fx, fy,
+            (unsigned)chest_ruin_wood, (unsigned)chest_ruin_fiber,
+            (unsigned)chest_ruin_metal, (unsigned)chest_ruin_stone,
+            (unsigned)wreck_exp);
+        websocket_server_broadcast(wbcast);
+        log_info("📦 Chest ruin %u spawned at (%.0f,%.0f) [w=%u f=%u m=%u s=%u]",
+                 wreck_id, fx, fy,
+                 (unsigned)chest_ruin_wood, (unsigned)chest_ruin_fiber,
+                 (unsigned)chest_ruin_metal, (unsigned)chest_ruin_stone);
     }
 
     /* ── Cascade: floor destroyed ──────────────────────────────────────── */
@@ -1851,12 +2440,81 @@ void destroy_placed_structure(uint32_t structure_id) {
 }
 
 /*
+ * shipyard_scaffolding_sanity_sweep — called once after world_load().
+ *
+ * Two-pass integrity check:
+ *   Pass 1 – every ship with SHIP_FLAG_SCAFFOLDED must have a matching active
+ *             STRUCT_SHIPYARD whose scaffolded_ship_id equals the ship id.
+ *             Stale flag → clear SHIP_FLAG_SCAFFOLDED + reset initial_plank_count.
+ *   Pass 2 – every STRUCT_SHIPYARD whose scaffolded_ship_id is non-zero must
+ *             point to a ship that actually exists in the sim.
+ *             Stale pointer → clear scaffolded_ship_id on the shipyard.
+ */
+void shipyard_scaffolding_sanity_sweep(void) {
+    if (!global_sim) return;
+
+    int fixed_ships = 0;
+    int fixed_yards = 0;
+
+    /* Pass 1: ships */
+    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+        struct Ship *ship = &global_sim->ships[si];
+        if (!(ship->flags & SHIP_FLAG_SCAFFOLDED)) continue;
+
+        bool has_yard = false;
+        for (uint32_t pi = 0; pi < placed_structure_count; pi++) {
+            PlacedStructure *sy = &placed_structures[pi];
+            if (!sy->active || sy->type != STRUCT_SHIPYARD) continue;
+            if (sy->scaffolded_ship_id == (uint32_t)ship->id) { has_yard = true; break; }
+        }
+
+        if (!has_yard) {
+            log_warn("⚓ [sanity] Ship %u has SHIP_FLAG_SCAFFOLDED but no matching shipyard — clearing",
+                     (unsigned)ship->id);
+            ship->flags &= (uint16_t)~SHIP_FLAG_SCAFFOLDED;
+            ship->initial_plank_count = 10;
+            fixed_ships++;
+        }
+    }
+
+    /* Pass 2: shipyards */
+    for (uint32_t pi = 0; pi < placed_structure_count; pi++) {
+        PlacedStructure *sy = &placed_structures[pi];
+        if (!sy->active || sy->type != STRUCT_SHIPYARD) continue;
+        if (sy->scaffolded_ship_id == 0) continue;
+
+        bool has_ship = false;
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if ((uint32_t)global_sim->ships[si].id == sy->scaffolded_ship_id) {
+                has_ship = true; break;
+            }
+        }
+
+        if (!has_ship) {
+            log_warn("⚓ [sanity] Shipyard %u references missing ship %u — clearing scaffolded_ship_id",
+                     sy->id, sy->scaffolded_ship_id);
+            sy->scaffolded_ship_id   = 0;
+            sy->construction_phase   = CONSTRUCTION_EMPTY;
+            sy->modules_placed       = 0;
+            fixed_yards++;
+        }
+    }
+
+    if (fixed_ships || fixed_yards) {
+        log_info("⚓ [sanity] Shipyard sweep complete: %d ship(s) unscaffolded, %d yard(s) cleared",
+                 fixed_ships, fixed_yards);
+    } else {
+        log_info("⚓ [sanity] Shipyard scaffolding OK");
+    }
+}
+
+/*
  * apply_structure_damage — shared hit-damage helper.
  * Subtracts dmg from s->hp, broadcasts structure_hp_changed on partial damage,
  * and delegates to destroy_placed_structure on death.
  * Returns true if the structure was destroyed (s is then stale).
  */
-bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
+bool apply_structure_damage(PlacedStructure *s, uint32_t dmg, float hit_x, float hit_y) {
     /* Claim flags are immune to damage — they only "die" by completing/reversing
      * their territory-claim timer (handled in claim.c). */
     if (s->type == STRUCT_CLAIM_FLAG) return false;
@@ -1864,25 +2522,35 @@ bool apply_structure_damage(PlacedStructure *s, uint16_t dmg) {
      * become vulnerable once the 1-min ground claim succeeds and they enter
      * BUILDING. */
     if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) return false;
-    s->hp = (s->hp > dmg) ? (uint16_t)(s->hp - dmg) : 0u;
+    /* Quality structural-resistance: reduce incoming damage by the rolled mult. */
+    if (s->quality.quality_q8 != 0) {
+        uint16_t sr_q8 = s->quality.stat_mult_q8[STAT_STRUCT_RESISTANCE];
+        if (sr_q8 > 256)
+            dmg = (uint32_t)(((uint64_t)dmg * 256) / sr_q8);
+    }
+    s->hp = (s->hp > dmg) ? (s->hp - dmg) : 0u;
     /* All structures track a heal ceiling that combat damage permanently
      * lowers. For most types there is no auto-repair (so target_hp just
      * mirrors hp), but flag forts use it to cap their heal-back. */
-    s->target_hp = (s->target_hp > dmg) ? (uint16_t)(s->target_hp - dmg) : 0u;
+    s->target_hp = (s->target_hp > dmg) ? (s->target_hp - dmg) : 0u;
     /* Stamp the damage time so player-funded repairs can enforce a cooldown
      * (no repairing structures that took combat damage in the last 30s). */
     s->last_damaged_ms = get_time_ms();
     if (s->hp == 0) {
         uint32_t sid = s->id;
-        destroy_placed_structure(sid);
+        destroy_placed_structure(sid, hit_x, hit_y);
         return true;
     }
+    /* Use impact position (hit_x/hit_y) so the client shows the damage number
+     * at the cannonball's point of impact rather than the structure's centre. */
+    float bx = (!isnan(hit_x)) ? hit_x : s->x;
+    float by = (!isnan(hit_y)) ? hit_y : s->y;
     char msg[224];
     snprintf(msg, sizeof(msg),
              "{\"type\":\"structure_hp_changed\","
              "\"structure_id\":%u,\"hp\":%u,\"max_hp\":%u,\"target_hp\":%u"
              ",\"x\":%.1f,\"y\":%.1f}",
-             s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, s->x, s->y);
+             s->id, (unsigned)s->hp, (unsigned)s->max_hp, (unsigned)s->target_hp, bx, by);
     websocket_server_broadcast(msg);
     return false;
 }
@@ -1937,7 +2605,7 @@ void handle_demolish_structure(WebSocketPlayer* player, struct WebSocketClient* 
             placed_structures[i].scaffolded_ship_id  = 0;
         }
         log_info("🔨 Player %u demolished structure %u", player->player_id, sid);
-        destroy_placed_structure(sid);
+        destroy_placed_structure(sid, NAN, NAN);
         return; /* already sent via broadcast */
     }
 
@@ -2010,10 +2678,66 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
 
         ShipModule* mod = &ship->modules[mod_idx];
 
-        /* Planks use the placement/repair system — not demolishable here */
+        /* Planks: demolish by removing from both ships and broadcasting PLANK_HIT
+         * (same wire format as a cannonball kill so the client reuses that path). */
         if (mod->type_id == MODULE_TYPE_PLANK) {
+            /* Range check */
+            const float DEMOLISH_RANGE_PX = 120.0f;
+            float mod_lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+            float mod_ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+            float dx = player->local_x - mod_lx;
+            float dy = player->local_y - mod_ly;
+            if (dx * dx + dy * dy > DEMOLISH_RANGE_PX * DEMOLISH_RANGE_PX) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"demolish_fail\",\"reason\":\"too_far\"}");
+                goto dm_send;
+            }
+
+            /* Capture health before memmove invalidates the pointer */
+            q16_t plank_health = mod->health;
+            q16_t plank_max_hp = mod->max_health;
+
+            /* Remove from SimpleShip */
+            memmove(&ship->modules[mod_idx],
+                    &ship->modules[mod_idx + 1],
+                    ((size_t)ship->module_count - (size_t)mod_idx - 1) * sizeof(ShipModule));
+            ship->module_count--;
+
+            /* Remove from global_sim counterpart */
+            if (global_sim) {
+                for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                    if (global_sim->ships[si].id != (entity_id)ship_id) continue;
+                    struct Ship* sim_ship = &global_sim->ships[si];
+                    for (int mi = 0; mi < (int)sim_ship->module_count; mi++) {
+                        if (sim_ship->modules[mi].id != (uint16_t)module_id) continue;
+                        memmove(&sim_ship->modules[mi],
+                                &sim_ship->modules[mi + 1],
+                                ((size_t)sim_ship->module_count - (size_t)mi - 1) * sizeof(ShipModule));
+                        sim_ship->module_count--;
+                        break;
+                    }
+                    break;
+                }
+            }
+
+            /* Broadcast as PLANK_HIT (destroyed) — clients already handle this */
+            char plank_bcast[160];
+            snprintf(plank_bcast, sizeof(plank_bcast),
+                     "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
+                     "\"damage\":9999,\"x\":%.1f,\"y\":%.1f}",
+                     ship_id, module_id,
+                     SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x)) + ship->x,
+                     SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y)) + ship->y);
+            websocket_server_broadcast(plank_bcast);
+
+            /* Refund half the plank cost scaled by remaining health */
+            res_refund_module_demolish(player, MODULE_TYPE_PLANK, plank_health, plank_max_hp);
+
+            log_info("🪓 Player %u demolished plank %u on ship %u",
+                     player->player_id, module_id, ship_id);
+
             snprintf(response, sizeof(response),
-                     "{\"type\":\"demolish_fail\",\"reason\":\"cant_demolish_planks\"}");
+                     "{\"type\":\"message_ack\",\"status\":\"plank_demolished\"}");
             goto dm_send;
         }
 
@@ -2042,8 +2766,14 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
         }
 
+        /* Capture type, deck, and health before the memmove invalidates the pointer */
+        ModuleTypeId demolished_type   = mod->type_id;
+        uint8_t      demolished_deck   = mod->deck_id;
+        q16_t        demolished_health = mod->health;
+        q16_t        demolished_max_hp = mod->max_health;
+
         log_info("🪓 Player %u demolished module %u (type %u) on ship %u",
-                 player->player_id, module_id, (unsigned)mod->type_id, ship_id);
+                 player->player_id, module_id, (unsigned)demolished_type, ship_id);
 
         /* Remove from SimpleShip */
         memmove(&ship->modules[mod_idx],
@@ -2068,7 +2798,7 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
         }
 
-        /* Broadcast removal to all clients */
+        /* Broadcast primary demolish to all clients */
         {
             char bcast[128];
             snprintf(bcast, sizeof(bcast),
@@ -2076,6 +2806,82 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
                      ship_id, module_id);
             websocket_server_broadcast(bcast);
         }
+
+        /* Refund half the module cost scaled by remaining health */
+        res_refund_module_demolish(player, demolished_type, demolished_health, demolished_max_hp);
+
+        /* ── Cascade: if a deck was demolished, remove all modules on that deck ── */
+        if (demolished_type == MODULE_TYPE_DECK) {
+            log_info("🪓 Deck %u demolished on ship %u — cascading deck modules", (unsigned)demolished_deck, ship_id);
+
+            /* Cascade on SimpleShip */
+            {
+                uint8_t m = 0;
+                while (m < ship->module_count) {
+                    ModuleTypeId t = ship->modules[m].type_id;
+                    uint8_t      d = ship->modules[m].deck_id;
+                    /* Skip masts (deck_id=255), ladders, planks, other decks */
+                    if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER ||
+                        t == MODULE_TYPE_PLANK || t == MODULE_TYPE_DECK) { m++; continue; }
+                    /* Only cascade modules on the demolished deck */
+                    if (d != demolished_deck) { m++; continue; }
+
+                    uint32_t cascaded_id = ship->modules[m].id;
+
+                    /* Dismount any player on this module */
+                    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+                        if (!players[pi].active) continue;
+                        if (players[pi].is_mounted &&
+                            players[pi].mounted_module_id == (module_id_t)cascaded_id) {
+                            players[pi].is_mounted          = false;
+                            players[pi].mounted_module_id   = 0;
+                            players[pi].controlling_ship_id = 0;
+                        }
+                    }
+
+                    /* Broadcast cascade demolish */
+                    {
+                        char cbcast[128];
+                        snprintf(cbcast, sizeof(cbcast),
+                                 "{\"type\":\"module_demolished\",\"shipId\":%u,\"moduleId\":%u}",
+                                 ship_id, cascaded_id);
+                        websocket_server_broadcast(cbcast);
+                    }
+
+                    /* Refund half the cost scaled by remaining health for cascaded module */
+                    q16_t casc_health = ship->modules[m].health;
+                    q16_t casc_max_hp = ship->modules[m].max_health;
+
+                    memmove(&ship->modules[m], &ship->modules[m + 1],
+                            ((size_t)ship->module_count - m - 1) * sizeof(ShipModule));
+                    ship->module_count--;
+
+                    res_refund_module_demolish(player, t, casc_health, casc_max_hp);
+                    /* do NOT increment m — we've shifted the array */
+                }
+            }
+
+            /* Cascade on sim ship */
+            if (global_sim) {
+                for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                    if (global_sim->ships[si].id != (entity_id)ship_id) continue;
+                    struct Ship* sim_ship = &global_sim->ships[si];
+                    uint8_t m = 0;
+                    while (m < sim_ship->module_count) {
+                        ModuleTypeId t = sim_ship->modules[m].type_id;
+                        uint8_t      d = sim_ship->modules[m].deck_id;
+                        if (t == MODULE_TYPE_MAST || t == MODULE_TYPE_LADDER ||
+                            t == MODULE_TYPE_PLANK || t == MODULE_TYPE_DECK) { m++; continue; }
+                        if (d != demolished_deck) { m++; continue; }
+                        memmove(&sim_ship->modules[m], &sim_ship->modules[m + 1],
+                                (sim_ship->module_count - m - 1) * sizeof(ShipModule));
+                        sim_ship->module_count--;
+                    }
+                    break;
+                }
+            }
+        }
+
         return; /* already broadcast */
     }
 
@@ -2269,6 +3075,9 @@ static int repair_recipe_for_struct(PlacedStructureType type,
             out[0] = (RepairIng){ ITEM_WOOD,  40 };
             out[1] = (RepairIng){ ITEM_STONE, 40 };
             return 2;
+        case STRUCT_CHEST:
+            out[0] = (RepairIng){ ITEM_WOOD, 8 };
+            return 1;
         case STRUCT_COMPANY_FORTRESS:
             out[0] = (RepairIng){ ITEM_WOOD,  100 };
             out[1] = (RepairIng){ ITEM_STONE, 100 };
@@ -2281,7 +3090,7 @@ static int repair_recipe_for_struct(PlacedStructureType type,
 /* Compute prorated repair cost: ceil(recipe_qty * missing_hp / max_hp), min 1
  * per ingredient. Returns the ingredient count. */
 static int compute_repair_cost(PlacedStructureType type,
-                               uint16_t missing_hp, uint16_t max_hp,
+                               uint32_t missing_hp, uint32_t max_hp,
                                RepairIng out[4]) {
     RepairIng base[4];
     int n = repair_recipe_for_struct(type, base);
@@ -2372,7 +3181,7 @@ void handle_repair_structure(WebSocketPlayer* player, struct WebSocketClient* cl
         }
 
         /* Compute cost */
-        uint16_t missing = (uint16_t)(s->max_hp - s->target_hp);
+        uint32_t missing = s->max_hp - s->target_hp;
         RepairIng cost[4];
         int nc = compute_repair_cost(s->type, missing, s->max_hp, cost);
         if (nc <= 0) {
@@ -2424,50 +3233,74 @@ rs_send:;
 
 void structure_repair_tick(uint32_t delta_ms) {
     if (delta_ms == 0) return;
-    /* Rate: STRUCTURE_REPAIR_FULL_MS restores max_hp worth of HP. */
+    /* Opportunistically run the garbage collector on every tick — the
+     * function is self-throttled to at most once every 30 s. */
+    structure_garbage_collect();
+    /* Rate: STRUCTURE_REPAIR_FULL_MS restores max_hp worth of HP.
+     * Under-construction structures also regen passively (no player required),
+     * but at half the rate (60s for full HP vs 30s for player-assisted). */
+    const uint32_t CONSTRUCTION_RATE_MS = 60000u; /* 60s passive build regen */
     for (uint32_t i = 0; i < placed_structure_count; i++) {
         PlacedStructure *s = &placed_structures[i];
         if (!s->active) continue;
-        if (s->repair_player_id == 0) continue;
+
+        /* Determine whether this tick should run for this structure */
+        bool passive_construction = s->under_construction && s->hp < s->target_hp;
+        if (s->repair_player_id == 0 && !passive_construction) continue;
 
         /* If structure was destroyed mid-repair, repair_player_id was cleared
          * by destroy_placed_structure (active=false). Skip stale state. */
-        if (s->target_hp >= s->max_hp || s->max_hp == 0) {
+        if (!passive_construction && (s->target_hp >= s->max_hp || s->max_hp == 0)) {
             /* Nothing more to repair */
             s->repair_player_id   = 0;
             s->repair_progress_ms = 0.0f;
             continue;
         }
         /* Flag fort entering CLAIMING is impossible mid-repair, but defensive: */
-        if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
+        if (s->repair_player_id != 0 &&
+            s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) {
             s->repair_player_id   = 0;
             s->repair_progress_ms = 0.0f;
             continue;
         }
 
+        /* Choose rate: player-assisted uses STRUCTURE_REPAIR_FULL_MS; passive construction is slower */
+        uint32_t rate_ms = (s->repair_player_id != 0)
+            ? STRUCTURE_REPAIR_FULL_MS
+            : CONSTRUCTION_RATE_MS;
+
         s->repair_progress_ms += (float)delta_ms;
         s->repair_broadcast_acc_ms += delta_ms;
-        /* HP gained = max_hp * delta / STRUCTURE_REPAIR_FULL_MS, accumulated */
-        float hp_gained_f = (float)s->max_hp * s->repair_progress_ms / (float)STRUCTURE_REPAIR_FULL_MS;
-        uint16_t hp_gain_int = (uint16_t)hp_gained_f;
+        /* HP gained = max_hp * delta / rate_ms, accumulated fractional */
+        float hp_gained_f = (float)s->max_hp * s->repair_progress_ms / (float)rate_ms;
+        uint32_t hp_gain_int = (uint32_t)hp_gained_f;
         if (hp_gain_int > 0) {
             /* Reset accumulator carry for next tick */
-            float consumed_ms = (float)hp_gain_int * (float)STRUCTURE_REPAIR_FULL_MS / (float)s->max_hp;
+            float consumed_ms = (float)hp_gain_int * (float)rate_ms / (float)s->max_hp;
             s->repair_progress_ms -= consumed_ms;
             if (s->repair_progress_ms < 0.0f) s->repair_progress_ms = 0.0f;
 
-            uint16_t cap = s->max_hp;
-            uint32_t new_hp        = (uint32_t)s->hp + (uint32_t)hp_gain_int;
-            uint32_t new_target_hp = (uint32_t)s->target_hp + (uint32_t)hp_gain_int;
-            if (new_hp        > cap) new_hp        = cap;
-            if (new_target_hp > cap) new_target_hp = cap;
-            s->hp        = (uint16_t)new_hp;
-            s->target_hp = (uint16_t)new_target_hp;
+            if (passive_construction) {
+                /* Construction regen: raise hp toward target_hp only */
+                uint32_t new_hp = s->hp + hp_gain_int;
+                if (new_hp > s->target_hp) new_hp = s->target_hp;
+                s->hp = new_hp;
+            } else {
+                uint32_t cap = s->max_hp;
+                uint32_t new_hp        = s->hp + hp_gain_int;
+                uint32_t new_target_hp = s->target_hp + hp_gain_int;
+                if (new_hp        > cap) new_hp        = cap;
+                if (new_target_hp > cap) new_target_hp = cap;
+                s->hp        = new_hp;
+                s->target_hp = new_target_hp;
+            }
         }
 
         /* Throttle hp_changed broadcasts to ~1Hz so clients see steady
          * progress without flooding. Always broadcast on completion. */
-        int complete = (s->target_hp >= s->max_hp) ? 1 : 0;
+        int complete = passive_construction
+            ? (s->hp >= s->target_hp ? 1 : 0)
+            : (s->target_hp >= s->max_hp ? 1 : 0);
         if (s->repair_broadcast_acc_ms < 1000u && !complete) continue;
         s->repair_broadcast_acc_ms = 0;
 
@@ -2482,17 +3315,72 @@ void structure_repair_tick(uint32_t delta_ms) {
 
         /* Completion */
         if (complete) {
-            uint32_t pid = s->repair_player_id;
-            s->repair_player_id   = 0;
-            s->repair_progress_ms = 0.0f;
-            s->repair_broadcast_acc_ms = 0;
-            char cmsg[160];
-            snprintf(cmsg, sizeof(cmsg),
-                     "{\"type\":\"repair_complete\",\"structure_id\":%u,\"player_id\":%u}",
-                     s->id, pid);
-            websocket_server_broadcast(cmsg);
-            log_info("🔧 Repair complete on structure %u (player %u)", s->id, pid);
+            if (passive_construction) {
+                /* Construction finished */
+                s->under_construction = false;
+                s->repair_progress_ms = 0.0f;
+                s->repair_broadcast_acc_ms = 0;
+                log_info("🏗️ Construction complete on structure %u", s->id);
+            } else {
+                uint32_t pid = s->repair_player_id;
+                s->repair_player_id   = 0;
+                s->repair_progress_ms = 0.0f;
+                s->repair_broadcast_acc_ms = 0;
+                char cmsg[160];
+                snprintf(cmsg, sizeof(cmsg),
+                         "{\"type\":\"repair_complete\",\"structure_id\":%u,\"player_id\":%u}",
+                         s->id, pid);
+                websocket_server_broadcast(cmsg);
+                log_info("🔧 Repair complete on structure %u (player %u)", s->id, pid);
+            }
         }
+    }
+}
+
+/*
+ * structure_garbage_collect — remove any active structure left with hp=0.
+ *
+ * Under normal operation every 0-hp structure is destroyed immediately via
+ * apply_structure_damage → destroy_placed_structure. This function is a
+ * safety net for cases where a code path forgets that call (e.g. direct
+ * field writes, save-file corruption, or a future bug). It runs at most
+ * once every 30 seconds so the overhead is negligible.
+ *
+ * Exempt types (they die via non-HP timers):
+ *   • STRUCT_CLAIM_FLAG  — claim progress timer drives removal
+ *   • STRUCT_FLAG_FORT during FLAG_FORT_PHASE_CLAIMING — HP damage immune
+ */
+void structure_garbage_collect(void) {
+    static uint32_t next_run_ms = 0;
+    uint32_t now = get_time_ms();
+    if (now < next_run_ms) return;
+    next_run_ms = now + 30000u; /* run at most every 30 s */
+
+    uint32_t purged = 0;
+    bool found = true;
+    while (found) {
+        found = false;
+        for (uint32_t i = 0; i < placed_structure_count; i++) {
+            PlacedStructure *s = &placed_structures[i];
+            if (!s->active)     continue;
+            if (s->max_hp == 0) continue; /* 0 max_hp = intentionally has no health bar */
+            if (s->hp != 0)     continue; /* still alive */
+
+            /* Exemptions */
+            if (s->type == STRUCT_CLAIM_FLAG) continue;
+            if (s->type == STRUCT_FLAG_FORT && s->claim_phase == FLAG_FORT_PHASE_CLAIMING) continue;
+
+            log_info("🗑️ GC: purging dead structure id=%u type=%u at (%.0f, %.0f)",
+                     (unsigned)s->id, (unsigned)s->type, s->x, s->y);
+            uint32_t sid = s->id;
+            destroy_placed_structure(sid, NAN, NAN); /* may compact array — restart scan */
+            purged++;
+            found = true;
+            break; /* restart outer while loop with fresh indices */
+        }
+    }
+    if (purged > 0) {
+        log_info("🗑️ GC: purged %u dead structure(s)", purged);
     }
 }
 
@@ -2541,7 +3429,6 @@ void handle_door_lock(WebSocketPlayer* player, struct WebSocketClient* client, c
 
         s->door_locked = lock_state;
         /* If locking, close the door too (a locked door can't stay open) */
-        bool was_open = s->open;
         if (lock_state && s->open) s->open = false;
 
         char bcast[128];

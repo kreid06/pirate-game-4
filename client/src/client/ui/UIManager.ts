@@ -6,11 +6,11 @@
  */
 
 import { ClientConfig } from '../ClientConfig.js';
-import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem } from '../../sim/Types.js';
+import { WorldState, Npc, Ship, WeaponGroupMode, WeaponGroupState, DroppedItem, IslandResource, SHIP_TYPE_GHOST } from '../../sim/Types.js';
 import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
-import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID, drawAxeIcon } from '../../sim/Inventory.js';
+import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight } from '../../sim/Inventory.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
@@ -20,6 +20,7 @@ import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
 import { TombstoneMenu } from './TombstoneMenu.js';
 import { SalvageMenu } from './SalvageMenu.js';
+import { tierColor as _tierColor, tierName as _tierName } from '../../sim/Quality.js';
 
 /**
  * UI render context
@@ -59,6 +60,10 @@ export interface UIRenderContext {
   debugMode?: boolean;
   /** True when the player has combat mode enabled (Z key). */
   combatMode?: boolean;
+  /** Shipyard structure ID if the player's current ship is scaffolded there, 0 otherwise. */
+  scaffoldedShipyardId?: number;
+  /** True when Alt is held — used for detail overlays (e.g. ship IDs on map). */
+  altHeld?: boolean;
 }
 
 /**
@@ -87,6 +92,7 @@ export const MENU_ID = {
   RESPAWN:   'respawn',
   MAP:       'map',
   SALVAGE:   'salvage',
+  CHEST:     'chest',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -167,9 +173,10 @@ export class UIManager {
 
   // Island structure build mode overlay state
   private islandBuildState: {
-    kind: 'wooden_floor' | 'workbench';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
     tooFar: boolean;
     enemyClose: boolean;
+    wallVariant?: 'wall' | 'door_frame';
   } | null = null;
 
   /** Called when the player clicks the XP bar to level up (has enough XP). */
@@ -185,6 +192,18 @@ export class UIManager {
   public onHotbarSlotClick: ((slot: number) => void) | null = null;
   /** Supplier for current player inventory — used for drag-and-drop in player menu. */
   public getPlayerInventory: (() => { slots: { item: ItemKind; quantity: number }[] } | null) | null = null;
+  /** Supplier for the connected ship's aggregated chest resources — used for land build resource panel. */
+  public getShipChestResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
+  /** Supplier for land-chest resources accessible from a nearby shipyard — null when not near a shipyard. */
+  public getShipyardResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
+  /** Which resource pool is active for ship building: 'ship' = chest, 'pack' = player. Toggled with R. */
+  public buildResourceSource: 'pack' | 'ship' | 'auto' = 'auto';
+  /** Persistent column display order in the resource panel (left=lowest priority, right=highest). */
+  public columnOrder: string[] = ['PACK', 'CHEST', 'YARD'];
+  /** Active column header drag state (null when not dragging). */
+  private _resColDrag: { header: string; dragX: number } | null = null;
+  /** Cached column hit-test info from the last renderResourcePanel call. */
+  private _resPanelHit: { colStartX: number; hdrY: number; colW: number; hdrH: number; count: number; headers: string[] } | null = null;
   /** Cached from last render frame — used by handleRightClick for hotbar hit-testing. */
   private _cachedHelmActiveGroup: number = -1;
   private _cachedControlGroups: Map<number, WeaponGroupState> | null = null;
@@ -196,19 +215,66 @@ export class UIManager {
   /** Called when player clicks a module type in the left build panel. */
   public onBuildPanelSelect: ((kind: GhostModuleKind) => void) | null = null;
 
-  // Entries shown in the left build panel
-  private static readonly BUILD_PANEL_ENTRIES: Array<{
-    kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
+  // ── Land build menu state ─────────────────────────────────────────────────
+  private landBuildMenuOpen = false;
+  private _pendingLandBuildKind: string | null = null;
+  /** Called when player selects a land structure from the Plan Menu (left panel). */
+  public onLandBuildPanelSelect: ((kind: string) => void) | null = null;
+  /** Called when player selects (or deselects) a slot in the Build Schematic Hotbar (bottom). */
+  public onBuildSchematicSelect: ((kind: string | null) => void) | null = null;
+  /** Per-kind ghost counts for badge display in the land build panel. */
+  private _landGhostCounts: Map<string, number> = new Map();
+  /** Total number of pending land ghost placements. */
+  private get _totalLandGhosts(): number {
+    let n = 0; this._landGhostCounts.forEach(v => n += v); return n;
+  }
+
+  /** Update the pending ghost counts per land structure kind. */
+  setLandGhostCounts(counts: Map<string, number>): void {
+    this._landGhostCounts = counts;
+  }
+
+  // Entries shown in the left land build panel
+  static readonly LAND_BUILD_PANEL_ENTRIES: Array<{
+    kind: string; label: string; symbol: string; color: string; borderColor: string;
+    cost: { item: string; qty: number }[];
   }> = [
-    { kind: 'cannon', label: 'Cannon',     symbol: '⚫', color: '#444',    borderColor: '#888'    },
-    { kind: 'swivel', label: 'Swivel Gun', symbol: '›', color: '#7a4a2a', borderColor: '#4a2810' },
-    { kind: 'mast',   label: 'Sail',       symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48' },
-    { kind: 'helm',   label: 'Helm',       symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060' },
-    { kind: 'deck',   label: 'Deck',       symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c' },
+    { kind: 'wooden_floor', label: 'Floor',        symbol: '\u229f',       color: '#8b6914', borderColor: '#5c4008', cost: [{ item: 'wood',  qty: 40  }] },
+    { kind: 'wall',         label: 'Wall',          symbol: '\u258b',       color: '#7a6030', borderColor: '#4a3818', cost: [{ item: 'wood',  qty: 20  }] },
+    { kind: 'door',         label: 'Door',          symbol: '\uD83D\uDEAA', color: '#7a5838', borderColor: '#4a3010', cost: [{ item: 'wood',  qty: 8   }] },
+    { kind: 'wood_ceiling', label: 'Ceiling',       symbol: '\u229e',       color: '#7a5c2a', borderColor: '#4a3410', cost: [{ item: 'wood',  qty: 25  }] },
+    { kind: 'workbench',    label: 'Workbench',     symbol: '\u2692',       color: '#6a4a20', borderColor: '#3a2808', cost: [{ item: 'wood',  qty: 12  }] },
+    { kind: 'chest',        label: 'Chest',         symbol: '\u229f',       color: '#7a4820', borderColor: '#4a2810', cost: [{ item: 'wood',  qty: 12  }] },
+    { kind: 'shipyard',     label: 'Shipyard',      symbol: '\u26F5',       color: '#1e6080', borderColor: '#0f3850', cost: [{ item: 'wood',  qty: 250 }, { item: 'stone', qty: 100 }] },
+    { kind: 'cannon',       label: 'Cannon',        symbol: '\u26AB',       color: '#444444', borderColor: '#888888', cost: [{ item: 'wood',  qty: 15  }, { item: 'metal', qty: 25  }] },
+    { kind: 'flag_fort',     label: 'Flag Fortress', symbol: '\u2302',      color: '#5a5848', borderColor: '#2a2820', cost: [{ item: 'wood',  qty: 300 }, { item: 'stone', qty: 200 }] },
   ];
 
-  private static readonly BUILD_PANEL_W = 164;
-  private static readonly BUILD_PANEL_ENTRY_H = 46;
+  // Entries shown in the left build panel
+  static readonly BUILD_PANEL_ENTRIES: Array<{
+    kind: GhostModuleKind; label: string; symbol: string; color: string; borderColor: string;
+    cost: { wood: number; fiber: number; metal: number; stone: number };
+  }> = [
+    { kind: 'plank',       label: 'Plank',          symbol: 'P',  color: '#b8832b', borderColor: '#7a5520', cost: { wood: 10, fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'cannon',      label: 'Cannon',          symbol: '⚫', color: '#444',    borderColor: '#888',    cost: { wood: 2,  fiber: 0,  metal: 5, stone: 0 } },
+    { kind: 'swivel',      label: 'Swivel Gun',      symbol: '›', color: '#7a4a2a', borderColor: '#4a2810', cost: { wood: 1,  fiber: 0,  metal: 3, stone: 0 } },
+    { kind: 'mast',        label: 'Sail / Mast',     symbol: '⛵', color: '#1e8c6e', borderColor: '#0f5c48', cost: { wood: 20, fiber: 10, metal: 0, stone: 0 } },
+    { kind: 'helm',        label: 'Helm',            symbol: 'W',  color: '#6a3d8f', borderColor: '#3d2060', cost: { wood: 5,  fiber: 0,  metal: 3, stone: 0 } },
+    { kind: 'deck',        label: 'Deck',            symbol: '⊟', color: '#8b5e3c', borderColor: '#5c3a1c', cost: { wood: 15, fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'ramp',        label: 'Ramp',            symbol: '/', color: '#7a5c2a', borderColor: '#4a3410', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'gunport',     label: 'Gunport',         symbol: '▪', color: '#4a3828', borderColor: '#2a1808', cost: { wood: 6,  fiber: 0,  metal: 2, stone: 0 } },
+    { kind: 'hatch_cover', label: 'Hatch Cover',     symbol: '⊞', color: '#8b832b', borderColor: '#5a5520', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'bed',         label: 'Bed',             symbol: '🛏', color: '#4a3060', borderColor: '#2a1840', cost: { wood: 10, fiber: 5,  metal: 0, stone: 0 } },
+  ];
+
+  /** Plan Menu entries — same as BUILD_PANEL_ENTRIES but without plank/deck (placed via schematics). */
+  static readonly PLAN_PANEL_ENTRIES = UIManager.BUILD_PANEL_ENTRIES.filter(
+    e => e.kind !== 'plank' && e.kind !== 'deck'
+  );
+
+  private static readonly BUILD_PANEL_W = 192;
+  private static readonly BUILD_PANEL_ENTRY_H = 54;
   private static readonly BUILD_PANEL_HEADER_H = 32;
 
   // ── Hammer minigame state ──────────────────────────────────────────────────
@@ -227,12 +293,97 @@ export class UIManager {
     callback: null, resultTime: -1, won: null,
   };
 
+  // ── Build hotbar (replaces regular hotbar visually in ship build mode) ─────
+  /** 8 schematic slots; each entry is the GhostModuleKind (or null = empty). */
+  public get buildHotbarSlots(): (GhostModuleKind | null)[] {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.buildHotbarSlots ?? [];
+  }
+  public set buildHotbarSlots(v: (GhostModuleKind | null)[]) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.buildHotbarSlots = v;
+  }
+  /** Currently selected build hotbar slot (0–7). */
+  public get buildHotbarActiveSlot(): number {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.buildHotbarActiveSlot ?? 0;
+  }
+  public set buildHotbarActiveSlot(v: number) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.buildHotbarActiveSlot = v;
+  }
+  /** Set to true by ClientApplication when ship build mode is active. */
+  public get inShipBuildMode(): boolean {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.inShipBuildMode ?? false;
+  }
+  public set inShipBuildMode(v: boolean) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.inShipBuildMode = v;
+  }
+  public get inLandBuildMode(): boolean {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.inLandBuildMode ?? false;
+  }
+  public set inLandBuildMode(v: boolean) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.inLandBuildMode = v;
+  }
+  public get selectedLandKind(): string | null {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.selectedLandKind ?? null;
+  }
+  public set selectedLandKind(v: string | null) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.selectedLandKind = v;
+  }
+  /** Land schematic hotbar slots (8 slots, kind string or null). */
+  public get landHotbarSlots(): (string | null)[] {
+    return (this.elements.get(UIElementType.HUD) as HUDElement | undefined)?.landHotbarSlots ?? [];
+  }
+  public set landHotbarSlots(v: (string | null)[]) {
+    const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (hud) hud.landHotbarSlots = v;
+  }
+  /** Callback fired when the player selects a new build hotbar slot. */
+  public onBuildHotbarSlotChange: ((slot: number, kind: GhostModuleKind | null) => void) | null = null;
+
   // ── Drop item picker (hold-E near pile) ───────────────────────────────────
   private _dropPicker: {
     open: boolean;
     items: DroppedItem[];
     scrollY: number;
   } = { open: false, items: [], scrollY: 0 };
+
+  // ── Schematic slot picker (click empty land hotbar slot) ──────────────────
+  private _schematicPicker: { open: boolean; slotIdx: number; anchorX: number; anchorY: number } =
+    { open: false, slotIdx: 0, anchorX: 0, anchorY: 0 };
+  private _schematicPickerHits: { kind: string; x: number; y: number; w: number; h: number }[] = [];
+
+  // ── Ship module picker (click empty ship build hotbar slot) ───────────────
+  private _shipModulePicker: { open: boolean; slotIdx: number; anchorX: number; anchorY: number } =
+    { open: false, slotIdx: 0, anchorX: 0, anchorY: 0 };
+  private _shipModulePickerHits: { kind: GhostModuleKind; x: number; y: number; w: number; h: number }[] = [];
+
+  /** Timestamp (performance.now()) until which the resource panel should remain visible after a resource gain. */
+  private _resourceFlashUntil = 0;
+
+  /** Timestamp when the resource panel started fading out, or null when it is fully visible. */
+  private _resourceFadeOutStart: number | null = null;
+  private static readonly RESOURCE_FADE_MS = 350;
+
+  /** Per-resource row flash state: maps resource key → { until, direction } */
+  private _resourceRowFlash = new Map<string, { until: number; dir: 'up' | 'down' }>();
+
+  /** Timestamp of last resource-source toggle (for the pop animation on the active column). */
+  private _resourceSourceToggledAt = 0;
+
+  /** Flash the resource panel visible for ~3 seconds (call when resources are gained). */
+  flashResourcePanel(): void {
+    this._resourceFlashUntil = performance.now() + 3000;
+    this._resourceSourceToggledAt = performance.now();
+  }
+
+  /** Flash a specific resource row green (up) or red (down) for 1.2 seconds. */
+  flashResourceRow(item: string, dir: 'up' | 'down'): void {
+    this._resourceFlashUntil = Math.max(this._resourceFlashUntil, performance.now() + 3000);
+    this._resourceRowFlash.set(item, { until: performance.now() + 1200, dir });
+  }
 
   /** Called when the player confirms a pickup from the drop picker. */
   public onDropPickerPick: ((itemId: number) => void) | null = null;
@@ -287,17 +438,23 @@ export class UIManager {
     return this.activeMenuId !== null || this.respawnScreen.visible || this.worldMapScreen.visible;
   }
 
+  /** Called whenever a menu is opened — used by ClientApplication to exit free-camera mode. */
+  public onMenuOpen: (() => void) | null = null;
+  /** Fired when the Player (character/inventory) menu specifically opens. */
+  public onPlayerMenuOpen: (() => void) | null = null;
+
   /**
    * Open one of the UIManager-owned menus by ID, closing any currently open menu first.
    * For menus owned by ClientApplication (crafting, shipyard, pause), call this to keep
    * activeMenuId in sync — pass the id and handle open/close yourself.
    */
   openMenu(id: MenuId): void {
+    this.onMenuOpen?.();
     this.closeActiveMenu();
     this.activeMenuId = id;
     switch (id) {
       case MENU_ID.COMPANY: this.companyMenu.open(); break;
-      case MENU_ID.PLAYER:  this.playerMenu.open();  break;
+      case MENU_ID.PLAYER:  this.playerMenu.open(); this.onPlayerMenuOpen?.(); break;
       case MENU_ID.SHIP:    this.shipMenu.open();     break;
       case MENU_ID.CREW:    /* opened externally via openCrewMenu() */ break;
       case MENU_ID.SALVAGE: /* opened externally with salvageMenu.open(wreckId, count) */ break;
@@ -353,8 +510,13 @@ export class UIManager {
   }
 
   /** Set the callback that fires when the player confirms a respawn location. */
-  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number) => void): void {
+  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number, bedRespawn?: boolean) => void): void {
     this.respawnScreen.onRespawnConfirmed = cb;
+  }
+
+  /** Store a bed respawn point so it appears as an option the next time the player dies. */
+  setBedRespawnPoint(bedId?: number, x?: number, y?: number, shipId?: number): void {
+    this.respawnScreen.setBedRespawn(bedId, x, y, shipId);
   }
 
   /** Store island definitions so the respawn screen minimap can draw them. */
@@ -392,6 +554,7 @@ export class UIManager {
 
   /** Forward mouse-move to the world map or respawn screen for drag-pan. */
   handleWorldMapMouseMove(x: number, y: number): void {
+    if (this._resColDrag) this._resColDrag.dragX = x;
     if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseMove(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseMove(x, y);
     if (this.salvageMenu.visible) this.salvageMenu.handleMouseMove(x, y);
@@ -402,6 +565,30 @@ export class UIManager {
 
   /** Notify world map / respawn screen of mouse-up to end drag. */
   handleWorldMapMouseUp(x = 0, y = 0): void {
+    if (this._resColDrag) {
+      const rph = this._resPanelHit;
+      if (rph && rph.count > 1) {
+        const relX = x - rph.colStartX;
+        const rawCi = Math.round(relX / rph.colW - 0.5);
+        const targetCi = Math.max(0, Math.min(rph.count - 1, rawCi));
+        const srcCi = rph.headers.indexOf(this._resColDrag.header);
+        if (srcCi !== -1 && targetCi !== srcCi) {
+          // Reorder the visible headers
+          const visibleHeaders = [...rph.headers];
+          const newVisibleOrder = [...visibleHeaders];
+          newVisibleOrder.splice(srcCi, 1);
+          newVisibleOrder.splice(targetCi, 0, visibleHeaders[srcCi]);
+          // Rebuild columnOrder: replace positions of visible headers in-place
+          const newOrder = [...this.columnOrder];
+          let vi = 0;
+          for (let i = 0; i < newOrder.length; i++) {
+            if (visibleHeaders.includes(newOrder[i])) newOrder[i] = newVisibleOrder[vi++];
+          }
+          this.columnOrder = newOrder;
+        }
+      }
+      this._resColDrag = null;
+    }
     if (this.tombstoneMenu.visible) this.tombstoneMenu.handleMouseUp(x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) this.playerMenu.handleMouseUp(x, y);
     if (this.respawnScreen.visible) this.respawnScreen.handleMouseUp();
@@ -415,6 +602,7 @@ export class UIManager {
     if (this.tombstoneMenu.visible) return this.tombstoneMenu.handleWheel(x, y, deltaY);
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
+    if (this.activeMenuId === MENU_ID.SHIP)   return this.shipMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
@@ -425,6 +613,14 @@ export class UIManager {
   handleKeyDown(key: string): boolean {
     // Company menu key routing is handled exclusively by onKeyDown (the window listener)
     // to avoid double-processing. Only handle non-company-menu cases here.
+    if (key === 'Escape' && this._schematicPicker.open) {
+      this._schematicPicker.open = false;
+      return true;
+    }
+    if (key === 'Escape' && this._shipModulePicker.open) {
+      this._shipModulePicker.open = false;
+      return true;
+    }
     if (key === 'Escape' && this._dropPicker.open) {
       this._dropPicker.open = false;
       return true;
@@ -433,6 +629,7 @@ export class UIManager {
       this.tombstoneMenu.close();
       return true;
     }
+    if (this.playerMenu.visible && this.playerMenu.handleKeyDown(key)) return true;
     if (!this.hammerGame.active) return false;
     if (key === ' ' || key === 'Enter') {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
@@ -462,10 +659,78 @@ export class UIManager {
    * Also handles right-click equip of armor items in the player menu inventory.
    */
   handleRightClick(x: number, y: number): boolean {
+    // Land build hotbar right-click: clear filled slot / open picker for empty slot
+    if (this.inLandBuildMode) {
+      const N_SLOTS = this.landHotbarSlots.length;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < N_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.landHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              // Clear this slot and deselect if it was active
+              const slots = [...this.landHotbarSlots];
+              slots[i] = null;
+              this.landHotbarSlots = slots;
+              if (this.selectedLandKind === kind) {
+                this.selectedLandKind = null;
+                this.onBuildSchematicSelect?.(null);
+              }
+            } else {
+              // Empty slot — open schematic picker
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._schematicPicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+            }
+            return true;
+          }
+        }
+      }
+    }
+
     // Player menu open — check inventory for armor right-click equip first
     if (this.activeMenuId === MENU_ID.PLAYER && this.playerMenu.visible) {
       const inv = this.getPlayerInventory?.() ?? null;
       if (inv && this.playerMenu.handleRightClick(x, y, inv)) return true;
+    }
+
+    // Ship build hotbar right-click: clear filled slot / open picker for empty slot
+    if (this.inShipBuildMode) {
+      const BUILD_SLOTS = 8;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < BUILD_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.buildHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              // Clear this slot
+              const slots = [...this.buildHotbarSlots];
+              slots[i] = null;
+              this.buildHotbarSlots = slots;
+              this._saveHotbars();
+              // Deselect if it was the active slot
+              if (this.buildHotbarActiveSlot === i) {
+                this.buildHotbarActiveSlot = -1;
+                this.onBuildHotbarSlotChange?.(i, null);
+              }
+            } else {
+              // Empty slot — open ship module picker above this slot
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._shipModulePicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+            }
+            return true;
+          }
+        }
+      }
     }
 
     if (!this._cachedControlGroups) return false;
@@ -478,7 +743,7 @@ export class UIManager {
     for (let i = 0; i < HOTBAR_SLOTS; i++) {
       const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       if (x >= sx && x <= sx + SLOT_SIZE) {
-        const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
+        const groupIdx = i; // slot 0→G0 (Port), slot 1→G1 (Starboard), …, slot 9→G9
         const state = this._cachedControlGroups.get(groupIdx);
         if (!state) return false;
         const CYCLE: WeaponGroupMode[] = ['aiming', 'freefire', 'haltfire', 'targetfire'];
@@ -551,7 +816,15 @@ export class UIManager {
 
     // Company menu renders last so it sits above all other UI
     this.companyMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    // Provide current hotbar slot arrays to the player menu before render
+    const _hudEl = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+    if (_hudEl) {
+      this.playerMenu.landHotbarSlots = _hudEl.landHotbarSlots;
+      this.playerMenu.shipHotbarSlots = _hudEl.buildHotbarSlots as (string | null)[];
+    }
     this.playerMenu.render(ctx, context.worldState, context.assignedPlayerId, this.mouseX, this.mouseY);
+    this.shipMenu.controlGroups = context.controlGroups ?? new Map();
+    this.shipMenu.scaffoldedAtShipyardId = context.scaffoldedShipyardId ?? 0;
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
     this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
@@ -576,6 +849,14 @@ export class UIManager {
       this.renderBuildMenuPanel(ctx, ctx.canvas);
     }
 
+    // Land build panel — left side of screen
+    if (this.landBuildMenuOpen) {
+      this.renderLandBuildMenuPanel(ctx, ctx.canvas);
+    }
+
+    // Resource panel — shown independently (flash on gain, hammer, build mode, etc.)
+    this.renderResourcePanel(ctx, ctx.canvas);
+
     // Hammer minigame — topmost overlay, blocks all game input when active
     if (this.hammerGame.active) {
       this.renderHammerMinigame(ctx, ctx.canvas);
@@ -586,7 +867,7 @@ export class UIManager {
       const ws = context.worldState;
       const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
       const companyId = localPlayer?.companyId ?? 0;
-      this.worldMapScreen.render(ctx, ws.ships, this._islands, ws.players, context.assignedPlayerId, companyId);
+      this.worldMapScreen.render(ctx, ws.ships, this._islands, ws.players, context.assignedPlayerId, companyId, context.altHeld ?? false);
     }
 
     // Respawn screen — rendered last so it covers everything
@@ -600,6 +881,16 @@ export class UIManager {
     // Drop picker — topmost overlay
     if (this._dropPicker.open) {
       this._renderDropPicker(ctx);
+    }
+
+    // Schematic slot picker — above hotbar
+    if (this._schematicPicker.open) {
+      this._renderSchematicPicker(ctx);
+    }
+
+    // Ship module picker — above build hotbar
+    if (this._shipModulePicker.open) {
+      this._renderShipModulePicker(ctx);
     }
 
     // Tombstone menu — rendered above everything else
@@ -1095,6 +1386,21 @@ export class UIManager {
     this.shipMenu.onRenameRequest = cb;
   }
 
+  /** Set callback for weapon group rename rows in the ship settings panel. */
+  setGroupRenameCallback(cb: (shipId: number, groupIndex: number, currentName: string) => void): void {
+    this.shipMenu.onGroupRename = cb;
+  }
+
+  /** Set callback for the "Release Ship" button in the ship settings panel (shown when docked at a shipyard). */
+  setShipReleaseCallback(cb: (shipId: number, shipyardId: number) => void): void {
+    this.shipMenu.onReleaseShipRequest = cb;
+  }
+
+  /** Set callback for deck demolish buttons in the ship status menu. */
+  setShipDemolishDeckCallback(cb: (shipId: number, moduleId: number, deckLevel: number) => void): void {
+    this.shipMenu.onDemolishDeck = cb;
+  }
+
   /** Set callback for the Leave Company button in the company menu. */
   setLeaveCompanyCallback(cb: () => void): void {
     this.companyMenu.onLeaveCompany = cb;
@@ -1142,6 +1448,15 @@ export class UIManager {
    */
   syncPlayerLevelUpCallback(): void {
     this.playerMenu.onPlayerLevelUp = () => this.onPlayerLevelUp?.();
+    // Wire hotbar slot assignment callbacks so the schematics tab can edit hotbars
+    this.playerMenu.onSetLandHotbarSlot = (idx, kind) => {
+      const slots = this.landHotbarSlots;
+      if (idx >= 0 && idx < slots.length) { slots[idx] = kind; this._saveHotbars(); }
+    };
+    this.playerMenu.onSetShipHotbarSlot = (idx, kind) => {
+      const slots = this.buildHotbarSlots;
+      if (idx >= 0 && idx < slots.length) { slots[idx] = kind as (typeof slots)[0]; this._saveHotbars(); }
+    };
   }
 
   /**
@@ -1171,11 +1486,27 @@ export class UIManager {
    * Pass null to hide the overlay.
    */
   setIslandBuildState(state: {
-    kind: 'wooden_floor' | 'workbench';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
     tooFar: boolean;
     enemyClose: boolean;
+    wallVariant?: 'wall' | 'door_frame';
   } | null): void {
     this.islandBuildState = state;
+  }
+
+  /** Open or close the land build panel and track the currently selected kind. */
+  setLandBuildMenuState(open: boolean, selectedKind: string | null): void {
+    this.landBuildMenuOpen = open;
+    this._pendingLandBuildKind = selectedKind;
+    this.selectedLandKind = selectedKind;
+  }
+
+  /**
+   * Clear only the Plan Menu row highlight without touching the Build Schematic Hotbar.
+   * Used by mutual-exclusion logic when the hotbar takes priority.
+   */
+  clearPlanKind(): void {
+    this._pendingLandBuildKind = null;
   }
 
   /**
@@ -1220,9 +1551,107 @@ export class UIManager {
       if (this.hammerGame.resultTime === -1) this.strikeHammer();
       return true;
     }
+    // Schematic slot picker intercepts all clicks when open
+    if (this._schematicPicker.open) {
+      // Check if a schematic entry was hit
+      for (const hit of this._schematicPickerHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          const slots = [...this.landHotbarSlots];
+          slots[this._schematicPicker.slotIdx] = hit.kind;
+          this.landHotbarSlots = slots;
+          this._schematicPicker.open = false;
+          return true;
+        }
+      }
+      // Click outside — close
+      this._schematicPicker.open = false;
+      return true;
+    }
+    // Ship module picker intercepts all clicks when open
+    if (this._shipModulePicker.open) {
+      for (const hit of this._shipModulePickerHits) {
+        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+          const slots = [...this.buildHotbarSlots];
+          slots[this._shipModulePicker.slotIdx] = hit.kind;
+          this.buildHotbarSlots = slots;
+          this._shipModulePicker.open = false;
+          this._saveHotbars();
+          return true;
+        }
+      }
+      // Click outside — close
+      this._shipModulePicker.open = false;
+      return true;
+    }
     // Drop picker intercepts all clicks when open
     if (this._dropPicker.open) {
       return this.handleDropPickerClick(x, y);
+    }
+    // Resource panel column header drag start
+    {
+      const rph = this._resPanelHit;
+      if (rph && rph.count > 1) {
+        const relX = x - rph.colStartX;
+        const relY = y - rph.hdrY;
+        if (relX >= 0 && relX < rph.count * rph.colW && Math.abs(relY) <= rph.hdrH / 2 + 3) {
+          const ci = Math.floor(relX / rph.colW);
+          if (ci >= 0 && ci < rph.count) {
+            this._resColDrag = { header: rph.headers[ci], dragX: x };
+            return true;
+          }
+        }
+      }
+    }
+    // Land build hotbar slot click — selects (or deselects) the Build Schematic Hotbar slot
+    if (this.inLandBuildMode) {
+      const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+
+      // Variant popup absorbs clicks first (even outside the popup rows, to dismiss)
+      if (hud?.handleVariantPopupClick(x, y)) return true;
+
+      const N_SLOTS = this.landHotbarSlots.length;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < N_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.landHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              if (this.selectedLandKind === kind) {
+                // Re-clicking the active slot: open variant picker if blueprints exist,
+                // otherwise deselect
+                const variants = hud?.getVariantsForKind(kind) ?? [];
+                if (variants.length > 0) {
+                  const slotCx = sx + SLOT_SIZE / 2;
+                  hud?.openVariantPopup(kind, slotCx, startY);
+                } else {
+                  this.selectedLandKind = null;
+                  this.onBuildSchematicSelect?.(null);
+                }
+              } else {
+                // Select this slot
+                this.selectedLandKind = kind;
+                this.onBuildSchematicSelect?.(kind);
+                hud?.closeVariantPopup();
+              }
+            } else {
+              // Empty slot — open inline schematic picker above this slot
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._schematicPicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+              hud?.closeVariantPopup();
+            }
+            return true;
+          }
+        }
+      }
+    }
+    // Land build panel (left side) — check before ship build panel
+    if (this.landBuildMenuOpen) {
+      if (this.handleLandBuildPanelClick(x, y)) return true;
     }
     // Build panel (left side) — check before other panels
     if (this.buildMenuOpen) {
@@ -1261,6 +1690,53 @@ export class UIManager {
       return true;
     }
     // Hotbar left-click slot selection (only when no menu/build mode is consuming)
+    // Build hotbar click — when in ship build mode, clicks on hotbar area select schematic slots
+    if (this.inShipBuildMode) {
+      const hud = this.elements.get(UIElementType.HUD) as HUDElement | undefined;
+
+      // Variant popup absorbs clicks first (even outside the popup rows, to dismiss)
+      if (hud?.handleVariantPopupClick(x, y)) return true;
+
+      const BUILD_SLOTS = 8;
+      const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
+      const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+      const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+      const startX = Math.round((this.canvas.width - totalW) / 2);
+      const startY = this.canvas.height - totalH - 8;
+      if (y >= startY + PADDING && y <= startY + PADDING + SLOT_SIZE) {
+        for (let i = 0; i < BUILD_SLOTS; i++) {
+          const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+          if (x >= sx && x <= sx + SLOT_SIZE) {
+            const kind = this.buildHotbarSlots[i] ?? null;
+            if (kind !== null) {
+              if (this.buildHotbarActiveSlot === i) {
+                // Re-clicking the active slot: open variant picker if blueprints exist,
+                // otherwise deselect the slot
+                const variants = hud?.getVariantsForKind(kind) ?? [];
+                if (variants.length > 0) {
+                  const slotCx = sx + SLOT_SIZE / 2;
+                  hud?.openVariantPopup(kind, slotCx, startY);
+                } else {
+                  this.buildHotbarActiveSlot = -1;
+                  this.onBuildHotbarSlotChange?.(i, null);
+                }
+              } else {
+                this.buildHotbarActiveSlot = i;
+                this.onBuildHotbarSlotChange?.(i, kind);
+                hud?.closeVariantPopup();
+              }
+            } else {
+              // Empty slot — open ship module picker above this slot
+              const slotCx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP) + SLOT_SIZE / 2;
+              this._shipModulePicker = { open: true, slotIdx: i, anchorX: slotCx, anchorY: startY };
+              hud?.closeVariantPopup();
+            }
+            return true;
+          }
+        }
+      }
+    }
+
     if (this.onHotbarSlotClick && !this._cachedControlGroups) {
       const SLOT_SIZE = 48, SLOT_GAP = 4, PADDING = 6, LABEL_H = 16;
       const totalW = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
@@ -1325,7 +1801,7 @@ export class UIManager {
     const W = UIManager.BUILD_PANEL_W;
     const ENTRY_H = UIManager.BUILD_PANEL_ENTRY_H;
     const HEADER_H = UIManager.BUILD_PANEL_HEADER_H;
-    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const entries = UIManager.PLAN_PANEL_ENTRIES;
     const totalH = HEADER_H + entries.length * ENTRY_H + 8;
     const panelY = (this.canvas.height - totalH) / 2;
 
@@ -1339,6 +1815,417 @@ export class UIManager {
       this.onBuildPanelSelect?.(entries[idx].kind);
     }
     return true;
+  }
+
+  /**
+   * Handle a click on the left-side land build panel.
+   * Returns true if the click landed inside the panel.
+   */
+  private handleLandBuildPanelClick(x: number, y: number): boolean {
+    const W = UIManager.BUILD_PANEL_W;
+    const ENTRY_H = UIManager.BUILD_PANEL_ENTRY_H;
+    const HEADER_H = UIManager.BUILD_PANEL_HEADER_H;
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const totalH = HEADER_H + entries.length * ENTRY_H + 8;
+    const panelY = (this.canvas.height - totalH) / 2;
+
+    if (x < 0 || x > W || y < panelY || y > panelY + totalH) {
+      // Click outside panel closes it
+      if (x > W) {
+        this.onLandBuildPanelSelect?.(this._pendingLandBuildKind ?? '');
+        // Let caller close via callback; don't consume click
+      }
+      return false;
+    }
+
+    const relY = y - panelY - HEADER_H;
+    if (relY < 0) return true; // clicked header area
+
+    const idx = Math.floor(relY / ENTRY_H);
+    if (idx >= 0 && idx < entries.length) {
+      this._pendingLandBuildKind = entries[idx].kind;
+      this.onLandBuildPanelSelect?.(entries[idx].kind);
+    }
+    return true;
+  }
+
+  /**
+   * Render the land build panel on the left side of the screen.
+   */
+  private renderLandBuildMenuPanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const W      = UIManager.BUILD_PANEL_W;
+    const EH     = UIManager.BUILD_PANEL_ENTRY_H;
+    const HH     = UIManager.BUILD_PANEL_HEADER_H;
+    const PAD    = 10;
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const totalH = HH + entries.length * EH + 8;
+    const px     = 0;
+    const py     = Math.round((canvas.height - totalH) / 2);
+
+    // Top banner
+    const BANNER_H = 40;
+    const cw = canvas.width;
+    ctx.save();
+    const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+    bannerGrad.addColorStop(0, '#3d2800');
+    bannerGrad.addColorStop(1, '#1e1200');
+    ctx.fillStyle = bannerGrad;
+    ctx.fillRect(0, 0, cw, BANNER_H);
+    ctx.strokeStyle = '#cc8833';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, BANNER_H);
+    ctx.lineTo(cw, BANNER_H);
+    ctx.stroke();
+    ctx.font = 'bold 18px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#ffcc66';
+    ctx.fillText(
+      this._totalLandGhosts > 0
+        ? `\uD83C\uDFD7  LAND BUILD  \u2014  Plan Menu: select left \u25B6 click to plan  \u2502  Build Hotbar: select bottom \u25B6 click ghost  \u2502  [B] Exit  \u2502  [RMB] Remove  \u2502  [Enter] Build All (${this._totalLandGhosts})`
+        : '\uD83C\uDFD7  LAND BUILD  \u2014  Plan Menu: select \u25B6 click to place plans  \u2502  Build Hotbar: select \u25B6 click ghost to build  \u2502  [B] Exit',
+      cw / 2, BANNER_H / 2
+    );
+    ctx.restore();
+
+    ctx.save();
+
+    // Panel background
+    ctx.fillStyle = 'rgba(14,10,4,0.90)';
+    ctx.strokeStyle = 'rgba(180,130,50,0.45)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, totalH, [0, 8, 8, 0]);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = 'rgba(60,40,10,0.90)';
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, HH, [0, 8, 0, 0]);
+    ctx.fill();
+    ctx.fillStyle = '#ffcc66';
+    ctx.font = 'bold 12px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('📋  Plan Menu  [B]', px + W / 2, py + HH / 2);
+
+    // Entries
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const ey = py + HH + i * EH;
+      const isPending = this._pendingLandBuildKind === e.kind;
+      const isHovered = this.mouseX >= px && this.mouseX < px + W
+        && this.mouseY >= ey && this.mouseY < ey + EH;
+
+      // Row background
+      if (isPending) {
+        ctx.fillStyle = 'rgba(180,100,20,0.30)';
+      } else if (isHovered) {
+        ctx.fillStyle = 'rgba(120,80,20,0.22)';
+      } else {
+        ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.03)' : 'transparent';
+      }
+      ctx.fillRect(px + 2, ey + 1, W - 4, EH - 2);
+
+      // Color swatch circle
+      const swatchX = px + PAD + 10;
+      const swatchY = ey + EH / 2;
+      const swatchR = 10;
+      ctx.fillStyle = e.color;
+      ctx.strokeStyle = isPending ? '#ffaa44' : e.borderColor;
+      ctx.lineWidth = isPending ? 2 : 1.5;
+      ctx.beginPath();
+      ctx.arc(swatchX, swatchY, swatchR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Symbol
+      ctx.fillStyle = '#fff';
+      ctx.font = `${swatchR * 1.1}px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, swatchX, swatchY + 1);
+
+      // Label
+      ctx.fillStyle = isPending ? '#ffcc66' : isHovered ? '#ffe0aa' : '#d0c8b0';
+      ctx.font = isPending ? 'bold 13px Georgia, serif' : '13px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.label, swatchX + swatchR + 8, ey + EH / 2);
+
+      // Ghost count badge
+      const ghostCount = this._landGhostCounts.get(e.kind) ?? 0;
+      if (ghostCount > 0) {
+        const badgeText = `×${ghostCount}`;
+        ctx.font = 'bold 11px monospace';
+        const badgeW = ctx.measureText(badgeText).width + 8;
+        const badgeX = px + W - 24 - badgeW;
+        const badgeY = ey + (EH - 16) / 2;
+        ctx.fillStyle = 'rgba(220,110,20,0.85)';
+        ctx.beginPath();
+        ctx.roundRect(badgeX, badgeY, badgeW, 16, 4);
+        ctx.fill();
+        ctx.fillStyle = '#fff8e0';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(badgeText, badgeX + badgeW / 2, badgeY + 8);
+      }
+
+      // Pending arrow
+      if (isPending) {
+        ctx.fillStyle = '#ffaa44';
+        ctx.font = '13px Georgia, serif';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('\u25B6', px + W - 8, ey + EH / 2);
+      }
+
+      // Separator
+      if (i < entries.length - 1) {
+        ctx.strokeStyle = 'rgba(180,130,50,0.18)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px + 8, ey + EH);
+        ctx.lineTo(px + W - 8, ey + EH);
+        ctx.stroke();
+      }
+    }
+
+    // Footer hint
+    ctx.fillStyle = 'rgba(200,160,80,0.6)';
+    ctx.font = '10px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      this._totalLandGhosts > 0
+        ? `[R] rotate  [RMB] remove plan  \u25b6 [Enter] build all (${this._totalLandGhosts})`
+        : '[R] rotate  [LMB] place plan  \u2502  select hotbar \u25b6 click ghost to build',
+      px + W / 2, py + totalH - 6
+    );
+
+
+    ctx.restore();
+  }
+
+  /** Draw the resource panel (bottom-left corner) — shown whenever the build menu is
+   *  open, build mode is active, the hammer is equipped, or resources were recently gained. */
+  private renderResourcePanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    // Show if: land build menu open, build mode active, hammer equipped, or recently gained resources
+    const inv = this.getPlayerInventory?.() ?? null;
+    let showResources = false;
+    if (this.landBuildMenuOpen || this.buildMenuOpen || this.buildMenuPending !== null || (this.buildModeState?.active)) {
+      showResources = true;
+    } else {
+      const activeSlot = (inv as any)?.activeSlot ?? 0;
+      const slots = inv?.slots ?? [];
+      const activeItem = slots[activeSlot]?.item ?? 'none';
+      if (activeItem === 'hammer') showResources = true;
+      if (performance.now() < this._resourceFlashUntil) showResources = true;
+    }
+    let panelAlpha = 1.0;
+    if (!showResources) {
+      if (this._resourceFadeOutStart === null) this._resourceFadeOutStart = performance.now();
+      const elapsed = performance.now() - this._resourceFadeOutStart;
+      panelAlpha = 1.0 - elapsed / UIManager.RESOURCE_FADE_MS;
+      if (panelAlpha <= 0) return;
+    } else {
+      this._resourceFadeOutStart = null;
+    }
+
+    const invRes   = (inv as any)?.resources as { wood: number; fiber: number; metal: number; stone: number } | undefined;
+    const chestRes = this.getShipChestResources?.() ?? null;
+    const yardRes  = this.getShipyardResources?.()  ?? null;
+
+    const RES_ITEMS  = ['wood', 'fiber', 'stone', 'metal'] as const;
+    const RES_LABELS: Record<string, string> = { wood: 'Wood', fiber: 'Fiber', stone: 'Stone', metal: 'Metal' };
+
+    // Build active source columns (dynamic — only show present sources)
+    type ResCol = { header: string; color: string; get: (item: string) => number };
+    const allCols: ResCol[] = [
+      { header: 'PACK',  color: '#cc9944', get: item => invRes  ? ((invRes  as any)[item] ?? 0) : 0 },
+    ];
+    if (chestRes !== null) allCols.push({ header: 'CHEST', color: '#66aadd', get: item => (chestRes as any)[item] ?? 0 });
+    if (yardRes  !== null) allCols.push({ header: 'YARD',  color: '#66dd88', get: item => (yardRes  as any)[item] ?? 0 });
+    // Sort by columnOrder (left=lowest, right=highest priority)
+    const cols = [...allCols].sort((a, b) => {
+      const ai = this.columnOrder.indexOf(a.header);
+      const bi = this.columnOrder.indexOf(b.header);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+
+    // Build cost map
+    const costMap = new Map<string, number>();
+    if (this.selectedLandKind) {
+      const ent = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === this.selectedLandKind);
+      if (ent) for (const c of ent.cost) costMap.set(c.item, c.qty);
+    }
+    const hasCost = costMap.size > 0;
+
+    // Panel dimensions — width grows with the number of columns
+    const PAD      = 8;
+    const ROW_H    = 16;
+    const HDR_H    = 14;
+    const TITLE_H  = 16;
+    const SEP      = 2;
+    const LABEL_W  = 68;
+    const COL_W    = 42;
+    const COST_W   = 44;
+    const HOTBAR_H = 76;
+    const RES_W    = PAD + LABEL_W + (hasCost ? COST_W : 0) + cols.length * COL_W + PAD;
+    const resH     = TITLE_H + HDR_H + SEP + RES_ITEMS.length * ROW_H + PAD;
+    const resX     = 8;
+    const resY     = canvas.height - HOTBAR_H - 8 - resH - 6;
+
+    ctx.save();
+    ctx.globalAlpha = panelAlpha;
+
+    // Panel background
+    ctx.fillStyle   = 'rgba(14,10,4,0.90)';
+    ctx.strokeStyle = 'rgba(180,130,50,0.45)';
+    ctx.lineWidth   = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(resX, resY, RES_W, resH, 4);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    ctx.font         = 'bold 10px Georgia, serif';
+    ctx.fillStyle    = '#ffcc66';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('RESOURCES', resX + PAD, resY + TITLE_H / 2);
+    // [R] toggle hint — only show when ship build mode is active and CHEST column is present
+    if ((this.buildMenuOpen || this.buildModeState?.active) && chestRes !== null) {
+      ctx.font      = '8px monospace';
+      ctx.fillStyle = 'rgba(200,180,120,0.6)';
+      ctx.textAlign = 'right';
+      const _rHint = this.buildResourceSource === 'ship' ? 'CHEST'
+                   : this.buildResourceSource === 'pack' ? 'PACK' : 'AUTO';
+      ctx.fillText(`[R] ${_rHint}`, resX + RES_W - PAD, resY + TITLE_H / 2);
+    }
+
+    // Column headers — highlight active resource source column
+    const hdrY       = resY + TITLE_H + HDR_H / 2;
+    const colStartX  = resX + PAD + LABEL_W + (hasCost ? COST_W : 0);
+
+    // Cache hit-test info for drag handling
+    this._resPanelHit = {
+      colStartX, hdrY, colW: COL_W, hdrH: HDR_H,
+      count: cols.length, headers: cols.map(c => c.header),
+    };
+
+    // Determine which column index is "active" for building
+    const activeColHeader = this.buildResourceSource === 'ship' ? 'CHEST'
+                           : this.buildResourceSource === 'pack' ? 'PACK' : null;
+    const activeColIdx = cols.findIndex(c => c.header === activeColHeader);
+
+    ctx.font      = 'bold 9px Georgia, serif';
+    ctx.textAlign = 'center';
+    if (hasCost) {
+      ctx.fillStyle = '#ff6666';
+      ctx.fillText('COST', resX + PAD + LABEL_W + COST_W / 2, hdrY);
+    }
+    for (let ci = 0; ci < cols.length; ci++) {
+      const colCX = colStartX + ci * COL_W + COL_W / 2;
+      if (ci === activeColIdx) {
+        // Pulse alpha — fades from 0.55 → 0.14 over 400 ms after source toggle
+        const toggleAge = performance.now() - this._resourceSourceToggledAt;
+        const PULSE_MS = 400;
+        const pulseExtra = toggleAge < PULSE_MS ? 0.55 * (1 - toggleAge / PULSE_MS) : 0;
+        // Draw highlight background spanning header + data rows
+        ctx.fillStyle = `rgba(${cols[ci].color.slice(1,3) === 'ff' ? '255,200,40' : '60,140,220'},${(0.14 + pulseExtra).toFixed(2)})`;
+        ctx.beginPath();
+        ctx.roundRect(colStartX + ci * COL_W, resY + TITLE_H + 2, COL_W - 1, resH - TITLE_H - 4, 3);
+        ctx.fill();
+        // Bright border along top
+        ctx.strokeStyle = cols[ci].color;
+        ctx.lineWidth = 1.5 + (toggleAge < PULSE_MS ? 1.5 * (1 - toggleAge / PULSE_MS) : 0);
+        ctx.beginPath();
+        ctx.moveTo(colStartX + ci * COL_W + 2, resY + TITLE_H + 2);
+        ctx.lineTo(colStartX + ci * COL_W + COL_W - 3, resY + TITLE_H + 2);
+        ctx.stroke();
+      }
+      // Dim columns that are not the dragged one when a drag is active
+      const isDragging = this._resColDrag !== null;
+      const isDraggedCol = isDragging && this._resColDrag!.header === cols[ci].header;
+      ctx.globalAlpha = panelAlpha * (isDragging && !isDraggedCol ? 0.45 : 1.0);
+      ctx.fillStyle = ci === activeColIdx ? '#ffffff' : cols[ci].color;
+      ctx.fillText(cols[ci].header, colCX, hdrY);
+      ctx.globalAlpha = panelAlpha;
+    }
+    // Drag indicator: vertical line at current drag position
+    if (this._resColDrag) {
+      const dx = Math.max(colStartX, Math.min(colStartX + cols.length * COL_W, this._resColDrag.dragX));
+      const dragColor = cols.find(c => c.header === this._resColDrag!.header)?.color ?? '#ffffff';
+      ctx.strokeStyle = dragColor;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(dx, resY + TITLE_H + 2);
+      ctx.lineTo(dx, resY + resH - 4);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Separator
+    const sepY = resY + TITLE_H + HDR_H + SEP;
+    ctx.strokeStyle = 'rgba(180,130,50,0.30)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath();
+    ctx.moveTo(resX + 4, sepY);
+    ctx.lineTo(resX + RES_W - 4, sepY);
+    ctx.stroke();
+
+    // Data rows
+    for (let i = 0; i < RES_ITEMS.length; i++) {
+      const item = RES_ITEMS[i];
+      const rowY = sepY + i * ROW_H + ROW_H / 2 + 2;
+
+      // Row flash highlight
+      const flash = this._resourceRowFlash.get(item);
+      if (flash && performance.now() < flash.until) {
+        const t     = 1 - (flash.until - performance.now()) / 1200;
+        const alpha = 0.45 * (1 - t * t);
+        ctx.fillStyle = flash.dir === 'up' ? `rgba(60,200,80,${alpha.toFixed(2)})` : `rgba(220,60,40,${alpha.toFixed(2)})`;
+        ctx.fillRect(resX + 2, rowY - ROW_H / 2, RES_W - 4, ROW_H - 1);
+      } else if (flash && performance.now() >= flash.until) {
+        this._resourceRowFlash.delete(item);
+      }
+
+      // Label
+      ctx.font         = '11px Georgia, serif';
+      ctx.fillStyle    = '#c0b898';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(RES_LABELS[item], resX + PAD, rowY);
+
+      // Cost column
+      if (hasCost) {
+        const costQty = costMap.get(item);
+        ctx.font      = 'bold 11px Georgia, serif';
+        ctx.textAlign = 'right';
+        if (costQty !== undefined) {
+          ctx.fillStyle = '#ff4444';
+          ctx.fillText(`-${costQty}`, resX + PAD + LABEL_W + COST_W - 2, rowY);
+        } else {
+          ctx.fillStyle = 'rgba(100,60,60,0.4)';
+          ctx.fillText('—', resX + PAD + LABEL_W + COST_W - 2, rowY);
+        }
+      }
+
+      // Source columns
+      ctx.font      = 'bold 11px Georgia, serif';
+      ctx.textAlign = 'right';
+      for (let ci = 0; ci < cols.length; ci++) {
+        const val = cols[ci].get(item);
+        const isActive = ci === activeColIdx;
+        ctx.fillStyle = val > 0 ? (isActive ? '#ffffff' : cols[ci].color) : (isActive ? 'rgba(180,160,140,0.5)' : 'rgba(80,60,40,0.5)');
+        ctx.fillText(String(val), colStartX + ci * COL_W + COL_W - 2, rowY);
+      }
+    }
+    ctx.restore();
   }
 
   /**
@@ -1446,7 +2333,7 @@ export class UIManager {
   /** Amber top banner shown when the player has a wooden_floor or workbench equipped. */
   private renderIslandBuildOverlay(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
     if (!this.islandBuildState) return;
-    const { kind, tooFar, enemyClose } = this.islandBuildState;
+    const { kind, tooFar, enemyClose, wallVariant } = this.islandBuildState;
 
     ctx.save();
 
@@ -1471,7 +2358,20 @@ export class UIManager {
     ctx.stroke();
 
     // Item label
-    const itemLabel = kind === 'wooden_floor' ? '\u229f WOODEN FLOOR' : '\u2692 WORKBENCH';
+    const STRUCT_LABELS: Record<string, string> = {
+      wooden_floor:      '\u229f WOODEN FLOOR',
+      workbench:         '\u2692 WORKBENCH',
+      wall:              '\u258b WALL',
+      door_frame:        '\u2293 DOOR FRAME',
+      door:              '\uD83D\uDEAA DOOR',
+      wood_ceiling:      '\u229e CEILING',
+      shipyard:          '\u26F5 SHIPYARD',
+      cannon:            '\u26AB CANNON',
+      flag_fort:         '\uD83D\uDEA9 FLAG FORT',
+      company_fortress:  '\uD83C\uDFF0 FORTRESS',
+      claim_flag:        '\uD83C\uDFF3 CLAIM FLAG',
+    };
+    const itemLabel = STRUCT_LABELS[kind] ?? `\u229f ${kind.toUpperCase()}`;
 
     // Status suffix
     let status = '';
@@ -1482,10 +2382,100 @@ export class UIManager {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#fff8e0';
+    const confirmHint = this._totalLandGhosts > 0
+      ? `  |  [Enter] Build All (${this._totalLandGhosts})  |  [RMB] Remove`
+      : '  |  [Esc / change slot] Cancel';
     ctx.fillText(
-      `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Place  |  [Esc / change slot] Cancel${status}`,
+      `\u2301  BUILD MODE — ${itemLabel}  |  [Click] Plan${confirmHint}${status}`,
       cw / 2, BANNER_H / 2
     );
+
+    ctx.restore();
+
+    // ── Wall / Door Frame variant selector — mid-right of screen ─────────────
+    if (wallVariant !== undefined) {
+      this._renderWallVariantSelector(ctx, canvas, wallVariant);
+    }
+  }
+
+  private _renderWallVariantSelector(
+    ctx: CanvasRenderingContext2D,
+    canvas: HTMLCanvasElement,
+    wallVariant: 'wall' | 'door_frame'
+  ): void {
+    const options: Array<{ label: string; value: 'wall' | 'door_frame' }> = [
+      { label: '\u258b  Wall',       value: 'wall'       },
+      { label: '\u2293  Door Frame', value: 'door_frame' },
+    ];
+
+    const ITEM_H  = 38;
+    const ITEM_W  = 140;
+    const ITEM_GAP = 6;
+    const PAD_X   = 14;
+    const PAD_Y   = 12;
+    const RADIUS  = 8;
+    const HINT_H  = 18;
+
+    const totalH  = options.length * ITEM_H + (options.length - 1) * ITEM_GAP + PAD_Y * 2 + HINT_H + 4;
+    const panelW  = ITEM_W + PAD_X * 2;
+    const panelX  = canvas.width - panelW - 18;
+    const panelY  = (canvas.height - totalH) / 2;
+
+    ctx.save();
+
+    // Panel background
+    ctx.fillStyle = 'rgba(20, 15, 8, 0.82)';
+    ctx.strokeStyle = 'rgba(180, 140, 50, 0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, panelW, totalH, RADIUS + 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // Title
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(220, 180, 80, 0.65)';
+    ctx.fillText('STRUCTURE TYPE', panelX + panelW / 2, panelY + PAD_Y / 2 + 4);
+
+    options.forEach((opt, i) => {
+      const itemX = panelX + PAD_X;
+      const itemY = panelY + PAD_Y + HINT_H / 2 + i * (ITEM_H + ITEM_GAP);
+      const isSelected = opt.value === wallVariant;
+
+      // Row background
+      ctx.beginPath();
+      ctx.roundRect(itemX, itemY, ITEM_W, ITEM_H, RADIUS);
+
+      if (isSelected) {
+        ctx.fillStyle = 'rgba(220, 175, 40, 0.90)';
+        ctx.fill();
+        ctx.strokeStyle = '#ffe066';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else {
+        ctx.fillStyle = 'rgba(50, 40, 20, 0.60)';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(120, 100, 40, 0.35)';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // Label
+      ctx.font = isSelected ? 'bold 14px Georgia, serif' : '14px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isSelected ? '#1a1000' : 'rgba(180, 150, 70, 0.50)';
+      ctx.fillText(opt.label, itemX + ITEM_W / 2, itemY + ITEM_H / 2);
+    });
+
+    // [T] hint at the bottom of the panel
+    ctx.font = '11px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillStyle = 'rgba(220, 180, 80, 0.50)';
+    ctx.fillText('[T] to cycle', panelX + panelW / 2, panelY + totalH - 4);
 
     ctx.restore();
   }
@@ -1583,7 +2573,7 @@ export class UIManager {
     const EH     = UIManager.BUILD_PANEL_ENTRY_H;
     const HH     = UIManager.BUILD_PANEL_HEADER_H;
     const PAD    = 10;
-    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const entries = UIManager.PLAN_PANEL_ENTRIES;
     const totalH = HH + entries.length * EH + 8;
     const px     = 0;
     const py     = Math.round((canvas.height - totalH) / 2);
@@ -1636,7 +2626,7 @@ export class UIManager {
     ctx.font = 'bold 12px Georgia, serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText('📋  PLAN MODE  [B]', px + W / 2, py + HH / 2);
+    ctx.fillText('📋  Plan Menu  [B]', px + W / 2, py + HH / 2);
 
     // ── Module entries ─────────────────────────────────────────────────────
     const ghostCounts = new Map<GhostModuleKind, number>();
@@ -1685,7 +2675,20 @@ export class UIManager {
       ctx.font = isPending ? 'bold 13px Georgia, serif' : '13px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
-      ctx.fillText(e.label, swatchX + swatchR + 8, swatchY);
+      const labelY = ey + EH / 2 - 7;
+      ctx.fillText(e.label, swatchX + swatchR + 8, labelY);
+
+      // Resource cost row
+      const parts: string[] = [];
+      if (e.cost.wood  > 0) parts.push(`\uD83E\uDEB5${e.cost.wood}`);
+      if (e.cost.fiber > 0) parts.push(`\uD83C\uDF3F${e.cost.fiber}`);
+      if (e.cost.metal > 0) parts.push(`\u2699\uFE0F${e.cost.metal}`);
+      if (e.cost.stone > 0) parts.push(`\uD83E\uDEA8${e.cost.stone}`);
+      ctx.font = '10px Georgia, serif';
+      ctx.fillStyle = 'rgba(180,200,220,0.55)';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(parts.join(' '), swatchX + swatchR + 8, ey + EH / 2 + 9);
 
       // Ghost count badge
       const count = ghostCounts.get(e.kind) ?? 0;
@@ -1694,7 +2697,7 @@ export class UIManager {
         ctx.fillStyle = 'rgba(255,200,50,0.85)';
         ctx.font = 'bold 11px Georgia, serif';
         ctx.textAlign = 'right';
-        ctx.fillText(badge, px + W - 10, swatchY);
+        ctx.fillText(badge, px + W - 10, labelY);
       }
 
       // Pending indicator arrow on the right edge
@@ -1703,7 +2706,7 @@ export class UIManager {
         ctx.font = '13px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
-        ctx.fillText('▶', px + W - 8, swatchY);
+        ctx.fillText('▶', px + W - 8, labelY);
       }
 
       // Separator
@@ -1729,7 +2732,14 @@ export class UIManager {
 
   private initializeUIElements(): void {
     // Initialize HUD
-    this.elements.set(UIElementType.HUD, new HUDElement());
+    const _hudEl = new HUDElement();
+    _hudEl.getVariantTooltipInfo  = (kind) => this.playerMenu.getVariantTooltipInfo(kind);
+    _hudEl.getVariantsForKind     = (kind) => this.playerMenu.getVariantsForKind(kind);
+    _hudEl.setVariantForKind      = (kind, idx) => this.playerMenu.setVariantForKind(kind, idx);
+    _hudEl.tierColorFn            = _tierColor;
+    _hudEl.tierNameFn             = _tierName;
+    this.elements.set(UIElementType.HUD, _hudEl);
+    this._loadHotbars();
     
     // Initialize Debug Overlay
     this.elements.set(UIElementType.DEBUG_OVERLAY, new DebugOverlayElement());
@@ -1743,6 +2753,38 @@ export class UIManager {
     this.updateElementVisibility();
   }
   
+  /** Persist current hotbar selections to localStorage. */
+  private _saveHotbars(): void {
+    try {
+      localStorage.setItem('pirate_mmo_land_hotbar', JSON.stringify(this.landHotbarSlots));
+      localStorage.setItem('pirate_mmo_ship_hotbar', JSON.stringify(this.buildHotbarSlots));
+    } catch { /* quota exceeded or private mode — ignore */ }
+  }
+
+  /** Restore hotbar selections from localStorage, validating each entry. */
+  private _loadHotbars(): void {
+    const validLand = new Set(UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind));
+    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','chest','bed']);
+    try {
+      const landRaw = localStorage.getItem('pirate_mmo_land_hotbar');
+      if (landRaw) {
+        const parsed: unknown[] = JSON.parse(landRaw);
+        if (Array.isArray(parsed) && parsed.length === 8) {
+          this.landHotbarSlots = parsed.map(v => (typeof v === 'string' && validLand.has(v)) ? v : null);
+        }
+      }
+    } catch { /* corrupt data — keep defaults */ }
+    try {
+      const shipRaw = localStorage.getItem('pirate_mmo_ship_hotbar');
+      if (shipRaw) {
+        const parsed: unknown[] = JSON.parse(shipRaw);
+        if (Array.isArray(parsed) && parsed.length === 8) {
+          this.buildHotbarSlots = parsed.map(v => (typeof v === 'string' && validShip.has(v)) ? v as GhostModuleKind : null);
+        }
+      }
+    } catch { /* corrupt data — keep defaults */ }
+  }
+
   private updateElementVisibility(): void {
     this.elements.get(UIElementType.HUD)!.visible = true;
     this.elements.get(UIElementType.DEBUG_OVERLAY)!.visible = this.showDebugOverlay;
@@ -1759,6 +2801,7 @@ export class UIManager {
   }
   
   private onKeyDown(event: KeyboardEvent): void {
+    if (event.repeat) return;
     // Close any open modal on Escape or backtick
     if (event.code === 'Escape' || event.code === 'Backquote') {
       // Let the company menu handle ESC first (e.g. cancel name-entry form)
@@ -1805,6 +2848,7 @@ export class UIManager {
           this.closeActiveMenu();
           this.activeMenuId = MENU_ID.PLAYER;
           this.playerMenu.openSkillsTab();
+          this.onPlayerMenuOpen?.();
         }
         event.preventDefault();
         event.stopPropagation();
@@ -1974,6 +3018,166 @@ export class UIManager {
 
   private _dropPickerHits: { itemId: number; y: number; h: number }[] = [];
 
+  private _renderSchematicPicker(ctx: CanvasRenderingContext2D): void {
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const { anchorX, anchorY } = this._schematicPicker;
+
+    const COLS = 3;
+    const CELL = 64, GAP = 6, PAD = 10, HEADER_H = 28;
+    const rows = Math.ceil(entries.length / COLS);
+    const W = COLS * CELL + (COLS - 1) * GAP + PAD * 2;
+    const H = HEADER_H + rows * CELL + (rows - 1) * GAP + PAD * 2;
+
+    // Position above the slot, centred on anchorX, above anchorY
+    let px = Math.round(anchorX - W / 2);
+    let py = anchorY - H - 6;
+    // Clamp to canvas
+    px = Math.max(4, Math.min(ctx.canvas.width - W - 4, px));
+    py = Math.max(4, py);
+
+    ctx.save();
+
+    // Panel background
+    ctx.fillStyle = 'rgba(14,10,4,0.96)';
+    ctx.strokeStyle = '#cc8822';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, H, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    // Header
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.fillStyle = '#ffcc66';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Assign Schematic  [Esc]', px + W / 2, py + HEADER_H / 2);
+
+    this._schematicPickerHits = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const cx = px + PAD + col * (CELL + GAP);
+      const cy = py + HEADER_H + PAD + row * (CELL + GAP);
+
+      const isHov = this.mouseX >= cx && this.mouseX <= cx + CELL &&
+                    this.mouseY >= cy && this.mouseY <= cy + CELL;
+      const isAssigned = this.landHotbarSlots.includes(e.kind);
+
+      this._schematicPickerHits.push({ kind: e.kind, x: cx, y: cy, w: CELL, h: CELL });
+
+      // Cell background
+      ctx.fillStyle = isHov ? 'rgba(180,100,20,0.45)' : (isAssigned ? 'rgba(80,50,10,0.6)' : 'rgba(25,15,5,0.8)');
+      ctx.strokeStyle = isHov ? '#ffcc44' : (isAssigned ? '#886620' : '#4a3010');
+      ctx.lineWidth = isHov ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(cx, cy, CELL, CELL, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      // Colour swatch
+      const SW = 28;
+      ctx.fillStyle = e.color;
+      ctx.fillRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+      ctx.strokeStyle = e.borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+
+      // Symbol
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, cx + CELL / 2, cy + 8 + SW / 2);
+
+      // Label
+      ctx.font = '8px Georgia, serif';
+      ctx.fillStyle = isHov ? '#ffee88' : '#b8905a';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(e.label.substring(0, 9), cx + CELL / 2, cy + CELL - 3);
+    }
+
+    ctx.restore();
+  }
+
+  private _renderShipModulePicker(ctx: CanvasRenderingContext2D): void {
+    const entries = UIManager.BUILD_PANEL_ENTRIES;
+    const { anchorX, anchorY } = this._shipModulePicker;
+
+    const COLS = 3;
+    const CELL = 64, GAP = 6, PAD = 10, HEADER_H = 28;
+    const rows = Math.ceil(entries.length / COLS);
+    const W = COLS * CELL + (COLS - 1) * GAP + PAD * 2;
+    const H = HEADER_H + rows * CELL + (rows - 1) * GAP + PAD * 2;
+
+    let px = Math.round(anchorX - W / 2);
+    let py = anchorY - H - 6;
+    px = Math.max(4, Math.min(ctx.canvas.width - W - 4, px));
+    py = Math.max(4, py);
+
+    ctx.save();
+
+    ctx.fillStyle = 'rgba(14,8,4,0.96)';
+    ctx.strokeStyle = '#c87800';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(px, py, W, H, 6);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.font = 'bold 11px Georgia, serif';
+    ctx.fillStyle = '#ffcc66';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Assign Module  [Esc]', px + W / 2, py + HEADER_H / 2);
+
+    this._shipModulePickerHits = [];
+
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const cx = px + PAD + col * (CELL + GAP);
+      const cy = py + HEADER_H + PAD + row * (CELL + GAP);
+
+      const isHov = this.mouseX >= cx && this.mouseX <= cx + CELL &&
+                    this.mouseY >= cy && this.mouseY <= cy + CELL;
+      const isAssigned = this.buildHotbarSlots.includes(e.kind);
+
+      this._shipModulePickerHits.push({ kind: e.kind, x: cx, y: cy, w: CELL, h: CELL });
+
+      ctx.fillStyle = isHov ? 'rgba(200,120,20,0.45)' : (isAssigned ? 'rgba(80,45,5,0.6)' : 'rgba(25,15,5,0.8)');
+      ctx.strokeStyle = isHov ? '#ffcc44' : (isAssigned ? '#886620' : '#4a3010');
+      ctx.lineWidth = isHov ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(cx, cy, CELL, CELL, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      const SW = 28;
+      ctx.fillStyle = e.color;
+      ctx.fillRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+      ctx.strokeStyle = e.borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(cx + (CELL - SW) / 2, cy + 8, SW, SW);
+
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.fillStyle = '#fff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(e.symbol, cx + CELL / 2, cy + 8 + SW / 2);
+
+      ctx.font = '8px Georgia, serif';
+      ctx.fillStyle = isHov ? '#ffee88' : '#b8905a';
+      ctx.textBaseline = 'bottom';
+      ctx.fillText(e.label.substring(0, 9), cx + CELL / 2, cy + CELL - 3);
+    }
+
+    ctx.restore();
+  }
+
   private _renderDropPicker(ctx: CanvasRenderingContext2D): void {
     const { items, scrollY } = this._dropPicker;
     const cw = ctx.canvas.width;
@@ -2135,8 +3339,104 @@ class HUDElement implements UIElement {
   public mouseY = 0;
   private _cachedPlayerLevel = 1;
   private _cachedPlayerXp    = 0;
-  
+
+  // ── Build hotbar state (owned by HUDElement since it renders it) ───────
+  /** 8 schematic slots; each entry is the GhostModuleKind (or null = empty). */
+  public buildHotbarSlots: (GhostModuleKind | null)[] = [
+    'plank', 'deck', 'mast', 'cannon', 'swivel', 'helm', 'ramp', 'chest',
+  ];
+  /** Currently selected build hotbar slot (0–7). */
+  public buildHotbarActiveSlot = 0;
+  /** Set to true when ship build mode is active. */
+  public inShipBuildMode = false;
+  /** Set to true when land build mode is active (panel open or structure selected). */
+  public inLandBuildMode = false;
+  /** The currently selected land structure kind (highlighted in land build hotbar). */
+  public selectedLandKind: string | null = null;
+  /** 8 land schematic hotbar slots; string kind or null = empty. */
+  public landHotbarSlots: (string | null)[] = UIManager.LAND_BUILD_PANEL_ENTRIES.slice(0, 8).map(e => e.kind);
+  /** Wired by UIManager so build-hotbar tooltip can show the active quality variant. */
+  public getVariantTooltipInfo: (kind: string) => { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined = () => undefined;
+  /** Wired by UIManager — returns quality blueprints available for a build kind. */
+  public getVariantsForKind: (kind: string) => Array<{ index: number; tier: number; crafts: number }> = () => [];
+  /** Wired by UIManager — persists a variant selection (null = Standard). */
+  public setVariantForKind: (kind: string, index: number | null) => void = () => {};
+
+  // ── Variant picker popup ────────────────────────────────────────────────
+  private _variantPopup: {
+    kind: string;
+    anchorX: number;
+    anchorY: number;
+    hits: Array<{ index: number | null; x: number; y: number; w: number; h: number }>;
+  } | null = null;
+
+  /** Open the variant picker popup anchored above the given hotbar slot. */
+  openVariantPopup(kind: string, anchorX: number, anchorY: number): void {
+    this._variantPopup = { kind, anchorX, anchorY, hits: [] };
+  }
+
+  /** Close the popup (no selection change). */
+  closeVariantPopup(): boolean {
+    const was = this._variantPopup !== null;
+    this._variantPopup = null;
+    return was;
+  }
+
+  /**
+   * Handle a click that may land on the variant popup.
+   * Returns true (consuming the event) if the popup was open regardless of where
+   * the click landed — any click outside the popup rows also closes it.
+   */
+  handleVariantPopupClick(x: number, y: number): boolean {
+    if (!this._variantPopup) return false;
+    for (const h of this._variantPopup.hits) {
+      if (x >= h.x && x <= h.x + h.w && y >= h.y && y <= h.y + h.h) {
+        this.setVariantForKind(this._variantPopup.kind, h.index);
+        this._variantPopup = null;
+        return true;
+      }
+    }
+    // Click missed all rows — dismiss popup without changing variant
+    this._variantPopup = null;
+    return true;
+  }
+
+  // ── Tooltip hover-delay tracking (500 ms) ─────────────────────────────
+  private _ttHoverKey   = '';
+  private _ttHoverStart = 0;
+  private _ttFrameKey   = '';
+
+  /** Register a bar as hovered this frame. Returns true once 500 ms has elapsed. */
+  private _ttHit(key: string): boolean {
+    this._ttFrameKey = key;
+    return this._ttHoverKey === key && (Date.now() - this._ttHoverStart) >= 500;
+  }
+
+  // ── Bar change-flash tracking ───────────────────────────────────────────
+  private _barFlash = new Map<string, number>(); // key → perf timestamp of last change
+  private _barPrev  = new Map<string, number>(); // key → previous ratio 0–1
+
+  /** Call before drawing a bar fill. Triggers a change-flash if ratio moved. */
+  private _tickFlash(key: string, ratio: number): void {
+    const prev = this._barPrev.get(key);
+    if (prev !== undefined && Math.abs(ratio - prev) > 0.01) {
+      this._barFlash.set(key, performance.now());
+    }
+    this._barPrev.set(key, ratio);
+  }
+
+  /** White overlay alpha (0–0.55) for the active change-flash on a bar. */
+  private _flashAlpha(key: string): number {
+    const t = this._barFlash.get(key);
+    if (t === undefined) return 0;
+    const elapsed = performance.now() - t;
+    const DURATION = 600;
+    if (elapsed >= DURATION) { this._barFlash.delete(key); return 0; }
+    return 0.55 * (1 - elapsed / DURATION);
+  }
+
   render(ctx: CanvasRenderingContext2D, context: UIRenderContext): void {
+    this._ttFrameKey = '';
     // Find our player using the server-assigned player ID
     const player = context.assignedPlayerId !== null && context.assignedPlayerId !== undefined
       ? context.worldState.players.find(p => p.id === context.assignedPlayerId)
@@ -2144,7 +3444,7 @@ class HUDElement implements UIElement {
     
     if (!player) return;
     
-    // ── Top-left stats box ────────────────────────────────────────────────
+    // ── Stats box (left of hotbar) ────────────────────────────────────────
     ctx.save();
 
     const fps      = Math.round(context.fps);
@@ -2154,9 +3454,18 @@ class HUDElement implements UIElement {
     const glScale  = context.glScalePct ?? 0;
     const fpsColor = fps >= 60 ? '#44ff66' : fps >= 30 ? '#ffaa00' : '#ff4444';
 
-    const BOX_W = 260;
-    const BOX_H = 118;
-    const BX = 10, BY = 10;
+    // Mirror hotbar layout to anchor the stats panel beside it
+    const _hbSlot = 48, _hbGap = 4, _hbPad = 6, _hbLabelH = 16;
+    const _hbW  = HOTBAR_SLOTS * (_hbSlot + _hbGap) - _hbGap + _hbPad * 2;
+    const _hbH  = _hbSlot + _hbPad * 2 + _hbLabelH;
+    const _hbX  = Math.round(ctx.canvas.width / 2 - _hbW / 2);
+    const _hbY  = ctx.canvas.height - _hbH - 8;
+    // Player bars sit above the hotbar (same constants as renderPlayerBars)
+    const _barsH = 4 * 2 + 6 + 3 + 10 * 2 + 3; // PPPAD*2 + XP_H + GAP + BAR_H*2 + GAP = 40
+    const BOX_W  = 220;
+    const BOX_H  = _hbH + _barsH + 4 + 16; // 76 + 40 + 4 + 16 = 136 (extra row for deck info)
+    const BX     = Math.max(8, _hbX - BOX_W - 6);
+    const BY     = _hbY - _barsH - 4;
 
     // Background + border
     ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
@@ -2171,13 +3480,13 @@ class HUDElement implements UIElement {
     // FPS row — large & colour-coded
     ctx.font      = 'bold 15px Georgia, serif';
     ctx.fillStyle = fpsColor;
-    ctx.fillText(`${fps} FPS  ${frameMs.toFixed(1)} ms`, BX + 10, BY + 9);
+    ctx.fillText(`${fps} FPS  ${frameMs.toFixed(1)}ms`, BX + 10, BY + 9);
 
     // Ping + GL row
     ctx.font      = '13px Georgia, serif';
     ctx.fillStyle = ping < 80 ? '#88ddff' : ping < 200 ? '#ffaa00' : '#ff4444';
-    const glText  = glScale > 0 ? `  GL ${glDc} dc @ ${glScale}%` : '  Canvas 2D';
-    ctx.fillText(`Ping ${ping} ms${glText}`, BX + 10, BY + 28);
+    const glText  = glScale > 0 ? `  GL ${glDc}dc @${glScale}%` : '  Canvas 2D';
+    ctx.fillText(`Ping ${ping}ms${glText}`, BX + 10, BY + 28);
 
     // Divider
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
@@ -2191,14 +3500,43 @@ class HUDElement implements UIElement {
     ctx.fillStyle = '#aaffcc';
     ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52);
 
-    // Ship / velocity
-    ctx.fillStyle = '#cccccc';
-    ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '—'}   Vel ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 69);
+    // Ship info OR island info depending on where the player is
+    if (player.onIslandId > 0) {
+      const island = context.worldState.islands?.find(i => i.id === player.onIslandId);
+      const preset = island ? (island.preset.charAt(0).toUpperCase() + island.preset.slice(1)) : '?';
+      ctx.fillStyle = '#aaffaa';
+      ctx.fillText(`Island #${player.onIslandId}  ${preset}`, BX + 10, BY + 68);
+      if (island) {
+        const live = (type: IslandResource['type']) =>
+          island.resources.filter(r => r.type === type && (r.hp ?? 0) > 0).length;
+        const wood   = live('wood');
+        const fiber  = live('fiber');
+        const rock   = live('rock');
+        const boulder = live('boulder');
+        const parts: string[] = [];
+        if (wood)    parts.push(`${wood}W`);
+        if (fiber)   parts.push(`${fiber}Fi`);
+        if (rock)    parts.push(`${rock}Rk`);
+        if (boulder) parts.push(`${boulder}Bo`);
+        ctx.fillStyle = '#88cc88';
+        ctx.fillText(parts.length ? `Res: ${parts.join('  ')}` : 'No resources', BX + 10, BY + 82);
+      }
+    } else {
+      const _deckLabel = player.onDeck
+        ? (player.deckId === 0 ? 'Lower deck' : 'Upper deck')
+        : 'Off ship';
+      ctx.fillStyle = '#cccccc';
+      ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '\u2014'}  ${_deckLabel}`, BX + 10, BY + 68);
+    }
+
+    // Velocity
+    ctx.fillStyle = '#bbbbbb';
+    ctx.fillText(`Vel  ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 84);
 
     // Network bandwidth
     const ns = context.networkStats;
     ctx.fillStyle = '#aaaaaa';
-    ctx.fillText(`↑ ${(ns.bytesSent / 1024).toFixed(1)} KB  ↓ ${(ns.bytesReceived / 1024).toFixed(1)} KB  loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 86);
+    ctx.fillText(`\u2191${(ns.bytesSent / 1024).toFixed(1)}KB \u2193${(ns.bytesReceived / 1024).toFixed(1)}KB loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 100);
 
     ctx.restore();
 
@@ -2209,22 +3547,63 @@ class HUDElement implements UIElement {
       : null;
 
     if (playerShip != null) {
-      // Compute deck health ratio from the ship's deck module(s)
+      // Compute deck health ratio from the ship's deck module(s).
+      // Also build per-deck ratios for the multi-bar HUD display.
       const decks = playerShip.modules.filter(m => m.kind === 'deck');
       let deckRatio = 1;
+      const deckRatios: number[] = [];
       if (decks.length > 0) {
+        // Accumulate hp/maxHp sums per deck level for per-bar display
+        const perDeckHp:    number[] = [];
+        const perDeckMax:   number[] = [];
         let totalHp = 0, totalMax = 0;
         for (const m of decks) {
           const d = m.moduleData as { health?: number; maxHealth?: number } | undefined;
-          totalHp  += d?.health    ?? 0;
-          totalMax += d?.maxHealth ?? 10000;
+          const hp    = d?.health    ?? 0;
+          const maxHp = d?.maxHealth ?? 10000;
+          totalHp  += hp;
+          totalMax += maxHp;
+          const di = m.deckId ?? 0; // 0 = lower deck, 1 = upper deck
+          perDeckHp[di]  = (perDeckHp[di]  ?? 0) + hp;
+          perDeckMax[di] = (perDeckMax[di] ?? 0) + maxHp;
         }
         deckRatio = totalMax > 0 ? Math.max(0, Math.min(1, totalHp / totalMax)) : 1;
+        // Build ratios array indexed by deck level
+        const maxDi = perDeckMax.length;
+        for (let di = 0; di < maxDi; di++) {
+          const m = perDeckMax[di] ?? 0;
+          deckRatios[di] = m > 0 ? Math.max(0, Math.min(1, (perDeckHp[di] ?? 0) / m)) : 1;
+        }
       }
       const mastModules = playerShip.modules.filter(m => m.kind === 'mast');
       const _shipSpeed = Math.hypot((playerShip.velocity as {x:number;y:number}|undefined)?.x ?? 0,
                                        (playerShip.velocity as {x:number;y:number}|undefined)?.y ?? 0);
-      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed);
+
+      // Compute total ship weight: modules + bodies (75 kg ea) + inventory
+      const SHIP_WEIGHT_CAP = 6000 + ((playerShip.levelStats?.levels?.[0] ?? 1) - 1) * 400;
+      const MODULE_KG_W: Record<string, number> = {
+        cannon: 100, swivel: 180, mast: 150, helm: 20, 'steering-wheel': 20,
+        plank: 30, deck: 200, ladder: 5, seat: 25, custom: 50,
+      };
+      const _modKg = playerShip.modules.reduce((s, m) => {
+        if (m.kind === 'cannon') {
+          const snapIdx = (m.moduleData as any)?.gunportSnapIdx;
+          if (snapIdx !== undefined && snapIdx !== 255) {
+            const gp = playerShip.modules.find(gm => gm.kind === 'gunport' && (gm.moduleData as any)?.snapIndex === snapIdx);
+            return s + (gp ? ((gp.moduleData as any)?.isOpen ? 100 : 40) : 100);
+          }
+          return s + 100;
+        }
+        return s + (MODULE_KG_W[m.kind] ?? 50);
+      }, 0);
+      const _aboard     = context.worldState.players.filter(p => p.onDeck && p.carrierId === playerShip.id);
+      const _npcsAboard = context.worldState.npcs.filter(n => n.shipId === playerShip.id);
+      const _bodyKg     = (_aboard.length + _npcsAboard.length) * 75;
+      const _invKg      = _aboard.reduce((sum, p) => sum + computeInventoryWeight(p.inventory), 0);
+      const shipRawKg   = _modKg + _bodyKg + _invKg;
+      const _shipWeight = Math.min(100, (shipRawKg / SHIP_WEIGHT_CAP) * 100);
+
+      this.renderWaterMeter(ctx, ctx.canvas, playerShip.hullHealth ?? 100, deckRatio, playerShip.rotation ?? 0, mastModules, playerShip.hull ?? [], context.windAngle ?? 0, context.debugMode ?? false, _shipSpeed, context.camera.getState().rotation, playerShip.shipName, playerShip.levelStats?.shipLevel, _shipWeight, shipRawKg, SHIP_WEIGHT_CAP, deckRatios);
     }
 
     // Health / stamina bars above hotbar
@@ -2237,13 +3616,36 @@ class HUDElement implements UIElement {
     this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
+    // In ship build mode, show the build schematic hotbar instead
     const helmMode = context.mountKind === 'helm'
       ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
       : undefined;
-    this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
+    if (this.inLandBuildMode) {
+      this.renderLandBuildHotbar(ctx, ctx.canvas, player.inventory.slots);
+    } else if (this.inShipBuildMode) {
+      this.renderBuildHotbar(ctx, ctx.canvas);
+    } else {
+      this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
+    }
+
+    // Vital bars (weight / food / water) — right of hotbar
+    const BASE_CARRY = 300;
+    const carryCapacity = BASE_CARRY * (1 + ((player.statWeight ?? 0) as number) * 0.1);
+    this.renderVitalBars(
+      ctx, ctx.canvas,
+      computeInventoryWeight(player.inventory), carryCapacity,
+      player.hunger ?? 100,
+      player.thirst ?? 100,
+    );
 
     // Equipment HUD — all 6 slots (helm, chest, legs, feet, hands, shield)
     this.renderEquipmentHUD(ctx, ctx.canvas, player.inventory.equipment);
+
+    // Finalise tooltip hover delay — reset timer whenever hovered element changes
+    if (this._ttFrameKey !== this._ttHoverKey) {
+      this._ttHoverKey   = this._ttFrameKey;
+      this._ttHoverStart = Date.now();
+    }
   }
 
   private renderPlayerBars(
@@ -2309,6 +3711,13 @@ class HUDElement implements UIElement {
     const xpDrawRatio = (canLevelUp || statPoints > 0) ? 1 : xpRatio;
     ctx.fillStyle = xpBarColor;
     ctx.fillRect(barX, xpY, Math.round(barW * xpDrawRatio), XP_BAR_H);
+    // Change-flash overlay
+    this._tickFlash('bar-xp', xpRatio);
+    const _xpFa = this._flashAlpha('bar-xp');
+    if (_xpFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_xpFa.toFixed(2)})`;
+      ctx.fillRect(barX, xpY, barW, XP_BAR_H);
+    }
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, xpY, barW, XP_BAR_H);
@@ -2339,6 +3748,13 @@ class HUDElement implements UIElement {
     ctx.fillRect(barX, hpY, barW, BAR_H);
     ctx.fillStyle = hpColor;
     ctx.fillRect(barX, hpY, Math.round(barW * hpRatio), BAR_H);
+    // Change-flash overlay
+    this._tickFlash('bar-hp', hpRatio);
+    const _hpFa = this._flashAlpha('bar-hp');
+    if (_hpFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_hpFa.toFixed(2)})`;
+      ctx.fillRect(barX, hpY, barW, BAR_H);
+    }
     ctx.strokeStyle = hpCrit ? '#ff4444' : 'rgba(255,255,255,0.20)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, hpY, barW, BAR_H);
@@ -2361,6 +3777,13 @@ class HUDElement implements UIElement {
     ctx.fillRect(barX, stY, barW, BAR_H);
     ctx.fillStyle = stColor;
     ctx.fillRect(barX, stY, Math.round(barW * stRatio), BAR_H);
+    // Change-flash overlay
+    this._tickFlash('bar-st', stRatio);
+    const _stFa = this._flashAlpha('bar-st');
+    if (_stFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_stFa.toFixed(2)})`;
+      ctx.fillRect(barX, stY, barW, BAR_H);
+    }
     ctx.strokeStyle = 'rgba(255,255,255,0.20)';
     ctx.lineWidth = 1;
     ctx.strokeRect(barX, stY, barW, BAR_H);
@@ -2405,7 +3828,293 @@ class HUDElement implements UIElement {
       ctx.fillText('[Z] Combat Mode', indicatorX + indicatorW / 2, indicatorY + indicatorH / 2);
     }
 
+    // ── Bar hover tooltips ─────────────────────────────────────────────────
+    const _mx = this.mouseX, _my = this.mouseY;
+    if (_mx >= barX && _mx <= barX + barW) {
+      if (_my >= xpY && _my <= xpY + XP_BAR_H) {
+        if (this._ttHit('bar-xp')) {
+          const xpDesc = isMaxLevel
+            ? 'You have reached the maximum level.'
+            : `${xpToNext - xp} XP needed to reach level ${level + 1}.`;
+          this._drawStatTooltip(ctx, canvas, barX + barW / 2, xpY,
+            'Experience', '#4488ff', '#aaddff',
+            isMaxLevel ? 'MAX LEVEL' : `${xp} / ${xpToNext} XP`,
+            xpDesc,
+            statPoints > 0 ? [{ label: 'Unspent stat points', val: String(statPoints), col: '#ffdd44' }] : [],
+          );
+        }
+      } else if (_my >= hpY && _my <= hpY + BAR_H) {
+        if (this._ttHit('bar-hp')) {
+          const hpDesc = hpCrit
+            ? 'Critical — seek healing immediately.'
+            : hpWarn ? 'Low health. Use supplies or rest to recover.'
+            : 'Damaged by enemies and environmental hazards.';
+          this._drawStatTooltip(ctx, canvas, barX + barW / 2, hpY,
+            'Health', hpColor, '#aaffbb',
+            `${Math.ceil(health)} / ${maxHealth}`,
+            hpDesc, [],
+          );
+        }
+      } else if (_my >= stY && _my <= stY + BAR_H) {
+        if (this._ttHit('bar-st')) {
+          const stDesc = stLow
+            ? 'Nearly exhausted. Stop sprinting to recover.'
+            : 'Consumed by sprinting, climbing, and combat. Regenerates over time.';
+          this._drawStatTooltip(ctx, canvas, barX + barW / 2, stY,
+            'Stamina', stColor, '#ffee88',
+            `${Math.ceil(stamina)} / ${maxStamina}`,
+            stDesc, [],
+          );
+        }
+      }
+    }
+
     ctx.restore();
+  }
+
+  /** Renders the 8-slot build schematic hotbar (replaces regular hotbar in ship build mode). */
+  private renderBuildHotbar(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const BUILD_SLOTS = 8;
+    const SLOT_SIZE = 48;
+    const SLOT_GAP = 4;
+    const PADDING = 6;
+    const LABEL_H = 16;
+    const totalW = BUILD_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const startY = canvas.height - totalH - 8;
+
+    ctx.save();
+
+    // Background
+    ctx.fillStyle = 'rgba(20,14,0,0.85)';
+    ctx.fillRect(startX, startY, totalW, totalH);
+    ctx.strokeStyle = '#c87800';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(startX, startY, totalW, totalH);
+
+    // "BUILD" label bottom-left of panel
+    ctx.font = 'bold 9px Georgia, serif';
+    ctx.fillStyle = '#ffcc44';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('BUILD', startX + 4, startY + totalH - LABEL_H + 2);
+
+    for (let i = 0; i < BUILD_SLOTS; i++) {
+      const kind = this.buildHotbarSlots[i];
+      const entry = kind ? UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind) : null;
+      const isActive = i === this.buildHotbarActiveSlot;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;  // same line
+
+      // Slot background
+      ctx.fillStyle = isActive ? 'rgba(200,120,0,0.45)' : 'rgba(30,20,5,0.7)';
+      ctx.strokeStyle = isActive ? '#ffcc44' : '#7a5500';
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, SLOT_SIZE, SLOT_SIZE, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      if (entry) {
+        // Module color swatch
+        const swatchSize = 28;
+        const swatchX = sx + (SLOT_SIZE - swatchSize) / 2;
+        const swatchY = sy + 6;
+        ctx.fillStyle = entry.color;
+        ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
+        ctx.strokeStyle = entry.borderColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(swatchX, swatchY, swatchSize, swatchSize);
+
+        // Symbol
+        ctx.font = 'bold 13px Georgia, serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(entry.symbol, sx + SLOT_SIZE / 2, swatchY + swatchSize / 2);
+
+        // Crafts-remaining badge (bottom-right of swatch, shown when quality variant active)
+        const vBadge = this.getVariantTooltipInfo(kind!);
+        if (vBadge) {
+          ctx.font = 'bold 9px Georgia, serif';
+          ctx.fillStyle = vBadge.color;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`×${vBadge.crafts}`, swatchX + swatchSize - 1, swatchY + swatchSize - 1);
+        }
+
+        // Short label at bottom of slot — quality tier color when variant active
+        ctx.font = '8px Georgia, serif';
+        ctx.fillStyle = vBadge ? vBadge.color : (isActive ? '#ffee88' : '#b8a080');
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(entry.label.substring(0, 8), sx + SLOT_SIZE / 2, sy + SLOT_SIZE - 2);
+      } else {
+        // Empty slot
+        ctx.font = '10px Georgia, serif';
+        ctx.fillStyle = '#554433';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('—', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+      }
+
+      // Slot key number
+      ctx.font = '9px monospace';
+      ctx.fillStyle = isActive ? '#ffcc44' : '#776655';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i + 1), sx + 3, sy + 3);
+    }
+
+    ctx.restore();
+
+    // Tooltip — show name + costs after hovering for 500 ms
+    for (let i = 0; i < BUILD_SLOTS; i++) {
+      const kind = this.buildHotbarSlots[i];
+      const entry = kind ? UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind) : null;
+      if (!entry) continue;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+      if (this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
+          this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE &&
+          this._ttHit(`build-ship-${i}`)) {
+        const vInfo = this.getVariantTooltipInfo(kind!);
+        const m = vInfo?.costMult ?? 1;
+        const costs = ([
+          entry.cost.wood  > 0 ? `Wood:  ${Math.ceil(entry.cost.wood  * m)}` : null,
+          entry.cost.fiber > 0 ? `Fiber: ${Math.ceil(entry.cost.fiber * m)}` : null,
+          entry.cost.metal > 0 ? `Metal: ${Math.ceil(entry.cost.metal * m)}` : null,
+          entry.cost.stone > 0 ? `Stone: ${Math.ceil(entry.cost.stone * m)}` : null,
+        ] as Array<string | null>).filter((l): l is string => l !== null);
+        this._drawBuildSlotTooltip(ctx, canvas, sx, sy, SLOT_SIZE,
+          entry.label, entry.color, entry.borderColor, costs, vInfo);
+      }
+    }
+
+    // Variant popup — rendered on top of everything, only for ship build mode
+    if (this._variantPopup) this._renderVariantPopup(ctx, canvas);
+  }
+
+  /** Renders the land structure build hotbar (replaces regular hotbar in land build mode). */
+  private renderLandBuildHotbar(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement, _invSlots: { item: ItemKind; quantity: number }[]): void {
+    const slots = this.landHotbarSlots;
+    const N_SLOTS = slots.length;
+    const SLOT_SIZE = 48;
+    const SLOT_GAP = 4;
+    const PADDING = 6;
+    const LABEL_H = 16;
+    const totalW = N_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const totalH = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const startX = Math.round((canvas.width - totalW) / 2);
+    const startY = canvas.height - totalH - 8;
+
+    ctx.save();
+
+    // Background — amber/brown tint
+    ctx.fillStyle = 'rgba(20,12,0,0.88)';
+    ctx.fillRect(startX, startY, totalW, totalH);
+    ctx.strokeStyle = '#cc8822';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(startX, startY, totalW, totalH);
+
+    // "BUILD SCHEMATICS" label bottom-left
+    ctx.font = 'bold 9px Georgia, serif';
+    ctx.fillStyle = '#ffcc44';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('BUILD SCHEMATICS', startX + 4, startY + totalH - LABEL_H + 2);
+
+    for (let i = 0; i < N_SLOTS; i++) {
+      const kind = slots[i] ?? null;
+      const e = kind ? UIManager.LAND_BUILD_PANEL_ENTRIES.find(ent => ent.kind === kind) : null;
+      const isActive = kind !== null && this.selectedLandKind === kind;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+
+      // Slot background
+      ctx.fillStyle = isActive ? 'rgba(180,100,0,0.50)' : 'rgba(25,15,5,0.75)';
+      ctx.strokeStyle = isActive ? '#ffcc44' : '#6a4400';
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.beginPath();
+      ctx.roundRect(sx, sy, SLOT_SIZE, SLOT_SIZE, 4);
+      ctx.fill();
+      ctx.stroke();
+
+      if (e) {
+        // Module color swatch
+        const swatchSize = 28;
+        const swatchX = sx + (SLOT_SIZE - swatchSize) / 2;
+        const swatchY = sy + 6;
+        ctx.fillStyle = e.color;
+        ctx.fillRect(swatchX, swatchY, swatchSize, swatchSize);
+        ctx.strokeStyle = e.borderColor;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(swatchX, swatchY, swatchSize, swatchSize);
+
+        // Symbol
+        ctx.font = 'bold 13px Georgia, serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(e.symbol, sx + SLOT_SIZE / 2, swatchY + swatchSize / 2);
+
+        // Crafts-remaining badge when quality variant active
+        const vBadgeLand = kind ? this.getVariantTooltipInfo(kind) : undefined;
+        if (vBadgeLand) {
+          ctx.font = 'bold 9px Georgia, serif';
+          ctx.fillStyle = vBadgeLand.color;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'bottom';
+          ctx.fillText(`×${vBadgeLand.crafts}`, swatchX + swatchSize - 1, swatchY + swatchSize - 1);
+        }
+
+        // Short label — quality tier color when variant active
+        ctx.font = '8px Georgia, serif';
+        ctx.fillStyle = vBadgeLand ? vBadgeLand.color : (isActive ? '#ffee88' : '#b8905a');
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'bottom';
+        ctx.fillText(e.label.substring(0, 8), sx + SLOT_SIZE / 2, sy + SLOT_SIZE - 2);
+      } else {
+        // Empty slot
+        ctx.font = '14px Georgia, serif';
+        ctx.fillStyle = '#443322';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('—', sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
+      }
+
+      // Slot key number
+      ctx.font = '9px monospace';
+      ctx.fillStyle = isActive ? '#ffcc44' : '#665533';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(String(i + 1), sx + 3, sy + 3);
+    }
+
+    ctx.restore();
+
+    // Tooltip — show name + costs after hovering for 500 ms
+    for (let i = 0; i < N_SLOTS; i++) {
+      const kind = slots[i] ?? null;
+      const e = kind ? UIManager.LAND_BUILD_PANEL_ENTRIES.find(ent => ent.kind === kind) : null;
+      if (!e) continue;
+      const sx = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
+      const sy = startY + PADDING;
+      if (this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
+          this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE &&
+          this._ttHit(`build-land-${i}`)) {
+        const vInfo = this.getVariantTooltipInfo(kind!);
+        const m = vInfo?.costMult ?? 1;
+        const costs = e.cost
+          .map(c => `${c.item.charAt(0).toUpperCase() + c.item.slice(1)}: ${Math.ceil(c.qty * m)}`);
+        this._drawBuildSlotTooltip(ctx, canvas, sx, sy, SLOT_SIZE,
+          e.label, e.color, e.borderColor, costs, vInfo);
+      }
+    }
+
+    // Variant popup for land build mode
+    if (this._variantPopup) this._renderVariantPopup(ctx, canvas);
   }
 
   private renderHotbar(
@@ -2452,7 +4161,7 @@ class HUDElement implements UIElement {
       const def  = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
       const sx   = startX + PADDING + i * (SLOT_SIZE + SLOT_GAP);
       const sy   = startY + PADDING;
-      const groupIdx = (i + 1) % 10; // slot 0→G1, …, slot 8→G9, slot 9→G0
+      const groupIdx = i; // slot 0→G0 (Port), slot 1→G1 (Starboard), …, slot 9→G9
       const isActive = weaponMode
         ? weaponMode.activeGroups.has(groupIdx)
         : (i === activeSlot && activeSlot < 10);
@@ -2476,12 +4185,20 @@ class HUDElement implements UIElement {
         const modeLbl  = MODE_LABELS[mode] ?? mode;
         const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
 
-        // Group number label (top-centre)
-        ctx.font         = 'bold 11px Georgia, serif';
+        // Group label (top-centre): use name if set, else "G{n}"
+        const _gName = state?.name ?? '';
+        const _gLabel = _gName.length > 0 ? _gName : `G${groupIdx}`;
+        // Scale font to fit slot width
+        let _gFontSize = 11;
+        ctx.font = `bold ${_gFontSize}px Georgia, serif`;
+        while (_gFontSize > 7 && ctx.measureText(_gLabel).width > SLOT_SIZE - 4) {
+          _gFontSize--;
+          ctx.font = `bold ${_gFontSize}px Georgia, serif`;
+        }
         ctx.textAlign    = 'center';
         ctx.textBaseline = 'top';
         ctx.fillStyle    = isActive ? '#ffd700' : 'rgba(160,160,180,0.75)';
-        ctx.fillText(`G${groupIdx}`, sx + SLOT_SIZE / 2, sy + 3);
+        ctx.fillText(_gLabel, sx + SLOT_SIZE / 2, sy + 3);
 
         // Cannon count (large, centre)
         if (count > 0) {
@@ -2532,6 +4249,7 @@ class HUDElement implements UIElement {
           ctx.textAlign = 'center';
           ctx.textBaseline = 'middle';
           if (slot.item === 'axe') drawAxeIcon(ctx, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2, SLOT_SIZE);
+          else if (slot.item === 'sword') drawSwordIcon(ctx, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2, SLOT_SIZE);
           else ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
 
           // Stack count (bottom-right, only for stackables > 1)
@@ -2561,9 +4279,286 @@ class HUDElement implements UIElement {
         this.mouseX >= sx && this.mouseX <= sx + SLOT_SIZE &&
         this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE
       ) {
-        this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy);
+        if (this._ttHit(`hotbar-${i}`)) {
+          this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy);
+        }
         break;
       }
+    }
+
+    ctx.restore();
+  }
+
+  /** Three vertical vital bars (carry weight / food / water) to the right of the hotbar. */
+  private renderVitalBars(
+    ctx:          CanvasRenderingContext2D,
+    canvas:       HTMLCanvasElement,
+    carryWeight:  number,   // kg currently carried
+    carryCapacity: number,  // max kg
+    hunger:       number,   // 0–100 (100 = full)
+    thirst:       number,   // 0–100 (100 = full)
+  ): void {
+    const SLOT_SIZE = 48;
+    const SLOT_GAP  = 4;
+    const PADDING   = 6;
+    const LABEL_H   = 16;
+    const hotbarW   = HOTBAR_SLOTS * (SLOT_SIZE + SLOT_GAP) - SLOT_GAP + PADDING * 2;
+    const hotbarH   = SLOT_SIZE + PADDING * 2 + LABEL_H;
+    const hotbarX   = Math.round((canvas.width - hotbarW) / 2);
+    const hotbarY   = canvas.height - hotbarH - 8;
+
+    const BAR_W    = 14;
+    const BAR_GAP  = 5;
+    const ICON_SZ  = 8;
+    const NUM_H    = 9;  // height reserved for numeric label
+    const PAD      = 5;
+    const barH     = hotbarH - PAD * 2 - ICON_SZ - 3 - NUM_H;
+    const PANEL_W  = 3 * BAR_W + 2 * BAR_GAP + PAD * 2;
+    const PANEL_H  = hotbarH;
+    const px       = hotbarX + hotbarW + 6;
+    const py       = hotbarY;
+
+    ctx.save();
+    ctx.fillStyle   = 'rgba(0,0,0,0.75)';
+    ctx.fillRect(px, py, PANEL_W, PANEL_H);
+    ctx.strokeStyle = '#556';
+    ctx.lineWidth   = 1;
+    ctx.strokeRect(px, py, PANEL_W, PANEL_H);
+
+    const barTop  = py + PAD;
+    const iconTop = barTop + barH + 3;
+    const numTop  = iconTop + ICON_SZ + 1;
+
+    interface BarDef {
+      label:    string;
+      pct:      number;
+      highIsBad: boolean;
+      normal:   string;
+      warn:     string;
+      crit:     string;
+      warnAt:   number;
+      critAt:   number;
+    }
+    const defs: BarDef[] = [
+      { label: 'WT',   pct: Math.min(carryWeight / Math.max(carryCapacity, 1), 1),
+        highIsBad: true,  normal: '#664422', warn: '#cc8811', crit: '#cc2222', warnAt: 0.70, critAt: 0.85 },
+      { label: 'FOOD', pct: Math.max(0, Math.min(hunger / 100, 1)),
+        highIsBad: false, normal: '#3a8a3a', warn: '#cc8811', crit: '#cc2222', warnAt: 0.30, critAt: 0.15 },
+      { label: 'H2O',  pct: Math.max(0, Math.min(thirst / 100, 1)),
+        highIsBad: false, normal: '#2266bb', warn: '#cc8811', crit: '#cc2222', warnAt: 0.30, critAt: 0.15 },
+    ];
+
+    for (let i = 0; i < defs.length; i++) {
+      const d   = defs[i];
+      const bx  = px + PAD + i * (BAR_W + BAR_GAP);
+      const icx = bx + BAR_W / 2;
+
+      const isCrit = d.highIsBad ? d.pct >= d.critAt  : d.pct <= d.critAt;
+      const isWarn = d.highIsBad ? d.pct >= d.warnAt  : d.pct <= d.warnAt;
+      const fill   = isCrit ? d.crit : isWarn ? d.warn : d.normal;
+
+      // Track
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(bx, barTop, BAR_W, barH);
+
+      // Fill (bottom-up)
+      const fillH = Math.round(barH * d.pct);
+      ctx.fillStyle = fill;
+      ctx.fillRect(bx, barTop + barH - fillH, BAR_W, fillH);
+      // Change-flash + critical-full red pulse (WT only)
+      const _vbKey = i === 0 ? 'bar-wt' : i === 1 ? 'bar-food' : 'bar-h2o';
+      this._tickFlash(_vbKey, d.pct);
+      const _vbFa = this._flashAlpha(_vbKey);
+      if (_vbFa > 0) {
+        ctx.fillStyle = `rgba(255,255,255,${_vbFa.toFixed(2)})`;
+        ctx.fillRect(bx, barTop, BAR_W, barH);
+      }
+      if (i === 0 && isCrit) {
+        const _pulse = 0.20 + 0.20 * Math.sin(performance.now() / 200);
+        ctx.fillStyle = `rgba(255,0,0,${_pulse.toFixed(2)})`;
+        ctx.fillRect(bx, barTop, BAR_W, barH);
+      }
+
+      // Border
+      ctx.strokeStyle = isCrit ? 'rgba(255,80,80,0.6)' : 'rgba(255,255,255,0.22)';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(bx, barTop, BAR_W, barH);
+
+      // Rotated label inside bar
+      ctx.save();
+      ctx.fillStyle    = 'rgba(255,255,255,0.75)';
+      ctx.font         = `bold 7px Georgia, serif`;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.translate(bx + BAR_W / 2, barTop + barH / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText(d.label, 0, 0);
+      ctx.restore();
+
+      // Icon
+      const icy = iconTop + ICON_SZ / 2;
+      const r   = ICON_SZ * 0.44;
+      if (i === 0) {
+        // Anchor (weight)
+        ctx.strokeStyle = isCrit ? '#ff6666' : '#aabbaa';
+        ctx.fillStyle   = isCrit ? '#ff6666' : '#aabbaa';
+        ctx.lineWidth   = 1;
+        ctx.beginPath(); ctx.arc(icx, icy - r * 0.5, r * 0.3, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(icx, icy - r * 0.2); ctx.lineTo(icx, icy + r * 0.9); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(icx - r * 0.7, icy - r * 0.1); ctx.lineTo(icx + r * 0.7, icy - r * 0.1); ctx.stroke();
+        ctx.beginPath(); ctx.arc(icx, icy + r * 0.5, r * 0.5, Math.PI * 0.15, Math.PI * 0.85); ctx.stroke();
+      } else if (i === 1) {
+        // Apple (food)
+        ctx.fillStyle = isCrit ? '#ff6666' : '#66bb44';
+        ctx.beginPath(); ctx.arc(icx, icy + r * 0.1, r, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = isCrit ? '#ff8888' : '#88dd66';
+        ctx.lineWidth   = 1;
+        ctx.beginPath(); ctx.moveTo(icx, icy - r * 0.8); ctx.lineTo(icx + r * 0.5, icy - r * 1.2); ctx.stroke();
+      } else {
+        // Teardrop (water)
+        ctx.beginPath();
+        ctx.moveTo(icx, iconTop);
+        ctx.bezierCurveTo(icx + r * 0.9, icy - r * 0.1, icx + r, icy + r * 0.5, icx, icy + r);
+        ctx.bezierCurveTo(icx - r, icy + r * 0.5, icx - r * 0.9, icy - r * 0.1, icx, iconTop);
+        ctx.closePath();
+        ctx.fillStyle = isCrit ? '#ff6666' : '#4499dd';
+        ctx.fill();
+      }
+
+      // Numeric label below icon
+      ctx.font         = '8px Georgia, serif';
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = isCrit ? '#ff9999' : 'rgba(160,180,200,0.75)';
+      const numTxt = i === 0
+        ? `${Math.round(carryWeight)}`
+        : `${Math.round(d.pct * 100)}%`;
+      ctx.fillText(numTxt, bx + BAR_W / 2, numTop);
+    }
+
+    // ── Bar hover tooltips ─────────────────────────────────────────────────
+    const _mx = this.mouseX, _my = this.mouseY;
+    for (let i = 0; i < defs.length; i++) {
+      const d  = defs[i];
+      const bx = px + PAD + i * (BAR_W + BAR_GAP);
+      if (_mx < bx || _mx > bx + BAR_W || _my < barTop || _my > barTop + barH) continue;
+      const isCrit = d.highIsBad ? d.pct >= d.critAt : d.pct <= d.critAt;
+      const isWarn = d.highIsBad ? d.pct >= d.warnAt : d.pct <= d.warnAt;
+      const col    = isCrit ? d.crit : isWarn ? d.warn : d.normal;
+      const ttKey  = i === 0 ? 'bar-wt' : i === 1 ? 'bar-food' : 'bar-h2o';
+      if (i === 0) {
+        if (this._ttHit(ttKey)) {
+          const wtDesc = isCrit
+            ? 'Overencumbered — movement is impaired.'
+            : isWarn ? 'Heavy load. Movement may slow near capacity.'
+            : 'Items in your inventory add to carry weight.';
+          this._drawStatTooltip(ctx, canvas, bx + BAR_W / 2, barTop,
+            'Carry Weight', col, '#ccbbaa',
+            `${Math.round(carryWeight)} / ${Math.round(carryCapacity)} kg`,
+            wtDesc, [],
+          );
+        }
+      } else if (i === 1) {
+        if (this._ttHit(ttKey)) {
+          const desc = isCrit ? 'Starving — health is draining rapidly.'
+            : isWarn ? 'Hungry. Eat food to restore your hunger.'
+            : 'Well fed. Food restores hunger over time.';
+          this._drawStatTooltip(ctx, canvas, bx + BAR_W / 2, barTop,
+            'Hunger', col, '#aaffaa',
+            `${Math.round(hunger)}%`,
+            desc, [],
+          );
+        }
+      } else {
+        if (this._ttHit(ttKey)) {
+          const desc = isCrit ? 'Dehydrated — health is draining rapidly.'
+            : isWarn ? 'Thirsty. Drink water to restore your thirst.'
+            : 'Well hydrated. Water restores thirst over time.';
+          this._drawStatTooltip(ctx, canvas, bx + BAR_W / 2, barTop,
+            'Thirst', col, '#aabbff',
+            `${Math.round(thirst)}%`,
+            desc, [],
+          );
+        }
+      }
+    }
+
+    ctx.restore();
+  }
+
+  /** Draw a compact stat info card anchored above a bar. */
+  private _drawStatTooltip(
+    ctx:       CanvasRenderingContext2D,
+    canvas:    HTMLCanvasElement,
+    anchorCX:  number,
+    anchorTop: number,
+    name:      string,
+    accent:    string,
+    border:    string,
+    value:     string,
+    desc:      string,
+    extras:    Array<{ label: string; val: string; col?: string }>,
+  ): void {
+    const PAD    = 10;
+    const W      = 210;
+    const LINE   = 15;
+    const NAME_H = 17;
+
+    const descLines = this.wrapText(ctx, desc, W - PAD * 2 - 4, '11px Georgia, serif');
+    const totalH = PAD + NAME_H + 4
+      + (descLines.length > 0 ? descLines.length * LINE + 4 : 0)
+      + extras.length * LINE
+      + PAD;
+
+    let tx = anchorCX - W / 2;
+    let ty = anchorTop - totalH - 8;
+    tx = Math.max(4, Math.min(canvas.width - W - 4, tx));
+    if (ty < 4) ty = anchorTop + 8;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = border;
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = accent;
+    this.roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+
+    ctx.font      = 'bold 13px Georgia, serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(name, tx + PAD + 4, cy);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText(value, tx + W - PAD - 4, cy);
+    cy += NAME_H + 4;
+
+    if (descLines.length > 0) {
+      ctx.textAlign = 'left';
+      ctx.font      = '11px Georgia, serif';
+      ctx.fillStyle = '#aaaaaa';
+      for (const l of descLines) { ctx.fillText(l, tx + PAD + 4, cy); cy += LINE; }
+      cy += 4;
+    }
+
+    for (const e of extras) {
+      ctx.font = '11px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#888888';
+      ctx.fillText(e.label, tx + PAD + 4, cy);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = e.col ?? '#cccccc';
+      ctx.fillText(e.val, tx + W - PAD - 4, cy);
+      cy += LINE;
     }
 
     ctx.restore();
@@ -2590,7 +4585,7 @@ class HUDElement implements UIElement {
     const LINE  = 16;
     const nameH = 18;
     const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Georgia, serif');
-    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + PAD;
+    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + LINE + PAD;
 
     // Position: centred above the slot, clamped to canvas
     let tx = slotX + SLOT_SIZE / 2 - W / 2;
@@ -2640,8 +4635,225 @@ class HUDElement implements UIElement {
       cy += LINE;
     }
 
+    // Weight
+    const wPerUnit = def.weight;
+    const totalW   = wPerUnit * (slot.quantity || 1);
+    const weightTxt = slot.quantity > 1
+      ? `Weight: ${wPerUnit} kg ea  ·  ${totalW} kg total`
+      : `Weight: ${wPerUnit} kg`;
+    ctx.fillStyle = '#8ab4cc';
+    ctx.font      = '11px Georgia, serif';
+    ctx.fillText(weightTxt, tx + PAD + 4, cy);
+
     ctx.restore();
   }
+
+  /** Draw a tooltip popup for a build hotbar slot (ship or land build mode). */
+  private _drawBuildSlotTooltip(
+    ctx:         CanvasRenderingContext2D,
+    canvas:      HTMLCanvasElement,
+    sx:          number,
+    sy:          number,
+    slotSize:    number,
+    label:       string,
+    color:       string,
+    borderColor: string,
+    costLines:   string[],
+    variantInfo?: { tierPrefix: string; crafts: number; color: string; costMult: number },
+  ): void {
+    const PAD    = 10;
+    const LINE   = 15;
+    const W      = 190;
+    // When a variant is active, add a blueprint cost line
+    const extraLines = variantInfo ? 1 : 0;
+    const totalH = PAD + 18 + (costLines.length + extraLines > 0 ? 6 + (costLines.length + extraLines) * LINE : 0) + PAD;
+
+    let tx = sx + slotSize / 2 - W / 2;
+    let ty = sy - totalH - 6;
+    tx = Math.max(4, Math.min(canvas.width - W - 4, tx));
+    if (ty < 4) ty = sy + slotSize + 6;
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.shadowBlur  = 8;
+    ctx.fillStyle   = 'rgba(12,12,20,0.94)';
+    ctx.strokeStyle = variantInfo ? variantInfo.color : borderColor;
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, tx, ty, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Left colour accent bar
+    ctx.fillStyle = variantInfo ? variantInfo.color : color;
+    this.roundRect(ctx, tx, ty, 4, totalH, { tl: 6, tr: 0, br: 0, bl: 6 });
+    ctx.fill();
+
+    let cy = ty + PAD;
+
+    // Structure name — prefixed with tier name and coloured when a variant is active
+    const displayLabel = variantInfo ? `${variantInfo.tierPrefix} ${label}` : label;
+    ctx.fillStyle    = variantInfo ? variantInfo.color : '#ffffff';
+    ctx.font         = 'bold 14px Georgia, serif';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText(displayLabel, tx + PAD + 4, cy);
+    cy += 18;
+
+    // Resource costs
+    const allCostLines = variantInfo
+      ? [...costLines, `\u25c6 Blueprint \u00d7${variantInfo.crafts} remaining`]
+      : costLines;
+    if (allCostLines.length > 0) {
+      cy += 6;
+      ctx.font = '11px Georgia, serif';
+      for (let i = 0; i < allCostLines.length; i++) {
+        // Blueprint line gets tier color; resource lines are dimmed
+        ctx.fillStyle = (variantInfo && i === allCostLines.length - 1) ? variantInfo.color : '#aaaaaa';
+        ctx.fillText(allCostLines[i], tx + PAD + 4, cy);
+        cy += LINE;
+      }
+    }
+
+    ctx.restore();
+  }
+
+  /**
+   * Renders the floating variant picker popup above the active build hotbar slot.
+   * Each row is a clickable hit-area recorded into `_variantPopup.hits`.
+   */
+  private _renderVariantPopup(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const popup = this._variantPopup;
+    if (!popup) return;
+
+    const variants = this.getVariantsForKind(popup.kind);
+    const activeInfo = this.getVariantTooltipInfo(popup.kind);
+    const ROW_H = 24;
+    const PAD = 10;
+    const W = 210;
+    const totalRows = 1 + variants.length; // Standard row + one per blueprint
+    const totalH = PAD + totalRows * ROW_H + PAD;
+
+    let px = popup.anchorX - W / 2;
+    let py = popup.anchorY - totalH - 6;
+    px = Math.max(4, Math.min(canvas.width  - W - 4, px));
+    py = Math.max(4, Math.min(canvas.height - totalH - 4, py));
+
+    popup.hits = []; // reset hit areas for this frame
+
+    ctx.save();
+
+    // Panel background
+    ctx.shadowColor = 'rgba(0,0,0,0.7)';
+    ctx.shadowBlur  = 10;
+    ctx.fillStyle   = 'rgba(10,10,22,0.96)';
+    ctx.strokeStyle = 'rgba(200,160,50,0.7)';
+    ctx.lineWidth   = 1.5;
+    this.roundRect(ctx, px, py, W, totalH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Header
+    ctx.font         = 'bold 10px Georgia, serif';
+    ctx.fillStyle    = 'rgba(200,160,50,0.7)';
+    ctx.textAlign    = 'left';
+    ctx.textBaseline = 'top';
+    ctx.fillText('SELECT VARIANT', px + PAD, py + 5);
+
+    // Standard row
+    const stdY   = py + PAD;
+    const isStd  = !activeInfo;
+    popup.hits.push({ index: null, x: px, y: stdY, w: W, h: ROW_H });
+
+    if (isStd) {
+      ctx.fillStyle = 'rgba(80,160,80,0.15)';
+      ctx.beginPath();
+      ctx.roundRect(px + 2, stdY, W - 4, ROW_H, 3);
+      ctx.fill();
+    }
+
+    ctx.font         = 'bold 11px Georgia, serif';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle    = isStd ? '#88ee88' : 'rgba(180,180,180,0.7)';
+    ctx.textAlign    = 'left';
+    ctx.fillText(isStd ? '✓' : '○', px + PAD, stdY + ROW_H / 2);
+    ctx.fillStyle = isStd ? '#cceecc' : 'rgba(180,180,180,0.7)';
+    ctx.fillText('Standard', px + PAD + 14, stdY + ROW_H / 2);
+    ctx.font      = '9px Georgia, serif';
+    ctx.fillStyle = 'rgba(140,140,140,0.6)';
+    ctx.textAlign = 'right';
+    ctx.fillText('(resources only)', px + W - PAD, stdY + ROW_H / 2);
+
+    // Blueprint rows
+    for (let bi = 0; bi < variants.length; bi++) {
+      const bp   = variants[bi];
+      const rowY = stdY + ROW_H + bi * ROW_H;
+      const col  = this._tierColorCache(bp.tier);
+      const tname = this._tierNameCache(bp.tier);
+      const isSel = activeInfo && this._activeVariantIndex(popup.kind) === bp.index;
+
+      popup.hits.push({ index: bp.index, x: px, y: rowY, w: W, h: ROW_H });
+
+      if (isSel) {
+        ctx.fillStyle = 'rgba(60,40,100,0.25)';
+        ctx.beginPath();
+        ctx.roundRect(px + 2, rowY, W - 4, ROW_H, 3);
+        ctx.fill();
+      }
+
+      // Radio dot
+      ctx.font         = 'bold 11px Georgia, serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle    = isSel ? col : 'rgba(140,140,140,0.6)';
+      ctx.fillText(isSel ? '✓' : '○', px + PAD, rowY + ROW_H / 2);
+
+      // Tier colour dot
+      ctx.fillStyle = col;
+      ctx.beginPath();
+      ctx.arc(px + PAD + 20, rowY + ROW_H / 2, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Tier name
+      ctx.font      = 'bold 11px Georgia, serif';
+      ctx.fillStyle = col;
+      ctx.fillText(tname, px + PAD + 28, rowY + ROW_H / 2);
+
+      // ×crafts
+      const tnameW = ctx.measureText(tname).width;
+      ctx.font      = '10px Georgia, serif';
+      ctx.fillStyle = bp.crafts > 0 ? '#b0d0b0' : 'rgba(130,130,130,0.6)';
+      ctx.fillText(`×${bp.crafts}`, px + PAD + 28 + tnameW + 6, rowY + ROW_H / 2);
+    }
+
+    ctx.restore();
+  }
+
+  /** Reads the currently-selected blueprint index for a kind (used by popup rendering). */
+  private _activeVariantIndex(kind: string): number | null {
+    // Forward to getVariantTooltipInfo indirectly — we check the selection via tooltip absence
+    // The popup is responsible for opening only when the kind matches, so we track selection
+    // through setVariantForKind/getVariantTooltipInfo.  Here we just need the raw index.
+    // UIManager wires setVariantForKind which writes through to PlayerMenu._variantSelection.
+    // We read it back via getVariantsForKind cross-referenced with getVariantTooltipInfo:
+    const info = this.getVariantTooltipInfo(kind);
+    if (!info) return null;
+    // Match by tier+crafts — not perfect if two blueprints have identical tier+crafts, but
+    // functionally correct since the popup only shows distinct blueprints.
+    const vs = this.getVariantsForKind(kind);
+    return vs.find(v => {
+      const col = this._tierColorCache(v.tier);
+      return col === info.color && v.crafts === info.crafts;
+    })?.index ?? null;
+  }
+
+  // Tiny cache wrappers so HUDElement doesn't need to import Quality.ts directly.
+  // These are set by UIManager after wiring:
+  public tierColorFn: (tier: number) => string = () => '#ffffff';
+  public tierNameFn:  (tier: number) => string = () => 'Unknown';
+  private _tierColorCache(tier: number): string { return this.tierColorFn(tier); }
+  private _tierNameCache(tier: number):  string { return this.tierNameFn(tier);  }
 
   /** Word-wrap `text` into lines that fit within `maxWidth`. */
   private wrapText(
@@ -2797,7 +5009,16 @@ class HUDElement implements UIElement {
     shipHull: import('../../common/Vec2.js').Vec2[] = [],
     windAngle: number = 0,
     debugMode: boolean = false,
-    shipSpeed: number = 0
+    shipSpeed: number = 0,
+    cameraRotation: number = 0,
+    shipName?: string,
+    shipLevel?: number,
+    shipWeight: number = 0,
+    shipWeightKg: number = 0,
+    shipWeightCap: number = 6000,
+    /** Per-deck health ratios indexed by deck level (0=lower, 1=upper). When provided with 2+
+     *  entries, separate labelled bars are drawn instead of the single combined DECK bar. */
+    deckRatios: number[] = [],
   ): void {
     const waterFill  = Math.max(0, Math.min(1, 1 - hullHealth / 100));
     const isCritical = waterFill > 0.9;
@@ -2815,9 +5036,9 @@ class HUDElement implements UIElement {
     // Half-diagonal of the icon bounding box: max screen extent after any rotation
     const halfDiag = Math.ceil(Math.sqrt(iW * iW + iH * iH) / 2) + 4; // ≈62
 
-    // ── Apply ship rotation around icon centre ────────────────────────────
+    // ── Apply ship rotation around icon centre (adjusted for camera rotation) ──
     ctx.translate(cx, cy);
-    ctx.rotate(shipRotation + Math.PI / 2);
+    ctx.rotate(shipRotation - cameraRotation + Math.PI / 2);
     ctx.translate(-cx, -cy);
 
     // ── Ship silhouette path (defined in rotated space) ───────────────────
@@ -2851,7 +5072,7 @@ class HUDElement implements UIElement {
 
       // Undo rotation → back to screen (unrotated) space
       ctx.translate(cx, cy);
-      ctx.rotate(-(shipRotation + Math.PI / 2));
+      ctx.rotate(-(shipRotation - cameraRotation + Math.PI / 2));
       ctx.translate(-cx, -cy);
 
       // Water rises from the screen-bottom of the silhouette bounding box upward
@@ -2997,7 +5218,7 @@ class HUDElement implements UIElement {
 
       ctx.save();
       ctx.translate(cx, cy);  // tail = icon centre
-      ctx.rotate(windAngle);
+      ctx.rotate(windAngle - cameraRotation);
 
       ctx.shadowColor = 'rgba(255, 235, 80, 0.85)';
       ctx.shadowBlur  = 6;
@@ -3023,50 +5244,205 @@ class HUDElement implements UIElement {
       ctx.restore();
     }
 
-    // ── Water % label + "WATER" tag ───────────────────────────────────────
-    const pct        = Math.round(waterFill * 100);
     // labelY is below the maximum rotated extent of the silhouette
-    const labelY     = cy + halfDiag + 6;
-    const labelColor = isCritical ? '#ff5555' : '#88bbee';
+    // (pushed down further if a ship name/level block is shown above it)
+    const nameBlockH = (shipName ? 13 : 0) + (shipLevel !== undefined ? 12 : 0);
+
+    // ── Ship name + level (between silhouette and bars) ───────────────────
+    if (shipName || shipLevel !== undefined) {
+      let nameLineY = cy + halfDiag + 6;
+      ctx.textAlign    = 'center';
+      ctx.textBaseline = 'top';
+      if (shipName) {
+        ctx.font      = 'bold 10px Georgia, serif';
+        ctx.fillStyle = '#f0e0b0';
+        ctx.fillText(shipName, cx, nameLineY);
+        nameLineY += 13;
+      }
+      if (shipLevel !== undefined) {
+        ctx.font      = '9px Georgia, serif';
+        ctx.fillStyle = '#88ccff';
+        ctx.fillText(`Lv. ${shipLevel}`, cx, nameLineY);
+      }
+    }
+
+    const labelY = cy + halfDiag + (nameBlockH > 0 ? nameBlockH + 10 : 6);
 
     ctx.save();
-    ctx.font         = 'bold 12px Georgia, serif';
+
+    // ── Two vertical bars: Water (left) and Weight (right) ────────────────
+    const weightRatio = Math.max(0, Math.min(1, shipWeight / 100));
+    const vBarW       = 20;
+    const vBarGap     = 4;   // 20 + 4 + 20 = 44 = iW
+    const vBarH       = 56;
+    const lBarX       = ix;
+    const rBarX       = ix + vBarW + vBarGap;
+    const weightCrit  = weightRatio > 0.85;
+    const weightWarn  = weightRatio > 0.70;
+
+    // Backgrounds
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(lBarX, labelY, vBarW, vBarH);
+    ctx.fillRect(rBarX, labelY, vBarW, vBarH);
+
+    // Water fill (bottom-up)
+    const waterFillH = Math.round(vBarH * waterFill);
+    ctx.fillStyle    = isCritical ? '#cc2222' : '#2266bb';
+    ctx.fillRect(lBarX, labelY + vBarH - waterFillH, vBarW, waterFillH);
+    this._tickFlash('ship-water', waterFill);
+    const _wFa = this._flashAlpha('ship-water');
+    if (_wFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_wFa.toFixed(2)})`;
+      ctx.fillRect(lBarX, labelY, vBarW, vBarH);
+    }
+
+    // Weight fill (bottom-up)
+    const weightFillH = Math.round(vBarH * weightRatio);
+    ctx.fillStyle     = weightCrit ? '#cc2222' : weightWarn ? '#cc8811' : '#664422';
+    ctx.fillRect(rBarX, labelY + vBarH - weightFillH, vBarW, weightFillH);
+    this._tickFlash('ship-weight', weightRatio);
+    const _swFa = this._flashAlpha('ship-weight');
+    if (_swFa > 0) {
+      ctx.fillStyle = `rgba(255,255,255,${_swFa.toFixed(2)})`;
+      ctx.fillRect(rBarX, labelY, vBarW, vBarH);
+    }
+    if (weightCrit) {
+      const _swPulse = 0.20 + 0.20 * Math.sin(performance.now() / 200);
+      ctx.fillStyle = `rgba(255,0,0,${_swPulse.toFixed(2)})`;
+      ctx.fillRect(rBarX, labelY, vBarW, vBarH);
+    }
+
+    // Borders
+    ctx.lineWidth   = 1;
+    ctx.strokeStyle = isCritical ? 'rgba(255,80,80,0.60)' : 'rgba(255,255,255,0.22)';
+    ctx.strokeRect(lBarX, labelY, vBarW, vBarH);
+    ctx.strokeStyle = weightCrit ? 'rgba(255,80,80,0.60)' : 'rgba(255,255,255,0.22)';
+    ctx.strokeRect(rBarX, labelY, vBarW, vBarH);
+
+    // Labels inside bars (rotated −90°)
+    ctx.fillStyle    = 'rgba(255,255,255,0.80)';
+    ctx.font         = 'bold 8px Georgia, serif';
     ctx.textAlign    = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle    = labelColor;
-    ctx.fillText(`${pct}%`, cx, labelY);
+    ctx.textBaseline = 'middle';
 
-    ctx.font      = '9px Georgia, serif';
-    ctx.fillStyle = isCritical ? '#ff7777' : '#557799';
-    ctx.fillText('WATER', cx, labelY + 14);
+    ctx.save();
+    ctx.translate(lBarX + vBarW / 2, labelY + vBarH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('WATER', 0, 0);
+    ctx.restore();
 
-    // ── Deck health bar ───────────────────────────────────────────────────
-    const barY      = labelY + 28;
+    ctx.save();
+    ctx.translate(rBarX + vBarW / 2, labelY + vBarH / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.fillText('WEIGHT', 0, 0);
+    ctx.restore();
+
+    // ── Icons below bars ──────────────────────────────────────────────────
+    const iconAreaY = labelY + vBarH + 5;
+    const iconSz    = 10;
+    const lIconCx   = lBarX + vBarW / 2;
+    const rIconCx   = rBarX + vBarW / 2;
+
+    // Teardrop (water icon)
+    {
+      const tx = lIconCx;
+      const ty = iconAreaY + iconSz * 0.55;
+      const r  = iconSz * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(tx, iconAreaY);
+      ctx.bezierCurveTo(tx + r * 0.9, ty - r * 0.1,  tx + r, ty + r * 0.5,  tx, ty + r);
+      ctx.bezierCurveTo(tx - r, ty + r * 0.5,  tx - r * 0.9, ty - r * 0.1,  tx, iconAreaY);
+      ctx.closePath();
+      ctx.fillStyle = isCritical ? '#ff6666' : '#4499dd';
+      ctx.fill();
+    }
+
+    // Anchor (weight icon)
+    {
+      const ax = rIconCx;
+      const ay = iconAreaY;
+      const ar = iconSz * 0.5;
+      ctx.strokeStyle = weightCrit ? '#ff6666' : '#aabbaa';
+      ctx.fillStyle   = weightCrit ? '#ff6666' : '#aabbaa';
+      ctx.lineWidth   = 1.3;
+      // Ring
+      ctx.beginPath();
+      ctx.arc(ax, ay + ar * 0.38, ar * 0.28, 0, Math.PI * 2);
+      ctx.stroke();
+      // Shaft
+      ctx.beginPath();
+      ctx.moveTo(ax, ay + ar * 0.66);
+      ctx.lineTo(ax, ay + ar * 1.72);
+      ctx.stroke();
+      // Crossbar
+      ctx.beginPath();
+      ctx.moveTo(ax - ar * 0.72, ay + ar * 0.92);
+      ctx.lineTo(ax + ar * 0.72, ay + ar * 0.92);
+      ctx.stroke();
+      // Bottom arc
+      ctx.beginPath();
+      ctx.arc(ax, ay + ar * 1.28, ar * 0.50, Math.PI * 0.15, Math.PI * 0.85);
+      ctx.stroke();
+      // End dots
+      ctx.beginPath();
+      ctx.arc(ax - ar * 0.49, ay + ar * 1.70, ar * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(ax + ar * 0.49, ay + ar * 1.70, ar * 0.16, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // ── Deck health bar(s) (horizontal) ───────────────────────────────────
+    const barY      = iconAreaY + iconSz + 6;
     const barW      = iW;
     const barH      = 8;
-    const plankCrit = plankRatio < 0.30;
-    const plankWarn = plankRatio < 0.60;
-    const barColor  = plankCrit ? '#dd3333' : plankWarn ? '#dd9922' : '#33aa55';
 
-    ctx.fillStyle = 'rgba(255,255,255,0.10)';
-    ctx.fillRect(ix, barY, barW, barH);
+    // When per-deck ratios are supplied (brigantine: index 0=lower, 1=upper),
+    // draw a separate labelled bar for each deck. Otherwise fall back to the
+    // combined plankRatio with the generic "DECK" label.
+    const deckBars: { label: string; ratio: number; flashKey: string }[] =
+      deckRatios.length >= 2
+        ? deckRatios.map((r, i) => ({
+            label:    i === 0 ? 'LOWER' : 'UPPER',
+            ratio:    r ?? 1,
+            flashKey: `ship-deck-${i}`,
+          }))
+        : [{ label: 'DECK', ratio: plankRatio, flashKey: 'ship-deck' }];
 
-    ctx.fillStyle = barColor;
-    ctx.fillRect(ix, barY, Math.round(barW * plankRatio), barH);
+    let curBarY = barY;
+    for (const bar of deckBars) {
+      const isCrit = bar.ratio < 0.30;
+      const isWarn = bar.ratio < 0.60;
+      const color  = isCrit ? '#dd3333' : isWarn ? '#dd9922' : '#33aa55';
 
-    ctx.strokeStyle = plankCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
-    ctx.lineWidth   = 1;
-    ctx.strokeRect(ix, barY, barW, barH);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(ix, curBarY, barW, barH);
 
-    const hullPct = Math.round(plankRatio * 100);
-    ctx.font         = '9px Georgia, serif';
-    ctx.textAlign    = 'left';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle    = plankCrit ? '#ff5555' : '#778866';
-    ctx.fillText('DECK', ix, barY + barH + 3);
-    ctx.textAlign = 'right';
-    ctx.fillStyle = plankCrit ? '#ff5555' : '#aabbaa';
-    ctx.fillText(`${hullPct}%`, ix + barW, barY + barH + 3);
+      ctx.fillStyle = color;
+      ctx.fillRect(ix, curBarY, Math.round(barW * bar.ratio), barH);
+      this._tickFlash(bar.flashKey, bar.ratio);
+      const _dkFa = this._flashAlpha(bar.flashKey);
+      if (_dkFa > 0) {
+        ctx.fillStyle = `rgba(255,255,255,${_dkFa.toFixed(2)})`;
+        ctx.fillRect(ix, curBarY, barW, barH);
+      }
+
+      ctx.strokeStyle = isCrit ? '#ff4444' : 'rgba(255,255,255,0.30)';
+      ctx.lineWidth   = 1;
+      ctx.strokeRect(ix, curBarY, barW, barH);
+
+      const pct = Math.round(bar.ratio * 100);
+      ctx.font         = '9px Georgia, serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle    = isCrit ? '#ff5555' : '#778866';
+      ctx.fillText(bar.label, ix, curBarY + barH + 3);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = isCrit ? '#ff5555' : '#aabbaa';
+      ctx.fillText(`${pct}%`, ix + barW, curBarY + barH + 3);
+
+      curBarY += barH + 16; // bar(8) + label line(~10) + gap(~6)
+    }
 
     // ── Wind / force debug panel (left of silhouette, debug mode only) ────
     if (debugMode) {
@@ -3147,6 +5523,73 @@ class HUDElement implements UIElement {
       ctx.restore();
     }
 
+    // ── Bar hover tooltips ─────────────────────────────────────────────────
+    {
+      const _mx = this.mouseX, _my = this.mouseY;
+
+      // Water ingress vertical bar
+      if (_mx >= lBarX && _mx <= lBarX + vBarW && _my >= labelY && _my <= labelY + vBarH) {
+        if (this._ttHit('ship-water')) {
+          const waterPct = Math.round(waterFill * 100);
+          const wDesc = isCritical
+            ? 'Critical flooding \u2014 the ship is in danger of sinking.'
+            : waterFill > 0.3 ? 'Significant water ingress. Repair planks to reduce flooding.'
+            : 'Hull is intact. No significant flooding.';
+          this._drawStatTooltip(ctx, canvas, lBarX + vBarW / 2, labelY,
+            'Water Ingress',
+            isCritical ? '#cc2222' : '#2266bb',
+            isCritical ? '#ff4444' : '#66aacc',
+            `${waterPct}%`,
+            wDesc,
+            [{ label: 'Hull Health', val: `${Math.round(hullHealth)}%`, col: hullHealth > 60 ? '#44cc66' : hullHealth > 30 ? '#ffaa22' : '#ff4444' }],
+          );
+        }
+      }
+
+      // Ship weight vertical bar
+      if (_mx >= rBarX && _mx <= rBarX + vBarW && _my >= labelY && _my <= labelY + vBarH) {
+        if (this._ttHit('ship-weight')) {
+          const swDesc = weightCrit
+            ? 'Overloaded \u2014 ship performance is heavily impaired.'
+            : weightWarn ? 'Heavy load. Ship maneuverability is reduced.'
+            : 'Ship weight is within safe limits.';
+          this._drawStatTooltip(ctx, canvas, rBarX + vBarW / 2, labelY,
+            'Ship Weight',
+            weightCrit ? '#cc2222' : weightWarn ? '#cc8811' : '#664422',
+            weightCrit ? '#ff4444' : weightWarn ? '#ffaa22' : '#aa7744',
+            `${shipWeightKg} / ${shipWeightCap} kg`,
+            swDesc, [],
+          );
+        }
+      }
+
+      // Deck integrity bar(s) tooltip — hit-test the full stacked bar region
+      const deckBarsEndY = barY + deckBars.length * (barH + 16);
+      if (_mx >= ix && _mx <= ix + barW && _my >= barY && _my <= deckBarsEndY) {
+        const hoveredBar = deckBars.find((_, i) => {
+          const by = barY + i * (barH + 16);
+          return _my >= by && _my <= by + barH + 16;
+        }) ?? deckBars[0];
+        if (hoveredBar && this._ttHit('ship-deck')) {
+          const isCrit  = hoveredBar.ratio < 0.30;
+          const isWarn  = hoveredBar.ratio < 0.60;
+          const dkDesc  = isCrit
+            ? 'Deck is critically damaged. Board repairs recommended immediately.'
+            : isWarn ? 'Deck integrity is low. Repair planks to restore structural strength.'
+            : 'Deck is in good condition.';
+          const col     = isCrit ? '#dd3333' : isWarn ? '#dd9922' : '#33aa55';
+          const outline = isCrit ? '#ff4444' : isWarn ? '#ffaa22' : '#66cc88';
+          this._drawStatTooltip(ctx, canvas, ix + barW / 2, barY,
+            `${hoveredBar.label} Deck Integrity`,
+            col,
+            outline,
+            `${Math.round(hoveredBar.ratio * 100)}%`,
+            dkDesc, [],
+          );
+        }
+      }
+    }
+
     ctx.restore();
   }
 }
@@ -3183,7 +5626,7 @@ class DebugOverlayElement implements UIElement {
       `Player Velocity: ${player.velocity.x.toFixed(2)}, ${player.velocity.y.toFixed(2)}`,
       `Camera Position: ${cameraState.position.x.toFixed(1)}, ${cameraState.position.y.toFixed(1)}`,
       `Camera Zoom: ${cameraState.zoom.toFixed(2)}x`,
-      `Ships: ${context.worldState.ships.length}`,
+      `Ships: ${context.worldState.ships.length} (👻 ${context.worldState.ships.filter(s => s.shipType === SHIP_TYPE_GHOST).length} ghost)`,
       `Cannonballs: ${context.worldState.cannonballs.length}`,
       '',
       '=== CONTROLS ===',

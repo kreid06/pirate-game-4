@@ -107,6 +107,11 @@ void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     }
     group->target_ship_id = (mode == WEAPON_GROUP_MODE_TARGETFIRE) ? target_ship_id : 0;
 
+    /* Apply current group gunport state to newly assigned cannons.
+     * If the group was already in the "open" state (gunports_open=1), opening
+     * a new cannon's gunport ensures it follows suit immediately. */
+    apply_group_gunport_state(ship, group);
+
     /* For all modes, NPCs remain stationed at their assigned cannon.
      * Mode only controls what the NPC does while there (aim/fire guards
      * in tick_npc_agents enforce HALTFIRE / AIMING / etc. per tick).
@@ -142,9 +147,6 @@ void handle_cannon_group_config(WebSocketPlayer* player, int group_index,
     if (mode == WEAPON_GROUP_MODE_AIMING) {
         update_npc_cannon_sector(ship, ship->active_aim_angle);
     }
-
-    log_info("🎯 Player %u group %d → mode=%d cannons=%d target=%u",
-             player->player_id, group_index, mode, group->weapon_count, group->target_ship_id);
 
     /* Defer the broadcast: mark the sender's client slot as dirty so that all
      * group-config messages in one frame collapse into a single broadcast at
@@ -227,7 +229,13 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                      ({  ShipModule* _m = find_module_by_id(find_ship(player->parent_ship_id), player->mounted_module_id);
                          _m && _m->type_id == MODULE_TYPE_CANNON; });
 
+    log_info("🎯 handle_cannon_aim ENTRY: player=%u parent_ship=%u is_mounted=%d mounted_module=%u at_helm=%d at_cannon=%d angle=%.3f groups=%d",
+             player->player_id, player->parent_ship_id, player->is_mounted ? 1 : 0,
+             player->mounted_module_id, at_helm ? 1 : 0, at_cannon ? 1 : 0,
+             aim_angle, active_group_count);
+
     if (!at_helm && !at_cannon) {
+        log_info("🎯 handle_cannon_aim EARLY-RETURN: not at helm or cannon");
         return; // Not at a valid control station
     }
 
@@ -401,23 +409,30 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
                 }
             }
             if (!in_active_pass2) {
-                if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE) {
-                    log_info("🔫 P2 c%u: SKIP haltfire (not in active list)", cannon->id);
-                    continue;
-                }
-                if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) {
-                    log_info("🔫 P2 c%u: SKIP targetfire (not in active list)", cannon->id);
-                    continue;
+                /* Player directly mounted to this cannon overrides group mode:
+                 * they are physically manning it and their cursor IS the aim. */
+                bool player_at_this_cannon = at_cannon && cannon->id == player->mounted_module_id;
+                if (!player_at_this_cannon) {
+                    if (grp->mode == WEAPON_GROUP_MODE_HALTFIRE) {
+                        log_info("🔫 P2 c%u: SKIP haltfire (not in active list)", cannon->id);
+                        continue;
+                    }
+                    if (grp->mode == WEAPON_GROUP_MODE_TARGETFIRE) {
+                        log_info("🔫 P2 c%u: SKIP targetfire (not in active list)", cannon->id);
+                        continue;
+                    }
                 }
             }
-        } else if (player_has_groups) {
+        } else if (player_has_groups && !at_cannon) {
             log_info("🔫 P2 c%u: SKIP ungrouped cannon in group mode", cannon->id);
             continue; /* ungrouped cannon in group mode — already handled in pass 1 */
         }
 
         // Only move a cannon if it is occupied (player mounted or WorldNpc AT_GUN).
         // Cannons cannot aim without crew present.
-        bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0;
+        // NOTE: MODULE_STATE_OCCUPIED is stored on SimpleShip modules, not sim_ship modules.
+        // When the player is directly mounted on this cannon (at_cannon), they ARE the occupant.
+        bool cannon_has_occupant = (cannon->state_bits & MODULE_STATE_OCCUPIED) != 0 || at_cannon;
         if (!cannon_has_occupant) {
             for (int ni = 0; ni < world_npc_count; ni++) {
                 WorldNpc* wnpc = &world_npcs[ni];
@@ -431,24 +446,6 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             }
         }
         if (!cannon_has_occupant) {
-            /* Find NPC state for diagnostics */
-            int npc_state = -1; uint32_t npc_assigned = 0;
-            for (int ni = 0; ni < world_npc_count; ni++) {
-                WorldNpc* wnpc = &world_npcs[ni];
-                if (wnpc->active && wnpc->role == NPC_ROLE_GUNNER &&
-                    wnpc->ship_id == ship->ship_id &&
-                    wnpc->assigned_weapon_id == cannon->id) {
-                    npc_state = wnpc->state;
-                    npc_assigned = wnpc->id;
-                    break;
-                }
-            }
-            int grp_idx = -1;
-            if (grp) { for (int gg = 0; gg < MAX_WEAPON_GROUPS; gg++) { if (&ship->weapon_groups[WG_CID(player->company_id)][gg] == grp) { grp_idx = gg; break; } } }
-            log_info("🔫 P2 c%u g%d: SKIP no_occupant (sim_occ=%d npc_id=%u npc_state=%d in_active=%d)",
-                     cannon->id, grp_idx,
-                     (cannon->state_bits & MODULE_STATE_OCCUPIED) ? 1 : 0,
-                     npc_assigned, npc_state, in_active_pass2 ? 1 : 0);
             continue;
         }
 
@@ -457,17 +454,21 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
          * group as active.  This overrides the stored mode to handle the race where the aim
          * message arrives before the cannon_group_config that switches the group to AIMING. */
         if (!in_active_pass2) {
-            bool in_haltfire = false;
-            for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
-                WeaponGroup* wg = &ship->weapon_groups[WG_CID(player->company_id)][g];
-                if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
-                for (int ci = 0; ci < wg->weapon_count; ci++) {
-                    if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+            /* Player directly mounted to this cannon overrides haltfire — they're manning it. */
+            bool player_at_this_cannon = at_cannon && cannon->id == player->mounted_module_id;
+            if (!player_at_this_cannon) {
+                bool in_haltfire = false;
+                for (int g = 0; g < MAX_WEAPON_GROUPS && !in_haltfire; g++) {
+                    WeaponGroup* wg = &ship->weapon_groups[WG_CID(player->company_id)][g];
+                    if (wg->mode != WEAPON_GROUP_MODE_HALTFIRE) continue;
+                    for (int ci = 0; ci < wg->weapon_count; ci++) {
+                        if (wg->weapon_ids[ci] == cannon->id) { in_haltfire = true; break; }
+                    }
                 }
-            }
-            if (in_haltfire) {
-                log_info("🔫 P2 c%u: SKIP in_haltfire check", cannon->id);
-                continue;
+                if (in_haltfire) {
+                    log_info("🔫 P2 c%u: SKIP in_haltfire check", cannon->id);
+                    continue;
+                }
             }
         }
 
@@ -489,14 +490,9 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
         while (desired_offset > M_PI) desired_offset -= 2.0f * M_PI;
         while (desired_offset < -M_PI) desired_offset += 2.0f * M_PI;
 
-        // Three zones:
-        //  ≤ ±30°           — track normally
-        //  ±30° to ±45°     — clamp to arc limit so cannon stays at its lateral edge
-        //  > ±45°           — reset to neutral (cursor is clearly pointing away)
-        const float CANNON_AIM_RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
-        if (fabsf(desired_offset) > CANNON_AIM_RANGE + CANNON_AIM_RESET_MARGIN) {
-            desired_offset = 0.0f; // Past grace zone — return to neutral
-        } else if (fabsf(desired_offset) > CANNON_AIM_RANGE) {
+        // Clamp to arc limit — cursor past lateral edge stays at the edge,
+        // never recenters to neutral.
+        if (fabsf(desired_offset) > CANNON_AIM_RANGE) {
             desired_offset = (desired_offset > 0.0f) ? CANNON_AIM_RANGE : -CANNON_AIM_RANGE;
         }
 
@@ -530,7 +526,6 @@ void handle_cannon_aim(WebSocketPlayer* player, float aim_angle,
             npos += snprintf(nbuf + npos, (size_t)(256 - npos), " c%u:g%d:%s",
                              dm_mod->id, gi, needed ? "NEED" : "----");
         }
-        log_info("📊 Ship %u NEEDED map:%s", ship->ship_id, nbuf);
     }
 
     /* ── Swivel pass: NEEDED + aim-propagation (mirrors cannon logic above) ─────
@@ -757,6 +752,19 @@ void fire_cannon(SimpleShip* ship, ShipModule* cannon, WebSocketPlayer* player, 
                     float dmg_mult = ship_level_damage_mult(&sim_ship->level_stats);
                     proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * dmg_mult);
                 }
+                /* Ghost ship NPC level damage scaling (levels 1-60, 1x-5x)
+                 * level  1 = 1.0x, level 60 = 5.0x
+                 * formula: 1 + (level-1) * 4/59 */
+                if (ship->ship_type == SHIP_TYPE_GHOST && ship->npc_level > 1) {
+                    float ghost_dmg = 1.0f + (ship->npc_level - 1) * 4.0f / 59.0f;
+                    proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * ghost_dmg);
+                }
+                /* Apply this cannon's rolled weapon-damage quality multiplier */
+                if (cannon->quality.quality_q8 != 0) {
+                    uint16_t wd_q8 = cannon->quality.stat_mult_q8[STAT_WEAPON_DAMAGE];
+                    if (wd_q8 > 256)
+                        proj->damage = Q16_FROM_FLOAT(Q16_TO_FLOAT(proj->damage) * ((float)wd_q8 / 256.0f));
+                }
             }
         }
         
@@ -878,7 +886,8 @@ void broadcast_cannon_group_state(SimpleShip* ship, uint8_t company_id) {
                 "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
-            "],\"targetShipId\":%u}", grp->target_ship_id);
+            "],\"targetShipId\":%u,\"gunportsOpen\":%u,\"name\":\"%s\"}",
+            grp->target_ship_id, grp->gunports_open, grp->name);
     }
     if (pos < (int)sizeof(message) - 2)
         pos += snprintf(message + pos, sizeof(message) - pos, "]}");
@@ -925,7 +934,8 @@ void send_cannon_group_state_to_client(struct WebSocketClient* client, SimpleShi
                 "%s%u", (c > 0 ? "," : ""), grp->weapon_ids[c]);
         }
         pos += snprintf(message + pos, sizeof(message) - pos,
-            "],\"targetShipId\":%u}", grp->target_ship_id);
+            "],\"targetShipId\":%u,\"gunportsOpen\":%u,\"name\":\"%s\"}",
+            grp->target_ship_id, grp->gunports_open, grp->name);
     }
     if (pos < (int)sizeof(message) - 2)
         pos += snprintf(message + pos, sizeof(message) - pos, "]}");
@@ -1101,8 +1111,13 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             if (dot < cosf(half_cone)) continue;
             uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
             bool killed = false;
-            if (npc->health <= dmg) { npc->health = 0; npc->active = false; killed = true; }
+            if (npc->health <= dmg) {
+                npc->health = 0; npc->active = false; killed = true;
+                npc->assigned_weapon_id = 0;
+            }
             else { npc->health -= dmg; }
+            npc->last_damage_ms = get_time_ms();
+            npc->hp_regen_accum_ms = 0;
             char hit_msg[256];
             snprintf(hit_msg, sizeof(hit_msg),
                 "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
@@ -1127,9 +1142,12 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             float half_cone = 18.0f * (float)(M_PI / 180.0f);
             float dot = nx * fdir_x + ny * fdir_y;
             if (dot < cosf(half_cone)) continue;
+            if (wp->is_dead) continue; /* already dead */
             uint16_t dmg = (uint16_t)GRAPE_DAMAGE;
             bool grape_killed = (wp->health <= dmg);
             if (grape_killed) wp->health = 0; else wp->health -= dmg;
+            wp->last_damage_ms = get_time_ms();
+            wp->hp_regen_accum_ms = 0;
             char hit_msg[256];
             snprintf(hit_msg, sizeof(hit_msg),
                 "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\",\"id\":%u,"
@@ -1411,10 +1429,32 @@ void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_typ
         }
         
         if (module->data.cannon.time_since_fire < module->data.cannon.reload_time) {
-            // log_info("  ⚠️  Cannon %u: Reloading (%.1fs remaining)", 
-            //          module->id,
-            //          (module->data.cannon.reload_time - module->data.cannon.time_since_fire) / 1000.0f);
             continue;
+        }
+
+        // ── Gunport blocking: if cannon is linked to a gunport and it's closed, block fire ──
+        {
+            uint8_t gp_snap = module->data.cannon.gunport_snap_idx;
+            if (gp_snap != 0xFF) {
+                // Find the gunport with the matching snap_idx
+                for (uint8_t gm = 0; gm < sim_ship->module_count; gm++) {
+                    ShipModule* gp = &sim_ship->modules[gm];
+                    if (gp->type_id != MODULE_TYPE_GUNPORT) continue;
+                    if (gp->data.gunport.snap_idx != gp_snap) continue;
+                    if (!gp->data.gunport.is_open) {
+                        // Notify the firing player that the gunport is closed (player may be NULL for NPC fire)
+                        if (player) {
+                            char gpblk[128];
+                            snprintf(gpblk, sizeof(gpblk),
+                                "{\"type\":\"gunport_blocked\",\"player_id\":%u,\"cannon_id\":%u,\"gunport_id\":%u}",
+                                player->player_id, module->id, gp->id);
+                            broadcast_json_all(gpblk);
+                        }
+                        goto next_cannon; // skip firing this cannon
+                    }
+                    break; // found matching gunport (open) — allow fire
+                }
+            }
         }
 
         // Require a player or NPC to be mounted at this cannon before it can fire.
@@ -1499,6 +1539,7 @@ void handle_cannon_fire(WebSocketPlayer* player, bool fire_all, uint8_t ammo_typ
                 }
             }
         }
+        next_cannon:; // label for gunport-blocked skip
     }
     
     log_info("💥 Player %u fired %d cannon(s) on ship %u (%s%s)", 
@@ -1738,7 +1779,11 @@ void update_flame_waves(uint32_t time_elapsed) {
  * Damage per cannonball hit on a structure: 25 HP (4 shots to destroy).
  * Trees are indestructible — they simply stop the cannonball.
  * ────────────────────────────────────────────────────────────────────────────*/
-#define PROJ_HIT_STRUCT_DAMAGE      25u     /* HP deducted per cannonball hit      */
+/* Base cannonball damage for building structures (matches ship module damage scale).
+ * Fortifications (flag forts, company fortresses) use PROJ_HIT_FORT_DAMAGE to
+ * preserve their independent balance. */
+#define PROJ_HIT_STRUCT_DAMAGE      3000u   /* HP deducted per cannonball hit (buildings) */
+#define PROJ_HIT_FORT_DAMAGE          25u   /* HP deducted per cannonball hit (forts)     */
 #define TREE_COLLISION_R_PX         22.0f   /* tree stop radius, client pixels     */
 /* TREE_TRUNK_R_PX now defined in cannon_fire.h */
 #define STRUCT_FLOOR_HALF_EXT       25.0f   /* floor tile half-extent (50px tile)  */
@@ -1783,7 +1828,29 @@ void check_projectile_static_collisions(struct Sim* sim) {
             float ly = dx * wsn + dy * wc;
             if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
             /* Hit wall */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+
+        /* Pass 0b: door frames and doors — same OBB shape as walls.
+         * Door frames are two thin posts (treated as one slab for hit purposes).
+         * Closed doors block cannonballs; open doors do not. */
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active) continue;
+            if (s->type != STRUCT_DOOR_FRAME && s->type != STRUCT_DOOR) continue;
+            if (s->type == STRUCT_DOOR && s->open) continue; /* open door: passable */
+            float wrad = wall_get_rad(s->x, s->y);
+            float wc = cosf(-wrad), wsn = sinf(-wrad);
+            float dx = px - s->x, dy = py - s->y;
+            float lx = dx * wc - dy * wsn;
+            float ly = dx * wsn + dy * wc;
+            if (fabsf(lx) > 25.0f || fabsf(ly) > 5.0f) continue;
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1803,7 +1870,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_WB_HALF_W && dx <= STRUCT_WB_HALF_W &&
                   dy >= -STRUCT_WB_HALF_H && dy <= STRUCT_WB_HALF_H)) continue;
             /* Hit workbench */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1821,7 +1888,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             if (!(dx >= -STRUCT_FLOOR_HALF_EXT && dx <= STRUCT_FLOOR_HALF_EXT &&
                   dy >= -STRUCT_FLOOR_HALF_EXT && dy <= STRUCT_FLOOR_HALF_EXT)) continue;
             /* Hit floor */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1839,7 +1906,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
             /* Circular hit-box ~15px radius covering the cannon mount */
             if (dx * dx + dy * dy > 15.0f * 15.0f) continue;
             /* Hit island cannon */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1875,7 +1942,7 @@ void check_projectile_static_collisions(struct Sim* sim) {
                          && (ly >= -SY_HH && ly <= -SY_HH + SY_BACK_T);
             if (!in_left && !in_right && !in_back) continue;
             /* Hit shipyard */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
@@ -1901,14 +1968,35 @@ void check_projectile_static_collisions(struct Sim* sim) {
             float dx = px - s->x;
             float dy = py - s->y;
             if (dx * dx + dy * dy > hit_r * hit_r) continue;
-            /* Hit fort */
-            apply_structure_damage(s, PROJ_HIT_STRUCT_DAMAGE);
+            /* Hit fort — use fort-specific damage to keep fort balance independent */
+            apply_structure_damage(s, PROJ_HIT_FORT_DAMAGE, px, py);
             memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
                     ((size_t)sim->projectile_count - (size_t)i - 1u)
                     * sizeof(struct Projectile));
             sim->projectile_count--;
             removed = true;
         }
+
+        /* Pass 6: land chests (STRUCT_CHEST) — AABB 36×26 px (half 18×13). */
+        #define STRUCT_CHEST_HALF_W  18.0f
+        #define STRUCT_CHEST_HALF_H  13.0f
+        for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
+            PlacedStructure* s = &placed_structures[si];
+            if (!s->active || s->type != STRUCT_CHEST) continue;
+            float dx = px - s->x;
+            float dy = py - s->y;
+            if (!(dx >= -STRUCT_CHEST_HALF_W && dx <= STRUCT_CHEST_HALF_W &&
+                  dy >= -STRUCT_CHEST_HALF_H && dy <= STRUCT_CHEST_HALF_H)) continue;
+            /* Hit land chest */
+            apply_structure_damage(s, (uint32_t)proj->damage, px, py);
+            memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                    ((size_t)sim->projectile_count - (size_t)i - 1u)
+                    * sizeof(struct Projectile));
+            sim->projectile_count--;
+            removed = true;
+        }
+        #undef STRUCT_CHEST_HALF_W
+        #undef STRUCT_CHEST_HALF_H
 
         /* ── Test vs. island trees (spatial grid lookup) ────────────────── */
         if (!removed) {
@@ -2131,15 +2219,10 @@ void handle_island_cannon_aim(WebSocketPlayer* player, float aim_angle) {
         while (offset >  (float)M_PI) offset -= 2.0f * (float)M_PI;
         while (offset < -(float)M_PI) offset += 2.0f * (float)M_PI;
 
-        /* Three zones — same as ship cannon:
-         *   |offset| ≤ 30°          → track normally
-         *   30° < |offset| ≤ 45°   → clamp to ±30° edge
-         *   |offset| > 45°         → reset barrel to facing direction */
+        /* Clamp to arc limit — cursor past lateral edge stays at the edge,
+         * never recenters to facing direction. */
         const float AIM_RANGE  = 30.0f * ((float)M_PI / 180.0f);
-        const float RESET_MARGIN = 15.0f * ((float)M_PI / 180.0f);
-        if (fabsf(offset) > AIM_RANGE + RESET_MARGIN) {
-            offset = 0.0f;
-        } else if (fabsf(offset) > AIM_RANGE) {
+        if (fabsf(offset) > AIM_RANGE) {
             offset = (offset > 0.0f) ? AIM_RANGE : -AIM_RANGE;
         }
 

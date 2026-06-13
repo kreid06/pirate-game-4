@@ -58,7 +58,7 @@ server/auth/error.log
 server/auth/.vscode/
 server/auth/.idea/
 server/auth/.DS_Store
-
+server/config/auth.env
 ################################################################################
 # Node / JS tooling
 ################################################################################

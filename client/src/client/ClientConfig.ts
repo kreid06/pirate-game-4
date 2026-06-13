@@ -70,6 +70,13 @@ export interface PredictionConfig {
   predictionErrorThreshold: number; // units (distance threshold for rollback)
   enablePrediction: boolean;
   enableInterpolation: boolean;
+  // Client-side physics prediction for the LOCAL player's ship. When false the ship
+  // uses pure server-snapshot interpolation (smooth, slightly latency-delayed) and the
+  // on-deck player is anchored to that interpolated hull. Ships move slowly enough that
+  // interpolation feels fine, and it sidesteps all the predicted-vs-server reconciliation
+  // artifacts (rotation snapping, rubberbanding). Player + projectile prediction are
+  // unaffected — they have their own flags / paths.
+  enableShipPrediction: boolean;
 }
 
 /**
@@ -182,14 +189,15 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
   
   prediction: {
     clientTickRate: 120, // 120 Hz client prediction for ultra-smooth local player movement
-    serverTickRate: 30, // 30 Hz server GAME_STATE broadcast (33.3ms per frame)
+    serverTickRate: 30,  // 30 Hz server GAME_STATE broadcast (33.3ms per frame)
     interpolationBuffer: 100, // 100ms buffer (~3 server frames at 30Hz) for jitter-free rendering
-    interpolationDelay: 66, // 66ms render delay (~2 server frames at 30Hz - ensures we always have data)
-    extrapolationLimit: 66, // 66ms max extrapolation (~2 server frames - allows smooth rendering between updates)
-    rollbackLimit: 10, // 10 ticks rollback for lag compensation
-    predictionErrorThreshold: 5.0, // 5 px position tolerance before rollback (doubled when moving)
-    enablePrediction: false,
-    enableInterpolation: true
+    interpolationDelay: 66,   // 66ms render delay (~2 server frames at 30Hz)
+    extrapolationLimit: 66,   // 66ms max extrapolation (~2 server frames)
+    rollbackLimit: 48,        // 48 prediction ticks (~400ms) — covers MAX_RTT_TICKS at high ping
+    predictionErrorThreshold: 8.0, // px tolerance before rollback (8px = ~1/6 tile; doubled when moving)
+    enablePrediction: true,
+    enableInterpolation: true,
+    enableShipPrediction: false, // ships use pure interpolation (see PredictionConfig docs)
   },
   
   debug: {

@@ -73,7 +73,7 @@ static float extract_json_float(const char* json, const char* key) {
     return atof(start);
 }
 
-static bool extract_json_bool(const char* json, const char* key) {
+static bool __attribute__((unused)) extract_json_bool(const char* json, const char* key) {
     char search_pattern[256];
     snprintf(search_pattern, sizeof(search_pattern), "\"%s\":", key);
     

@@ -3,6 +3,28 @@
 #include <string.h>
 
 /**
+ * Apply a rolled quality payload to a freshly-placed module.
+ */
+void module_apply_quality(ShipModule* module, const QualityPayload* q) {
+    if (!module || !q || q->quality_q8 == 0) return;
+    module->quality = *q;
+    uint16_t dm_q8 = q->stat_mult_q8[STAT_DURABILITY];
+    if (dm_q8 > 256) {  /* 256 = 1.00x; only scale up */
+        if (module->max_health > 0) {
+            int64_t scaled = ((int64_t)module->max_health * dm_q8) / 256;
+            module->max_health    = (q16_t)scaled;
+            module->health        = (q16_t)scaled;
+            module->target_health = (q16_t)scaled;
+        }
+        if (module->type_id == MODULE_TYPE_MAST && module->data.mast.fiber_max_health > 0) {
+            int64_t fs = ((int64_t)module->data.mast.fiber_max_health * dm_q8) / 256;
+            module->data.mast.fiber_max_health = (q16_t)fs;
+            module->data.mast.fiber_health     = (q16_t)fs;
+        }
+    }
+}
+
+/**
  * Create a default module of specified type
  */
 ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t rotation) {
@@ -21,6 +43,7 @@ ShipModule module_create(uint16_t id, ModuleTypeId type, Vec2Q16 position, q16_t
         case MODULE_TYPE_CANNON:
             module.data.cannon.aim_direction = 0;
             module.data.cannon.ammunition = 10;
+            module.data.cannon.gunport_snap_idx = 0xFF; // not linked to a gunport by default
             module.data.cannon.time_since_fire = CANNON_RELOAD_TIME_MS; // start ready to fire
             module.data.cannon.reload_time = CANNON_RELOAD_TIME_MS;
             module.health        = 8000;
