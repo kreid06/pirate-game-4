@@ -490,9 +490,18 @@ export class PredictionEngine {
       if (this.serverStateBuffer.length > 0) {
         const latestState = this.serverStateBuffer[this.serverStateBuffer.length - 1];
         const oldestState = this.serverStateBuffer[0];
-        
-        // If we're ahead of the latest state, just use the latest state (no extrapolation)
+
+        // Buffer starved: renderTime is ahead of the newest snapshot we have.
+        // Dead-reckon forward from the latest state using velocity so entities
+        // glide smoothly through the gap instead of freezing then snapping when
+        // the next snapshot arrives. Cap at extrapolationLimit to avoid
+        // diverging badly during a prolonged outage.
         if (renderTime >= latestState.receiveTime) {
+          const staleDt = renderTime - latestState.receiveTime;
+          if (staleDt > 0 && this.config.extrapolationLimit > 0) {
+            const clampedDt = Math.min(staleDt, this.config.extrapolationLimit) / 1000;
+            return this.extrapolateState(latestState.worldState, clampedDt);
+          }
           return latestState.worldState;
         }
         
