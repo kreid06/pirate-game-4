@@ -3391,6 +3391,11 @@ export class ClientApplication {
 
       this.networkManager.onLandChestState = (structureId, chestRes, playerRes, readOnly) => {
         this.landChestMenu.updateChestResources(chestRes);
+        // Keep the cached placed-structure chest contents in sync. The server
+        // only sends land_chest_state to the acting client (no STRUCTURES
+        // rebroadcast), so without this the build resource panel / shipyard
+        // aggregation would show stale chest counts until a reconnect.
+        this.renderSystem.updateStructureChestResources(structureId, chestRes);
         if (!this.landChestMenu.visible) {
           this.landChestMenu.open(structureId, chestRes, readOnly);
         } else {

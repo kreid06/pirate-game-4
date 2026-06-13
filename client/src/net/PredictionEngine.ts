@@ -168,11 +168,11 @@ export class PredictionEngine {
   // Ring buffer constants (16 frames = ~350ms at 60Hz)
   private static readonly REWIND_BUFFER_SIZE = 16;
   // Sized to hold the rollback window (rollbackLimit) plus the RTT lead (MAX_RTT_TICKS) plus a
-  // little margin, in client ticks (×4 at 120/30 Hz): (16 + 10 + 4) × 4 = 120 → round to 128.
+  // little margin, in client ticks (×4 at 120/30 Hz): (48 + 10 + 4) × 4 = 248 → round to 256.
   // Ensures the prediction labelled with a server tick survives until that tick's snapshot
   // returns ~RTT later. If a match is ever missed at extreme ping, reconciliation just skips
   // that frame (findPredictionState → null) — safe degradation, no snap.
-  private static readonly MAX_PREDICTION_HISTORY = 128;
+  private static readonly MAX_PREDICTION_HISTORY = 256;
   
   constructor(config: PredictionConfig) {
     this.config = config;

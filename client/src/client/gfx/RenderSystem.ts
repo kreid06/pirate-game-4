@@ -2767,6 +2767,22 @@ export class RenderSystem {
     return this.placedStructures.find(p => p.id === structId);
   }
 
+  /**
+   * Update a land chest's stored resources after a land_chest_state update.
+   * The server only sends the per-transfer land_chest_state to the acting
+   * client (no STRUCTURES rebroadcast), so the cached structure must be
+   * patched here to keep the build resource panel / shipyard aggregation in
+   * sync without waiting for a reconnect.
+   */
+  updateStructureChestResources(
+    id: number,
+    res: { wood: number; fiber: number; metal: number; stone: number },
+  ): void {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'chest');
+    if (!s) return;
+    s.chestResources = { wood: res.wood, fiber: res.fiber, metal: res.metal, stone: res.stone };
+  }
+
   /** Replace the full placed-structure list (e.g. on join). */
   setPlacedStructures(arr: PlacedStructure[]): void {
     this.placedStructures = [...arr];
