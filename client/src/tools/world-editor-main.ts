@@ -406,8 +406,8 @@ function applySpawnPanel() {
   sp.x               = parseFloat($spX.value)        || sp.x;
   sp.y               = parseFloat($spY.value)        || sp.y;
   sp.radius          = clamp(parseFloat($spRadius.value)  || sp.radius, 500, 20000);
-  sp.level_min       = clamp(parseInt($spLvlMin.value)    || sp.level_min, 1, 10);
-  sp.level_max       = clamp(parseInt($spLvlMax.value)    || sp.level_max, 1, 10);
+  sp.level_min       = clamp(parseInt($spLvlMin.value)    || sp.level_min, 1, 60);
+  sp.level_max       = clamp(parseInt($spLvlMax.value)    || sp.level_max, 1, 60);
   if (sp.level_max < sp.level_min) sp.level_max = sp.level_min;
   sp.count_min       = clamp(parseInt($spCntMin.value)    || sp.count_min, 0, 10);
   sp.count_max       = clamp(parseInt($spCntMax.value)    || sp.count_max, 0, 10);
@@ -543,14 +543,15 @@ function drawGrid(W: number, H: number) {
   }
 }
 
-/** Apply island rotation to a local vertex and return screen coords. */
+/**
+ * Translate a pre-rotated local vertex into screen coordinates.
+ *
+ * The server bakes rotation_deg into all vertex arrays via islands_apply_rotations()
+ * at startup, so vertices from the API are already in the correct orientation.
+ * We simply add the island centre (cx, cy) to get world coords.
+ */
 function islVertToScreen(isl: IslandEntry, lx: number, ly: number, W: number, H: number): [number, number] {
-  const rad = (isl.rotation_deg * Math.PI) / 180;
-  const cos = Math.cos(rad);
-  const sin = Math.sin(rad);
-  const wx = isl.cx + lx * cos - ly * sin;
-  const wy = isl.cy + lx * sin + ly * cos;
-  return cam.w2s(wx, wy, W, H);
+  return cam.w2s(isl.cx + lx, isl.cy + ly, W, H);
 }
 
 function drawPolyPath(isl: IslandEntry, verts: { x: number; y: number }[], W: number, H: number) {
@@ -595,10 +596,15 @@ function drawIslands(W: number, H: number) {
         ctx.fill();
       }
 
-      // Orientation arrow: forward direction = unrotated +X axis → rotated into world
-      const rotRad  = (isl.rotation_deg * Math.PI) / 180;
+      // Orientation arrow: points in the direction of rotation_deg (degrees CW from +X)
+      // Vertices are already pre-rotated, so we compute the tip directly in world space.
+      const rotRad   = (isl.rotation_deg * Math.PI) / 180;
       const arrowLen = 700; // world units
-      const [ex, ey] = islVertToScreen(isl, arrowLen, 0, W, H);
+      const [ex, ey] = cam.w2s(
+        isl.cx + arrowLen * Math.cos(rotRad),
+        isl.cy + arrowLen * Math.sin(rotRad),
+        W, H,
+      );
       ctx.beginPath();
       ctx.moveTo(sx, sy);
       ctx.lineTo(ex, ey);

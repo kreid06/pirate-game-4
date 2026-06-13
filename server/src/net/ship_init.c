@@ -1100,9 +1100,9 @@ void load_ghost_spawns(const char *path) {
         if (json_object_object_get_ex(e, "respawn_delay_s", &jv)) sp->respawn_delay_s = (float)json_object_get_double(jv);
 
         /* Clamp */
-        if (sp->level_min < 1) sp->level_min = 1;
+        if (sp->level_min < 1)  sp->level_min = 1;
         if (sp->level_max < sp->level_min) sp->level_max = sp->level_min;
-        if (sp->level_max > 10) sp->level_max = 10;
+        if (sp->level_max > 60) sp->level_max = 60;
         if (sp->count_min < 0) sp->count_min = 0;
         if (sp->count_max < sp->count_min) sp->count_max = sp->count_min;
         if (sp->respawn_delay_s <= 0.0f) sp->respawn_delay_s = 60.0f;
