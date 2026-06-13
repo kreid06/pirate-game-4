@@ -37,10 +37,12 @@ int base64url_decode(const char *in, unsigned char *out, int out_size) {
 
 /*
  * Extract the display_name claim from a JWT token.
- * Optionally verifies the HMAC-SHA256 signature when JWT_SECRET env var is set.
+ * Always verifies the HMAC-SHA256 signature; returns false immediately when
+ * JWT_SECRET is not set so the server never accepts unsigned tokens.
  *
  * Returns true and fills display_name (up to name_size bytes) on success.
- * Returns false if the token is malformed or signature verification fails.
+ * Returns false if JWT_SECRET is absent, the token is malformed, or signature
+ * verification fails.
  */
 bool jwt_extract_display_name(const char *token,
                               char *display_name, size_t name_size) {
@@ -50,9 +52,16 @@ bool jwt_extract_display_name(const char *token,
     const char *dot2 = strchr(dot1 + 1, '.');
     if (!dot2) return false;
 
-    /* ── Optional signature verification ─────────────────────────────────── */
+    /* ── Mandatory signature verification ────────────────────────────────── */
+    /* Refuse the token outright when JWT_SECRET is absent — accepting unsigned
+     * tokens would let any attacker forge an arbitrary display_name and load a
+     * victim's save by triggering the duplicate-login kick.                    */
     const char *secret = getenv("JWT_SECRET");
-    if (secret && strlen(secret) > 0) {
+    if (!secret || strlen(secret) == 0) {
+        log_error("JWT_SECRET not set — refusing token (set EnvironmentFile in pirate-server.service)");
+        return false;
+    }
+    {
         /* Signed message = everything before the second dot */
         size_t msg_len = (size_t)(dot2 - token);
         unsigned int sig_len = 0;
