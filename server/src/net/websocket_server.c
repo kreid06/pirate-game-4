@@ -1098,6 +1098,141 @@ static void resolve_player_hull_containment(const SimpleShip* ship,
     }
 }
 
+/*
+ * Hull collision for NON-boarded players (swimmers).
+ *
+ * Robust against SUSTAINED contact: which side of the hull the player belongs
+ * on is anchored to their PREVIOUS (collision-valid) position, so pressing
+ * into the hull can never flip the wall. Alive edges reject old→new crossings
+ * outright and push the contact circle back to the legal side. Edges whose
+ * guarding plank(s) are all destroyed are passable in both directions, so a
+ * hull breach remains the only way to swim into (or out of) a ship.
+ *
+ * Mirrored on the client by resolveSwimmerHullCollision (Physics.ts).
+ * Returns true if (*world_x, *world_y) was modified.
+ */
+static bool resolve_swimmer_ship_hull_collision(const SimpleShip* ship,
+                                                float old_x, float old_y,
+                                                float* world_x, float* world_y)
+{
+    const float PLAYER_RADIUS = 8.0f;
+    struct Ship* sim_ship = find_sim_ship(ship->ship_id);
+    if (!sim_ship || sim_ship->hull_vertex_count < 3) return false;
+
+    /* Broad phase: a brigantine hull fits well inside a 400 px radius. */
+    float bdx = *world_x - ship->x;
+    float bdy = *world_y - ship->y;
+    if (bdx * bdx + bdy * bdy > 400.0f * 400.0f) return false;
+
+    float lx, ly, olx, oly;
+    ship_world_to_local(ship, *world_x, *world_y, &lx, &ly);
+    ship_world_to_local(ship, old_x, old_y, &olx, &oly);
+
+    const uint8_t n = sim_ship->hull_vertex_count;
+    float hxv[64], hyv[64];
+    uint8_t nv = n < 64 ? n : 64;
+    for (uint8_t i = 0; i < nv; i++) {
+        hxv[i] = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].x));
+        hyv[i] = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].y));
+    }
+
+    /* Polygon winding → outward normal orientation. */
+    float area2 = 0.0f;
+    for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
+        area2 += hxv[j] * hyv[i] - hxv[i] * hyv[j];
+    }
+    float ccw = (area2 >= 0.0f) ? 1.0f : -1.0f;
+
+    /* Which side did the player legally occupy last tick? (point-in-polygon
+       of the OLD position — breaches are the only legal way to change it) */
+    bool inside_prev = false;
+    for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
+        if ((hyv[j] > oly) != (hyv[i] > oly)) {
+            float xi = hxv[j] + (oly - hyv[j]) * (hxv[i] - hxv[j]) / (hyv[i] - hyv[j]);
+            if (olx < xi) inside_prev = !inside_prev;
+        }
+    }
+    float side = inside_prev ? -1.0f : 1.0f;
+
+    bool moved = false;
+
+    /* Pass 1: crossing rejection — if the old→new motion segment crosses an
+       alive edge, clamp to the earliest crossing pushed back to the legal side. */
+    float mx = lx - olx, my = ly - oly;
+    if (mx * mx + my * my > 1e-9f) {
+        float best_t = 1e30f;
+        int   best_i = -1, best_j = -1;
+        for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
+            if (!hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
+                continue; /* breach: passable */
+            float ax = hxv[j], ay = hyv[j];
+            float ex = hxv[i] - ax, ey = hyv[i] - ay;
+            float denom = mx * ey - my * ex;
+            if (fabsf(denom) < 1e-9f) continue; /* parallel */
+            float t = ((ax - olx) * ey - (ay - oly) * ex) / denom;
+            float u = ((ax - olx) * my - (ay - oly) * mx) / denom;
+            if (t >= 0.0f && t <= 1.0f && u >= 0.0f && u <= 1.0f && t < best_t) {
+                best_t = t;
+                best_i = i;
+                best_j = j;
+            }
+        }
+        if (best_i >= 0) {
+            float ex = hxv[best_i] - hxv[best_j];
+            float ey = hyv[best_i] - hyv[best_j];
+            float elen = sqrtf(ex * ex + ey * ey);
+            /* Outward edge normal oriented to the player's legal side. */
+            float nx_d = ( ey / elen) * ccw * side;
+            float ny_d = (-ex / elen) * ccw * side;
+            lx = olx + mx * best_t + nx_d * PLAYER_RADIUS;
+            ly = oly + my * best_t + ny_d * PLAYER_RADIUS;
+            moved = true;
+        }
+    }
+
+    /* Pass 2: contact pushout (two iterations so corners settle). */
+    for (int iter = 0; iter < 2; iter++) {
+        for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
+            if (!hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
+                continue; /* breach: passable */
+
+            float ax = hxv[j], ay = hyv[j];
+            float bx = hxv[i], by = hyv[i];
+            float ex = bx - ax, ey = by - ay;
+            float elen2 = ex * ex + ey * ey;
+            if (elen2 < 0.0001f) continue;
+            float t = ((lx - ax) * ex + (ly - ay) * ey) / elen2;
+            if (t < 0.0f) t = 0.0f; else if (t > 1.0f) t = 1.0f;
+            float cx = ax + t * ex, cy = ay + t * ey;
+            float ddx = lx - cx,  ddy = ly - cy;
+            float d2  = ddx * ddx + ddy * ddy;
+            if (d2 >= PLAYER_RADIUS * PLAYER_RADIUS) continue;
+
+            float elen = sqrtf(elen2);
+            float nx_d = ( ey / elen) * ccw * side; /* legal-side normal */
+            float ny_d = (-ex / elen) * ccw * side;
+            float s = ddx * nx_d + ddy * ny_d;
+            float d = sqrtf(d2);
+            if (s >= 0.0f && d > 0.001f) {
+                /* Shallow contact on the legal side: push away from the edge. */
+                float push = PLAYER_RADIUS - d;
+                lx += ddx / d * push;
+                ly += ddy / d * push;
+            } else {
+                /* Center slipped to (or past) the wrong side: snap back. */
+                lx = cx + nx_d * PLAYER_RADIUS;
+                ly = cy + ny_d * PLAYER_RADIUS;
+            }
+            moved = true;
+        }
+    }
+
+    if (moved) {
+        ship_local_to_world(ship, lx, ly, world_x, world_y);
+    }
+    return moved;
+}
+
 /**
  * Resolve player-vs-module collisions in ship-local space.
  * Pushes (new_local_x, new_local_y) out of any module it overlaps.
@@ -1796,7 +1931,14 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                             (unsigned)snap->players[p].res_metal,
                             (unsigned)snap->players[p].res_stone);
 
-        char player_entry[3072];
+        /* Effective movement speed multiplier — accounts for carry weight. */
+        float _snap_inv_kg    = player_inventory_weight(&snap->players[p]);
+        float _snap_carry_cap = 300.0f * (1.0f + (float)snap->players[p].stat_weight * 0.1f);
+        float _snap_carry_r   = (_snap_carry_cap > 0.0f) ? (_snap_inv_kg / _snap_carry_cap) : 0.0f;
+        float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
+        bool  _snap_can_sprint = (_snap_carry_r < 0.85f);
+
+        char player_entry[3200];
         snprintf(player_entry, sizeof(player_entry),
                 "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                 "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
@@ -1805,10 +1947,12 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
                 "\"company\":%u,\"health\":%u,\"max_health\":%u,"
                 "\"stamina\":%u,\"max_stamina\":%u,"
-                "\"on_island\":%u,"
+                "\"on_island\":%u,\"on_dock\":%u,"
                 "\"player_level\":%u,\"player_xp\":%u,"
                 "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-                "\"stat_points\":%u%s}",
+                "\"stat_points\":%u,"
+                "\"speed_mult\":%.4f,\"can_sprint\":%s"
+                "%s}",
                 snap->players[p].player_id, snap->players[p].name[0] ? snap->players[p].name : "Player",
                 snap->players[p].x, snap->players[p].y, snap->players[p].rotation,
                 snap->players[p].velocity_x, snap->players[p].velocity_y,
@@ -1823,7 +1967,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 snap->players[p].company_id,
                 snap->players[p].health, snap->players[p].max_health,
                 snap->players[p].stamina, snap->players[p].max_stamina,
-                snap->players[p].on_island_id,
+                snap->players[p].on_island_id, snap->players[p].on_dock_id,
                 (unsigned)snap->players[p].player_level,
                 (unsigned)snap->players[p].player_xp,
                 (unsigned)snap->players[p].stat_health,
@@ -1835,6 +1979,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                       - (snap->players[p].stat_health + snap->players[p].stat_damage
                          + snap->players[p].stat_stamina + snap->players[p].stat_weight)
                     : 0),
+                _snap_spd_mult, _snap_can_sprint ? "true" : "false",
                 inv_buf);
         /* Capture per-entry for AOI-filtered per-client assembly. */
         {
@@ -2004,6 +2149,11 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     "\"rudder_angle\":%.3f,"
                     "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
                     "\"npcLevel\":%u,"
+                    /* Live mass (crew + cargo + modules, via recalc_ship_mass) — the client
+                     * ship predictor needs it for the wind-speed mass ratio; without it the
+                     * client assumes the template mass and mispredicts top speed whenever
+                     * anyone/anything is aboard. */
+                    "\"mass\":%.0f,"
                     "\"ammo\":%u,\"infiniteAmmo\":%s,\"modules\":[",
                     ship->id, simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF),
                     simple_ship ? simple_ship->ship_name : "",
@@ -2013,6 +2163,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL,
                     simple_ship ? simple_ship->ship_type  : SHIP_TYPE_BRIGANTINE,
                     (unsigned)(simple_ship ? simple_ship->npc_level : 0),
+                    simple_ship ? simple_ship->mass : BRIGANTINE_MASS,
                     simple_ship ? simple_ship->cannon_ammo : 0,
                     (simple_ship && simple_ship->infinite_ammo) ? "true" : "false");
 
@@ -13252,6 +13403,18 @@ void websocket_server_tick(float dt) {
                                                                      _swim_speed_client, dt,
                                                                      &_sw_new_x, &_sw_new_y);
                             if (_sw_adopted) {
+                                /* Ship-hull walls: resolve the adopted position against every
+                                 * nearby ship BEFORE committing, anchored to the previous
+                                 * (collision-valid) position. Adopted steps can be several px
+                                 * (heartbeat gaps × anti-cheat tolerance), so without the
+                                 * crossing rejection a sustained push tunnels through the hull. */
+                                for (int _si = 0; _si < MAX_SIMPLE_SHIPS; _si++) {
+                                    SimpleShip *_sh = &ships[_si];
+                                    if (_sh->ship_id == 0) continue;
+                                    resolve_swimmer_ship_hull_collision(_sh,
+                                                                        ws_player->x, ws_player->y,
+                                                                        &_sw_new_x, &_sw_new_y);
+                                }
                                 /* Derive velocity from position delta so the deceleration path
                                  * has the correct speed when the player stops. */
                                 float _sv_x = CLIENT_TO_SERVER(_sw_new_x - ws_player->x) / (dt > 0.0001f ? dt : 0.0001f);
@@ -13497,6 +13660,45 @@ void websocket_server_tick(float dt) {
                                 ws_player->on_dock_id = 0;
                                 ws_player->movement_state = PLAYER_STATE_SWIMMING;
                                 log_info("🌊 Player %u left dock %u", ws_player->player_id, _did);
+                            }
+                        }
+                    }
+                    /* ── Ship-hull collision for swimmers (non-boarded players) ────────
+                     * A player who isn't aboard must not pass through intact ship hulls.
+                     * The client mirrors this (sweptCircleVsHealthyHull), and since the
+                     * server adopts client-reported positions (semi-authority) it MUST
+                     * enforce the same wall or a modified client could phase through.
+                     * Breached sections (all guarding planks destroyed) stay passable. */
+                    if (ws_player->on_dock_id == 0 && ws_player->on_island_id == 0) {
+                        for (int _si = 0; _si < MAX_SIMPLE_SHIPS; _si++) {
+                            SimpleShip *_sh = &ships[_si];
+                            if (_sh->ship_id == 0) continue;
+                            float _hx = ws_player->x, _hy = ws_player->y;
+                            /* Old == current here: this pass only covers legacy sim
+                             * integration (≤1 px/tick), which cannot cross an edge from
+                             * a resolved position; the adopted path resolves with the
+                             * true previous position inside the movement block above. */
+                            if (resolve_swimmer_ship_hull_collision(_sh, _hx, _hy, &_hx, &_hy)) {
+                                float _hdx = _hx - ws_player->x;
+                                float _hdy = _hy - ws_player->y;
+                                ws_player->x = _hx;
+                                ws_player->y = _hy;
+                                sim_player->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_hx));
+                                sim_player->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(_hy));
+                                /* Cancel the velocity component pointing into the hull so
+                                 * drag doesn't keep re-penetrating next tick. */
+                                float _hm2 = _hdx * _hdx + _hdy * _hdy;
+                                if (_hm2 > 0.0001f) {
+                                    float _hm = sqrtf(_hm2);
+                                    float _hnx = _hdx / _hm, _hny = _hdy / _hm;
+                                    float _hvx = Q16_TO_FLOAT(sim_player->velocity.x);
+                                    float _hvy = Q16_TO_FLOAT(sim_player->velocity.y);
+                                    float _hdot = _hvx * _hnx + _hvy * _hny;
+                                    if (_hdot < 0.0f) {
+                                        sim_player->velocity.x = Q16_FROM_FLOAT(_hvx - _hdot * _hnx);
+                                        sim_player->velocity.y = Q16_FROM_FLOAT(_hvy - _hdot * _hny);
+                                    }
+                                }
                             }
                         }
                     }

@@ -70,6 +70,13 @@ export interface PredictionConfig {
   predictionErrorThreshold: number; // units (distance threshold for rollback)
   enablePrediction: boolean;
   enableInterpolation: boolean;
+  // Client-side physics prediction for the LOCAL player's ship. When false the ship
+  // uses pure server-snapshot interpolation (smooth, slightly latency-delayed) and the
+  // on-deck player is anchored to that interpolated hull. Ships move slowly enough that
+  // interpolation feels fine, and it sidesteps all the predicted-vs-server reconciliation
+  // artifacts (rotation snapping, rubberbanding). Player + projectile prediction are
+  // unaffected — they have their own flags / paths.
+  enableShipPrediction: boolean;
 }
 
 /**
@@ -186,10 +193,11 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
     interpolationBuffer: 100, // 100ms buffer (~3 server frames at 30Hz) for jitter-free rendering
     interpolationDelay: 66,   // 66ms render delay (~2 server frames at 30Hz)
     extrapolationLimit: 66,   // 66ms max extrapolation (~2 server frames)
-    rollbackLimit: 16,        // 16 ticks rollback — matches REWIND_BUFFER_SIZE
+    rollbackLimit: 48,        // 48 prediction ticks (~400ms) — covers MAX_RTT_TICKS at high ping
     predictionErrorThreshold: 8.0, // px tolerance before rollback (8px = ~1/6 tile; doubled when moving)
     enablePrediction: true,
-    enableInterpolation: true
+    enableInterpolation: true,
+    enableShipPrediction: false, // ships use pure interpolation (see PredictionConfig docs)
   },
   
   debug: {

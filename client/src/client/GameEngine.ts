@@ -123,6 +123,7 @@ export class GameEngine {
         health: 100,
         maxHealth: 100,
         onIslandId: 0,
+        onDockId: 0,
         inventory: createEmptyInventory()
       }],
       cannonballs: [],
