@@ -56,6 +56,7 @@ After=network.target
 Type=simple
 User=$USER
 WorkingDirectory=/opt/pirate-game
+EnvironmentFile=/opt/pirate-game/config/auth.env
 ExecStart=/opt/pirate-game/bin/pirate-server
 Restart=always
 RestartSec=10
@@ -104,7 +105,8 @@ if command -v ufw &> /dev/null; then
     sudo ufw allow 80/tcp comment 'HTTP nginx'
     sudo ufw allow 443/tcp comment 'HTTPS nginx'
     sudo ufw allow 8082/tcp comment 'Game WebSocket'
-    sudo ufw allow 8081/tcp comment 'Game Admin Panel'
+    # Admin panel (8081) binds to 127.0.0.1 only — do NOT open to the internet.
+    # Access via: ssh -L 8081:127.0.0.1:8081 user@server
     sudo ufw allow 8080/udp comment 'Game UDP future'
     # Auth server listens on loopback only — nginx proxies /auth/ to it
     echo "✅ UFW rules added (including SSH)"
@@ -130,7 +132,7 @@ else
         sudo ufw allow 80/tcp comment 'HTTP nginx'
         sudo ufw allow 443/tcp comment 'HTTPS nginx'
         sudo ufw allow 8082/tcp comment 'Game WebSocket'
-        sudo ufw allow 8081/tcp comment 'Game Admin Panel'
+        # Admin panel (8081) binds to 127.0.0.1 only — do NOT open to the internet.
         sudo ufw allow 8080/udp comment 'Game UDP future'
         # Auth server proxied via nginx — no direct public port needed
         
@@ -165,7 +167,7 @@ else
         sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT -m comment --comment "HTTP (nginx)"
         sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT -m comment --comment "HTTPS (nginx)"
         sudo iptables -A INPUT -p tcp --dport 8082 -j ACCEPT -m comment --comment "Game WebSocket"
-        sudo iptables -A INPUT -p tcp --dport 8081 -j ACCEPT -m comment --comment "Admin Panel"
+        # Admin panel (8081) binds to 127.0.0.1 only — no public iptables rule needed.
         sudo iptables -A INPUT -p udp --dport 8080 -j ACCEPT -m comment --comment "UDP (future)"
         # Auth server proxied via nginx — no direct public port needed
         
@@ -244,7 +246,7 @@ echo "  - 22/tcp:   SSH"
 echo "  - 80/tcp:   HTTP (nginx, redirect to HTTPS)"
 echo "  - 443/tcp:  HTTPS (nginx — proxies /auth/ and /ws)"
 echo "  - 8082/tcp: WebSocket (game traffic, direct)"
-echo "  - 8081/tcp: Admin panel"
+echo "  - 8081/tcp: Admin panel (loopback only — use SSH tunnel to access)"
 echo "  - 8080/udp: UDP traffic (future feature)"
 echo "  - 3001/tcp: Auth server (loopback only — proxied via nginx)"
 echo ""
@@ -258,4 +260,4 @@ echo "6. Start auth server:  sudo systemctl start pirate-auth"
 echo "7. Check status:       sudo systemctl status pirate-server pirate-auth nginx"
 echo "8. View game logs:     sudo journalctl -u pirate-server -f"
 echo "9. View auth logs:     sudo journalctl -u pirate-auth -f"
-echo "10. Access admin panel: http://your-server-ip:8081"
+echo "10. Access admin panel via SSH tunnel: ssh -L 8081:127.0.0.1:8081 user@your-server  then open http://127.0.0.1:8081"

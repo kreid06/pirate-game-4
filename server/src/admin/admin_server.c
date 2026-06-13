@@ -1186,14 +1186,15 @@ int admin_server_init(struct AdminServer* admin, uint16_t port) {
         return -1;
     }
     
-    // Bind socket
+    // Bind socket — loopback only; the admin panel must never be reachable from
+    // the public internet.  Access it via SSH tunnel or a localhost nginx proxy.
     struct sockaddr_in addr = {0};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = htons(port);
     
     if (bind(admin->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        log_error("Failed to bind admin socket to port %u: %s", port, strerror(errno));
+        log_error("Failed to bind admin socket to 127.0.0.1:%u: %s", port, strerror(errno));
         close(admin->socket_fd);
         return -1;
     }
@@ -1205,7 +1206,7 @@ int admin_server_init(struct AdminServer* admin, uint16_t port) {
         return -1;
     }
     
-    log_info("Admin server initialized on port %u", port);
+    log_info("Admin server initialized on 127.0.0.1:%u (loopback only)", port);
     return 0;
 }
 
