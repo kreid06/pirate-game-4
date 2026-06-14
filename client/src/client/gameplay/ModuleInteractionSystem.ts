@@ -375,6 +375,12 @@ export class ModuleInteractionSystem {
   }
   
   private updateModuleSystems(worldState: WorldState, deltaTime: number): void {
+    // Skip entirely when there are no ships or no mounted players — the
+    // cannon/swivel reload timers and mast transitions are client-side cosmetic
+    // state; there is no correctness issue deferring them when nothing is mounted.
+    if (worldState.ships.length === 0) return;
+    if (this.mountedPlayers.size === 0) return;
+
     // Update module-specific systems (cannons, sails, etc.)
     for (const ship of worldState.ships) {
       for (const module of ship.modules) {
@@ -388,7 +394,6 @@ export class ModuleInteractionSystem {
           case 'swivel':
             this.updateSwivelModule(module, deltaTime);
             break;
-          // Add other module types as needed
         }
       }
     }

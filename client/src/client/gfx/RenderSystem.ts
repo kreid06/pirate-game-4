@@ -242,6 +242,18 @@ export class RenderSystem {
   public fogRayHitDist: Float32Array | null = null;
   /** Off-screen canvas reused for fog-mask compositing. */
   private _fogCanvas: HTMLCanvasElement | null = null;
+  /** Camera state captured when the fog canvas was last rendered.
+   *  Used for dirty-detection so we skip the expensive blur(48px) redraw
+   *  when neither the ray data nor the camera has changed since last frame. */
+  private _fogLastRayVersion = -1;
+  private _fogLastCamX = NaN;
+  private _fogLastCamY = NaN;
+  private _fogLastZoom = NaN;
+  private _fogLastRot  = NaN;
+  /** Monotonic counter incremented by ClientApplication whenever the fog
+   *  worker delivers a new ray set. RenderSystem compares this to skip
+   *  redundant fog redraws at render-frame rate (60-120 Hz). */
+  public fogRayVersion = 0;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
@@ -4611,14 +4623,15 @@ export class RenderSystem {
     const localPlayer = this._cachedLocalPlayer;
     if (!localPlayer) return;
 
-    const N      = hitDist.length;
+    const N = hitDist.length;
     if (N === 0) return;
 
+    // Read camera state once — avoids two getState() calls that each clone a Vec2.
+    const camZoom = camera.zoom;
+    const camRot  = camera.rotation;
     const screenPos = camera.worldToScreen(localPlayer.position);
-    const cx   = screenPos.x;
-    const cy   = screenPos.y;
-    const zoom = camera.getState().zoom;
-    const cameraRotation = camera.getState().rotation;
+    const cx = screenPos.x;
+    const cy = screenPos.y;
     const TWO_PI = Math.PI * 2;
     const { width, height } = this.canvas;
 
@@ -4627,7 +4640,33 @@ export class RenderSystem {
       this._fogCanvas = document.createElement('canvas');
       this._fogCanvas.width  = width;
       this._fogCanvas.height = height;
+      // Force a full redraw on resize
+      this._fogLastRayVersion = -1;
     }
+
+    // Skip the expensive blur(48px) redraw when nothing has changed.
+    // The fog rays update at ~30 Hz (worker cadence); the render loop runs at
+    // 60-120 Hz, so most frames can just re-blit the cached fog canvas.
+    const camMoved = cx   !== this._fogLastCamX || cy   !== this._fogLastCamY
+                  || camZoom !== this._fogLastZoom  || camRot  !== this._fogLastRot;
+    const raysDirty = this.fogRayVersion !== this._fogLastRayVersion;
+
+    if (!raysDirty && !camMoved) {
+      // Nothing changed — blit the already-rendered fog canvas directly.
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.68;
+      this.ctx.drawImage(this._fogCanvas, 0, 0);
+      this.ctx.restore();
+      return;
+    }
+
+    // Record the camera/ray state for next frame's dirty check.
+    this._fogLastRayVersion = this.fogRayVersion;
+    this._fogLastCamX = cx;
+    this._fogLastCamY = cy;
+    this._fogLastZoom = camZoom;
+    this._fogLastRot  = camRot;
+
     const fc   = this._fogCanvas;
     const fctx = fc.getContext('2d')!;
 
@@ -4643,8 +4682,8 @@ export class RenderSystem {
       fctx.moveTo(cx, cy);
       for (let i = 0; i <= N; i++) {
         const idx   = i % N;
-        const angle = idx * TWO_PI / N - cameraRotation;
-        const dist  = hitDist[idx] * zoom * scale;
+        const angle = idx * TWO_PI / N - camRot;
+        const dist  = hitDist[idx] * camZoom * scale;
         fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
       }
       fctx.closePath();

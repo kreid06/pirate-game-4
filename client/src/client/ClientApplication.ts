@@ -144,6 +144,10 @@ export class ClientApplication {
   private predictedWorldState: WorldState | null = null;
   /** Predicted state from the previous fixed tick — used for sub-tick position lerp. */
   private prevPredictedWorldState: WorldState | null = null;
+  /** Interpolated world state cached once per RAF frame (start of gameLoop) and reused
+   *  by both updateClient (camera follow, up to 5×) and renderFrame (rendering).
+   *  Avoids up to 6 O(buffer-size) scans of the snapshot buffer per display frame. */
+  private _frameInterpolatedState: WorldState | null = null;
   /** Wall-clock time of the previous render frame (ms) — for smooth-error-correction decay. */
   private _lastRenderTime = 0;
   /** Single bound game-loop reference to avoid allocating a closure every frame. */
@@ -193,6 +197,11 @@ export class ClientApplication {
   // Result arrives async (1-frame lag) which is imperceptible for fog.
   private _fogWorker: Worker | null = null;
   private _fogWorkerReady = false; // true once INIT has been sent
+  // Throttle fog worker posts to ~30 Hz (every 4th client tick at 120 Hz).
+  // The blur(48px) redraw in RenderSystem is skipped when rays are unchanged,
+  // so reducing the post rate directly reduces the most expensive canvas op.
+  private _fogTickCounter = 0;
+  private static readonly FOG_POST_EVERY_N_TICKS = 4; // 120 Hz / 4 = 30 Hz
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
@@ -3142,6 +3151,8 @@ export class ClientApplication {
         this._fogWorker.onmessage = (e: MessageEvent<ArrayBuffer>) => {
           // Swap in the worker's result buffer directly — zero copy on the main thread.
           this._rayHitDist = new Float32Array(e.data);
+          // Increment version so RenderSystem knows to re-render the fog canvas.
+          this.renderSystem.fogRayVersion++;
         };
         this._fogWorker.postMessage({
           type: 'INIT',
@@ -3858,6 +3869,12 @@ export class ClientApplication {
     // Update FPS tracking
     this.updateFPSTracking(deltaTime);
     
+    // Compute the interpolated state once per RAF frame and cache it.
+    // updateClient (camera follow) and renderFrame both need it; without caching
+    // getInterpolatedState does an O(snapshot-buffer) scan on every call, which
+    // would fire up to 6× per display frame (5 catch-up ticks + 1 render).
+    this._frameInterpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
+
     // Fixed timestep client updates (prediction, input processing).
     // Cap the number of catch-up ticks per frame: after a long stall (tab refocus, GC, a heavy
     // frame) the accumulator can hold many ticks' worth of time. Running all of them in one
@@ -3926,7 +3943,7 @@ export class ClientApplication {
       // 30 Hz server cadence into camera motion (perceived as choppy movement). updateCamera
       // only reads the local player, so splicing it into the interpolated world is sufficient.
       if (this.predictedWorldState) {
-        const _interp = this.predictionEngine.getInterpolatedState(performance.now());
+        const _interp = this._frameInterpolatedState;
         const _assignedId = this.networkManager.getAssignedPlayerId();
         let _cameraFollowState: WorldState = this.predictedWorldState;
         if (_interp && _assignedId !== null) {
@@ -3968,13 +3985,19 @@ export class ClientApplication {
           // --- Dynamic view-range / AOI ---
           // Cast rays against island coastlines to compute per-direction visibility
           // distances. Used for the fog mask (RenderSystem) and server AOI hint.
+          // Worker posts are throttled to ~30 Hz (every N ticks) — fog doesn't
+          // need to update at the full 120 Hz client tick rate, and the
+          // RenderSystem dirty flag skips the blur(48px) when rays are unchanged.
+          this._fogTickCounter++;
           if (this._fogWorkerReady && this._fogWorker) {
-            // Off-thread: dispatch position to worker, use previous frame's result now.
-            this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
+            if (this._fogTickCounter % ClientApplication.FOG_POST_EVERY_N_TICKS === 0) {
+              this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
+            }
           } else {
             // Fallback: synchronous (before first ISLANDS message, or if worker unavailable).
             const islands = this.renderSystem.getIslands();
             this.computeViewRays(player.position, islands);
+            this.renderSystem.fogRayVersion++;
           }
 
           // Smooth openness so the fog/zoom doesn't jitter when near a polygon edge
@@ -4069,9 +4092,10 @@ export class ClientApplication {
    * Render a frame with interpolation
    */
   private renderFrame(alpha: number): void {
-    // Get interpolated state for smooth rendering of other entities
+    // Use the interpolated state cached at the start of gameLoop — avoids a
+    // redundant O(snapshot-buffer) scan that would duplicate updateClient's work.
     const currentTime = performance.now();
-    const interpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
+    const interpolatedState = this._frameInterpolatedState;
 
     // Frame delta (seconds) for decaying the smooth-error-correction offset.
     const _renderDt = this._lastRenderTime > 0

@@ -151,6 +151,10 @@ export class ShipPredictor {
 
   // Island definitions for shallow-water drag (fed by ClientApplication)
   private islands: readonly ShallowDragIsland[] = [];
+  // Pre-computed bounding radii for each island's sand and shallow polygons.
+  // Recomputed only when setIslands() is called (once, on ISLANDS message), not
+  // every physics tick — shallowWaterDepth() was iterating all vertices per call.
+  private _islandBounds: Array<{ shallowR: number; sandR: number }> = [];
 
   // Other ships (cloned snapshot state, dead-reckoned between snapshots) and
   // shipyard docks — collision impulse partners for the predicted ship.
@@ -396,6 +400,25 @@ export class ShipPredictor {
    */
   setIslands(islands: readonly ShallowDragIsland[]): void {
     this.islands = islands;
+    // Pre-compute per-island bounding radii so shallowWaterDepth() doesn't
+    // iterate all vertices on every physics tick (120 Hz × island count).
+    this._islandBounds = islands.map(isl => {
+      let shallowR = 0;
+      let sandR    = 0;
+      if (isl.shallowVertices) {
+        for (const v of isl.shallowVertices) {
+          const r = Math.hypot(v.x - isl.x, v.y - isl.y);
+          if (r > shallowR) shallowR = r;
+        }
+      }
+      if (isl.vertices) {
+        for (const v of isl.vertices) {
+          const r = Math.hypot(v.x - isl.x, v.y - isl.y);
+          if (r > sandR) sandR = r;
+        }
+      }
+      return { shallowR, sandR };
+    });
   }
 
   /**
@@ -653,24 +676,18 @@ export class ShipPredictor {
    */
   private shallowWaterDepth(px: number, py: number): number {
     let maxDepth = 0;
-    for (const isl of this.islands) {
-      const sand = isl.vertices;
+    for (let i = 0; i < this.islands.length; i++) {
+      const isl     = this.islands[i];
+      const bounds  = this._islandBounds[i];
+      const sand    = isl.vertices;
       const shallow = isl.shallowVertices;
       if (!sand || sand.length < 3 || !shallow || shallow.length < 3) continue;
 
-      // Broad phase: bounding radius of the shallow polygon around island centre.
+      // Broad phase: use pre-cached bounding radii (computed once in setIslands).
       const dx = px - isl.x, dy = py - isl.y;
       const distSq = dx * dx + dy * dy;
-      let shallowBoundR = 0;
-      let polyBoundR = 0;
-      for (const v of shallow) {
-        const r = Math.hypot(v.x - isl.x, v.y - isl.y);
-        if (r > shallowBoundR) shallowBoundR = r;
-      }
-      for (const v of sand) {
-        const r = Math.hypot(v.x - isl.x, v.y - isl.y);
-        if (r > polyBoundR) polyBoundR = r;
-      }
+      const shallowBoundR = bounds.shallowR;
+      const polyBoundR    = bounds.sandR;
       if (distSq > shallowBoundR * shallowBoundR) continue;
       if (this.pointInPoly(px, py, sand)) continue;        // inside the island
       if (!this.pointInPoly(px, py, shallow)) continue;    // outside the shallow ring
