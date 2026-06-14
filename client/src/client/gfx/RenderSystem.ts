@@ -9041,10 +9041,9 @@ export class RenderSystem {
           const _ly = _dx * _sin + _dy * _cos;
 
           // Detection radius around each snap-point (px in ship-local).
-          // Matches the ramp's visual footprint (±25) so the transition fires
-          // exactly when the player enters the rendered ramp tile.
+          // Must match server FALL_ZONE / CLIMB_ZONE (websocket_server.c ~6615).
           // Both fall and climb use the same zone for consistent behaviour.
-          const _ZONE = 20;
+          const _ZONE = 22;
 
           if (this._playerDeckLevel === 1) {
             // Upper deck — fall through empty holes, or enter a ramp from its top (light) face

@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <json-c/json.h>
 #include <stdbool.h>
 #define _USE_MATH_DEFINES
 #ifndef M_PI
@@ -14,6 +15,10 @@
 #include "net/module_interactions.h"
 #include "sim/ship_level.h"
 #include "net/quality.h"
+#include "core/rng.h"
+
+/* RNG used for fleet-size and level rolls in the ghost spawn system. */
+static struct RNGState ghost_spawn_rng;
 
 void tick_sinking_ships(void) {
     uint32_t now = get_time_ms();
@@ -758,8 +763,13 @@ uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
  *  attack mode we do NOT touch it, so on loss-of-target the wander resumes.
  * ========================================================================= */
 
-/* Maximum distance (client pixels) to scan for an enemy. */
+/* Forward declaration — defined in the spawn-point section below. */
+static int find_ship_slot(uint16_t ship_id);
+
+/* Maximum distance (client pixels) to scan for an enemy.
+ * ~800 px ≈ 4-5 ship lengths — about half a screen width at normal zoom. */
 #define GHOST_ATTACK_RANGE      2400.0f
+#define GHOST_WAKE_RADIUS       6000.0f  /* non-ghost must be closer than this to wake ghost AI */
 /* Wander: new random heading every N seconds */
 #define GHOST_WANDER_INTERVAL_S 5.0f
 
@@ -793,7 +803,99 @@ static uint32_t ghost_last_combat_ms[MAX_SIMPLE_SHIPS] = {0};
 /* Radius within which an alerted ghost propagates its target to idle fleet-mates */
 #define GHOST_PACK_ALERT_RADIUS  3000.0f
 
+/* ── Ghost ship level + fleet tracking ───────────────────────────────────── *
+ * Level 1–10 scales chase speed (+15%/level) and wander speed.              *
+ * spawn_idx: index into ghost_spawns[] that created this ship, -1 = manual.
+ * fleet_idx: index into ghost_fleets[], -1 if not in a fleet.
+ * fleet_role: 0 = fleet lead, 1+ = follower (formation slot index).         */
+static int ghost_ship_level[MAX_SIMPLE_SHIPS];
+static int ghost_ship_spawn_idx[MAX_SIMPLE_SHIPS];
+static int ghost_ship_fleet_idx[MAX_SIMPLE_SHIPS];
+static int ghost_ship_fleet_role[MAX_SIMPLE_SHIPS];
+
+/* ── Ghost fleet table ───────────────────────────────────────────────────── */
+#define MAX_GHOST_FLEETS 64
+#define MAX_FLEET_SIZE   10
+
+typedef struct {
+    int      spawn_idx;
+    uint16_t ship_ids[MAX_FLEET_SIZE];
+    int      ship_count;
+    int      level;
+    bool     active;
+} GhostFleet;
+
+static GhostFleet ghost_fleets[MAX_GHOST_FLEETS];
+static int ghost_fleet_count = 0;
+
+/* ── Spawn queue ─────────────────────────────────────────────────────────── */
+/* Zones whose timers have fired are enqueued here instead of being spawned
+ * immediately.  The queue drains whenever a free fleet slot exists — either
+ * at the top of each tick or the moment a fleet fully sinks.  This prevents
+ * the "table full" spam and keeps fleet creation latency smooth. */
+#define MAX_SPAWN_QUEUE 128
+
+typedef struct {
+    int spawn_idx;
+    int fleet_size;
+    int level;
+} SpawnQueueEntry;
+
+static SpawnQueueEntry spawn_queue[MAX_SPAWN_QUEUE];
+static int spawn_queue_head = 0; /* next entry to consume */
+static int spawn_queue_tail = 0; /* next slot to insert  */
+static int spawn_queue_len  = 0;
+
+/* Wedge formation: local offsets (units of GHOST_FLEET_SPACING).
+ * lx = forward axis (positive = ahead), ly = lateral (positive = left).
+ *
+ *       [0] Lead
+ *    [1]   [2]       ← 1 unit behind, ±1 unit lateral
+ *  [3]       [4]     ← 2 units behind, ±2 units lateral
+ * [5]   [6] [7]  [8] ← 3 units behind
+ *           [9]      ← 4 units behind, centred (rearguard)
+ */
+#define GHOST_FLEET_SPACING 200.0f
+static const float fleet_form_lx[MAX_FLEET_SIZE] = { 0, -1, -1, -2, -2, -3, -3, -3, -3, -4 };
+static const float fleet_form_ly[MAX_FLEET_SIZE] = { 0,  1, -1,  2, -2,  1, -1,  3, -3,  0 };
+
+/* ── Ghost spawn-point table ─────────────────────────────────────────────── */
+#define MAX_GHOST_SPAWNS 64
+#define GHOST_SPAWNS_PATH "data/ghost_spawns.json"
+
+typedef struct {
+    int   id;
+    char  label[64];
+    float x, y;
+    float radius;
+    int   level_min, level_max;
+    int   count_min, count_max;
+    float respawn_delay_s;
+    /* runtime */
+    int   active_count;
+    float respawn_timer;
+    bool  enabled;
+} GhostSpawnPoint;
+
+static GhostSpawnPoint ghost_spawns[MAX_GHOST_SPAWNS];
+static int ghost_spawn_count = 0;
+static bool ghost_spawns_enabled = false;
+/* Global cap: maximum total ghost ships across ALL zones (0 = unlimited). */
+static int ghost_global_max_cap = 0;
+
 void tick_ghost_ships(float dt) {
+    /* ── Global fast-path: skip all AI when no non-ghost ships are alive.
+     * This keeps the server idle when no players are connected. */
+    bool any_non_ghost = false;
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip *c = &ships[s];
+        if (c->active && !c->is_sinking && c->ship_type != SHIP_TYPE_GHOST) {
+            any_non_ghost = true;
+            break;
+        }
+    }
+    if (!any_non_ghost) return;
+
     for (int s = 0; s < ship_count; s++) {
         SimpleShip* ship = &ships[s];
         if (!ship->active) continue;
@@ -801,8 +903,8 @@ void tick_ghost_ships(float dt) {
         if (ship->is_sinking) continue;
 
         /* ── AI culling: skip processing when no player is within render range ──
-         * Render distance is approximately 5000 client px; we add 500 px tolerance
-         * so ghosts begin reacting slightly before they enter the player's view. */
+         * Render distance is approximately 5000 client px; we add 2000 px buffer
+         * so ghosts begin reacting before they enter the player's view. */
         {
             const float AI_RANGE2 = GHOST_AI_PLAYER_RANGE * GHOST_AI_PLAYER_RANGE;
             bool player_nearby = false;
@@ -810,9 +912,6 @@ void tick_ghost_ships(float dt) {
                 if (!players[pi].active) continue;
                 float px, py;
                 if (players[pi].parent_ship_id != 0) {
-                    /* Player is aboard a ship — use the ship's world position.
-                     * Fall back to player's own coords if ship lookup fails
-                     * (stale parent_ship_id after a sink event). */
                     SimpleShip* ps = find_ship(players[pi].parent_ship_id);
                     if (ps) { px = ps->x; py = ps->y; }
                     else    { px = players[pi].x; py = players[pi].y; }
@@ -823,8 +922,6 @@ void tick_ghost_ships(float dt) {
                 if (dx * dx + dy * dy <= AI_RANGE2) player_nearby = true;
             }
             if (!player_nearby) {
-                /* No player in range — freeze the ghost in place by zeroing velocity
-                 * so it doesn't drift from momentum when culled. */
                 ship->velocity_x = 0.0f;
                 ship->velocity_y = 0.0f;
                 struct Ship* _gs = find_sim_ship(ship->ship_id);
@@ -922,7 +1019,10 @@ void tick_ghost_ships(float dt) {
             ghost_sway_phase[s] += GHOST_SWAY_RATE * dt;
             float center_heading = atan2f(dy, dx);
             desired_heading = center_heading + sinf(ghost_sway_phase[s]) * GHOST_SWAY_AMP;
-            move_speed = GHOST_CHASE_SPEED;
+            {
+                float lvl_scale = 1.0f + (ghost_ship_level[s] - 1) * 0.15f;
+                move_speed = GHOST_CHASE_SPEED * lvl_scale;
+            }
 
             /* Find the sim ship once — reload state lives in sim modules, not
              * SimpleShip modules (SimpleShip copy is reset by fire_cannon but
@@ -979,28 +1079,58 @@ void tick_ghost_ships(float dt) {
                 }
             }
         } else {
-            /* Wander mode — pick a new random heading every 5-8 s and drift
-             * slowly toward it.  Uses the wander timer + a stable per-ship seed
-             * so each ghost wanders independently without a shared rand() state. */
-            ghost_wander_timer[s] -= dt;
-            if (ghost_wander_timer[s] <= 0.0f) {
-                /* Cheap deterministic pseudo-random: mix ship index with a
-                 * counter scaled by current heading to get varied offsets. */
-                static uint32_t wander_seed = 0x9e3779b9u;
-                wander_seed ^= (uint32_t)(s * 2654435761u) ^ (uint32_t)(ghost_sway_phase[s] * 1000.0f);
-                wander_seed = wander_seed * 1664525u + 1013904223u; /* LCG */
-                /* Turn ±PI from current heading for an organic wandering arc */
-                float turn_offset = ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 2.0f * (float)M_PI
-                                    - (float)M_PI;
-                ghost_desired_heading[s] = ghost_desired_heading[s] + turn_offset * 0.65f;
-                while (ghost_desired_heading[s] >  (float)M_PI) ghost_desired_heading[s] -= 2.0f * (float)M_PI;
-                while (ghost_desired_heading[s] < -(float)M_PI) ghost_desired_heading[s] += 2.0f * (float)M_PI;
-                /* Next heading change in 5–8 s */
-                wander_seed = wander_seed * 1664525u + 1013904223u;
-                ghost_wander_timer[s] = 5.0f + ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 3.0f;
+            /* Wander mode — fleet followers hold formation; lead ships wander. */
+            int fi   = ghost_ship_fleet_idx[s];
+            int role = ghost_ship_fleet_role[s];
+            bool in_formation = false;
+
+            if (fi >= 0 && role > 0 && ghost_fleets[fi].active) {
+                uint16_t lead_id   = ghost_fleets[fi].ship_ids[0];
+                int      lead_slot = find_ship_slot(lead_id);
+                if (lead_slot >= 0 && ships[lead_slot].active && !ships[lead_slot].is_sinking) {
+                    SimpleShip *lead = &ships[lead_slot];
+                    int ri = (role < MAX_FLEET_SIZE) ? role : (MAX_FLEET_SIZE - 1);
+                    float local_fwd = fleet_form_lx[ri] * GHOST_FLEET_SPACING;
+                    float local_lat = fleet_form_ly[ri] * GHOST_FLEET_SPACING;
+                    float cos_h = cosf(lead->rotation);
+                    float sin_h = sinf(lead->rotation);
+                    float form_x = lead->x + local_fwd * cos_h - local_lat * sin_h;
+                    float form_y = lead->y + local_fwd * sin_h + local_lat * cos_h;
+                    float dx = form_x - ship->x;
+                    float dy = form_y - ship->y;
+                    float dist = sqrtf(dx * dx + dy * dy);
+                    float lvl_scale = 1.0f + (ghost_ship_level[s] - 1) * 0.10f;
+                    if (dist > GHOST_FLEET_SPACING * 0.4f) {
+                        desired_heading = atan2f(dy, dx);
+                        float catch_up  = 1.0f + dist / GHOST_FLEET_SPACING;
+                        move_speed = fminf(GHOST_WANDER_SPEED * lvl_scale * catch_up,
+                                           GHOST_CHASE_SPEED  * lvl_scale);
+                    } else {
+                        desired_heading = lead->rotation;
+                        move_speed = GHOST_WANDER_SPEED * lvl_scale;
+                    }
+                    in_formation = true;
+                }
             }
-            desired_heading = ghost_desired_heading[s];
-            move_speed      = GHOST_WANDER_SPEED;
+
+            if (!in_formation) {
+                ghost_wander_timer[s] -= dt;
+                if (ghost_wander_timer[s] <= 0.0f) {
+                    static uint32_t wander_seed = 0x9e3779b9u;
+                    wander_seed ^= (uint32_t)(s * 2654435761u) ^ (uint32_t)(ghost_sway_phase[s] * 1000.0f);
+                    wander_seed = wander_seed * 1664525u + 1013904223u;
+                    float turn_offset = ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 2.0f * (float)M_PI
+                                        - (float)M_PI;
+                    ghost_desired_heading[s] = ghost_desired_heading[s] + turn_offset * 0.65f;
+                    while (ghost_desired_heading[s] >  (float)M_PI) ghost_desired_heading[s] -= 2.0f * (float)M_PI;
+                    while (ghost_desired_heading[s] < -(float)M_PI) ghost_desired_heading[s] += 2.0f * (float)M_PI;
+                    wander_seed = wander_seed * 1664525u + 1013904223u;
+                    ghost_wander_timer[s] = 5.0f + ((float)(wander_seed & 0xFFFFu) / 65535.0f) * 3.0f;
+                }
+                desired_heading = ghost_desired_heading[s];
+                float lvl_scale = 1.0f + (ghost_ship_level[s] - 1) * 0.10f;
+                move_speed = GHOST_WANDER_SPEED * lvl_scale;
+            }
         }
 
         /* Store in ship slot for rendering-side debug convenience */
@@ -1098,306 +1228,7 @@ void ghost_notify_dealt_damage(uint32_t attacker_ship_id) {
     }
 }
 
-/* ── Ghost fleet spawn points ─────────────────────────────────────────────── */
-
-GhostSpawnPoint ghost_spawn_points[MAX_GHOST_SPAWN_POINTS];
-int             ghost_spawn_point_count = 0;
-
-/* Per-ship-slot spawn-point tag.
- * ghost_spawn_tags[slot] == spawn_point_id means that ship slot belongs to the
- * fleet assigned to that spawn point.  0 = untagged (random / player ship).
- * Because we check ships[s].active, stale entries in dead/reused slots are
- * naturally ignored — no explicit cleanup is required. */
-static uint32_t ghost_spawn_tags[MAX_SHIPS];
-
-void ghost_spawns_load(void) {
-    FILE *f = fopen(GHOST_SPAWNS_PATH, "r");
-    if (!f) {
-        log_info("No ghost spawn points file found at %s — starting empty", GHOST_SPAWNS_PATH);
-        return;
-    }
-
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
-    rewind(f);
-    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return; }
-
-    char *buf = malloc((size_t)sz + 1);
-    if (!buf) { fclose(f); return; }
-    size_t rd = fread(buf, 1, (size_t)sz, f);
-    fclose(f);
-    buf[rd] = '\0';
-
-    /* Simple hand-rolled JSON array parser for:
-     * {"spawn_points":[{"id":1,"x":1000,"y":2000,"level":30,"fleet_size":3},...]} */
-    ghost_spawn_point_count = 0;
-    uint32_t max_id = 0;
-
-    const char *arr = strstr(buf, "\"spawn_points\"");
-    if (!arr) { free(buf); return; }
-    arr = strchr(arr, '[');
-    if (!arr) { free(buf); return; }
-
-    const char *p = arr + 1;
-    while (*p && ghost_spawn_point_count < MAX_GHOST_SPAWN_POINTS) {
-        /* Skip whitespace */
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') p++;
-        if (*p != '{') break;
-
-        GhostSpawnPoint sp = {0};
-        const char *obj_end = strchr(p, '}');
-        if (!obj_end) break;
-
-        const char *v;
-        v = strstr(p, "\"id\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.id = (uint32_t)atoi(v + 1); }
-        v = strstr(p, "\"x\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.x = (float)atof(v + 1); }
-        v = strstr(p, "\"y\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.y = (float)atof(v + 1); }
-
-        /* Support both range fields (level_min/level_max) and legacy single field (level) */
-        v = strstr(p, "\"level_min\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.level_min = (uint8_t)atoi(v + 1); }
-        v = strstr(p, "\"level_max\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.level_max = (uint8_t)atoi(v + 1); }
-        if (sp.level_min == 0 && sp.level_max == 0) {
-            /* Legacy: single "level" field */
-            v = strstr(p, "\"level\"");
-            if (v && v < obj_end) {
-                v = strchr(v, ':'); if (v) {
-                    uint8_t lv = (uint8_t)atoi(v + 1);
-                    sp.level_min = sp.level_max = lv;
-                }
-            }
-        }
-
-        v = strstr(p, "\"fleet_min\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.fleet_min = (uint8_t)atoi(v + 1); }
-        v = strstr(p, "\"fleet_max\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.fleet_max = (uint8_t)atoi(v + 1); }
-        if (sp.fleet_min == 0 && sp.fleet_max == 0) {
-            /* Legacy: single "fleet_size" field */
-            v = strstr(p, "\"fleet_size\"");
-            if (v && v < obj_end) {
-                v = strchr(v, ':'); if (v) {
-                    uint8_t fs = (uint8_t)atoi(v + 1);
-                    sp.fleet_min = sp.fleet_max = fs;
-                }
-            }
-        }
-
-        v = strstr(p, "\"angle_deg\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.angle_deg = (float)atof(v + 1); }
-
-        /* Clamp */
-        if (sp.level_min < 1)  sp.level_min = 1;
-        if (sp.level_min > 60) sp.level_min = 60;
-        if (sp.level_max < sp.level_min) sp.level_max = sp.level_min;
-        if (sp.level_max > 60) sp.level_max = 60;
-        if (sp.fleet_min < 1)  sp.fleet_min = 1;
-        if (sp.fleet_min > 10) sp.fleet_min = 10;
-        if (sp.fleet_max < sp.fleet_min) sp.fleet_max = sp.fleet_min;
-        if (sp.fleet_max > 10) sp.fleet_max = 10;
-        if (sp.angle_deg < 0.0f || sp.angle_deg >= 360.0f)
-            sp.angle_deg = fmodf(sp.angle_deg + 360.0f, 360.0f);
-        if (sp.id > max_id) max_id = sp.id;
-
-        ghost_spawn_points[ghost_spawn_point_count++] = sp;
-        p = obj_end + 1;
-    }
-
-    free(buf);
-    log_info("Loaded %d ghost fleet spawn point(s) from %s", ghost_spawn_point_count, GHOST_SPAWNS_PATH);
-}
-
-void ghost_spawns_save(void) {
-    FILE *f = fopen(GHOST_SPAWNS_PATH, "w");
-    if (!f) {
-        log_error("Failed to open %s for writing", GHOST_SPAWNS_PATH);
-        return;
-    }
-
-    fprintf(f, "{\n  \"spawn_points\": [\n");
-    for (int i = 0; i < ghost_spawn_point_count; i++) {
-        const GhostSpawnPoint *sp = &ghost_spawn_points[i];
-        fprintf(f,
-                "    {\"id\":%u,\"x\":%.1f,\"y\":%.1f"
-                ",\"level_min\":%u,\"level_max\":%u"
-                ",\"fleet_min\":%u,\"fleet_max\":%u"
-                ",\"angle_deg\":%.1f}%s\n",
-                sp->id, sp->x, sp->y,
-                (unsigned)sp->level_min, (unsigned)sp->level_max,
-                (unsigned)sp->fleet_min, (unsigned)sp->fleet_max,
-                sp->angle_deg,
-                i < ghost_spawn_point_count - 1 ? "," : "");
-    }
-    fprintf(f, "  ]\n}\n");
-    fclose(f);
-    log_info("Saved %d ghost fleet spawn point(s) to %s", ghost_spawn_point_count, GHOST_SPAWNS_PATH);
-}
-
-/* ── Ghost ship auto-spawner ─────────────────────────────────────────────────
- * If static spawn points are defined (ghost_spawn_point_count > 0), fleets
- * are spawned at those positions whenever the area is vacant.
- * If no spawn points are configured, falls back to random open-water spawning.
- * Called each server tick; internally rate-limited to GHOST_SPAWN_INTERVAL_S.
- */
-void tick_ghost_ship_spawner(float dt) {
-    static float spawn_timer = 0.0f;
-    static uint32_t spawn_rng = 0xdeadbeef;
-
-    spawn_timer -= dt;
-    if (spawn_timer > 0.0f) return;
-    spawn_timer = GHOST_SPAWN_INTERVAL_S;
-
-    /* Count active ghost ships */
-    int ghost_count = 0;
-    for (int s = 0; s < ship_count; s++) {
-        if (ships[s].active && !ships[s].is_sinking &&
-            ships[s].ship_type == SHIP_TYPE_GHOST)
-            ghost_count++;
-    }
-    if (ghost_count >= GHOST_MAX_POPULATION) return;
-
-    /* Don't spawn if the sim is nearly full */
-    if (global_sim && (int)global_sim->ship_count >= (MAX_SHIPS - 20)) return;
-
-    /* ── Point-based spawning ──────────────────────────────────────────────── */
-    if (ghost_spawn_point_count > 0) {
-        for (int pi = 0; pi < ghost_spawn_point_count; pi++) {
-            GhostSpawnPoint *sp = &ghost_spawn_points[pi];
-
-            /* A spawn point is occupied as long as ANY ghost ship tagged with
-             * this point's id is still active and not sinking.  We don't use
-             * a proximity radius — ships roam freely and the fleet is tied to
-             * its spawn point by membership, not by location. */
-            bool occupied = false;
-            for (int s = 0; s < ship_count && !occupied; s++) {
-                if (!ships[s].active || ships[s].is_sinking) continue;
-                if (ships[s].ship_type != SHIP_TYPE_GHOST)  continue;
-                if (ghost_spawn_tags[s] == sp->id)
-                    occupied = true;
-            }
-            if (occupied) continue;
-
-            /* All tagged members are gone — pick a new randomised fleet */
-            spawn_rng = spawn_rng * 1664525u + 1013904223u;
-            int fleet_range = (int)(sp->fleet_max - sp->fleet_min + 1);
-            int fleet_size  = sp->fleet_min + (int)(spawn_rng % (uint32_t)fleet_range);
-
-            /* Cap to global population limit and sim headroom */
-            int remaining    = GHOST_MAX_POPULATION - ghost_count;
-            int sim_headroom = global_sim ? (MAX_SHIPS - 20 - (int)global_sim->ship_count) : 0;
-            if (sim_headroom < remaining) remaining = sim_headroom;
-            if (fleet_size > remaining) fleet_size = remaining;
-            if (fleet_size <= 0) return;
-
-            /* Formation base angle from the spawn point's configured heading */
-            float base_angle = sp->angle_deg * ((float)M_PI / 180.0f);
-
-            for (int fi = 0; fi < fleet_size; fi++) {
-                float angle = base_angle + (float)fi * (2.0f * (float)M_PI / (float)fleet_size);
-                spawn_rng = spawn_rng * 1664525u + 1013904223u;
-                float jitter = (((float)(spawn_rng & 0xFFFFu) / 65535.0f) - 0.5f) * 0.524f;
-                angle += jitter;
-                spawn_rng = spawn_rng * 1664525u + 1013904223u;
-                float radius = 300.0f + ((float)(spawn_rng & 0xFFFFu) / 65535.0f) * 300.0f;
-                float sx = sp->x + cosf(angle) * radius;
-                float sy = sp->y + sinf(angle) * radius;
-                if (sx < 1000.0f) sx = 1000.0f;
-                if (sx > MAP_WIDTH  - 1000.0f) sx = MAP_WIDTH  - 1000.0f;
-                if (sy < 1000.0f) sy = 1000.0f;
-                if (sy > MAP_HEIGHT - 1000.0f) sy = MAP_HEIGHT - 1000.0f;
-
-                /* Each ship in the fleet gets a random level within the range */
-                spawn_rng = spawn_rng * 1664525u + 1013904223u;
-                int lv_range = (int)(sp->level_max - sp->level_min + 1);
-                uint8_t ship_level = sp->level_min + (uint8_t)(spawn_rng % (uint32_t)lv_range);
-
-                uint32_t new_id = websocket_server_create_ghost_ship(sx, sy, ship_level);
-
-                /* Tag the newly created ship slot so we can track fleet membership */
-                if (new_id != 0) {
-                    for (int s = 0; s < ship_count; s++) {
-                        if (ships[s].active && ships[s].ship_id == new_id) {
-                            ghost_spawn_tags[s] = sp->id;
-                            break;
-                        }
-                    }
-                }
-            }
-            ghost_count += fleet_size;
-            if (ghost_count >= GHOST_MAX_POPULATION) return;
-        }
-        return;
-    }
-
-    /* ── Fallback: random open-water spawning (no spawn points defined) ────── */
-    for (int attempt = 0; attempt < GHOST_SPAWN_MAX_ATTEMPTS; attempt++) {
-        spawn_rng = spawn_rng * 1664525u + 1013904223u;
-        float rx = (float)(spawn_rng & 0xFFFFu) / 65535.0f * MAP_WIDTH;
-        spawn_rng = spawn_rng * 1664525u + 1013904223u;
-        float ry = (float)(spawn_rng & 0xFFFFu) / 65535.0f * MAP_HEIGHT;
-
-        bool too_close = false;
-        for (int ii = 0; ii < ISLAND_COUNT && !too_close; ii++) {
-            const IslandDef* isl = &ISLAND_PRESETS[ii];
-            float dx = rx - isl->x;
-            float dy = ry - isl->y;
-            float dist = sqrtf(dx * dx + dy * dy);
-            float island_edge = isl->beach_radius_px + isl->beach_max_bump;
-            if (dist < island_edge + GHOST_MIN_ISLAND_DIST)
-                too_close = true;
-        }
-        if (too_close) continue;
-
-        if (rx < 1000.0f || rx > MAP_WIDTH  - 1000.0f) continue;
-        if (ry < 1000.0f || ry > MAP_HEIGHT - 1000.0f) continue;
-
-        #define GHOST_MIN_PLAYER_DIST 2000.0f
-        bool near_player = false;
-        for (int ps = 0; ps < ship_count && !near_player; ps++) {
-            if (!ships[ps].active || ships[ps].ship_type == SHIP_TYPE_GHOST) continue;
-            float pdx = rx - ships[ps].x;
-            float pdy = ry - ships[ps].y;
-            if (pdx * pdx + pdy * pdy < GHOST_MIN_PLAYER_DIST * GHOST_MIN_PLAYER_DIST)
-                near_player = true;
-        }
-        if (near_player) continue;
-
-        spawn_rng = spawn_rng * 1664525u + 1013904223u;
-        uint8_t level = (uint8_t)(1 + (spawn_rng % 60));
-        spawn_rng = spawn_rng * 1664525u + 1013904223u;
-        int fleet_size = (int)(3 + (spawn_rng % 3));
-
-        int remaining = GHOST_MAX_POPULATION - ghost_count;
-        int sim_headroom = global_sim ? (MAX_SHIPS - 20 - (int)global_sim->ship_count) : 0;
-        if (sim_headroom < remaining) remaining = sim_headroom;
-        if (fleet_size > remaining) fleet_size = remaining;
-        if (fleet_size <= 0) return;
-
-        spawn_rng = spawn_rng * 1664525u + 1013904223u;
-        float fleet_base_angle = ((float)(spawn_rng & 0xFFFFu) / 65535.0f) * 2.0f * (float)M_PI;
-
-        for (int fi = 0; fi < fleet_size; fi++) {
-            float base_angle = fleet_base_angle + (float)fi * (2.0f * (float)M_PI / (float)fleet_size);
-            spawn_rng = spawn_rng * 1664525u + 1013904223u;
-            float jitter = (((float)(spawn_rng & 0xFFFFu) / 65535.0f) - 0.5f) * 0.524f;
-            float angle  = base_angle + jitter;
-            spawn_rng = spawn_rng * 1664525u + 1013904223u;
-            float radius = 300.0f + ((float)(spawn_rng & 0xFFFFu) / 65535.0f) * 300.0f;
-            float sx = rx + cosf(angle) * radius;
-            float sy = ry + sinf(angle) * radius;
-            if (sx < 1000.0f) sx = 1000.0f;
-            if (sx > MAP_WIDTH  - 1000.0f) sx = MAP_WIDTH  - 1000.0f;
-            if (sy < 1000.0f) sy = 1000.0f;
-            if (sy > MAP_HEIGHT - 1000.0f) sy = MAP_HEIGHT - 1000.0f;
-            websocket_server_create_ghost_ship(sx, sy, level);
-        }
-        return;
-    }
-}
+/* ── Ghost spawn points: see load_ghost_spawns / tick_ghost_spawn_points ─── */
 
 /* ── Ship Claiming Flag tick ────────────────────────────────────────────────
  * Called each server tick (dt in seconds).
@@ -1500,4 +1331,421 @@ void tick_claim_flags(float dt) {
             websocket_server_broadcast(abcast);
         }
     }
+}
+
+/* ============================================================================
+ * GHOST SPAWN-POINT SYSTEM
+ * ============================================================================ */
+
+/* Helper: find ship slot index (0-based) by ship_id. Returns -1 if not found. */
+static int find_ship_slot(uint16_t ship_id) {
+    for (int i = 0; i < ship_count; i++) {
+        if (ships[i].active && ships[i].ship_id == ship_id) return i;
+    }
+    return -1;
+}
+
+/* load_ghost_spawns — parse data/ghost_spawns.json at startup.
+ * Also initialises the per-ship parallel arrays. */
+void load_ghost_spawns(const char *path) {
+    /* Seed the spawn RNG from wall-clock time so each server run gives
+     * different level/fleet-size rolls. */
+    rng_seed(&ghost_spawn_rng, (uint32_t)get_time_ms() ^ 0xDEADBEEFu);
+
+    /* Initialise per-ship tracking arrays */
+    for (int i = 0; i < MAX_SIMPLE_SHIPS; i++) {
+        ghost_ship_level[i]     = 1;
+        ghost_ship_spawn_idx[i] = -1;
+        ghost_ship_fleet_idx[i] = -1;
+        ghost_ship_fleet_role[i] = 0;
+    }
+    /* Initialise fleet table */
+    memset(ghost_fleets, 0, sizeof(ghost_fleets));
+    ghost_fleet_count    = 0;
+    ghost_spawn_count    = 0;
+    ghost_spawns_enabled = false;
+
+    /* Reset spawn queue */
+    spawn_queue_head = 0;
+    spawn_queue_tail = 0;
+    spawn_queue_len  = 0;
+
+    if (!path) path = GHOST_SPAWNS_PATH;
+
+    json_object *root = json_object_from_file(path);
+    if (!root) {
+        log_warn("ghost_spawns: could not load '%s' — ghost ships disabled", path);
+        return;
+    }
+
+    json_object *j_enabled;
+    if (json_object_object_get_ex(root, "enabled", &j_enabled))
+        ghost_spawns_enabled = json_object_get_boolean(j_enabled);
+
+    json_object *j_cap;
+    if (json_object_object_get_ex(root, "global_max_cap", &j_cap))
+        ghost_global_max_cap = json_object_get_int(j_cap);
+    if (ghost_global_max_cap < 0) ghost_global_max_cap = 0;
+
+    json_object *arr;
+    if (!json_object_object_get_ex(root, "spawns", &arr) ||
+        !json_object_is_type(arr, json_type_array)) {
+        log_warn("ghost_spawns: no 'spawns' array in '%s'", path);
+        json_object_put(root);
+        return;
+    }
+
+    int n = json_object_array_length(arr);
+    for (int i = 0; i < n && ghost_spawn_count < MAX_GHOST_SPAWNS; i++) {
+        json_object *e = json_object_array_get_idx(arr, i);
+        GhostSpawnPoint *sp = &ghost_spawns[ghost_spawn_count];
+        memset(sp, 0, sizeof(*sp));
+        sp->enabled = true;
+
+        json_object *jv;
+        if (json_object_object_get_ex(e, "id",              &jv)) sp->id              = json_object_get_int(jv);
+        if (json_object_object_get_ex(e, "label",           &jv)) snprintf(sp->label, sizeof(sp->label), "%s", json_object_get_string(jv));
+        if (json_object_object_get_ex(e, "x",               &jv)) sp->x               = (float)json_object_get_double(jv);
+        if (json_object_object_get_ex(e, "y",               &jv)) sp->y               = (float)json_object_get_double(jv);
+        if (json_object_object_get_ex(e, "radius",          &jv)) sp->radius          = (float)json_object_get_double(jv);
+        if (json_object_object_get_ex(e, "level_min",       &jv)) sp->level_min       = json_object_get_int(jv);
+        if (json_object_object_get_ex(e, "level_max",       &jv)) sp->level_max       = json_object_get_int(jv);
+        if (json_object_object_get_ex(e, "count_min",       &jv)) sp->count_min       = json_object_get_int(jv);
+        if (json_object_object_get_ex(e, "count_max",       &jv)) sp->count_max       = json_object_get_int(jv);
+        if (json_object_object_get_ex(e, "respawn_delay_s", &jv)) sp->respawn_delay_s = (float)json_object_get_double(jv);
+
+        /* Clamp */
+        if (sp->level_min < 1)  sp->level_min = 1;
+        if (sp->level_max < sp->level_min) sp->level_max = sp->level_min;
+        if (sp->level_max > 60) sp->level_max = 60;
+        if (sp->count_min < 0) sp->count_min = 0;
+        if (sp->count_max < sp->count_min) sp->count_max = sp->count_min;
+        if (sp->respawn_delay_s <= 0.0f) sp->respawn_delay_s = 60.0f;
+        if (sp->radius <= 0.0f) sp->radius = 2000.0f;
+
+        sp->active_count = 0;
+        sp->respawn_timer = 0.0f;
+        ghost_spawn_count++;
+    }
+
+    json_object_put(root);
+    log_info("👻 ghost_spawns: loaded %d spawn point(s), enabled=%s",
+             ghost_spawn_count, ghost_spawns_enabled ? "true" : "false");
+}
+
+/* websocket_server_create_ghost_ship_level — level-scaled ghost ship creation.
+ * level 1–60 scales speed and hull HP.  spawn_idx = index into ghost_spawns[] (or -1). */
+uint32_t websocket_server_create_ghost_ship_level(float x, float y, int level, int spawn_idx) {
+    if (level < 1)  level = 1;
+    if (level > 60) level = 60;
+
+    uint32_t ship_id = websocket_server_create_ghost_ship(x, y, (uint8_t)level);
+    if (!ship_id) return 0;
+
+    int slot = find_ship_slot((uint16_t)ship_id);
+    if (slot >= 0) {
+        ghost_ship_level[slot]     = level;
+        ghost_ship_spawn_idx[slot] = spawn_idx;
+    }
+    return ship_id;
+}
+
+/* Forward declarations: ghost_ship_sunk uses these, which are defined later */
+static void enqueue_spawn(int spawn_idx, int fleet_size, int level);
+static bool try_drain_spawn_queue(void);
+
+/* ghost_ship_sunk — call this when a ghost ship completes its sink animation.
+ * Frees the spawn-point slot, updates fleet membership, and starts the
+ * respawn timer when the fleet has fully sunk. */
+void ghost_ship_sunk(uint16_t ship_id) {
+    int slot = find_ship_slot(ship_id);
+    if (slot < 0) return;
+
+    int sp_idx = ghost_ship_spawn_idx[slot];
+    int fi     = ghost_ship_fleet_idx[slot];
+
+    /* ── Decrement spawn-zone count ── */
+    if (sp_idx >= 0 && sp_idx < ghost_spawn_count) {
+        GhostSpawnPoint *sp = &ghost_spawns[sp_idx];
+        if (sp->active_count > 0) sp->active_count--;
+    }
+
+    /* ── Remove from fleet, promote if lead ── */
+    if (fi >= 0 && fi < MAX_GHOST_FLEETS && ghost_fleets[fi].active) {
+        GhostFleet *fleet = &ghost_fleets[fi];
+        for (int i = 0; i < fleet->ship_count; i++) {
+            if (fleet->ship_ids[i] != ship_id) continue;
+            /* Shift the rest down; re-assign roles */
+            for (int j = i; j < fleet->ship_count - 1; j++) {
+                fleet->ship_ids[j] = fleet->ship_ids[j + 1];
+                int sh = find_ship_slot(fleet->ship_ids[j]);
+                if (sh >= 0) ghost_ship_fleet_role[sh] = j; /* j is new index */
+            }
+            fleet->ship_count--;
+            break;
+        }
+        if (fleet->ship_count == 0) {
+            fleet->active = false;
+            /* Start respawn timer now that the whole fleet is gone */
+            if (sp_idx >= 0 && sp_idx < ghost_spawn_count) {
+                GhostSpawnPoint *sp = &ghost_spawns[sp_idx];
+                if (sp->active_count < sp->count_min && sp->respawn_timer <= 0.0f)
+                    sp->respawn_timer = sp->respawn_delay_s;
+            }
+            /* Fleet slot freed — immediately try to spawn a queued fleet */
+            try_drain_spawn_queue();
+        }
+    } else {
+        /* Manual / unfleeted ship — start timer immediately */
+        if (sp_idx >= 0 && sp_idx < ghost_spawn_count) {
+            GhostSpawnPoint *sp = &ghost_spawns[sp_idx];
+            if (sp->active_count < sp->count_min && sp->respawn_timer <= 0.0f)
+                sp->respawn_timer = sp->respawn_delay_s;
+        }
+    }
+
+    ghost_ship_spawn_idx[slot]  = -1;
+    ghost_ship_fleet_idx[slot]  = -1;
+    ghost_ship_fleet_role[slot] = 0;
+    ghost_ship_level[slot]      = 1;
+}
+
+/* spawn_ghost_fleet — create a full fleet at once in a wedge formation.
+ * fleet_size ships are spawned; the lead ship is placed at the zone centre
+ * (with slight scatter) and followers are offset in the wedge pattern.
+ * All ships share the same level and fleet slot. */
+static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
+    GhostSpawnPoint *spn = &ghost_spawns[spawn_idx];
+
+    /* Find a free fleet slot */
+    int fi = -1;
+    for (int i = 0; i < ghost_fleet_count; i++) {
+        if (!ghost_fleets[i].active) { fi = i; break; }
+    }
+    if (fi < 0) {
+        if (ghost_fleet_count >= MAX_GHOST_FLEETS) {
+            /* Should not happen — callers check for a free slot first.
+             * Re-enqueue so the spawn retries when a slot frees up. */
+            enqueue_spawn(spawn_idx, fleet_size, level);
+            return;
+        }
+        fi = ghost_fleet_count++;
+    }
+
+    GhostFleet *fleet = &ghost_fleets[fi];
+    memset(fleet, 0, sizeof(*fleet));
+    fleet->spawn_idx  = spawn_idx;
+    fleet->level      = level;
+    fleet->active     = true;
+
+    if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
+    if (fleet_size < 1)              fleet_size = 1;
+
+    /* Fleet initial heading — random direction */
+    float heading = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
+    float cos_h   = cosf(heading);
+    float sin_h   = sinf(heading);
+
+    /* Lead position: zone centre + small scatter */
+    float scatter = spn->radius * 0.25f;
+    float angle   = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
+    float lead_x  = spn->x + cosf(angle) * scatter;
+    float lead_y  = spn->y + sinf(angle) * scatter;
+
+    for (int i = 0; i < fleet_size; i++) {
+        float local_fwd = fleet_form_lx[i] * GHOST_FLEET_SPACING;
+        float local_lat = fleet_form_ly[i] * GHOST_FLEET_SPACING;
+        float sx = lead_x + local_fwd * cos_h - local_lat * sin_h;
+        float sy = lead_y + local_fwd * sin_h + local_lat * cos_h;
+
+        uint32_t ship_id = websocket_server_create_ghost_ship_level(sx, sy, level, spawn_idx);
+        if (!ship_id) {
+            log_warn("spawn_ghost_fleet: failed to create ship %d/%d", i + 1, fleet_size);
+            break;
+        }
+
+        fleet->ship_ids[fleet->ship_count] = (uint16_t)ship_id;
+
+        int slot = find_ship_slot((uint16_t)ship_id);
+        if (slot >= 0) {
+            ghost_ship_fleet_idx[slot]  = fi;
+            ghost_ship_fleet_role[slot] = fleet->ship_count; /* 0 = lead */
+            /* Initialise wander heading to the fleet heading */
+            ghost_desired_heading[slot] = heading;
+        }
+
+        fleet->ship_count++;
+        spn->active_count++;
+    }
+
+    log_info("👻 Spawn zone %d (%s): fleet %d — %d×Lv%d ghost ship(s) in wedge at (%.0f,%.0f)",
+             spn->id, spn->label, fi, fleet->ship_count, level, lead_x, lead_y);
+}
+
+/* ── Spawn queue helpers ─────────────────────────────────────────────────── */
+
+static int count_global_active_ghosts(void) {
+    int n = 0;
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active && ships[s].ship_type == SHIP_TYPE_GHOST && !ships[s].is_sinking)
+            n++;
+    }
+    return n;
+}
+
+static bool spawn_zone_in_queue(int spawn_idx) {
+    int i = spawn_queue_head;
+    for (int n = 0; n < spawn_queue_len; n++) {
+        if (spawn_queue[i].spawn_idx == spawn_idx) return true;
+        i = (i + 1) % MAX_SPAWN_QUEUE;
+    }
+    return false;
+}
+
+static void enqueue_spawn(int spawn_idx, int fleet_size, int level) {
+    if (spawn_queue_len >= MAX_SPAWN_QUEUE) return; /* silently drop — very unlikely */
+    spawn_queue[spawn_queue_tail].spawn_idx  = spawn_idx;
+    spawn_queue[spawn_queue_tail].fleet_size = fleet_size;
+    spawn_queue[spawn_queue_tail].level      = level;
+    spawn_queue_tail = (spawn_queue_tail + 1) % MAX_SPAWN_QUEUE;
+    spawn_queue_len++;
+}
+
+/* Attempt to spawn the oldest queued fleet entry.
+ * Returns true when a spawn was issued so callers can loop until empty. */
+static bool try_drain_spawn_queue(void) {
+    if (spawn_queue_len == 0) return false;
+
+    /* Need a free fleet slot */
+    bool has_slot = false;
+    for (int i = 0; i < ghost_fleet_count; i++) {
+        if (!ghost_fleets[i].active) { has_slot = true; break; }
+    }
+    if (!has_slot && ghost_fleet_count >= MAX_GHOST_FLEETS) return false;
+
+    int global_active = count_global_active_ghosts();
+    if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) return false;
+
+    SpawnQueueEntry e = spawn_queue[spawn_queue_head];
+    spawn_queue_head  = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
+    spawn_queue_len--;
+
+    int fleet_size = e.fleet_size;
+    if (ghost_global_max_cap > 0) {
+        int headroom = ghost_global_max_cap - global_active;
+        if (headroom <= 0) return false;
+        if (fleet_size > headroom) fleet_size = headroom;
+    }
+
+    spawn_ghost_fleet(e.spawn_idx, fleet_size, e.level);
+    return true;
+}
+
+/* tick_ghost_spawn_points — called each server tick.
+ * Counts active ghost ships per spawn point and spawns a fresh fleet when
+ * the zone is clear (active_count == 0) and the respawn timer expires. */
+void tick_ghost_spawn_points(float dt) {
+    if (!ghost_spawns_enabled || ghost_spawn_count == 0) return;
+
+    /* Recount active ships for each spawn zone and the global total */
+    for (int sp = 0; sp < ghost_spawn_count; sp++)
+        ghost_spawns[sp].active_count = 0;
+
+    int global_active = 0;
+    for (int s = 0; s < ship_count; s++) {
+        if (!ships[s].active || ships[s].ship_type != SHIP_TYPE_GHOST) continue;
+        if (ships[s].is_sinking) continue;
+        global_active++;
+        int sp_idx = ghost_ship_spawn_idx[s];
+        if (sp_idx >= 0 && sp_idx < ghost_spawn_count)
+            ghost_spawns[sp_idx].active_count++;
+    }
+
+    for (int sp = 0; sp < ghost_spawn_count; sp++) {
+        GhostSpawnPoint *spn = &ghost_spawns[sp];
+        if (!spn->enabled) continue;
+
+        /* Zone must be fully clear before a new fleet spawns */
+        if (spn->active_count > 0) {
+            spn->respawn_timer = 0.0f;
+            continue;
+        }
+
+        /* Don't enqueue the same zone twice */
+        if (spawn_zone_in_queue(sp)) continue;
+
+        /* Count down respawn timer */
+        if (spn->respawn_timer > 0.0f) {
+            spn->respawn_timer -= dt;
+            if (spn->respawn_timer > 0.0f) continue;
+            spn->respawn_timer = 0.0f;
+        }
+
+        /* Respect the global cap — stop queuing when already at limit */
+        if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) break;
+
+        /* Roll fleet size in [count_min, count_max] and a single level for
+         * the whole fleet in [level_min, level_max].
+         * Use the dedicated RNG so every zone/respawn gets a truly different
+         * value instead of the float-precision-collapsed get_time_ms() hack
+         * (which made all zones that spawn in the same tick use level_min). */
+        int fleet_size = (int)rng_range(&ghost_spawn_rng,
+                                        (uint32_t)spn->count_min,
+                                        (uint32_t)spn->count_max);
+        int lvl        = (int)rng_range(&ghost_spawn_rng,
+                                        (uint32_t)spn->level_min,
+                                        (uint32_t)spn->level_max);
+
+        if (fleet_size < 1) fleet_size = 1;
+
+        if (ghost_global_max_cap > 0) {
+            int headroom = ghost_global_max_cap - global_active;
+            if (headroom <= 0) break;
+            if (fleet_size > headroom) fleet_size = headroom;
+        }
+
+        global_active += fleet_size; /* optimistic accounting for subsequent zones */
+        enqueue_spawn(sp, fleet_size, lvl);
+    }
+
+    /* Immediately drain newly queued entries if slots are available */
+    while (try_drain_spawn_queue())
+        ;
+}
+
+/* ghost_spawns_to_json — serialise the spawn-point config to JSON.
+ * Returns bytes written (excluding NUL), or -1 on truncation. */
+int ghost_spawns_to_json(char *buf, size_t buf_size) {
+    /* Count live ghost ships for the status field */
+    int live_total = 0;
+    for (int s = 0; s < ship_count; s++) {
+        if (ships[s].active && ships[s].ship_type == SHIP_TYPE_GHOST && !ships[s].is_sinking)
+            live_total++;
+    }
+    int pos = 0;
+    pos += snprintf(buf + pos, buf_size - pos,
+                    "{\"enabled\":%s,\"global_max_cap\":%d,\"active_total\":%d,\"spawns\":[",
+                    ghost_spawns_enabled ? "true" : "false",
+                    ghost_global_max_cap,
+                    live_total);
+    for (int i = 0; i < ghost_spawn_count; i++) {
+        GhostSpawnPoint *sp = &ghost_spawns[i];
+        if (i > 0) pos += snprintf(buf + pos, buf_size - pos, ",");
+        pos += snprintf(buf + pos, buf_size - pos,
+            "{\"id\":%d,\"label\":\"%s\","
+            "\"x\":%.1f,\"y\":%.1f,\"radius\":%.1f,"
+            "\"level_min\":%d,\"level_max\":%d,"
+            "\"count_min\":%d,\"count_max\":%d,"
+            "\"respawn_delay_s\":%.1f,"
+            "\"active_count\":%d}",
+            sp->id, sp->label,
+            sp->x, sp->y, sp->radius,
+            sp->level_min, sp->level_max,
+            sp->count_min, sp->count_max,
+            sp->respawn_delay_s,
+            sp->active_count);
+        if (pos >= (int)buf_size - 4) return -1;
+    }
+    pos += snprintf(buf + pos, buf_size - pos, "]}");
+    return pos;
 }

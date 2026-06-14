@@ -1339,7 +1339,7 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     } else if (strcmp(path_start, "/api/islands") == 0) {
                         admin_api_islands(&resp);
                     } else if (strcmp(path_start, "/api/ghost-spawns") == 0) {
-                        admin_api_ghost_spawns_get(&resp);
+                        admin_api_get_ghost_spawns(&resp);
                     } else if (strcmp(path_start, "/api/world/state") == 0) {
                         /* Return the current save file as JSON */
                         static char world_state_buf[524288]; /* 512 KB */
@@ -1406,12 +1406,15 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                     } else if (strcmp(post_start, "/api/islands/save") == 0) {
                         size_t blen = body ? strlen(body) : 0;
                         admin_api_islands_save(&resp, body, blen);
+                    } else if (strcmp(post_start, "/api/ghost-spawns") == 0) {
+                        size_t blen = body ? strlen(body) : 0;
+                        admin_api_save_ghost_spawns(&resp, body, blen);
+                    } else if (strcmp(post_start, "/api/islands/positions") == 0) {
+                        size_t blen = body ? strlen(body) : 0;
+                        admin_api_save_island_positions(&resp, body, blen);
                     } else if (strcmp(post_start, "/api/islands/reposition") == 0) {
                         size_t blen = body ? strlen(body) : 0;
                         admin_api_islands_reposition(&resp, body, blen);
-                    } else if (strcmp(post_start, "/api/ghost-spawns") == 0) {
-                        size_t blen = body ? strlen(body) : 0;
-                        admin_api_ghost_spawns_set(&resp, body, blen);
                     } else if (strcmp(post_start, "/api/admin/ship") == 0) {
                         float x = 400.0f, y = 400.0f;
                         uint8_t company = 1; // COMPANY_PIRATES default

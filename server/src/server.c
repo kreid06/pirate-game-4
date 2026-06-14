@@ -135,7 +135,7 @@ int server_init(struct ServerContext** out_ctx) {
     log_info("WebSocket server linked to simulation");
 
     /* ── Load ghost fleet spawn points ── */
-    ghost_spawns_load();
+    load_ghost_spawns("data/ghost_spawns.json");
 
     /* ── Auto-load world state if a save file exists ── */
     {

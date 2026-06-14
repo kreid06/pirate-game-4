@@ -106,6 +106,53 @@ typedef struct {
 static IslandTemplate s_templates[MAX_TEMPLATES];
 static int            s_template_count = 0;
 
+/* ── Vertex normalisation ────────────────────────────────────────────────── */
+
+/**
+ * Centre every vertex ring of a template on (0, 0).
+ *
+ * The centroid is computed from the sand (outer) ring — that polygon defines
+ * the island "centre" semantically.  The same (cx, cy) offset is subtracted
+ * from all other rings so every layer stays aligned.  poly_bound_r is
+ * recomputed from the shifted sand vertices afterwards.
+ *
+ * Tolerances: if the centroid is already within 1 px of the origin we skip
+ * the shift (avoids floating-point churn on already-centred data).
+ */
+static void normalise_template_verts(IslandTemplate *t)
+{
+    if (t->vertex_count < 1) return;
+
+    float cx = 0.0f, cy = 0.0f;
+    for (int i = 0; i < t->vertex_count; i++) {
+        cx += t->vx[i];
+        cy += t->vy[i];
+    }
+    cx /= (float)t->vertex_count;
+    cy /= (float)t->vertex_count;
+
+    if (fabsf(cx) < 1.0f && fabsf(cy) < 1.0f) return; /* already centred */
+
+    log_info("[islands] normalising template '%s': centroid offset (%.1f, %.1f)",
+             t->name, cx, cy);
+
+    for (int i = 0; i < t->vertex_count;         i++) { t->vx[i]  -= cx; t->vy[i]  -= cy; }
+    for (int i = 0; i < t->grass_vertex_count;   i++) { t->gvx[i] -= cx; t->gvy[i] -= cy; }
+    for (int i = 0; i < t->shallow_vertex_count; i++) { t->svx[i] -= cx; t->svy[i] -= cy; }
+    for (int pi = 0; pi < t->stone_poly_count; pi++)
+        for (int i = 0; i < t->stone_vc[pi]; i++) { t->stone_vx[pi][i] -= cx; t->stone_vy[pi][i] -= cy; }
+    for (int pi = 0; pi < t->metal_poly_count; pi++)
+        for (int i = 0; i < t->metal_vc[pi]; i++) { t->metal_vx[pi][i] -= cx; t->metal_vy[pi][i] -= cy; }
+
+    /* Recompute broad-phase radius from shifted sand ring */
+    float max_r = 0.0f;
+    for (int i = 0; i < t->vertex_count; i++) {
+        float r = sqrtf(t->vx[i]*t->vx[i] + t->vy[i]*t->vy[i]);
+        if (r > max_r) max_r = r;
+    }
+    t->poly_bound_r = max_r + 50.0f;
+}
+
 static IslandTemplate *find_template(const char *name)
 {
     for (int i = 0; i < s_template_count; i++)
@@ -163,6 +210,9 @@ static void load_template_file(const char *path)
         t->stone_poly_count = load_multi_poly(stone_polys, t->stone_vx, t->stone_vy, t->stone_vc, ISLAND_MAX_BIOME_POLYS);
     if (metal_polys)
         t->metal_poly_count = load_multi_poly(metal_polys, t->metal_vx, t->metal_vy, t->metal_vc, ISLAND_MAX_BIOME_POLYS);
+
+    /* Ensure all rings are centred at (0, 0) before rotation is applied */
+    normalise_template_verts(t);
 
     json_object_put(root);
     s_template_count++;

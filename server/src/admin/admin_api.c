@@ -886,8 +886,8 @@ int admin_api_islands(struct HttpResponse* resp) {
         if (ii > 0)
             ISL_APPEND(",");
 
-        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"preset\":\"%s\",\"rotation_deg\":%.1f",
-            isl->id, isl->x, isl->y, isl->preset, isl->rotation_deg);
+        ISL_APPEND("{\"id\":%d,\"cx\":%.1f,\"cy\":%.1f,\"rotation_deg\":%.4f,\"preset\":\"%s\"",
+            isl->id, isl->x, isl->y, isl->rotation_deg, isl->preset);
         if (isl->template_name[0] != '\0')
             ISL_APPEND(",\"template\":\"%s\"", isl->template_name);
 
@@ -1088,6 +1088,64 @@ int admin_api_islands_save(struct HttpResponse *resp, const char *body, size_t b
     return 0;
 }
 
+/* ── Ghost spawn-point API (world editor) ───────────────────────────────── */
+
+static char ghost_spawn_json_buf[65536];
+
+int admin_api_get_ghost_spawns(struct HttpResponse *resp) {
+    int written = ghost_spawns_to_json(ghost_spawn_json_buf, sizeof(ghost_spawn_json_buf));
+    if (written < 0) {
+        resp->status_code = 500;
+        resp->content_type = "application/json";
+        resp->body = "{\"error\":\"buffer overflow\"}";
+        resp->body_length = 26;
+        return -1;
+    }
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = ghost_spawn_json_buf;
+    resp->body_length = (size_t)written;
+    return 0;
+}
+
+int admin_api_save_ghost_spawns(struct HttpResponse *resp, const char *body, size_t body_len) {
+    static char save_gs_buf[256];
+    const char *path = "data/ghost_spawns.json";
+
+    json_object *test = json_tokener_parse(body);
+    if (!test) {
+        int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"error\":\"invalid JSON\"}");
+        resp->status_code = 400;
+        resp->content_type = "application/json";
+        resp->body = save_gs_buf;
+        resp->body_length = (size_t)len;
+        return -1;
+    }
+    json_object_put(test);
+
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"error\":\"cannot write %s\"}", path);
+        resp->status_code = 500;
+        resp->content_type = "application/json";
+        resp->body = save_gs_buf;
+        resp->body_length = (size_t)len;
+        return -1;
+    }
+    fwrite(body, 1, body_len, f);
+    fclose(f);
+
+    load_ghost_spawns(path);
+
+    int len = snprintf(save_gs_buf, sizeof(save_gs_buf), "{\"ok\":true}");
+    resp->status_code = 200;
+    resp->content_type = "application/json";
+    resp->body = save_gs_buf;
+    resp->body_length = (size_t)len;
+    return 0;
+}
+
+/* ── Island reposition endpoint ──────────────────────────────────────────── */
 /* ── Island reposition endpoint ──────────────────────────────────────────── *
  * POST /api/islands/reposition                                                *
  * Body: [{id, x, y}, ...]                                                    *
@@ -1212,147 +1270,39 @@ int admin_api_islands_reposition(struct HttpResponse *resp, const char *body, si
     return 0;
 }
 
-/* ── GET /api/ghost-spawns ────────────────────────────────────────────────── */
+/* ── Island positions API (world editor full-save) ──────────────────────── */
+int admin_api_save_island_positions(struct HttpResponse *resp, const char *body, size_t body_len) {
+    static char save_ip_buf[256];
+    const char *path = "data/islands/islands.json";
 
-static char ghost_spawns_get_buf[16384];
-
-int admin_api_ghost_spawns_get(struct HttpResponse *resp) {
-    int pos = 0;
-    pos += snprintf(ghost_spawns_get_buf + pos, sizeof(ghost_spawns_get_buf) - (size_t)pos,
-                    "{\"spawn_points\":[");
-    for (int i = 0; i < ghost_spawn_point_count; i++) {
-        const GhostSpawnPoint *sp = &ghost_spawn_points[i];
-        pos += snprintf(ghost_spawns_get_buf + pos, sizeof(ghost_spawns_get_buf) - (size_t)pos,
-                        "%s{\"id\":%u,\"x\":%.1f,\"y\":%.1f"
-                        ",\"level_min\":%u,\"level_max\":%u"
-                        ",\"fleet_min\":%u,\"fleet_max\":%u"
-                        ",\"angle_deg\":%.1f}",
-                        i > 0 ? "," : "",
-                        sp->id, sp->x, sp->y,
-                        (unsigned)sp->level_min, (unsigned)sp->level_max,
-                        (unsigned)sp->fleet_min, (unsigned)sp->fleet_max,
-                        sp->angle_deg);
-    }
-    pos += snprintf(ghost_spawns_get_buf + pos, sizeof(ghost_spawns_get_buf) - (size_t)pos, "]}");
-
-    resp->status_code  = 200;
-    resp->content_type = "application/json";
-    resp->body         = ghost_spawns_get_buf;
-    resp->body_length  = (size_t)pos;
-    return 0;
-}
-
-/* ── POST /api/ghost-spawns ───────────────────────────────────────────────── */
-
-static char ghost_spawns_set_buf[256];
-
-int admin_api_ghost_spawns_set(struct HttpResponse *resp, const char *body, size_t body_len) {
-    (void)body_len;
-    if (!body) {
-        resp->status_code  = 400;
-        resp->body         = (char *)"{\"error\":\"missing body\"}";
-        resp->body_length  = 23;
+    json_object *root = json_tokener_parse(body);
+    if (!root) {
+        int len = snprintf(save_ip_buf, sizeof(save_ip_buf), "{\"error\":\"invalid JSON\"}");
+        resp->status_code = 400;
         resp->content_type = "application/json";
+        resp->body = save_ip_buf;
+        resp->body_length = (size_t)len;
         return -1;
     }
+    json_object_put(root);
 
-    /* Parse JSON array of spawn-point objects:
-     * [{"id":1,"x":1000,"y":2000,"level":30,"fleet_size":3}, ...]
-     * We accept either an array at root or {"spawn_points":[...]}. */
-    const char *arr = body;
-    const char *sp_key = strstr(body, "\"spawn_points\"");
-    if (sp_key) {
-        arr = strchr(sp_key, '[');
-        if (!arr) arr = body;
-    } else {
-        /* Skip to first '[' */
-        while (*arr && *arr != '[') arr++;
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        int len = snprintf(save_ip_buf, sizeof(save_ip_buf), "{\"error\":\"cannot write %s\"}", path);
+        resp->status_code = 500;
+        resp->content_type = "application/json";
+        resp->body = save_ip_buf;
+        resp->body_length = (size_t)len;
+        return -1;
     }
+    fwrite(body, 1, body_len, f);
+    fclose(f);
 
-    int new_count = 0;
-    GhostSpawnPoint new_points[MAX_GHOST_SPAWN_POINTS];
-    uint32_t next_id = 1;
-
-    /* Find highest existing id for auto-increment */
-    for (int i = 0; i < ghost_spawn_point_count; i++)
-        if (ghost_spawn_points[i].id >= next_id)
-            next_id = ghost_spawn_points[i].id + 1;
-
-    const char *p = arr;
-    if (*p == '[') p++;
-    while (*p && new_count < MAX_GHOST_SPAWN_POINTS) {
-        while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == ',') p++;
-        if (*p != '{') break;
-
-        GhostSpawnPoint sp = {0};
-        const char *obj_end = strchr(p, '}');
-        if (!obj_end) break;
-
-        const char *v;
-        v = strstr(p, "\"id\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.id = (uint32_t)atoi(v + 1); }
-        v = strstr(p, "\"x\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.x = (float)atof(v + 1); }
-        v = strstr(p, "\"y\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.y = (float)atof(v + 1); }
-
-        v = strstr(p, "\"level_min\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.level_min = (uint8_t)atoi(v + 1); }
-        v = strstr(p, "\"level_max\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.level_max = (uint8_t)atoi(v + 1); }
-        if (sp.level_min == 0 && sp.level_max == 0) {
-            v = strstr(p, "\"level\"");
-            if (v && v < obj_end) {
-                v = strchr(v, ':'); if (v) {
-                    uint8_t lv = (uint8_t)atoi(v + 1);
-                    sp.level_min = sp.level_max = lv;
-                }
-            }
-        }
-
-        v = strstr(p, "\"fleet_min\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.fleet_min = (uint8_t)atoi(v + 1); }
-        v = strstr(p, "\"fleet_max\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.fleet_max = (uint8_t)atoi(v + 1); }
-        if (sp.fleet_min == 0 && sp.fleet_max == 0) {
-            v = strstr(p, "\"fleet_size\"");
-            if (v && v < obj_end) {
-                v = strchr(v, ':'); if (v) {
-                    uint8_t fs = (uint8_t)atoi(v + 1);
-                    sp.fleet_min = sp.fleet_max = fs;
-                }
-            }
-        }
-
-        v = strstr(p, "\"angle_deg\"");
-        if (v && v < obj_end) { v = strchr(v, ':'); if (v) sp.angle_deg = (float)atof(v + 1); }
-
-        if (sp.id == 0) sp.id = next_id++;
-        if (sp.level_min < 1)  sp.level_min = 1;
-        if (sp.level_min > 60) sp.level_min = 60;
-        if (sp.level_max < sp.level_min) sp.level_max = sp.level_min;
-        if (sp.level_max > 60) sp.level_max = 60;
-        if (sp.fleet_min < 1)  sp.fleet_min = 1;
-        if (sp.fleet_min > 10) sp.fleet_min = 10;
-        if (sp.fleet_max < sp.fleet_min) sp.fleet_max = sp.fleet_min;
-        if (sp.fleet_max > 10) sp.fleet_max = 10;
-        if (sp.angle_deg < 0.0f || sp.angle_deg >= 360.0f)
-            sp.angle_deg = fmodf(sp.angle_deg + 360.0f, 360.0f);
-
-        new_points[new_count++] = sp;
-        p = obj_end + 1;
-    }
-
-    /* Replace global array */
-    memcpy(ghost_spawn_points, new_points, (size_t)new_count * sizeof(GhostSpawnPoint));
-    ghost_spawn_point_count = new_count;
-    ghost_spawns_save();
-
-    int len = snprintf(ghost_spawns_set_buf, sizeof(ghost_spawns_set_buf),
-                       "{\"ok\":true,\"count\":%d}", new_count);
-    resp->status_code  = 200;
+    int len = snprintf(save_ip_buf, sizeof(save_ip_buf), "{\"ok\":true}");
+    resp->status_code = 200;
     resp->content_type = "application/json";
-    resp->body         = ghost_spawns_set_buf;
-    resp->body_length  = (size_t)len;
+    resp->body = save_ip_buf;
+    resp->body_length = (size_t)len;
     return 0;
 }
+

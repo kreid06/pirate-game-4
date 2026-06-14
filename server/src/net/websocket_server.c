@@ -1143,28 +1143,34 @@ static bool resolve_swimmer_ship_hull_collision(const SimpleShip* ship,
     }
     float ccw = (area2 >= 0.0f) ? 1.0f : -1.0f;
 
-    /* Which side did the player legally occupy last tick? (point-in-polygon
-       of the OLD position — breaches are the only legal way to change it) */
-    bool inside_prev = false;
-    for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
-        if ((hyv[j] > oly) != (hyv[i] > oly)) {
-            float xi = hxv[j] + (oly - hyv[j]) * (hxv[i] - hxv[j]) / (hyv[i] - hyv[j]);
-            if (olx < xi) inside_prev = !inside_prev;
-        }
-    }
-    float side = inside_prev ? -1.0f : 1.0f;
+    /* Swimmers always belong on the OUTSIDE of any hull.
+     *
+     * The old model used the previous-position side to pick the normal direction:
+     * if old pos was inside (e.g. just dismounted from deck), side = -1.0 and
+     * pass 2 pushed the player toward the ship centre every tick.  Because the
+     * server is semi-authoritative and adopts client positions, the client's
+     * inward-pushed prediction was reported back and adopted, reinforcing the bug.
+     *
+     * Fix: always side = +1.0 (outward normals).  Breach gaps are handled by
+     * hull_section_plank_alive() returning false — those edges are skipped in
+     * both passes, so players can still exit through a breached section. */
+    float side = 1.0f;
 
     bool moved = false;
 
     /* Pass 1: crossing rejection — if the old→new motion segment crosses an
        alive edge, clamp to the earliest crossing pushed back to the legal side. */
+    /* Ghost ship hulls are always fully solid — players cannot pass through
+     * a breached section or board a ghost ship. Skip plank-alive checks. */
+    bool _ghost_hull = (ship->ship_type == SHIP_TYPE_GHOST);
+
     float mx = lx - olx, my = ly - oly;
     if (mx * mx + my * my > 1e-9f) {
         float best_t = 1e30f;
         int   best_i = -1, best_j = -1;
         for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
-            if (!hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
-                continue; /* breach: passable */
+            if (!_ghost_hull && !hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
+                continue; /* breach: passable (player ships only) */
             float ax = hxv[j], ay = hyv[j];
             float ex = hxv[i] - ax, ey = hyv[i] - ay;
             float denom = mx * ey - my * ex;
@@ -1193,8 +1199,8 @@ static bool resolve_swimmer_ship_hull_collision(const SimpleShip* ship,
     /* Pass 2: contact pushout (two iterations so corners settle). */
     for (int iter = 0; iter < 2; iter++) {
         for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
-            if (!hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
-                continue; /* breach: passable */
+            if (!_ghost_hull && !hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
+                continue; /* breach: passable (player ships only) */
 
             float ax = hxv[j], ay = hyv[j];
             float bx = hxv[i], by = hyv[i];
@@ -1607,6 +1613,7 @@ void apply_group_gunport_state(SimpleShip* ship, WeaponGroup* group) {
 }
 
 void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
+    if (ship->ship_type == SHIP_TYPE_GHOST) return; /* players cannot board ghost ships */
     player->parent_ship_id = ship->ship_id;
     // company_id is NOT inherited from ship — assigned by admin or player choice
     player->local_x = local_x;
@@ -1635,8 +1642,16 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
 
     log_info("🌊 Player %u dismounting from ship %u (reason: %s)", 
              player->player_id, player->parent_ship_id, reason);
-    
-    // Keep current world position but clear ship reference
+
+    // Convert the player's local position to world coordinates before clearing it.
+    // player->x/y may be stale (only updated in the movement tick), so recalculate
+    // now to ensure the player exits at their actual position on deck, not the ship centre.
+    SimpleShip* old_ship = find_ship(old_ship_id);
+    if (old_ship) {
+        ship_local_to_world(old_ship, player->local_x, player->local_y,
+                            &player->x, &player->y);
+    }
+
     player->parent_ship_id = 0;
     player->local_x = 0.0f;
     player->local_y = 0.0f;
@@ -2032,21 +2047,25 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "]");
     out->projectiles_len = (int)strlen(out->projectiles_json);
 
-    int npcs_offset = 0;
-    npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "[");
-    bool first_npc = true;
+    /* NPC entries: serialise directly into per-entry cache; no combined blob.
+     * The old approach wrote all NPCs into npcs_json[32768], but with up to
+     * MAX_WORLD_NPCS (512) active NPCs at ~500 bytes each (~256 KB needed)
+     * the 32 KB buffer overflowed.  snprintf's signed/unsigned subtraction
+     * (sizeof - int offset) wraps to a huge size_t once offset > sizeof,
+     * allowing writes past the buffer end that corrupt adjacent struct fields
+     * (tmb_len, ditem_len, players_len …) and produce non-UTF-8 WebSocket
+     * frames.  The per-client send path already reads npc_entry[] directly;
+     * npcs_json is not used in any send path, so we skip building it. */
+    memset(out->npc_entry_active, 0, sizeof(out->npc_entry_active));
     int _wnc = snap->world_npc_count;
     if (_wnc < 0) _wnc = 0;
     if (_wnc > MAX_WORLD_NPCS) _wnc = MAX_WORLD_NPCS;
-    memset(out->npc_entry_active, 0, sizeof(out->npc_entry_active));
     out->npc_entry_count = _wnc;
     for (int n = 0; n < _wnc; n++) {
         const WorldNpc* npc = &snap->world_npcs[n];
         if (!npc->active) continue;
-        if (!first_npc)
-            npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, ",");
-        int _ne_start = npcs_offset;
-        npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset,
+
+        int _nlen = snprintf(out->npc_entry[n], sizeof(out->npc_entry[n]),
             "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
             "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
             "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
@@ -2069,34 +2088,27 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
                 (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
             (int)npc->task_locked);
-        /* Capture per-entry for AOI-filtered per-client assembly. */
-        {
-            int _nelen = npcs_offset - _ne_start;
-            if (_nelen > 0) {
-                int _ncap = (int)sizeof(out->npc_entry[n]) - 1;
-                if (_nelen > _ncap) _nelen = _ncap;
-                memcpy(out->npc_entry[n], out->npcs_json + _ne_start, (size_t)_nelen);
-                out->npc_entry[n][_nelen] = '\0';
-                out->npc_entry_len[n] = _nelen;
-            } else {
-                out->npc_entry_len[n] = 0;
-            }
-            float _nwx = npc->x, _nwy = npc->y;
-            if (npc->ship_id != 0) {
-                for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
-                    if (out->aoi_ship_id[_asi] == (uint32_t)npc->ship_id) {
-                        _nwx = out->aoi_ship_px[_asi]; _nwy = out->aoi_ship_py[_asi]; break;
-                    }
+        if (_nlen < 0) _nlen = 0;
+        if (_nlen >= (int)sizeof(out->npc_entry[n]))
+            _nlen = (int)sizeof(out->npc_entry[n]) - 1;
+        out->npc_entry[n][_nlen] = '\0';
+        out->npc_entry_len[n] = _nlen;
+
+        float _nwx = npc->x, _nwy = npc->y;
+        if (npc->ship_id != 0) {
+            for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
+                if (out->aoi_ship_id[_asi] == (uint32_t)npc->ship_id) {
+                    _nwx = out->aoi_ship_px[_asi]; _nwy = out->aoi_ship_py[_asi]; break;
                 }
             }
-            out->npc_world_x[n] = _nwx;
-            out->npc_world_y[n] = _nwy;
-            out->npc_entry_active[n] = true;
         }
-        first_npc = false;
+        out->npc_world_x[n] = _nwx;
+        out->npc_world_y[n] = _nwy;
+        out->npc_entry_active[n] = true;
     }
-    npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "]");
-    out->npcs_len = (int)strlen(out->npcs_json);
+    /* npcs_json is unused in the send path; mark empty so stale data is never read. */
+    out->npcs_json[0] = '\0';
+    out->npcs_len = 0;
 }
 
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
@@ -3590,6 +3602,7 @@ int websocket_server_init(uint16_t port) {
     islands_generate_zone_resources();
     islands_generate_trees();
     islands_build_grid();
+    load_ghost_spawns("data/ghost_spawns.json");
 
     memset(&ws_server, 0, sizeof(ws_server));
     ws_server.port = port;
@@ -4910,6 +4923,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 player->inventory.slots[bed_slot].item = ITEM_NONE;
                                             // Set ship respawn, clear island respawn
                                             player->respawn_ship_id = (uint16_t)player->parent_ship_id;
+                                            player->respawn_ship_lx = player->local_x;
+                                            player->respawn_ship_ly = player->local_y;
                                             player->respawn_bed_id  = 0;
                                             player->bed_last_use_ms = now_ship_bed;
                                             log_info("🛏️  Player %u set ship bed respawn on ship %u",
@@ -5158,9 +5173,12 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
                                             if (bs) {
-                                                board_player_on_ship(player, bs, 0.0f, 0.0f);
-                                                log_info("🛏️  Player %u respawned at ship bed (ship %u)",
-                                                         player->player_id, player->respawn_ship_id);
+                                                board_player_on_ship(player, bs,
+                                                    player->respawn_ship_lx,
+                                                    player->respawn_ship_ly);
+                                                log_info("🛏️  Player %u respawned at ship bed (ship %u) local=(%.1f,%.1f)",
+                                                         player->player_id, player->respawn_ship_id,
+                                                         player->respawn_ship_lx, player->respawn_ship_ly);
                                             } else {
                                                 // Ship gone — clear and fall through
                                                 player->respawn_ship_id = 0;
@@ -5566,6 +5584,8 @@ int websocket_server_update(struct Sim* sim) {
                                                         tnpc->active = false;
                                                         tnpc->assigned_weapon_id = 0;
                                                         killed_npc = true;
+                                                        while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                                            world_npc_count--;
                                                         // Award XP to the attacker
                                                         player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
                                                     } else {
@@ -5739,6 +5759,8 @@ int websocket_server_update(struct Sim* sim) {
                                                         tnpc->active = false;
                                                         tnpc->assigned_weapon_id = 0;
                                                         killed_npc = true;
+                                                        while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                                            world_npc_count--;
                                                         player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
                                                     } else {
                                                         tnpc->health -= dmg16;
@@ -11805,6 +11827,8 @@ void websocket_server_tick(float dt) {
                         for (int sv = 0; sv < n_survivors; sv++) {
                             spawn_unclaimed_npc(sinking_ship->x, sinking_ship->y, sv);
                         }
+                        /* Notify spawn-point system so the slot can respawn */
+                        ghost_ship_sunk(sinking_ship->ship_id);
                     }
 
                     /* Broadcast SHIP_SINKING so clients start the animation immediately */
@@ -12274,6 +12298,8 @@ void websocket_server_tick(float dt) {
                     if (npc->health <= dmg16) {
                         npc->health = 0;
                         npc->active = false;
+                        while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                            world_npc_count--;
                     } else {
                         npc->health -= dmg16;
                     }
@@ -12604,8 +12630,8 @@ void websocket_server_tick(float dt) {
     // ===== TICK GHOST SHIPS (wander + attack AI) =====
     tick_ghost_ships(dt);
 
-    // ===== GHOST SHIP SPAWNER (maintains population up to 50, respawns on death) =====
-    tick_ghost_ship_spawner(dt);
+    // ===== TICK GHOST SPAWN POINTS (configured respawn system) =====
+    tick_ghost_spawn_points(dt);
 
     // ===== TICK RESOURCE RESPAWNS =====
     tick_resource_respawn();
@@ -13102,6 +13128,13 @@ void websocket_server_tick(float dt) {
                                 log_info("🌊 Player %u walked off the deck of ship %u (tick movement)", 
                                          ws_player->player_id, player_ship->ship_id);
                                 
+                                /* Commit new_local_x/y so dismount_player_from_ship re-derives the
+                                 * hull-edge world position instead of the stale previous-tick local.
+                                 * Without this, dismount overwrites x/y with ship_local_to_world of
+                                 * the old local coords (often {0,0} = ship centre). */
+                                ws_player->local_x = new_local_x;
+                                ws_player->local_y = new_local_y;
+
                                 // Place player at the exit point (new_local_x/y is just outside the hull)
                                 ship_local_to_world(player_ship, new_local_x, new_local_y, 
                                                   &ws_player->x, &ws_player->y);
@@ -13704,14 +13737,26 @@ void websocket_server_tick(float dt) {
                     }
                 } else {
                     // For on-ship players, recalculate world position from local coords
-                    // (ship might have moved/rotated since last tick)
-                    if (player_ship) {
+                    // (ship might have moved/rotated since last tick).
+                    //
+                    // CRITICAL GUARD: `on_ship` / `player_ship` are computed ONCE at the
+                    // top of the tick (parent_ship_id snapshot). A player who walked off
+                    // the deck THIS tick has already been dismounted (parent_ship_id == 0,
+                    // local_x/y == 0, world x/y == hull-edge exit point, swim velocity set),
+                    // but `on_ship` is still stale-true so we land in this else branch.
+                    // Recomputing from the now-zeroed local via the stale player_ship pointer
+                    // would call ship_local_to_world(ship, 0, 0) → SHIP CENTRE, teleporting
+                    // the just-dismounted swimmer back to (0,0) and wiping their swim velocity.
+                    // Only recompute when the player is GENUINELY still aboard.
+                    if (player_ship && ws_player->parent_ship_id != 0) {
                         ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
                                           &ws_player->x, &ws_player->y);
+                        // On-ship players have zero velocity (movement is relative to ship)
+                        ws_player->velocity_x = 0.0f;
+                        ws_player->velocity_y = 0.0f;
                     }
-                    // On-ship players have zero velocity (movement is relative to ship)
-                    ws_player->velocity_x = 0.0f;
-                    ws_player->velocity_y = 0.0f;
+                    // else: dismounted mid-tick — keep the hull-edge world position and
+                    // swim velocity already set by the walk-off block above.
                 }
             }
         }
@@ -13898,6 +13943,8 @@ void websocket_server_tick(float dt) {
             if (npc->health == 0) {
                 npc->active = false;
                 npc->fire_timer_ms = 0;
+                while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                    world_npc_count--;
                 char death_msg[192];
                 snprintf(death_msg, sizeof(death_msg),
                     "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"

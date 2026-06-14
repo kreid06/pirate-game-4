@@ -1,7 +1,7 @@
 import { Vec2 } from '../common/Vec2.js';
 import { AngleUtils } from '../common/AngleUtils.js';
 import { PolygonUtils } from '../common/PolygonUtils.js';
-import { WorldState, InputFrame, Ship, Player, PhysicsConfig } from './Types.js';
+import { WorldState, InputFrame, Ship, Player, PhysicsConfig, SHIP_TYPE_GHOST } from './Types.js';
 import { CollisionContext, resolveIslandCollisions, isInsideIsland, resolveDockCollisions, isDockPointOnSurface } from './IslandCollisions.js';
 import { CollisionSystem, CollisionResult } from './CollisionSystem.js';
 import { predictShipCollisions, predictIslandCollisions } from './PhysicsCollisionPredict.js';
@@ -642,9 +642,13 @@ function resolveShipDeckCollisions(
   }
 
   // ── 3. Hull polygon containment (lower deck only, 2 passes) ──────────────
+  // Mirrors server resolve_player_hull_containment (websocket_server.c ~1010):
+  // if the nearest plank edge is breached (plank dead), containment is skipped
+  // for that iteration so the player can fall through the gap.
   if (playerDeckLevel === 0 && ship.hull.length >= 3) {
     const hull = ship.hull;
     const nv = hull.length;
+    const slotHealth = buildPlankSlotHealth(ship);
 
     // Determine polygon winding (CCW = positive signed area → CCW sign = +1).
     let signedArea2 = 0;
@@ -667,10 +671,11 @@ function resolveShipDeckCollisions(
         }
       }
 
-      // Find closest edge and its inward normal.
+      // Find closest edge (track dest vertex index for plank-slot lookup).
       let bestDist2 = 1e30;
       let bestCx = px, bestCy = py;
       let bestNx = 0, bestNy = 0;
+      let bestEdgeI = 0; // destination vertex index (= i in j→i edge loop)
       for (let i = 0, j = nv - 1; i < nv; j = i++) {
         const ax = hull[j].x, ay = hull[j].y;
         const bx = hull[i].x, by = hull[i].y;
@@ -686,11 +691,16 @@ function resolveShipDeckCollisions(
         if (d2 < bestDist2) {
           bestDist2 = d2;
           bestCx = cx2; bestCy = cy2;
+          bestEdgeI = i;
           const elen = Math.sqrt(elen2);
           bestNx = -ey * ccwSign / elen;
           bestNy =  ex * ccwSign / elen;
         }
       }
+
+      // Skip containment if the nearest plank is breached — player falls through.
+      // Mirrors server: hull_section_plank_alive check (websocket_server.c ~1082).
+      if (!hullEdgeAlive(bestEdgeI, nv, slotHealth)) continue;
 
       const dist = Math.sqrt(bestDist2);
       if (!inside) {
@@ -788,6 +798,10 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
   // per_second = 0.95^20, so per dt = per_second^dt = 0.95^(20*dt)
   const SWIM_DRAG_PER_SECOND = Math.pow(0.95, 20); // ≈ 0.358
   
+  // Server also applies linear deceleration (120 px/s²) when stopped to bring
+  // velocity to zero faster than drag alone. Mirrors websocket_server.c ~13493-13518.
+  const SWIM_DECELERATION = 120.0; // px/s² - matches server CLIENT_TO_SERVER(120.0)
+
   const isMoving = inputFrame.movement.lengthSq() > 0.01;
   
   if (isMoving) {
@@ -797,6 +811,17 @@ function updatePlayerOffDeck(player: Player, ships: Ship[], inputFrame: InputFra
     const currentSpeed = player.velocity.length();
     if (currentSpeed > SWIM_MAX_SPEED) {
       player.velocity = player.velocity.normalize().mul(SWIM_MAX_SPEED);
+    }
+  } else {
+    // Stopped: apply linear deceleration opposite to velocity direction.
+    const currentSpeed = player.velocity.length();
+    if (currentSpeed > 0.1) {
+      const decelAmount = SWIM_DECELERATION * dt;
+      if (decelAmount >= currentSpeed) {
+        player.velocity = new Vec2(0, 0);
+      } else {
+        player.velocity = player.velocity.mul((currentSpeed - decelAmount) / currentSpeed);
+      }
     }
   }
   
@@ -1255,6 +1280,9 @@ function hullEdgeAlive(
 function createHealthyHullSegments(ship: Ship): Array<{start: Vec2, end: Vec2, plankIndex: number}> {
   const segments: Array<{start: Vec2, end: Vec2, plankIndex: number}> = [];
 
+  // Ghost hulls are always fully solid — treat every edge as alive.
+  const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+
   // Plank health keyed by server slot (0-9), section-aware like the server.
   const slotHealth = buildPlankSlotHealth(ship);
 
@@ -1266,7 +1294,7 @@ function createHealthyHullSegments(ship: Ship): Array<{start: Vec2, end: Vec2, p
   // Edges are keyed by their DESTINATION vertex index, matching the server.
   for (let i = 0; i < n; i++) {
     const destIndex = (i + 1) % n;
-    if (!hullEdgeAlive(destIndex, n, slotHealth)) continue; // breach — gap
+    if (!isGhost && !hullEdgeAlive(destIndex, n, slotHealth)) continue; // breach — gap (player ships only)
 
     segments.push({
       start: hullWorld[i],
@@ -1300,13 +1328,17 @@ function resolveSwimmerHullCollision(
   const n = hull.length;
   if (n < 3) return null;
 
+  // Ghost ship hulls are always fully solid — players cannot pass through
+  // breached sections or board a ghost ship. Skip plank-alive checks.
+  const isGhost = ship.shipType === SHIP_TYPE_GHOST;
+
   // Plank health keyed by server slot (0-9). Edges are keyed by their
   // DESTINATION vertex index — the same convention as the server's
   // `for (i, j=i-1)` loop passing `i` to hull_edge_to_plank_slot(). Our loops
   // below walk edges as (i → i+1), so the edge key is (i + 1) % n.
   const slotHealth = buildPlankSlotHealth(ship);
   const edgeAlive = (i: number): boolean =>
-    hullEdgeAlive((i + 1) % n, n, slotHealth);
+    isGhost || hullEdgeAlive((i + 1) % n, n, slotHealth);
 
   // Work in ship-local space so the hull stays static.
   const cosL = Math.cos(-ship.rotation), sinL = Math.sin(-ship.rotation);
@@ -1322,17 +1354,20 @@ function resolveSwimmerHullCollision(
   }
   const ccw = area2 >= 0 ? 1 : -1;
 
-  // Which side did the player legally occupy last tick? (breaches are the only
-  // legal way for this to change)
-  let insidePrev = false;
-  for (let i = 0, j = n - 1; i < n; j = i++) {
-    const a = hull[j], b = hull[i];
-    if ((a.y > oy) !== (b.y > oy)) {
-      const xi = a.x + (oy - a.y) * (b.x - a.x) / (b.y - a.y);
-      if (ox < xi) insidePrev = !insidePrev;
-    }
-  }
-  const sideSign = insidePrev ? -1 : 1;
+  // Swimmers always belong on the OUTSIDE of any hull.
+  //
+  // The old model used the previous-position side to pick the normal direction:
+  // if prevPos was inside (e.g. just dismounted from deck), sideSign = -1 and
+  // pass 2 actively pushed the player TOWARD the ship centre every tick. The
+  // client then reported that centre position to the server, which adopted it,
+  // creating a self-reinforcing loop ("pushed back to centre on dismount").
+  //
+  // Fix: always use sideSign = +1 (outward normals). If the player starts
+  // inside (post-dismount), both passes push them outward through the nearest
+  // alive edge. Breach gaps are handled separately by edgeAlive() returning
+  // false for dead planks — those edges are simply skipped in both passes, so
+  // players can still exit through a breached hull section.
+  const sideSign = 1;
 
   let moved = false;
 

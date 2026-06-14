@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>World Editor — Pirate Game</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #0a0e1a;
+      color: #c8d4e8;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 13px;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* ── Sidebar ── */
+    #sidebar {
+      width: 270px;
+      min-width: 270px;
+      background: #111827;
+      border-right: 1px solid #1e2d40;
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+    }
+
+    #sidebar-header {
+      padding: 14px 16px 10px;
+      border-bottom: 1px solid #1e2d40;
+    }
+    #sidebar-header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #7dd3fc;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    #sidebar-header p {
+      color: #64748b;
+      font-size: 11px;
+      margin-top: 2px;
+    }
+
+    .section {
+      padding: 12px 14px;
+      border-bottom: 1px solid #1a2436;
+    }
+    .section-title {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      color: #475569;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    label {
+      display: block;
+      color: #94a3b8;
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    input[type="text"], input[type="number"], input[type="range"], select {
+      width: 100%;
+      background: #0f172a;
+      border: 1px solid #1e2d40;
+      border-radius: 4px;
+      color: #e2e8f0;
+      padding: 5px 8px;
+      font-size: 12px;
+      margin-bottom: 7px;
+      outline: none;
+    }
+    input[type="text"]:focus, input[type="number"]:focus, select:focus {
+      border-color: #3b82f6;
+    }
+    input[type="range"] { padding: 2px 0; cursor: pointer; }
+
+    .row-2 { display: flex; gap: 6px; }
+    .row-2 > * { flex: 1; }
+
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      padding: 6px 12px;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-size: 12px;
+      font-weight: 500;
+      transition: opacity .15s, transform .08s;
+    }
+    button:hover { opacity: .9; }
+    button:active { transform: scale(.97); }
+
+    .btn-primary  { background: #1d4ed8; color: #fff; }
+    .btn-success  { background: #15803d; color: #fff; }
+    .btn-danger   { background: #991b1b; color: #fff; }
+    .btn-neutral  { background: #1e293b; color: #94a3b8; border: 1px solid #334155; }
+    .btn-warning  { background: #92400e; color: #fde68a; }
+    .btn-full { width: 100%; margin-top: 4px; }
+
+    #status-bar {
+      padding: 5px 14px;
+      font-size: 11px;
+      color: #475569;
+      border-bottom: 1px solid #1a2436;
+      min-height: 24px;
+    }
+    #status-bar.ok  { color: #4ade80; }
+    #status-bar.err { color: #f87171; }
+
+    /* ── Mode toggle ── */
+    #mode-group { display: flex; gap: 4px; flex-wrap: wrap; }
+    #mode-group button {
+      flex: 1;
+      min-width: 80px;
+      background: #1e293b;
+      color: #64748b;
+      border: 1px solid #334155;
+    }
+    #mode-group button.active { background: #1e3a5f; color: #7dd3fc; border-color: #3b82f6; }
+
+    /* ── Selected spawn panel ── */
+    #spawn-panel { display: none; }
+    #spawn-panel.visible { display: block; }
+
+    /* ── Selected island panel ── */
+    #island-panel { display: none; }
+    #island-panel.visible { display: block; }
+
+    /* ── Legend ── */
+    .legend-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+    .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+
+    /* ── Canvas area ── */
+    #canvas-wrap {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+      background: #060c18;
+      cursor: crosshair;
+    }
+    #editor-canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    #hud {
+      position: absolute;
+      bottom: 12px;
+      right: 12px;
+      background: rgba(10,14,26,.85);
+      border: 1px solid #1e2d40;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 11px;
+      color: #64748b;
+      pointer-events: none;
+    }
+    #hud span { color: #94a3b8; }
+    #coords { min-width: 120px; display: inline-block; }
+    #zoom-pct { display: inline-block; min-width: 50px; }
+  </style>
+</head>
+<body>
+
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>⚓ World Editor</h1>
+    <p>Ghost ship spawns &amp; island layout</p>
+  </div>
+
+  <!-- Server connection -->
+  <div class="section">
+    <div class="section-title">Server</div>
+    <label>Admin URL</label>
+    <input type="text" id="server-url" value="" placeholder="https://yourdomain.com/admin" />
+    <div class="row-2">
+      <button class="btn-primary" id="btn-fetch">Fetch World</button>
+      <button class="btn-neutral" id="btn-refresh">Refresh</button>
+    </div>
+    <div id="status-bar">Not connected</div>
+  </div>
+
+  <!-- Edit mode -->
+  <div class="section">
+    <div class="section-title">Edit Mode</div>
+    <div id="mode-group">
+      <button class="active" data-mode="select" id="mode-select">Select</button>
+      <button data-mode="add-spawn" id="mode-add-spawn">+ Spawn</button>
+    </div>
+  </div>
+
+  <!-- Island panel (shown when island selected) -->
+  <div class="section" id="island-panel">
+    <div class="section-title">Island — <span id="isl-name">none</span></div>
+    <label>X</label>
+    <input type="number" id="isl-x" step="10" />
+    <label>Y</label>
+    <input type="number" id="isl-y" step="10" />
+    <label>Rotation (deg)</label>
+    <input type="number" id="isl-rot" step="1" min="-180" max="180" />
+    <button class="btn-success btn-full" id="btn-save-islands">Save Island Positions</button>
+  </div>
+
+  <!-- Spawn point panel (shown when spawn selected) -->
+  <div class="section" id="spawn-panel">
+    <div class="section-title">Spawn Zone — <span id="sp-id"></span></div>
+    <label>Label</label>
+    <input type="text" id="sp-label" />
+    <div class="row-2">
+      <div>
+        <label>X</label>
+        <input type="number" id="sp-x" step="100" />
+      </div>
+      <div>
+        <label>Y</label>
+        <input type="number" id="sp-y" step="100" />
+      </div>
+    </div>
+    <label>Radius (world units)</label>
+    <input type="number" id="sp-radius" step="100" min="500" max="20000" />
+    <div class="row-2">
+      <div>
+        <label>Level min</label>
+        <input type="number" id="sp-lvl-min" step="1" min="1" max="60" />
+      </div>
+      <div>
+        <label>Level max</label>
+        <input type="number" id="sp-lvl-max" step="1" min="1" max="60" />
+      </div>
+    </div>
+    <div class="row-2">
+      <div>
+        <label>Count min</label>
+        <input type="number" id="sp-cnt-min" step="1" min="0" max="10" />
+      </div>
+      <div>
+        <label>Count max</label>
+        <input type="number" id="sp-cnt-max" step="1" min="0" max="10" />
+      </div>
+    </div>
+    <label>Respawn delay (s)</label>
+    <input type="number" id="sp-respawn" step="10" min="10" max="3600" />
+    <div class="row-2">
+      <button class="btn-success" id="btn-apply-spawn">Apply</button>
+      <button class="btn-danger"  id="btn-delete-spawn">Delete</button>
+    </div>
+  </div>
+
+  <!-- Global limits -->
+  <div class="section">
+    <div class="section-title">Ghost Ship Limits</div>
+    <div style="margin-bottom:6px; display:flex; align-items:center; gap:6px;">
+      <label style="margin:0; flex:1;">Auto-spawn enabled</label>
+      <input type="checkbox" id="spawns-enabled" />
+    </div>
+    <label>Global max cap <span style="color:#475569">(0 = unlimited)</span></label>
+    <input type="number" id="global-cap" step="1" min="0" max="500" value="20" />
+    <div style="font-size:10px;color:#475569;margin-top:-4px;margin-bottom:6px;">
+      Total ghost ships across <em>all</em> zones at once
+    </div>
+    <div id="active-total-row" style="font-size:11px;color:#64748b;margin-bottom:4px;">
+      Active now: <span id="active-total">—</span>
+    </div>
+  </div>
+
+  <!-- New-zone presets -->
+  <div class="section">
+    <div class="section-title">Defaults for New Zones</div>
+    <div class="row-2">
+      <div><label>Lv min</label><input type="number" id="def-lvl-min" step="1" min="1" max="60" value="1" /></div>
+      <div><label>Lv max</label><input type="number" id="def-lvl-max" step="1" min="1" max="60" value="3" /></div>
+    </div>
+    <div class="row-2">
+      <div><label>Ships min <span style="color:#475569;font-size:9px">(per zone)</span></label><input type="number" id="def-cnt-min" step="1" min="0" max="10" value="1" /></div>
+      <div><label>Ships max <span style="color:#475569;font-size:9px">(per zone)</span></label><input type="number" id="def-cnt-max" step="1" min="0" max="10" value="2" /></div>
+    </div>
+    <label>Radius</label>
+    <input type="number" id="def-radius" step="100" min="500" max="20000" value="3000" />
+    <label>Respawn delay (s)</label>
+    <input type="number" id="def-respawn" step="10" min="10" max="3600" value="120" />
+  </div>
+
+  <!-- Spawn list -->
+  <div class="section">
+    <div class="section-title">Ghost Spawn Zones</div>
+    <div id="spawn-list" style="max-height:160px; overflow-y:auto; margin-bottom:6px;"></div>
+    <button class="btn-success btn-full" id="btn-save-spawns">💾 Save Spawn Config</button>
+  </div>
+
+  <!-- Legend -->
+  <div class="section">
+    <div class="section-title">Legend</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#22d3ee;"></div>Island</div>
+    <div class="legend-row"><div class="legend-dot" style="background:#a78bfa;border:2px solid #c4b5fd;box-sizing:border-box;"></div>Selected spawn</div>
+
+    <!-- Gradient bar: green (lv1) → yellow (lv20) → orange (lv40) → red (lv60+) -->
+    <div style="margin-top:6px;">
+      <div style="
+        height: 10px;
+        border-radius: 5px;
+        background: linear-gradient(to right,
+          rgb(34,197,94)  0%,
+          rgb(234,179,8) 51%,
+          rgb(249,115,22) 75%,
+          rgb(239,68,68) 100%);
+        margin-bottom: 3px;
+      "></div>
+      <div style="display:flex; justify-content:space-between; font-size:9px; color:#94a3b8;">
+        <span>Lv 1</span><span>Lv 20</span><span>Lv 40</span><span>Lv 60+</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Danger zone -->
+  <div class="section">
+    <div class="section-title">Actions</div>
+    <button class="btn-warning btn-full" id="btn-reset-view">Reset View</button>
+  </div>
+</div>
+
+<!-- Canvas -->
+<div id="canvas-wrap">
+  <canvas id="editor-canvas"></canvas>
+  <div id="hud">
+    World: <span id="coords">0, 0</span> &nbsp;|&nbsp; Zoom: <span id="zoom-pct">100%</span>
+  </div>
+</div>
+
+<script type="module" src="/src/tools/world-editor-main.ts"></script>
+</body>
+</html>
