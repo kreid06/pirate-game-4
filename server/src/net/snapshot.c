@@ -98,8 +98,12 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
                                  const struct AOIGrid* aoi, entity_id player_id,
                                  uint32_t current_time, uint8_t* packet_buffer,
                                  size_t buffer_size, size_t* packet_size) {
-    (void)buffer_size;
     if (!mgr || !sim || !aoi || !packet_buffer || !packet_size) return -1;
+    if (buffer_size < sizeof(struct SnapshotPacket)) {
+        log_error("snapshot_generate_for_player: buffer too small (%zu < %zu)",
+                  buffer_size, sizeof(struct SnapshotPacket));
+        return -1;
+    }
     
     struct PlayerSnapshotState* player_state = find_player_state(mgr, player_id);
     if (!player_state) {
