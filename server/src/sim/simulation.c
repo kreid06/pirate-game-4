@@ -311,12 +311,13 @@ void sim_step(struct Sim* sim, q16_t dt) {
     sim_update_ships(sim, dt);
     sim_update_players(sim, dt);
     sim_update_projectiles(sim, dt);
-    
-    // Handle collisions
-    sim_handle_collisions(sim);
-    
-    // Update spatial acceleration structures
+
+    // Rebuild spatial hash AFTER all integration so collision broad-phase uses
+    // current-tick positions rather than the positions from the previous tick.
     sim_update_spatial_hash(sim);
+
+    // Handle collisions — spatial hash now reflects post-integration positions.
+    sim_handle_collisions(sim);
 }
 
 void sim_update_ships(struct Sim* sim, q16_t dt) {
@@ -376,48 +377,54 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         }
 
         // ---- Sinking / water mechanic ----
-        // Passive healing for planks toward target_health (always active, even in shipyard).
-        // Planks placed during construction start at 10% HP with target = max so they
-        // heal to full while scaffolded. This loop must run BEFORE the scaffolded early-out.
+        // Single pass over all modules: heal planks, heal non-plank modules, and
+        // count planks for hull-integrity drain — all before the scaffolded early-out
+        // so newly placed modules reach full HP even while in the shipyard.
+        // Healing rates: plank 3.5%/s, deck 3.5%/s, helm 2.0%/s, mast 1.5%/s,
+        //                cannon/swivel 1.0%/s.
+        int planks_remaining = 0;
+        int planks_leaking   = 0;
+
         for (uint8_t m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
-            if (mod->type_id != MODULE_TYPE_PLANK) continue;
-            if (mod->health <= 0) continue;
-            if (mod->health >= (int32_t)mod->target_health) continue;
 
-            float heal = (float)mod->max_health * 0.035f * dt_secs;
-            mod->health += (int32_t)heal;
-            if (mod->health >= (int32_t)mod->target_health) {
-                mod->health = (int32_t)mod->target_health;
-                mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
-            }
-        }
-
-        // Passive healing for all other gameplay modules (also before scaffolded early-out).
-        // Rates: deck 3.5%/s, helm 2.0%/s, mast 1.5%/s, cannon/swivel 1.0%/s
-        for (uint8_t m = 0; m < ship->module_count; m++) {
-            ShipModule* mod = &ship->modules[m];
-            if (mod->health <= 0 || mod->max_health <= 0) continue;
-            if (mod->type_id == MODULE_TYPE_PLANK) continue; // handled above
-            if (mod->health >= (int32_t)mod->target_health) continue;
-
-            float rate;
-            switch (mod->type_id) {
-                case MODULE_TYPE_DECK:           rate = 0.035f; break;
-                case MODULE_TYPE_HELM:
-                case MODULE_TYPE_STEERING_WHEEL: rate = 0.020f; break;
-                case MODULE_TYPE_MAST:           rate = 0.015f; break;
-                case MODULE_TYPE_CANNON:
-                case MODULE_TYPE_SWIVEL:         rate = 0.010f; break;
-                default:                         continue;
-            }
-
-            float heal = (float)mod->max_health * rate * dt_secs;
-            mod->health += (int32_t)heal;
-            if (mod->health >= (int32_t)mod->target_health) {
-                mod->health = (int32_t)mod->target_health;
-                if (mod->health >= (int32_t)mod->max_health)
-                    mod->state_bits &= (uint16_t)~(MODULE_STATE_REPAIRING | MODULE_STATE_DAMAGED);
+            if (mod->type_id == MODULE_TYPE_PLANK) {
+                // Plank healing
+                if (mod->health > 0 && mod->health < (int32_t)mod->target_health) {
+                    float heal = (float)mod->max_health * 0.035f * dt_secs;
+                    mod->health += (int32_t)heal;
+                    if (mod->health >= (int32_t)mod->target_health) {
+                        mod->health = (int32_t)mod->target_health;
+                        mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
+                    }
+                }
+                // Plank count for post-scaffolded drain logic
+                if (mod->health > 0) {
+                    bool is_leaking = (mod->health < mod->max_health * 30 / 100);
+                    if (is_leaking) planks_leaking++;
+                    planks_remaining++;
+                }
+            } else {
+                // Non-plank module healing
+                if (mod->health <= 0 || mod->max_health <= 0) continue;
+                if (mod->health >= (int32_t)mod->target_health) continue;
+                float rate;
+                switch (mod->type_id) {
+                    case MODULE_TYPE_DECK:           rate = 0.035f; break;
+                    case MODULE_TYPE_HELM:
+                    case MODULE_TYPE_STEERING_WHEEL: rate = 0.020f; break;
+                    case MODULE_TYPE_MAST:           rate = 0.015f; break;
+                    case MODULE_TYPE_CANNON:
+                    case MODULE_TYPE_SWIVEL:         rate = 0.010f; break;
+                    default:                         continue;
+                }
+                float heal = (float)mod->max_health * rate * dt_secs;
+                mod->health += (int32_t)heal;
+                if (mod->health >= (int32_t)mod->target_health) {
+                    mod->health = (int32_t)mod->target_health;
+                    if (mod->health >= (int32_t)mod->max_health)
+                        mod->state_bits &= (uint16_t)~(MODULE_STATE_REPAIRING | MODULE_STATE_DAMAGED);
+                }
             }
         }
 
@@ -427,22 +434,6 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         if (ship->flags & SHIP_FLAG_SCAFFOLDED) {
             ship->hull_health = Q16_FROM_INT(100);
             continue;
-        }
-
-        // Count remaining planks and detect leaks (< 30% HP).
-        // Leaking planks do NOT self-damage — they stay at their current HP but
-        // contribute to the hull drain rate at half the missing-plank rate.
-        int planks_remaining = 0;
-        int planks_leaking = 0;
-
-        for (uint8_t m = 0; m < ship->module_count; m++) {
-            ShipModule* mod = &ship->modules[m];
-            if (mod->type_id != MODULE_TYPE_PLANK) continue;
-            if (mod->health <= 0) continue;
-
-            bool is_leaking = (mod->health < mod->max_health * 30 / 100);
-            if (is_leaking) planks_leaking++;
-            planks_remaining++;
         }
 
         int missing = (int)ship->initial_plank_count - planks_remaining;

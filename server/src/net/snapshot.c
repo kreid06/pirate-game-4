@@ -142,6 +142,12 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
     packet->header.aoi_cell = (uint16_t)(player_state->aoi_subscription.cell_x << 8) | 
                               player_state->aoi_subscription.cell_y;
     
+    // Track which tiers are actually sent this call so we only reset those
+    // timestamps — previously all tiers were reset unconditionally, causing MID
+    // and LOW tier entities to be sent at HIGH-tier frequency (wasting ~3–6× bandwidth).
+    bool tier_sent[AOI_TIER_COUNT];
+    memset(tier_sent, 0, sizeof(tier_sent));
+
     if (send_baseline) {
         packet->header.base_id = packet->header.snap_id; // Self-referential baseline
         packet->header.flags = 0x01; // Baseline flag
@@ -161,6 +167,7 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
                                               player_state->last_snapshot_time[tier])) {
                 continue;
             }
+            tier_sent[tier] = true;
             
             // Try to find entity in simulation and convert to snapshot
             struct Ship* ship = sim_get_ship((struct Sim*)sim, entity_id);
@@ -225,6 +232,7 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
                                               player_state->last_snapshot_time[tier])) {
                 continue;
             }
+            tier_sent[tier] = true;
             
             // Find baseline for this entity
             struct EntitySnapshot* baseline = NULL;
@@ -279,9 +287,13 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
                   player_id, delta_count, *packet_size);
     }
     
-    // Update tier timestamps
+    // Update timestamps only for tiers that were actually sent this call.
+    // Tiers not sent this call keep their old timestamp so their throttle
+    // interval is correctly measured from the last time they were sent.
     for (int tier = 0; tier < AOI_TIER_COUNT; tier++) {
-        player_state->last_snapshot_time[tier] = current_time;
+        if (tier_sent[tier]) {
+            player_state->last_snapshot_time[tier] = current_time;
+        }
     }
     
     // Add checksum

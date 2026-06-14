@@ -11386,9 +11386,18 @@ int websocket_server_update(struct Sim* sim) {
 
             char* per_gs = per_gs_pool[_send_count];
             int _goff = 0;
-            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff,
-                              "{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
-                              current_time / 33, current_time);
+            /* _GS: safe snprintf accumulator — always guards against _goff going
+             * past PER_GS_BUF so that PER_GS_BUF - _goff is never negative (which
+             * when cast to size_t would be a huge positive, causing a buffer overrun
+             * and the 4x -Warray-bounds= GCC warnings). */
+#define _GS(fmt, ...) do { \
+    if (_goff < PER_GS_BUF - 1) { \
+        int _gs_n = snprintf(per_gs + _goff, (size_t)(PER_GS_BUF - _goff), fmt, ##__VA_ARGS__); \
+        if (_gs_n > 0) { _goff += _gs_n; if (_goff >= PER_GS_BUF) _goff = PER_GS_BUF - 1; } \
+    } \
+} while(0)
+            _GS("{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
+                current_time / 33, current_time);
 #define _MC1(buf, len) do { if (_goff + (len) < PER_GS_BUF - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
             _MC1(per_ship_json, _soff);
             /* Players: AOI-filtered per-client (skip players outside view radius). */
@@ -11409,7 +11418,7 @@ int websocket_server_update(struct Sim* sim) {
                 }
                 if (_goff < PER_GS_BUF - 1) per_gs[_goff++] = ']';
             }
-            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"projectiles\":");
+            _GS(",\"projectiles\":");
             _MC1(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
             /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
             if (_goff + 9 < PER_GS_BUF) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
@@ -11432,18 +11441,18 @@ int websocket_server_update(struct Sim* sim) {
                 }
                 if (_goff < PER_GS_BUF - 1) per_gs[_goff++] = ']';
             }
-            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"tombstones\":");
+            _GS(",\"tombstones\":");
             _MC1(shared_blob_cache.tmb_json, shared_blob_cache.tmb_len);
-            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"droppedItems\":");
+            _GS(",\"droppedItems\":");
             _MC1(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
-            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff, ",\"companies\":");
+            _GS(",\"companies\":");
             _MC1(shared_blob_cache.co_json, shared_blob_cache.co_len);
 #undef _MC1
             /* World wind — included every tick so late-joining clients get it immediately. */
-            _goff += snprintf(per_gs + _goff, PER_GS_BUF - _goff,
-                              ",\"windAngle\":%.4f,\"windStrength\":%.3f",
-                              g_wind_angle,
-                              global_sim ? global_sim->wind_power : 0.5f);
+            _GS(",\"windAngle\":%.4f,\"windStrength\":%.3f",
+                g_wind_angle,
+                global_sim ? global_sim->wind_power : 0.5f);
+#undef _GS
             if (_goff < PER_GS_BUF - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
             per_gs_len[_send_count] = _goff;
 

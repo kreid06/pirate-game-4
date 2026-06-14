@@ -1184,8 +1184,8 @@ int admin_api_islands_reposition(struct HttpResponse *resp, const char *body, si
             if (fsz > 0 && fsz < 65536) {
                 char *buf = (char *)malloc((size_t)fsz + 1);
                 if (buf) {
-                    fread(buf, 1, (size_t)fsz, f);
-                    buf[fsz] = '\0';
+                    size_t fgot = fread(buf, 1, (size_t)fsz, f);
+                    buf[fgot] = '\0';
                     islands_arr = json_tokener_parse(buf);
                     free(buf);
                 }
