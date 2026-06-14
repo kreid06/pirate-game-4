@@ -2672,13 +2672,20 @@ export class ClientApplication {
         this.networkManager.sendChatMessage(channel, text);
       };
       this.networkManager.onPlayerTeleported = (playerId, x, y, parentShip, localX, localY) => {
-        // Snap the local player position if it's us being teleported
+        // Snap the local player position if it's us being teleported.
+        // Only set localPosition when on a ship AND it's non-zero: the server always
+        // includes local_x/local_y (0,0 for bed-respawn / swim spawns). Writing
+        // Vec2.from(0,0) while carrierId > 0 is truthy and causes the anchor block
+        // to render the player at ship center for the first frame after the teleport.
+        const newLocalPos = (parentShip > 0 && (localX !== 0 || localY !== 0))
+          ? Vec2.from(localX, localY)
+          : undefined;
         for (const ws of [this.authoritativeWorldState, this.predictedWorldState]) {
           const p = ws?.players.find(pl => pl.id === playerId);
           if (!p) continue;
           p.position = Vec2.from(x, y);
           p.carrierId = parentShip;
-          p.localPosition = Vec2.from(localX, localY);
+          p.localPosition = newLocalPos;
         }
       };
       

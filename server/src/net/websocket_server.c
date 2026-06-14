@@ -1143,28 +1143,34 @@ static bool resolve_swimmer_ship_hull_collision(const SimpleShip* ship,
     }
     float ccw = (area2 >= 0.0f) ? 1.0f : -1.0f;
 
-    /* Which side did the player legally occupy last tick? (point-in-polygon
-       of the OLD position — breaches are the only legal way to change it) */
-    bool inside_prev = false;
-    for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
-        if ((hyv[j] > oly) != (hyv[i] > oly)) {
-            float xi = hxv[j] + (oly - hyv[j]) * (hxv[i] - hxv[j]) / (hyv[i] - hyv[j]);
-            if (olx < xi) inside_prev = !inside_prev;
-        }
-    }
-    float side = inside_prev ? -1.0f : 1.0f;
+    /* Swimmers always belong on the OUTSIDE of any hull.
+     *
+     * The old model used the previous-position side to pick the normal direction:
+     * if old pos was inside (e.g. just dismounted from deck), side = -1.0 and
+     * pass 2 pushed the player toward the ship centre every tick.  Because the
+     * server is semi-authoritative and adopts client positions, the client's
+     * inward-pushed prediction was reported back and adopted, reinforcing the bug.
+     *
+     * Fix: always side = +1.0 (outward normals).  Breach gaps are handled by
+     * hull_section_plank_alive() returning false — those edges are skipped in
+     * both passes, so players can still exit through a breached section. */
+    float side = 1.0f;
 
     bool moved = false;
 
     /* Pass 1: crossing rejection — if the old→new motion segment crosses an
        alive edge, clamp to the earliest crossing pushed back to the legal side. */
+    /* Ghost ship hulls are always fully solid — players cannot pass through
+     * a breached section or board a ghost ship. Skip plank-alive checks. */
+    bool _ghost_hull = (ship->ship_type == SHIP_TYPE_GHOST);
+
     float mx = lx - olx, my = ly - oly;
     if (mx * mx + my * my > 1e-9f) {
         float best_t = 1e30f;
         int   best_i = -1, best_j = -1;
         for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
-            if (!hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
-                continue; /* breach: passable */
+            if (!_ghost_hull && !hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
+                continue; /* breach: passable (player ships only) */
             float ax = hxv[j], ay = hyv[j];
             float ex = hxv[i] - ax, ey = hyv[i] - ay;
             float denom = mx * ey - my * ex;
@@ -1193,8 +1199,8 @@ static bool resolve_swimmer_ship_hull_collision(const SimpleShip* ship,
     /* Pass 2: contact pushout (two iterations so corners settle). */
     for (int iter = 0; iter < 2; iter++) {
         for (int i = 0, j = (int)nv - 1; i < (int)nv; j = i++) {
-            if (!hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
-                continue; /* breach: passable */
+            if (!_ghost_hull && !hull_section_plank_alive(ship, hull_edge_to_plank_slot(i, nv)))
+                continue; /* breach: passable (player ships only) */
 
             float ax = hxv[j], ay = hyv[j];
             float bx = hxv[i], by = hyv[i];
@@ -1607,6 +1613,7 @@ void apply_group_gunport_state(SimpleShip* ship, WeaponGroup* group) {
 }
 
 void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local_x, float local_y) {
+    if (ship->ship_type == SHIP_TYPE_GHOST) return; /* players cannot board ghost ships */
     player->parent_ship_id = ship->ship_id;
     // company_id is NOT inherited from ship — assigned by admin or player choice
     player->local_x = local_x;
@@ -1635,8 +1642,16 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
 
     log_info("🌊 Player %u dismounting from ship %u (reason: %s)", 
              player->player_id, player->parent_ship_id, reason);
-    
-    // Keep current world position but clear ship reference
+
+    // Convert the player's local position to world coordinates before clearing it.
+    // player->x/y may be stale (only updated in the movement tick), so recalculate
+    // now to ensure the player exits at their actual position on deck, not the ship centre.
+    SimpleShip* old_ship = find_ship(old_ship_id);
+    if (old_ship) {
+        ship_local_to_world(old_ship, player->local_x, player->local_y,
+                            &player->x, &player->y);
+    }
+
     player->parent_ship_id = 0;
     player->local_x = 0.0f;
     player->local_y = 0.0f;
@@ -4911,6 +4926,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 player->inventory.slots[bed_slot].item = ITEM_NONE;
                                             // Set ship respawn, clear island respawn
                                             player->respawn_ship_id = (uint16_t)player->parent_ship_id;
+                                            player->respawn_ship_lx = player->local_x;
+                                            player->respawn_ship_ly = player->local_y;
                                             player->respawn_bed_id  = 0;
                                             player->bed_last_use_ms = now_ship_bed;
                                             log_info("🛏️  Player %u set ship bed respawn on ship %u",
@@ -5159,9 +5176,12 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
                                             if (bs) {
-                                                board_player_on_ship(player, bs, 0.0f, 0.0f);
-                                                log_info("🛏️  Player %u respawned at ship bed (ship %u)",
-                                                         player->player_id, player->respawn_ship_id);
+                                                board_player_on_ship(player, bs,
+                                                    player->respawn_ship_lx,
+                                                    player->respawn_ship_ly);
+                                                log_info("🛏️  Player %u respawned at ship bed (ship %u) local=(%.1f,%.1f)",
+                                                         player->player_id, player->respawn_ship_id,
+                                                         player->respawn_ship_lx, player->respawn_ship_ly);
                                             } else {
                                                 // Ship gone — clear and fall through
                                                 player->respawn_ship_id = 0;
@@ -13105,6 +13125,13 @@ void websocket_server_tick(float dt) {
                                 log_info("🌊 Player %u walked off the deck of ship %u (tick movement)", 
                                          ws_player->player_id, player_ship->ship_id);
                                 
+                                /* Commit new_local_x/y so dismount_player_from_ship re-derives the
+                                 * hull-edge world position instead of the stale previous-tick local.
+                                 * Without this, dismount overwrites x/y with ship_local_to_world of
+                                 * the old local coords (often {0,0} = ship centre). */
+                                ws_player->local_x = new_local_x;
+                                ws_player->local_y = new_local_y;
+
                                 // Place player at the exit point (new_local_x/y is just outside the hull)
                                 ship_local_to_world(player_ship, new_local_x, new_local_y, 
                                                   &ws_player->x, &ws_player->y);
@@ -13707,14 +13734,26 @@ void websocket_server_tick(float dt) {
                     }
                 } else {
                     // For on-ship players, recalculate world position from local coords
-                    // (ship might have moved/rotated since last tick)
-                    if (player_ship) {
+                    // (ship might have moved/rotated since last tick).
+                    //
+                    // CRITICAL GUARD: `on_ship` / `player_ship` are computed ONCE at the
+                    // top of the tick (parent_ship_id snapshot). A player who walked off
+                    // the deck THIS tick has already been dismounted (parent_ship_id == 0,
+                    // local_x/y == 0, world x/y == hull-edge exit point, swim velocity set),
+                    // but `on_ship` is still stale-true so we land in this else branch.
+                    // Recomputing from the now-zeroed local via the stale player_ship pointer
+                    // would call ship_local_to_world(ship, 0, 0) → SHIP CENTRE, teleporting
+                    // the just-dismounted swimmer back to (0,0) and wiping their swim velocity.
+                    // Only recompute when the player is GENUINELY still aboard.
+                    if (player_ship && ws_player->parent_ship_id != 0) {
                         ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
                                           &ws_player->x, &ws_player->y);
+                        // On-ship players have zero velocity (movement is relative to ship)
+                        ws_player->velocity_x = 0.0f;
+                        ws_player->velocity_y = 0.0f;
                     }
-                    // On-ship players have zero velocity (movement is relative to ship)
-                    ws_player->velocity_x = 0.0f;
-                    ws_player->velocity_y = 0.0f;
+                    // else: dismounted mid-tick — keep the hull-edge world position and
+                    // swim velocity already set by the walk-off block above.
                 }
             }
         }

@@ -89,7 +89,7 @@ const ctx = canvas.getContext('2d')!;
 const cam = new Camera();
 
 let islands: IslandEntry[] = [];
-let spawnConfig: GhostSpawnConfig = { enabled: false, spawns: [] };
+let spawnConfig: GhostSpawnConfig = { enabled: false, global_max_cap: 0, spawns: [] };
 let nextSpawnId = 100;
 let editMode: EditMode = 'select';
 

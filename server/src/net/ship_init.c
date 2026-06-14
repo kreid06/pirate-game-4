@@ -15,6 +15,10 @@
 #include "net/module_interactions.h"
 #include "sim/ship_level.h"
 #include "net/quality.h"
+#include "core/rng.h"
+
+/* RNG used for fleet-size and level rolls in the ghost spawn system. */
+static struct RNGState ghost_spawn_rng;
 
 void tick_sinking_ships(void) {
     uint32_t now = get_time_ms();
@@ -1344,6 +1348,10 @@ static int find_ship_slot(uint16_t ship_id) {
 /* load_ghost_spawns — parse data/ghost_spawns.json at startup.
  * Also initialises the per-ship parallel arrays. */
 void load_ghost_spawns(const char *path) {
+    /* Seed the spawn RNG from wall-clock time so each server run gives
+     * different level/fleet-size rolls. */
+    rng_seed(&ghost_spawn_rng, (uint32_t)get_time_ms() ^ 0xDEADBEEFu);
+
     /* Initialise per-ship tracking arrays */
     for (int i = 0; i < MAX_SIMPLE_SHIPS; i++) {
         ghost_ship_level[i]     = 1;
@@ -1426,10 +1434,10 @@ void load_ghost_spawns(const char *path) {
 }
 
 /* websocket_server_create_ghost_ship_level — level-scaled ghost ship creation.
- * level 1–10 scales speed.  spawn_idx = index into ghost_spawns[] (or -1). */
+ * level 1–60 scales speed and hull HP.  spawn_idx = index into ghost_spawns[] (or -1). */
 uint32_t websocket_server_create_ghost_ship_level(float x, float y, int level, int spawn_idx) {
     if (level < 1)  level = 1;
-    if (level > 10) level = 10;
+    if (level > 60) level = 60;
 
     uint32_t ship_id = websocket_server_create_ghost_ship(x, y, (uint8_t)level);
     if (!ship_id) return 0;
@@ -1533,15 +1541,14 @@ static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
     if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
     if (fleet_size < 1)              fleet_size = 1;
 
-    /* Fleet initial heading — random based on time */
-    uint32_t now_ms  = get_time_ms();
-    float heading = ((float)(now_ms % 10000) / 10000.0f) * 2.0f * (float)M_PI;
+    /* Fleet initial heading — random direction */
+    float heading = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
     float cos_h   = cosf(heading);
     float sin_h   = sinf(heading);
 
     /* Lead position: zone centre + small scatter */
     float scatter = spn->radius * 0.25f;
-    float angle   = ((float)((now_ms / 17) % 10000) / 10000.0f) * 2.0f * (float)M_PI;
+    float angle   = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
     float lead_x  = spn->x + cosf(angle) * scatter;
     float lead_y  = spn->y + sinf(angle) * scatter;
 
@@ -1640,10 +1647,6 @@ static bool try_drain_spawn_queue(void) {
 void tick_ghost_spawn_points(float dt) {
     if (!ghost_spawns_enabled || ghost_spawn_count == 0) return;
 
-    /* Drain any queued spawns that were waiting for a free fleet slot */
-    while (try_drain_spawn_queue())
-        ;
-
     /* Recount active ships for each spawn zone and the global total */
     for (int sp = 0; sp < ghost_spawn_count; sp++)
         ghost_spawns[sp].active_count = 0;
@@ -1682,14 +1685,16 @@ void tick_ghost_spawn_points(float dt) {
         if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) break;
 
         /* Roll fleet size in [count_min, count_max] and a single level for
-         * the whole fleet in [level_min, level_max]. */
-        int size_range = spn->count_max - spn->count_min;
-        int fleet_size = spn->count_min + (size_range > 0
-            ? ((int)(spn->x * 7 + (float)get_time_ms() * 0.1f) % (size_range + 1)) : 0);
-
-        int level_range = spn->level_max - spn->level_min;
-        int lvl         = spn->level_min + (level_range > 0
-            ? ((int)((float)get_time_ms() * 0.013f) % (level_range + 1)) : 0);
+         * the whole fleet in [level_min, level_max].
+         * Use the dedicated RNG so every zone/respawn gets a truly different
+         * value instead of the float-precision-collapsed get_time_ms() hack
+         * (which made all zones that spawn in the same tick use level_min). */
+        int fleet_size = (int)rng_range(&ghost_spawn_rng,
+                                        (uint32_t)spn->count_min,
+                                        (uint32_t)spn->count_max);
+        int lvl        = (int)rng_range(&ghost_spawn_rng,
+                                        (uint32_t)spn->level_min,
+                                        (uint32_t)spn->level_max);
 
         if (fleet_size < 1) fleet_size = 1;
 

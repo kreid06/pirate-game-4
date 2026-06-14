@@ -704,6 +704,8 @@ typedef struct WebSocketPlayer {
      * bed_last_use_ms tracks the 60-second cooldown between uses. */
     uint16_t respawn_bed_id;    /* PlacedStructure.id of active island bed (0 = none) */
     uint16_t respawn_ship_id;   /* ship_id of active ship bed (0 = none) */
+    float    respawn_ship_lx;   /* ship-local X where the bed was placed */
+    float    respawn_ship_ly;   /* ship-local Y where the bed was placed */
     uint32_t bed_last_use_ms;   /* wall-clock ms of last bed sleep (cooldown gate) */
 } WebSocketPlayer;
 

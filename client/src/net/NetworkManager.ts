@@ -2711,8 +2711,14 @@ export class NetworkManager {
             deckId: player.deck_index ?? player.deck_level ?? player.deckId ?? 1, // deck_level: 0=lower, 1=upper (default upper)
             onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
             
-            // Local (ship-relative) position when on a ship
-            localPosition: (player.local_x !== undefined && player.local_y !== undefined)
+            // Local (ship-relative) position — only valid when on a ship.
+            // The server always serialises local_x/local_y (0,0 when swimming),
+            // so we must gate on parent_ship to avoid overwriting the predicted
+            // deck anchor with a stale {0,0} from the previous swim snapshot.
+            // buildSimBase uses `runningLocal.localPosition ?? serverLocal.localPosition`,
+            // so undefined here correctly falls through to the server's boarding value.
+            localPosition: (player.parent_ship > 0 &&
+                            player.local_x !== undefined && player.local_y !== undefined)
               ? Vec2.from(player.local_x, player.local_y)
               : undefined,
             
