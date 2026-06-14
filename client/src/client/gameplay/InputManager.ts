@@ -597,6 +597,16 @@ export class InputManager {
     return this.inputState.mouseWorldPosition.clone();
   }
   
+  /** True for the single frame when the left mouse button was released. */
+  isLeftMouseJustReleased(): boolean {
+    return this.inputState.leftMouseReleased;
+  }
+
+  /** True while the left mouse button is held down. */
+  isLeftMouseDown(): boolean {
+    return this.inputState.leftMouseDown;
+  }
+
   /**
    * Check if a specific action is currently active
    */

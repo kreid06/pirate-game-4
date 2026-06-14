@@ -16771,6 +16771,38 @@ export class RenderSystem {
       this.ctx.fillText(player.name, screenPos.x, nameY);
     }
 
+    // ── Grapple hook rope + tip ────────────────────────────────────────────
+    // Rendered only when the hook is actively flying (1) or attached (2).
+    if (player.grappleState && player.grappleX !== undefined && player.grappleY !== undefined) {
+      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
+      const zoom = camera.zoom;
+      const FLYING   = 1;
+      const ATTACHED = 2;
+
+      // Rope — dashed brown line from player to hook
+      this.ctx.save();
+      this.ctx.globalAlpha = _playerDeckAlpha;
+      this.ctx.strokeStyle = player.grappleState === ATTACHED ? '#c68642' : '#a06030';
+      this.ctx.lineWidth = Math.max(1.5, 2 * zoom);
+      this.ctx.setLineDash(player.grappleState === FLYING ? [6, 4] : []);
+      this.ctx.beginPath();
+      this.ctx.moveTo(screenPos.x, screenPos.y);
+      this.ctx.lineTo(hookScreen.x, hookScreen.y);
+      this.ctx.stroke();
+      this.ctx.setLineDash([]);
+
+      // Hook tip — small filled circle + a tiny claw shape
+      const hookR = Math.max(4, 5 * zoom);
+      this.ctx.fillStyle   = player.grappleState === ATTACHED ? '#e8a840' : '#cccccc';
+      this.ctx.strokeStyle = '#333333';
+      this.ctx.lineWidth   = 1.5;
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, hookR, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
+
     this.ctx.restore();
   }
   

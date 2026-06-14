@@ -223,6 +223,54 @@ typedef struct {
 static DroppedItem dropped_items[MAX_DROPPED_ITEMS];
 static uint32_t    next_dropped_item_id = 1;
 
+/* ── Grapple hook system ──────────────────────────────────────────────────────
+ * Each connected player slot has one grapple hook entry.  Hooks travel as
+ * projectiles, attach to the first valid target in range, then pull that
+ * target toward the player (items) or the player toward the target (ships).
+ * The client holds left-click to maintain the hook; releasing the button sends
+ * "release_grapple" which immediately detaches.  A 5-second server-side
+ * timeout auto-releases stale hooks (e.g. on client disconnect / lag). */
+
+#define GRAPPLE_SPEED         1200.0f   /* px/s hook travel speed                */
+#define GRAPPLE_MAX_RANGE      600.0f   /* max distance the hook can fly (px)    */
+#define GRAPPLE_PULL_SPEED     350.0f   /* px/s pull velocity (items toward player) */
+#define GRAPPLE_PULL_PLAYER    300.0f   /* px/s pull speed for players / NPCs    */
+#define GRAPPLE_HIT_R_ITEM      80.0f   /* hit radius for dropped items          */
+#define GRAPPLE_HIT_R_SHIP     140.0f   /* hit radius for ships (approx hull)    */
+#define GRAPPLE_HIT_R_ENTITY    55.0f   /* hit radius for players / NPCs         */
+#define GRAPPLE_DETACH_DIST     80.0f   /* auto-detach when target this close    */
+#define GRAPPLE_TIMEOUT_MS    5000u     /* safety auto-release timeout           */
+#define GRAPPLE_COOLDOWN_MS   1500u     /* minimum time between fire attempts    */
+
+typedef enum { GRAPPLE_IDLE = 0, GRAPPLE_FLYING = 1, GRAPPLE_ATTACHED = 2 } GrappleState;
+
+#define GRAPPLE_TARGET_NONE         0
+#define GRAPPLE_TARGET_DROPPED_ITEM 1
+#define GRAPPLE_TARGET_SHIP         2
+#define GRAPPLE_TARGET_PLAYER       3
+#define GRAPPLE_TARGET_NPC          4
+
+typedef struct {
+    bool         active;        /* slot is in use                                */
+    int          player_idx;    /* index into players[]                          */
+    GrappleState state;
+    float        hook_x, hook_y;
+    float        vel_x, vel_y;  /* direction the hook is flying                  */
+    float        origin_x, origin_y;
+    int          target_type;   /* GRAPPLE_TARGET_* once attached                */
+    uint32_t     target_id;     /* id of attached entity                         */
+    uint32_t     fire_time_ms;
+} GrappleHook;
+
+static GrappleHook grapple_hooks[WS_MAX_CLIENTS];
+
+static void grapple_detach(int slot) {
+    grapple_hooks[slot].active      = false;
+    grapple_hooks[slot].state       = GRAPPLE_IDLE;
+    grapple_hooks[slot].target_type = GRAPPLE_TARGET_NONE;
+    grapple_hooks[slot].target_id   = 0;
+}
+
 /* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
  * Offloads non-authoritative JSON serialization from the main tick thread.
  * The authoritative simulation and send loop remain single-threaded.
@@ -1674,7 +1722,12 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
     player->local_x = 0.0f;
     player->local_y = 0.0f;
     player->movement_state = PLAYER_STATE_SWIMMING;
-    
+    /* Reset to upper-deck so the swimming snapshot never carries stale lower-deck
+     * state into the next ship boarding (walk-off gate checks deck_level != 0).
+     * RenderSystem resets _playerDeckLevel to 1 when carrierId == 0, so this
+     * keeps the server in sync with what the client will show. */
+    player->deck_level = 1;
+
     // Keep some of the ship's velocity (player carries momentum)
     player->velocity_x *= 0.5f;
     player->velocity_y *= 0.5f;
@@ -2014,6 +2067,25 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                     : 0),
                 _snap_spd_mult, _snap_can_sprint ? "true" : "false",
                 inv_buf);
+        /* Append active grapple state so the client can render the rope.
+         * Only included when the hook is in flight or attached. */
+        {
+            const GrappleHook* _gh = &grapple_hooks[p];
+            if (_gh->active && _gh->state != GRAPPLE_IDLE) {
+                int _glen = (int)strlen(player_entry);
+                /* Inject before the closing '}' */
+                if (_glen > 1 && player_entry[_glen - 1] == '}') {
+                    char _gbuf[128];
+                    snprintf(_gbuf, sizeof(_gbuf),
+                        ",\"grapple_state\":%d,\"grapple_x\":%.1f,\"grapple_y\":%.1f}",
+                        (int)_gh->state, _gh->hook_x, _gh->hook_y);
+                    /* Replace the last '}' with the grapple suffix. */
+                    player_entry[_glen - 1] = '\0';
+                    strncat(player_entry, _gbuf,
+                            sizeof(player_entry) - strlen(player_entry) - 1);
+                }
+            }
+        }
         /* Capture per-entry for AOI-filtered per-client assembly. */
         {
             int _pelen = (int)strlen(player_entry);
@@ -3228,6 +3300,274 @@ static void handle_pickup_item(WebSocketPlayer* player,
 }
 
 
+
+// ── Grapple hook handlers ─────────────────────────────────────────────────────
+
+/** Fire the grapple hook from player_idx toward (target_x, target_y). */
+static void handle_fire_grapple(int player_idx, float target_x, float target_y,
+                                 uint32_t now_ms)
+{
+    WebSocketPlayer* player = &players[player_idx];
+
+    /* Must be holding a grapple hook in the active slot. */
+    uint8_t aslot = player->inventory.active_slot;
+    if (aslot >= INVENTORY_SLOTS ||
+        player->inventory.slots[aslot].item != ITEM_GRAPPLE_HOOK ||
+        player->inventory.slots[aslot].quantity == 0) {
+        return;
+    }
+
+    GrappleHook* gh = &grapple_hooks[player_idx];
+
+    /* Cooldown check — prevent rapid re-fire. */
+    if (gh->active && (now_ms - gh->fire_time_ms) < GRAPPLE_COOLDOWN_MS) return;
+
+    /* Cancel any existing hook first. */
+    grapple_detach(player_idx);
+
+    /* Compute normalised direction toward target. */
+    float ox = player->x, oy = player->y;
+    float dx = target_x - ox, dy = target_y - oy;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 1.0f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+    float nx = dx / dist, ny = dy / dist;
+
+    gh->active      = true;
+    gh->player_idx  = player_idx;
+    gh->state       = GRAPPLE_FLYING;
+    gh->hook_x      = ox;
+    gh->hook_y      = oy;
+    gh->vel_x       = nx * GRAPPLE_SPEED;
+    gh->vel_y       = ny * GRAPPLE_SPEED;
+    gh->origin_x    = ox;
+    gh->origin_y    = oy;
+    gh->target_type = GRAPPLE_TARGET_NONE;
+    gh->target_id   = 0;
+    gh->fire_time_ms = now_ms;
+
+    log_info("🪝  Player %u fired grapple toward (%.0f,%.0f)",
+             player->player_id, target_x, target_y);
+}
+
+/** Detach the grapple hook for a given player index. */
+static void handle_release_grapple(int player_idx)
+{
+    if (grapple_hooks[player_idx].active) {
+        log_info("🪝  Player %u released grapple",
+                 players[player_idx].player_id);
+    }
+    grapple_detach(player_idx);
+}
+
+/** Per-tick grapple physics.  Called from the main server tick with dt seconds. */
+static void update_grapple_hooks(float dt, uint32_t now_ms)
+{
+    for (int si = 0; si < WS_MAX_CLIENTS; si++) {
+        GrappleHook* gh = &grapple_hooks[si];
+        if (!gh->active) continue;
+
+        WebSocketPlayer* owner = &players[si];
+        if (!owner->active) { grapple_detach(si); continue; }
+
+        /* Safety timeout — auto-release stale hooks. */
+        if (now_ms - gh->fire_time_ms > GRAPPLE_TIMEOUT_MS) {
+            grapple_detach(si);
+            continue;
+        }
+
+        if (gh->state == GRAPPLE_FLYING) {
+            /* Advance hook position. */
+            gh->hook_x += gh->vel_x * dt;
+            gh->hook_y += gh->vel_y * dt;
+
+            /* Out-of-range check. */
+            float rdx = gh->hook_x - gh->origin_x;
+            float rdy = gh->hook_y - gh->origin_y;
+            if (rdx * rdx + rdy * rdy > GRAPPLE_MAX_RANGE * GRAPPLE_MAX_RANGE) {
+                grapple_detach(si);
+                continue;
+            }
+
+            /* ── Hit detection ──────────────────────────────────────────────── */
+            bool hit = false;
+
+            /* Dropped items. */
+            for (int di = 0; di < (int)MAX_DROPPED_ITEMS && !hit; di++) {
+                if (!dropped_items[di].active) continue;
+                float ddx = gh->hook_x - dropped_items[di].x;
+                float ddy = gh->hook_y - dropped_items[di].y;
+                if (ddx * ddx + ddy * ddy <= GRAPPLE_HIT_R_ITEM * GRAPPLE_HIT_R_ITEM) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_DROPPED_ITEM;
+                    gh->target_id   = (uint32_t)di; /* array index */
+                    gh->hook_x      = dropped_items[di].x;
+                    gh->hook_y      = dropped_items[di].y;
+                    hit = true;
+                }
+            }
+
+            /* Ships. */
+            for (int shp = 0; shp < ship_count && !hit; shp++) {
+                if (!ships[shp].active) continue;
+                float sdx = gh->hook_x - ships[shp].x;
+                float sdy = gh->hook_y - ships[shp].y;
+                if (sdx * sdx + sdy * sdy <= GRAPPLE_HIT_R_SHIP * GRAPPLE_HIT_R_SHIP) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_SHIP;
+                    gh->target_id   = (uint32_t)ships[shp].ship_id;
+                    gh->hook_x      = ships[shp].x;
+                    gh->hook_y      = ships[shp].y;
+                    hit = true;
+                }
+            }
+
+            /* Other players. */
+            for (int pi = 0; pi < WS_MAX_CLIENTS && !hit; pi++) {
+                if (pi == si) continue;
+                if (!players[pi].active) continue;
+                float pdx = gh->hook_x - players[pi].x;
+                float pdy = gh->hook_y - players[pi].y;
+                if (pdx * pdx + pdy * pdy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_PLAYER;
+                    gh->target_id   = players[pi].player_id;
+                    gh->hook_x      = players[pi].x;
+                    gh->hook_y      = players[pi].y;
+                    hit = true;
+                }
+            }
+
+            /* World NPCs. */
+            for (int ni = 0; ni < world_npc_count && !hit; ni++) {
+                if (!world_npcs[ni].active) continue;
+                float ndx = gh->hook_x - world_npcs[ni].x;
+                float ndy = gh->hook_y - world_npcs[ni].y;
+                if (ndx * ndx + ndy * ndy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_NPC;
+                    gh->target_id   = (uint32_t)ni; /* array index */
+                    gh->hook_x      = world_npcs[ni].x;
+                    gh->hook_y      = world_npcs[ni].y;
+                    hit = true;
+                }
+            }
+
+        } else if (gh->state == GRAPPLE_ATTACHED) {
+            /* ── Pull logic ─────────────────────────────────────────────────── */
+
+            switch (gh->target_type) {
+
+            case GRAPPLE_TARGET_DROPPED_ITEM: {
+                int di = (int)gh->target_id;
+                if (di < 0 || di >= (int)MAX_DROPPED_ITEMS || !dropped_items[di].active) {
+                    grapple_detach(si); break;
+                }
+                /* Pull item toward player. */
+                float idx = owner->x - dropped_items[di].x;
+                float idy = owner->y - dropped_items[di].y;
+                float idist = sqrtf(idx * idx + idy * idy);
+                if (idist < GRAPPLE_DETACH_DIST) {
+                    /* Auto pick-up: attempt to give item to player. */
+                    bool stacked = false;
+                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                        InventorySlot* isl = &owner->inventory.slots[s];
+                        if (isl->item == (ItemKind)dropped_items[di].item_kind &&
+                            isl->quantity > 0 && isl->quantity < 99) {
+                            int add = (int)dropped_items[di].quantity;
+                            if (isl->quantity + add > 99) add = 99 - isl->quantity;
+                            isl->quantity += (uint8_t)add;
+                            dropped_items[di].quantity -= (uint8_t)add;
+                            stacked = true;
+                        }
+                    }
+                    if (!stacked || dropped_items[di].quantity == 0) {
+                        if (dropped_items[di].quantity > 0) {
+                            for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                InventorySlot* isl = &owner->inventory.slots[s];
+                                if (isl->item == ITEM_NONE || isl->quantity == 0) {
+                                    isl->item     = (ItemKind)dropped_items[di].item_kind;
+                                    isl->quantity = dropped_items[di].quantity;
+                                    dropped_items[di].quantity = 0;
+                                    break;
+                                }
+                            }
+                        }
+                        dropped_items[di].active = false;
+                    }
+                    grapple_detach(si);
+                } else {
+                    float step = GRAPPLE_PULL_SPEED * dt / idist;
+                    dropped_items[di].x += idx * step;
+                    dropped_items[di].y += idy * step;
+                    gh->hook_x = dropped_items[di].x;
+                    gh->hook_y = dropped_items[di].y;
+                }
+                break;
+            }
+
+            case GRAPPLE_TARGET_SHIP: {
+                /* Find the ship. */
+                SimpleShip* tship = find_ship((uint16_t)gh->target_id);
+                if (!tship || !tship->active) { grapple_detach(si); break; }
+
+                /* Pull owner player toward the ship center. */
+                float tdx = tship->x - owner->x;
+                float tdy = tship->y - owner->y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < GRAPPLE_DETACH_DIST) {
+                    grapple_detach(si); break;
+                }
+                float step = GRAPPLE_PULL_SPEED * dt / tdist;
+                owner->x += tdx * step;
+                owner->y += tdy * step;
+                /* Tiny nudge on ship (barely perceptible — player mass << ship mass). */
+                tship->x -= tdx * (step * 0.02f);
+                tship->y -= tdy * (step * 0.02f);
+                gh->hook_x = tship->x;
+                gh->hook_y = tship->y;
+                break;
+            }
+
+            case GRAPPLE_TARGET_PLAYER: {
+                WebSocketPlayer* tgt = find_player(gh->target_id);
+                if (!tgt || !tgt->active) { grapple_detach(si); break; }
+
+                float tdx = owner->x - tgt->x;
+                float tdy = owner->y - tgt->y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < GRAPPLE_DETACH_DIST) { grapple_detach(si); break; }
+                float step = GRAPPLE_PULL_PLAYER * dt / tdist;
+                tgt->x += tdx * step;
+                tgt->y += tdy * step;
+                gh->hook_x = tgt->x;
+                gh->hook_y = tgt->y;
+                break;
+            }
+
+            case GRAPPLE_TARGET_NPC: {
+                int ni = (int)gh->target_id;
+                if (ni < 0 || ni >= world_npc_count || !world_npcs[ni].active) {
+                    grapple_detach(si); break;
+                }
+                float tdx = owner->x - world_npcs[ni].x;
+                float tdy = owner->y - world_npcs[ni].y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < GRAPPLE_DETACH_DIST) { grapple_detach(si); break; }
+                float step = GRAPPLE_PULL_PLAYER * dt / tdist;
+                world_npcs[ni].x += tdx * step;
+                world_npcs[ni].y += tdy * step;
+                gh->hook_x = world_npcs[ni].x;
+                gh->hook_y = world_npcs[ni].y;
+                break;
+            }
+
+            default:
+                grapple_detach(si);
+                break;
+            }
+        }
+    }
+}
 
 // ── Player persistence ──────────────────────────────────────────────────────
 #include "net/player_persistence.h"
@@ -5867,6 +6207,32 @@ int websocket_server_update(struct Sim* sim) {
                                                 "{\"type\":\"player_block\",\"player_id\":%u}",
                                                 player->player_id);
                                             websocket_server_broadcast(block_msg);
+                                        }
+                                    } else if (strcmp(action, "fire_grapple") == 0) {
+                                        /* Fire grapple toward target position.
+                                         * Requires ITEM_GRAPPLE_HOOK in active slot. */
+                                        float tgx = player->x, tgy = player->y;
+                                        const char* tg_start = strstr(payload, "\"target\":{");
+                                        if (tg_start) {
+                                            const char* xp = strstr(tg_start, "\"x\":");
+                                            const char* yp = strstr(tg_start, "\"y\":");
+                                            if (xp) tgx = strtof(xp + 4, NULL);
+                                            if (yp) tgy = strtof(yp + 4, NULL);
+                                        }
+                                        /* Find this player's slot index. */
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] == player) {
+                                                handle_fire_grapple(_gsi, tgx, tgy, get_time_ms());
+                                                break;
+                                            }
+                                        }
+                                    } else if (strcmp(action, "release_grapple") == 0) {
+                                        /* Player released left-click — detach the hook. */
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] == player) {
+                                                handle_release_grapple(_gsi);
+                                                break;
+                                            }
                                         }
                                     }
                                     
@@ -13027,6 +13393,10 @@ void websocket_server_tick(float dt) {
                                     /* On ship deck — flag as on-ship */
                                     if (ws_player->parent_ship_id == 0) {
                                         ws_player->parent_ship_id = _zship->ship_id;
+                                        /* Boarding always lands on the upper deck.
+                                         * Must be explicit here because we skip
+                                         * board_player_on_ship() in the scaffold path. */
+                                        ws_player->deck_level     = 1;
                                         ws_player->on_dock_id     = 0;
                                         ws_player->velocity_x     = 0.0f;
                                         ws_player->velocity_y     = 0.0f;
@@ -13063,6 +13433,7 @@ void websocket_server_tick(float dt) {
                                     ws_player->controlling_ship_id = 0;
                                 }
                                 ws_player->parent_ship_id  = 0;
+                                ws_player->deck_level      = 1; /* reset so next boarding starts upper deck */
                                 ws_player->on_dock_id      = 0;
                                 ws_player->movement_state  = PLAYER_STATE_SWIMMING;
                                 sim_player->ship_id        = INVALID_ENTITY_ID;
@@ -14363,6 +14734,10 @@ void websocket_server_tick(float dt) {
             }
         }
     }
+
+    /* ===== GRAPPLE HOOK PHYSICS TICK =========================================
+       Advance flying hooks and apply pull forces each server tick. */
+    update_grapple_hooks(dt, current_time);
 
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====
     if (global_sim && global_sim->ship_count > 0) {

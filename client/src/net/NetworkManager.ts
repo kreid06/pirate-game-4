@@ -1457,6 +1457,16 @@ export class NetworkManager {
     this.sendMessage(message);
   }
 
+  /** Fire the grapple hook toward a world-space target. */
+  sendFireGrapple(target: Vec2): void {
+    this.sendAction('fire_grapple', target);
+  }
+
+  /** Release the currently active grapple hook. */
+  sendReleaseGrapple(): void {
+    this.sendAction('release_grapple');
+  }
+
   /**
    * Send ship sail control (when mounted to helm)
    * W/S keys adjust desired sail openness
@@ -2769,6 +2779,9 @@ export class NetworkManager {
             statPoints: player.stat_points ?? 0,
             speedMult: typeof player.speed_mult === 'number' ? player.speed_mult : 1.0,
             canSprint: typeof player.can_sprint === 'boolean' ? player.can_sprint : true,
+            grappleState: typeof player.grapple_state === 'number' ? player.grapple_state : undefined,
+            grappleX: typeof player.grapple_x === 'number' ? player.grapple_x : undefined,
+            grappleY: typeof player.grapple_y === 'number' ? player.grapple_y : undefined,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,

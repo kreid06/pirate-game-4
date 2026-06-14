@@ -131,6 +131,11 @@ export interface Player {
   // Used by client-side prediction to match the server exactly.
   speedMult?: number;  // Effective walk-speed multiplier in [0.3, 1.0]. Absent = 1.0 (unloaded).
   canSprint?: boolean; // False when carry ratio >= 85 % of capacity. Absent = true.
+
+  // Grapple hook state — absent when hook is idle (GRAPPLE_IDLE=0).
+  grappleState?: number; // 1 = flying, 2 = attached
+  grappleX?: number;     // current world X of the hook tip
+  grappleY?: number;     // current world Y of the hook tip
 }
 
 /**

@@ -335,15 +335,19 @@ export class PredictionEngine {
           localPosition: serverLocal.isMounted
             ? serverLocal.localPosition
             : (runningLocal.localPosition ?? serverLocal.localPosition),
-          // deckId: CLIENT semi-authority — the RenderSystem state machine transitions this
-          // immediately when the player enters/exits a ramp zone, then sends player_set_deck
-          // to the server. Until the server echoes back the new deck_level (one RTT later),
-          // the snapshot still carries the old deck. Overwriting with the stale server value
-          // every merge would apply the WRONG per-deck collision filter for the full RTT,
-          // letting players walk through ramp walls or fall through upper-deck floors.
-          // We keep the client's locally-transitioned value; forced corrections (teleport /
-          // respawn) set it directly in onAuthoritativeState's position-correction block.
-          deckId: runningLocal.deckId,
+          // deckId: CLIENT semi-authority during ramp transitions — the RenderSystem state
+          // machine transitions this immediately when the player enters/exits a ramp zone,
+          // then sends player_set_deck to the server.  Until the server echoes back the new
+          // deck_level (one RTT later) the snapshot still carries the old deck.  Overwriting
+          // with the stale server value every tick would apply the WRONG per-deck collision
+          // filter for the full RTT, letting players walk through ramp walls or fall through
+          // upper-deck floors.  We keep the client value — EXCEPT when the player just boarded
+          // a ship (carrierId changed 0 → non-zero): in that case the server's deck_level is
+          // the ground-truth initial deck and must not be overridden by a swimming-player's
+          // stale deckId (which is always 1 from the RenderSystem off-ship reset).
+          deckId: (serverLocal.carrierId > 0 && runningLocal.carrierId === 0)
+            ? serverLocal.deckId   // boarding transition: trust server's initial deck_level
+            : runningLocal.deckId, // normal walking / ramp transition: keep client value
         }
       : { ...runningLocal };
 

@@ -1155,6 +1155,11 @@ export class ClientApplication {
             });
             return;
           }
+          // Grapple hook — left-click fires; release is detected in the game loop
+          if (activeItem === 'grapple_hook' && player && !player.isMounted) {
+            if (target) this.networkManager.sendFireGrapple(target);
+            return;
+          }
           // Not a hammer click — check for sword
           if (activeItem === 'sword' && player && !player.isMounted) {
             const now = performance.now();
@@ -4013,6 +4018,17 @@ export class ClientApplication {
 
           // Expose average view distance for server AOI hint (client units)
           this.networkManager.viewRadius = raySum / N;
+
+          // Grapple hook: detect left-mouse-button release to send release_grapple.
+          // The server auto-detaches after 5 s, but we send an explicit release on
+          // mouse-up so the hook drops immediately when the player lets go.
+          if (this.inputManager.isLeftMouseJustReleased()) {
+            const gSlot  = player.inventory?.activeSlot ?? 0;
+            const gItem  = player.inventory?.slots[gSlot]?.item;
+            if (gItem === 'grapple_hook' && player.grappleState) {
+              this.networkManager.sendReleaseGrapple();
+            }
+          }
         }
       }
       
