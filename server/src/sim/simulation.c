@@ -320,15 +320,17 @@ void sim_step(struct Sim* sim, q16_t dt) {
 }
 
 void sim_update_ships(struct Sim* sim, q16_t dt) {
-    // Sort ships by ID to ensure deterministic order
-    for (uint16_t i = 0; i < sim->ship_count; i++) {
-        for (uint16_t j = i + 1; j < sim->ship_count; j++) {
-            if (sim->ships[i].id > sim->ships[j].id) {
-                struct Ship temp = sim->ships[i];
-                sim->ships[i] = sim->ships[j];
-                sim->ships[j] = temp;
-            }
+    /* Sort ships by ID for deterministic order.
+     * Insertion sort: O(n) when array is already sorted (the common case, since
+     * entity IDs are monotonically increasing and new ships are appended). */
+    for (uint16_t i = 1; i < sim->ship_count; i++) {
+        struct Ship key = sim->ships[i];
+        int16_t j = (int16_t)i - 1;
+        while (j >= 0 && sim->ships[j].id > key.id) {
+            sim->ships[j + 1] = sim->ships[j];
+            j--;
         }
+        sim->ships[j + 1] = key;
     }
 
     float dt_secs = Q16_TO_FLOAT(dt);
@@ -494,15 +496,16 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
 }
 
 void sim_update_players(struct Sim* sim, q16_t dt) {
-    // Sort players by ID for deterministic order
-    for (uint16_t i = 0; i < sim->player_count; i++) {
-        for (uint16_t j = i + 1; j < sim->player_count; j++) {
-            if (sim->players[i].id > sim->players[j].id) {
-                struct Player temp = sim->players[i];
-                sim->players[i] = sim->players[j];
-                sim->players[j] = temp;
-            }
+    /* Sort players by ID for deterministic order.
+     * Insertion sort: O(n) when array is already sorted (the common case). */
+    for (uint16_t i = 1; i < sim->player_count; i++) {
+        struct Player key = sim->players[i];
+        int16_t j = (int16_t)i - 1;
+        while (j >= 0 && sim->players[j].id > key.id) {
+            sim->players[j + 1] = sim->players[j];
+            j--;
         }
+        sim->players[j + 1] = key;
     }
     
     // Periodic player position log disabled — too noisy
@@ -527,15 +530,16 @@ void sim_update_players(struct Sim* sim, q16_t dt) {
 }
 
 void sim_update_projectiles(struct Sim* sim, q16_t dt) {
-    // Sort projectiles by ID for deterministic order
-    for (uint16_t i = 0; i < sim->projectile_count; i++) {
-        for (uint16_t j = i + 1; j < sim->projectile_count; j++) {
-            if (sim->projectiles[i].id > sim->projectiles[j].id) {
-                struct Projectile temp = sim->projectiles[i];
-                sim->projectiles[i] = sim->projectiles[j];
-                sim->projectiles[j] = temp;
-            }
+    /* Sort projectiles by ID for deterministic order.
+     * Insertion sort: O(n) when array is already sorted (the common case). */
+    for (uint16_t i = 1; i < sim->projectile_count; i++) {
+        struct Projectile key = sim->projectiles[i];
+        int16_t j = (int16_t)i - 1;
+        while (j >= 0 && sim->projectiles[j].id > key.id) {
+            sim->projectiles[j + 1] = sim->projectiles[j];
+            j--;
         }
+        sim->projectiles[j + 1] = key;
     }
     
     // Update each projectile's physics and check lifetime
