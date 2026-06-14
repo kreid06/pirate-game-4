@@ -9,7 +9,7 @@
  */
 
 import { PredictionConfig } from '../client/ClientConfig.js';
-import { WorldState, InputFrame } from '../sim/Types.js';
+import { WorldState, InputFrame, PhysicsConfig } from '../sim/Types.js';
 import { Vec2 } from '../common/Vec2.js';
 import { simulate } from '../sim/Physics.js';
 import { createCarrierDetectionState, DETECTION_CONFIG, ShipDetectionState, CarrierDetectionState } from '../sim/CarrierDetection.js';
@@ -411,9 +411,39 @@ export class PredictionEngine {
       const runningLocal = this.runningPredicted.players.find(p => p.id === this.localPlayerId);
 
       if (serverPlayer && runningLocal) {
+        // ── Latency-robust trigger decision ──────────────────────────────────────
+        // The server snapshot reflects the position the CLIENT itself reported at
+        // serverState.tick (semi-authority: the server adopts our position). The
+        // running prediction has since advanced by roughly v×RTT — that lead is
+        // legitimate, NOT a misprediction. Comparing the snapshot against the current
+        // running position therefore inflates the error by the lead and, past ~500 ms
+        // RTT while sprinting (120 u/s × 0.5 s = 60 u), trips a FALSE correction that
+        // snaps the player backward every snapshot.
+        //
+        // To isolate genuine server-forced moves (teleport / respawn / forced dismount)
+        // from ordinary lead, compare the snapshot against the client's OWN prediction
+        // at the SAME server tick when it's still in history. That difference is
+        // latency-independent. Only when no matching prediction exists (extreme ping /
+        // history eviction) do we fall back to the running position, with a threshold
+        // widened by the maximum distance the player could have legitimately travelled
+        // during the round trip so the lead alone never trips it.
+        const matchedLocal = this.findClosestPredictionLocal(serverState.tick, 2);
+
+        let triggered: boolean;
+        if (matchedLocal) {
+          const mispredict = serverPlayer.position.sub(matchedLocal.position).length();
+          triggered = mispredict > PredictionEngine.FORCED_CORRECTION_THRESHOLD;
+        } else {
+          const fullRttSec = (this.estimatedNetworkDelay * 2) / 1000;
+          const sprintLead = PhysicsConfig.PLAYER_WALK_SPEED
+            * PhysicsConfig.PLAYER_SPRINT_MULT * fullRttSec;
+          const dynThreshold = PredictionEngine.FORCED_CORRECTION_THRESHOLD + sprintLead;
+          triggered = serverPlayer.position.sub(runningLocal.position).length() > dynThreshold;
+        }
+
         const posDiff = serverPlayer.position.sub(runningLocal.position).length();
 
-        if (posDiff > PredictionEngine.FORCED_CORRECTION_THRESHOLD) {
+        if (triggered) {
           console.log(`📍 Forced server correction | Tick ${serverState.tick} | Pos diff: ${posDiff.toFixed(1)}u | adopting server position`);
 
           // Fold the visual discrepancy into the decaying render offset when it's small
@@ -841,6 +871,32 @@ export class PredictionEngine {
   
   private findPredictionState(tick: number): PredictionState | null {
     return this.predictionHistory.find(state => state.tick === tick) || null;
+  }
+
+  /**
+   * Find the local player's stored prediction at (or nearest within ±tol of) a server
+   * tick. Used by the forced-correction gate to compare the server snapshot against the
+   * client's own same-tick prediction, isolating genuine server-forced moves from the
+   * legitimate v×RTT lead. A small tolerance absorbs ±1 tick error in the RTT-lead label.
+   * Returns the local player snapshot (with a cloned position) or null when no prediction
+   * within tolerance survives in history (extreme ping / eviction).
+   */
+  private findClosestPredictionLocal(tick: number, tol: number): { position: Vec2 } | null {
+    let best: PredictionState | null = null;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const state of this.predictionHistory) {
+      const delta = Math.abs(state.tick - tick);
+      if (delta <= tol && delta < bestDelta) {
+        best = state;
+        bestDelta = delta;
+        if (delta === 0) break;
+      }
+    }
+    if (!best) return null;
+    const local = this.localPlayerId !== null
+      ? best.worldState.players.find(p => p.id === this.localPlayerId)
+      : best.worldState.players[0];
+    return local?.position ? { position: local.position } : null;
   }
   
   /**
