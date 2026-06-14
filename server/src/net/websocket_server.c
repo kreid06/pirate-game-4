@@ -956,6 +956,16 @@ static bool hull_section_plank_alive(const SimpleShip* ship, int slot) {
  * Padding: INSET = PLAYER_RADIUS (body) + PLANK_THICKNESS (visual clearance).
  * This keeps the player's sprite fully clear of the visible plank line.
  */
+/* How long a client-reported position stays "fresh" for semi-authority adoption.
+ * The client streams its position every ~40 ms (movement heartbeat), so this is
+ * ~12× the steady-state cadence. Widened from 250 ms to give high-latency / jittery
+ * connections headroom: a brief packet-loss burst no longer expires freshness and
+ * drops the player into server-side direction integration (which can diverge from
+ * the client and cause a correction when the stream resumes). The anti-cheat
+ * max_step still bounds per-adopt travel by sprint speed × elapsed, and elapsed is
+ * capped at 0.5 s, so a longer freshness window grants no extra cheat distance. */
+#define CLIENT_POS_FRESH_MS 500u
+
 /*
  * Semi-authority target position for on-foot world-coordinate walking.
  *
@@ -974,15 +984,23 @@ static bool ws_player_walk_target(WebSocketPlayer* p,
                                   float* out_x, float* out_y)
 {
     uint32_t now = get_time_ms();
-    bool fresh = (p->client_pos_ms != 0u) && (now - p->client_pos_ms <= 250u);
+    bool fresh = (p->client_pos_ms != 0u) && (now - p->client_pos_ms <= CLIENT_POS_FRESH_MS);
 
     if (fresh) {
-        /* Distance the client is allowed to have travelled since we last committed. */
+        /* Distance the client is allowed to have travelled since we last committed.
+         * Use the SPRINT ceiling (walk * 2) regardless of the player's current
+         * is_sprinting flag.  The server's sprint state lags behind the client by
+         * one network RTT on deployed servers; if we clamp with the walk ceiling
+         * while the client is still predicting at sprint speed (or vice versa) the
+         * position gets clamped every tick, producing a visible rubber-band.
+         * Using sprint speed as the ceiling still blocks true teleport cheats while
+         * eliminating false corrections during sprint-state transitions. */
         float elapsed = (p->last_pos_adopt_ms != 0u && now > p->last_pos_adopt_ms)
                         ? (float)(now - p->last_pos_adopt_ms) / 1000.0f
                         : dt;
         if (elapsed > 0.5f) elapsed = 0.5f;          /* cap after a stream gap */
-        float max_step = walk_speed_client * elapsed * 1.5f + 6.0f; /* tolerance + epsilon */
+        float sprint_speed = walk_speed_client * 2.0f; /* sprint ceiling regardless of state */
+        float max_step = sprint_speed * elapsed * 2.5f + 8.0f; /* tolerance + epsilon */
 
         float dx = p->client_pos_x - p->x;
         float dy = p->client_pos_y - p->y;
@@ -13070,7 +13088,7 @@ void websocket_server_tick(float dt) {
                             float new_local_x, new_local_y;
                             uint32_t _now_ship = get_time_ms();
                             bool _ship_fresh = (ws_player->client_pos_ms != 0u) &&
-                                               (_now_ship - ws_player->client_pos_ms <= 250u);
+                                               (_now_ship - ws_player->client_pos_ms <= CLIENT_POS_FRESH_MS);
                             if (_ship_fresh) {
                                 float _cl_lx, _cl_ly;
                                 ship_world_to_local(player_ship,
@@ -13081,7 +13099,11 @@ void websocket_server_tick(float dt) {
                                                  ? (float)(_now_ship - ws_player->last_pos_adopt_ms) / 1000.0f
                                                  : dt;
                                 if (_elapsed > 0.5f) _elapsed = 0.5f;
-                                float _max_step = walk_speed_client * _elapsed * 1.5f + 6.0f;
+                                /* Use sprint ceiling for max_step (see ws_player_walk_target comment):
+                                 * the server's sprint state lags by one RTT; clamping to walk speed
+                                 * while the client predicts sprint (or vice versa) causes rubber-band. */
+                                float _sprint_ceil = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult * 2.0f;
+                                float _max_step = _sprint_ceil * _elapsed * 2.5f + 8.0f;
                                 float _dlx = _cl_lx - ws_player->local_x;
                                 float _dly = _cl_ly - ws_player->local_y;
                                 float _dl  = sqrtf(_dlx * _dlx + _dly * _dly);
