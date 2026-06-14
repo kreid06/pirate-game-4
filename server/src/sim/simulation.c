@@ -374,49 +374,29 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         }
 
         // ---- Sinking / water mechanic ----
-        // Ships scaffolded in a shipyard are immune to plank-drain sinking
-        if (ship->flags & SHIP_FLAG_SCAFFOLDED) {
-            // Keep hull_health at 100 while scaffolded
-            ship->hull_health = Q16_FROM_INT(100);
-            continue;  // skip entire drain/heal block for this ship
-        }
-        // Count remaining planks and detect leaks (< 30% HP).
-        // Leaking planks do NOT self-damage — they stay at their current HP but
-        // contribute to the hull drain rate at half the missing-plank rate.
-        int planks_remaining = 0;
-        int planks_leaking = 0;
-
+        // Passive healing for planks toward target_health (always active, even in shipyard).
+        // Planks placed during construction start at 10% HP with target = max so they
+        // heal to full while scaffolded. This loop must run BEFORE the scaffolded early-out.
         for (uint8_t m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
             if (mod->type_id != MODULE_TYPE_PLANK) continue;
-            if (mod->health <= 0) continue; // already destroyed elsewhere
+            if (mod->health <= 0) continue;
+            if (mod->health >= (int32_t)mod->target_health) continue;
 
-            bool is_leaking = (mod->health < mod->max_health * 30 / 100);
-
-            if (is_leaking) {
-                planks_leaking++;
-            }
-            planks_remaining++;
-
-            // Passive healing at 3.5%/s toward target_health — always active.
-            // target_health is the repair ceiling; it decreases with damage and
-            // must be raised back by the player spending wood (repair_plank msg).
-            if (mod->health < (int32_t)mod->target_health) {
-                float heal = (float)mod->max_health * 0.035f * dt_secs;
-                mod->health += (int32_t)heal;
-                if (mod->health >= (int32_t)mod->target_health) {
-                    mod->health = (int32_t)mod->target_health;
-                    mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
-                }
+            float heal = (float)mod->max_health * 0.035f * dt_secs;
+            mod->health += (int32_t)heal;
+            if (mod->health >= (int32_t)mod->target_health) {
+                mod->health = (int32_t)mod->target_health;
+                mod->state_bits &= (uint16_t)~MODULE_STATE_REPAIRING;
             }
         }
 
-        // Passive healing for all gameplay modules toward target_health (always active)
+        // Passive healing for all other gameplay modules (also before scaffolded early-out).
         // Rates: deck 3.5%/s, helm 2.0%/s, mast 1.5%/s, cannon/swivel 1.0%/s
         for (uint8_t m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
             if (mod->health <= 0 || mod->max_health <= 0) continue;
-            if (mod->type_id == MODULE_TYPE_PLANK) continue; // handled separately above
+            if (mod->type_id == MODULE_TYPE_PLANK) continue; // handled above
             if (mod->health >= (int32_t)mod->target_health) continue;
 
             float rate;
@@ -427,7 +407,7 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
                 case MODULE_TYPE_MAST:           rate = 0.015f; break;
                 case MODULE_TYPE_CANNON:
                 case MODULE_TYPE_SWIVEL:         rate = 0.010f; break;
-                default:                         continue; // no passive heal for ladders etc
+                default:                         continue;
             }
 
             float heal = (float)mod->max_health * rate * dt_secs;
@@ -437,6 +417,30 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
                 if (mod->health >= (int32_t)mod->max_health)
                     mod->state_bits &= (uint16_t)~(MODULE_STATE_REPAIRING | MODULE_STATE_DAMAGED);
             }
+        }
+
+        // Ships scaffolded in a shipyard are immune to plank-drain sinking.
+        // Hull health is kept at 100 and the drain/leak logic below is skipped,
+        // but module healing above still runs so newly placed modules reach full HP.
+        if (ship->flags & SHIP_FLAG_SCAFFOLDED) {
+            ship->hull_health = Q16_FROM_INT(100);
+            continue;
+        }
+
+        // Count remaining planks and detect leaks (< 30% HP).
+        // Leaking planks do NOT self-damage — they stay at their current HP but
+        // contribute to the hull drain rate at half the missing-plank rate.
+        int planks_remaining = 0;
+        int planks_leaking = 0;
+
+        for (uint8_t m = 0; m < ship->module_count; m++) {
+            ShipModule* mod = &ship->modules[m];
+            if (mod->type_id != MODULE_TYPE_PLANK) continue;
+            if (mod->health <= 0) continue;
+
+            bool is_leaking = (mod->health < mod->max_health * 30 / 100);
+            if (is_leaking) planks_leaking++;
+            planks_remaining++;
         }
 
         int missing = (int)ship->initial_plank_count - planks_remaining;

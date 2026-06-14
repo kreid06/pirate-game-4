@@ -2047,21 +2047,25 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "]");
     out->projectiles_len = (int)strlen(out->projectiles_json);
 
-    int npcs_offset = 0;
-    npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "[");
-    bool first_npc = true;
+    /* NPC entries: serialise directly into per-entry cache; no combined blob.
+     * The old approach wrote all NPCs into npcs_json[32768], but with up to
+     * MAX_WORLD_NPCS (512) active NPCs at ~500 bytes each (~256 KB needed)
+     * the 32 KB buffer overflowed.  snprintf's signed/unsigned subtraction
+     * (sizeof - int offset) wraps to a huge size_t once offset > sizeof,
+     * allowing writes past the buffer end that corrupt adjacent struct fields
+     * (tmb_len, ditem_len, players_len …) and produce non-UTF-8 WebSocket
+     * frames.  The per-client send path already reads npc_entry[] directly;
+     * npcs_json is not used in any send path, so we skip building it. */
+    memset(out->npc_entry_active, 0, sizeof(out->npc_entry_active));
     int _wnc = snap->world_npc_count;
     if (_wnc < 0) _wnc = 0;
     if (_wnc > MAX_WORLD_NPCS) _wnc = MAX_WORLD_NPCS;
-    memset(out->npc_entry_active, 0, sizeof(out->npc_entry_active));
     out->npc_entry_count = _wnc;
     for (int n = 0; n < _wnc; n++) {
         const WorldNpc* npc = &snap->world_npcs[n];
         if (!npc->active) continue;
-        if (!first_npc)
-            npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, ",");
-        int _ne_start = npcs_offset;
-        npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset,
+
+        int _nlen = snprintf(out->npc_entry[n], sizeof(out->npc_entry[n]),
             "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
             "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
             "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
@@ -2084,34 +2088,27 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
                 (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
             (int)npc->task_locked);
-        /* Capture per-entry for AOI-filtered per-client assembly. */
-        {
-            int _nelen = npcs_offset - _ne_start;
-            if (_nelen > 0) {
-                int _ncap = (int)sizeof(out->npc_entry[n]) - 1;
-                if (_nelen > _ncap) _nelen = _ncap;
-                memcpy(out->npc_entry[n], out->npcs_json + _ne_start, (size_t)_nelen);
-                out->npc_entry[n][_nelen] = '\0';
-                out->npc_entry_len[n] = _nelen;
-            } else {
-                out->npc_entry_len[n] = 0;
-            }
-            float _nwx = npc->x, _nwy = npc->y;
-            if (npc->ship_id != 0) {
-                for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
-                    if (out->aoi_ship_id[_asi] == (uint32_t)npc->ship_id) {
-                        _nwx = out->aoi_ship_px[_asi]; _nwy = out->aoi_ship_py[_asi]; break;
-                    }
+        if (_nlen < 0) _nlen = 0;
+        if (_nlen >= (int)sizeof(out->npc_entry[n]))
+            _nlen = (int)sizeof(out->npc_entry[n]) - 1;
+        out->npc_entry[n][_nlen] = '\0';
+        out->npc_entry_len[n] = _nlen;
+
+        float _nwx = npc->x, _nwy = npc->y;
+        if (npc->ship_id != 0) {
+            for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
+                if (out->aoi_ship_id[_asi] == (uint32_t)npc->ship_id) {
+                    _nwx = out->aoi_ship_px[_asi]; _nwy = out->aoi_ship_py[_asi]; break;
                 }
             }
-            out->npc_world_x[n] = _nwx;
-            out->npc_world_y[n] = _nwy;
-            out->npc_entry_active[n] = true;
         }
-        first_npc = false;
+        out->npc_world_x[n] = _nwx;
+        out->npc_world_y[n] = _nwy;
+        out->npc_entry_active[n] = true;
     }
-    npcs_offset += snprintf(out->npcs_json + npcs_offset, sizeof(out->npcs_json) - npcs_offset, "]");
-    out->npcs_len = (int)strlen(out->npcs_json);
+    /* npcs_json is unused in the send path; mark empty so stale data is never read. */
+    out->npcs_json[0] = '\0';
+    out->npcs_len = 0;
 }
 
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
@@ -5587,6 +5584,8 @@ int websocket_server_update(struct Sim* sim) {
                                                         tnpc->active = false;
                                                         tnpc->assigned_weapon_id = 0;
                                                         killed_npc = true;
+                                                        while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                                            world_npc_count--;
                                                         // Award XP to the attacker
                                                         player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
                                                     } else {
@@ -5760,6 +5759,8 @@ int websocket_server_update(struct Sim* sim) {
                                                         tnpc->active = false;
                                                         tnpc->assigned_weapon_id = 0;
                                                         killed_npc = true;
+                                                        while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                                            world_npc_count--;
                                                         player_apply_xp(player, PLAYER_XP_PER_NPC_KILL);
                                                     } else {
                                                         tnpc->health -= dmg16;
@@ -12297,6 +12298,8 @@ void websocket_server_tick(float dt) {
                     if (npc->health <= dmg16) {
                         npc->health = 0;
                         npc->active = false;
+                        while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                            world_npc_count--;
                     } else {
                         npc->health -= dmg16;
                     }
@@ -13940,6 +13943,8 @@ void websocket_server_tick(float dt) {
             if (npc->health == 0) {
                 npc->active = false;
                 npc->fire_timer_ms = 0;
+                while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                    world_npc_count--;
                 char death_msg[192];
                 snprintf(death_msg, sizeof(death_msg),
                     "{\"type\":\"ENTITY_HIT\",\"entityType\":\"npc\",\"id\":%u,"
