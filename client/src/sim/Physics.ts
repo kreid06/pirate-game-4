@@ -353,7 +353,74 @@ function updatePlayerWithDetection(
   } else {
     updatePlayerOffDeck(player, ships, inputFrame, dt);
   }
-  
+
+  // ── Grapple constraint — mirrors server update_grapple_hooks logic ─────────
+  // Run for all movement states so the constraint is consistent with server.
+  if (player.grappleState === 2 &&
+      player.grappleX !== undefined && player.grappleY !== undefined) {
+    const GRAPPLE_REEL_PULL = 90.0;  // px/s — must match server GRAPPLE_REEL_PULL
+    const GRAPPLE_ROPE_MIN  = 10.0;  // px   — must match server GRAPPLE_ROPE_MIN
+
+    const gx = player.grappleX;
+    const gy = player.grappleY;
+
+    // Vector from hook to player (same convention as server: tdx/tdy)
+    const tdx  = player.position.x - gx;
+    const tdy  = player.position.y - gy;
+    const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+
+    if (tdist > 0.5) {
+      const nx = tdx / tdist;
+      const ny = tdy / tdist;
+
+      if (inputFrame.grappleReelIn) {
+        // Mode A: LMB held — actively pull player toward hook (mirrors server)
+        const step    = GRAPPLE_REEL_PULL * dt;
+        const newDist = Math.max(tdist - step, GRAPPLE_ROPE_MIN);
+        const moved   = tdist - newDist;
+        if (moved > 0) {
+          player.position = new Vec2(
+            player.position.x - nx * moved,
+            player.position.y - ny * moved,
+          );
+          // Kill outward velocity so drag doesn't push us back out
+          const outward = player.velocity.dot(new Vec2(nx, ny));
+          if (outward > 0) {
+            player.velocity = player.velocity.sub(new Vec2(nx * outward, ny * outward));
+          }
+        }
+      } else if (!inputFrame.grappleReelOut) {
+        // Mode B: idle — hard rope constraint (player cannot drift past rope_length)
+        const rope = player.grappleRopeLength;
+        if (rope !== undefined && tdist > rope) {
+          const over = tdist - rope;
+          player.position = new Vec2(
+            player.position.x - nx * over,
+            player.position.y - ny * over,
+          );
+          // Cancel outward velocity so the player doesn't immediately re-violate
+          const outward = player.velocity.dot(new Vec2(nx, ny));
+          if (outward > 0) {
+            player.velocity = player.velocity.sub(new Vec2(nx * outward, ny * outward));
+          }
+        }
+      }
+      // Mode C: RMB held (grappleReelOut) — rope is extending, no constraint applied
+
+      // If player is on a ship deck, recompute localPosition from the constrained world pos
+      if (carrierShip) {
+        const cosR = Math.cos(carrierShip.rotation);
+        const sinR = Math.sin(carrierShip.rotation);
+        const dxW  = player.position.x - carrierShip.position.x;
+        const dyW  = player.position.y - carrierShip.position.y;
+        player.localPosition = new Vec2(
+          dxW * cosR + dyW * sinR,
+          -dxW * sinR + dyW * cosR,
+        );
+      }
+    }
+  }
+
   return events;
 }
 
@@ -584,8 +651,9 @@ function resolveShipDeckCollisions(
     for (const mod of ship.modules) {
       if (mod.kind !== 'ramp') continue;
       if (mod.id === mountedModuleId) continue;
-      // Skip destroyed ramps (DAMAGED flag = health 0 approximation).
-      if (mod.stateBits & 4 /* ModuleStateBits.DAMAGED */) continue;
+      // Skip fully destroyed ramps — mirrors server check: `if (mod->health == 0) continue`.
+      // Use the parsed health value when available; fall back to the stateBits ACTIVE flag.
+      if (mod.health !== undefined ? mod.health === 0 : !(mod.stateBits & 1 /* MODULE_STATE_ACTIVE */)) continue;
 
       const rampX = mod.localPos.x;
       const rampY = mod.localPos.y;
@@ -641,11 +709,14 @@ function resolveShipDeckCollisions(
     }
   }
 
-  // ── 3. Hull polygon containment (lower deck only, 2 passes) ──────────────
-  // Mirrors server resolve_player_hull_containment (websocket_server.c ~1010):
-  // if the nearest plank edge is breached (plank dead), containment is skipped
-  // for that iteration so the player can fall through the gap.
-  if (playerDeckLevel === 0 && ship.hull.length >= 3) {
+  // ── 3. Hull polygon containment (both decks, 2 passes) ──────────────────
+  // Lower deck: mirrors server resolve_player_hull_containment — if the nearest plank edge
+  //   is breached (plank dead), containment is skipped so the player can exit through the gap.
+  // Upper deck: added for prediction quality — prevents the client from predicting the player
+  //   walking through live planks for one RTT while waiting for the server dismount snapshot.
+  //   Dead-plank breaches are still allowed (same plank-alive check), matching the server's
+  //   behaviour where a hull breach also triggers dismount via is_outside_deck.
+  if (ship.hull.length >= 3) {
     const hull = ship.hull;
     const nv = hull.length;
     const slotHealth = buildPlankSlotHealth(ship);

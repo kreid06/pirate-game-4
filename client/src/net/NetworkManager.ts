@@ -716,6 +716,10 @@ export class NetworkManager {
   public onStructureReload: ((structureId: number, reloadMs: number, loadedAmmo: number) => void) | null = null;
   /** Fired when the player tries to fire an island cannon but has no cannonballs. */
   public onNoAmmo: (() => void) | null = null;
+  /** Fired when the server echoes the authoritative deck level after a player_set_deck request.
+   *  deckLevel is the server's current value — may differ from what was requested if the
+   *  validation was rejected, in which case the client should roll back its local state. */
+  public onDeckLevelAck: ((deckLevel: number) => void) | null = null;
 
   public onEntityHit: ((entityType: 'npc' | 'player', id: number, x: number, y: number,
     damage: number, health: number, maxHealth: number, killed: boolean, killerShipId: number) => void) | null = null;
@@ -1455,6 +1459,43 @@ export class NetworkManager {
       console.log(`⚡ Action: ${action}${target ? ` at (${target.x.toFixed(1)}, ${target.y.toFixed(1)})` : ''}`);
     }
     this.sendMessage(message);
+  }
+
+  /** Fire the grapple hook toward a world-space target.
+   *  charge: 0.0 (min range) … 1.0 (full range). */
+  sendFireGrapple(target: Vec2, charge: number = 1.0): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg = {
+      type: MessageType.ACTION_EVENT,
+      timestamp: Date.now(),
+      action: 'fire_grapple',
+      target: { x: target.x, y: target.y },
+      charge: Math.max(0, Math.min(1, charge)),
+    };
+    console.log(`🪝 fire_grapple charge=${charge.toFixed(2)} at (${target.x.toFixed(1)},${target.y.toFixed(1)})`);
+    this.sendMessage(msg as any);
+  }
+
+  /** Release the currently active grapple hook. */
+  sendReleaseGrapple(): void {
+    this.sendAction('release_grapple');
+  }
+
+  /** Start reeling the grapple rope in or out. */
+  sendGrappleReelStart(direction: 'in' | 'out'): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.ACTION_EVENT, timestamp: Date.now(), action: 'grapple_reel_start', direction } as any);
+  }
+
+  /** Stop reeling — rope stays at current length. */
+  sendGrappleReelStop(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.ACTION_EVENT, timestamp: Date.now(), action: 'grapple_reel_stop' } as any);
+  }
+
+  sendBoardShip(): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({ type: MessageType.ACTION_EVENT, timestamp: Date.now(), action: 'board_ship' } as any);
   }
 
   /**
@@ -2589,6 +2630,7 @@ export class NetworkManager {
                     localRot: mod.rotation ?? 0,
                     occupiedBy: null,
                     stateBits: mod.state ?? 0,
+                    health: typeof mod.health === 'number' ? mod.health : undefined,
                     qualityTier: typeof mod.qt === 'number' && mod.qt >= 0 ? mod.qt : undefined,
                     qualityWeaponDmgQ8: typeof mod.qw === 'number' ? mod.qw : undefined,
                     qualitySailEffQ8: typeof mod.qse === 'number' ? mod.qse : undefined,
@@ -2769,6 +2811,11 @@ export class NetworkManager {
             statPoints: player.stat_points ?? 0,
             speedMult: typeof player.speed_mult === 'number' ? player.speed_mult : 1.0,
             canSprint: typeof player.can_sprint === 'boolean' ? player.can_sprint : true,
+            grappleState: typeof player.grapple_state === 'number' ? player.grapple_state : undefined,
+            grappleX: typeof player.grapple_x === 'number' ? player.grapple_x : undefined,
+            grappleY: typeof player.grapple_y === 'number' ? player.grapple_y : undefined,
+            grappleRopeLength: typeof player.grapple_rope === 'number' ? player.grapple_rope : undefined,
+            grappleTargetType: typeof player.grapple_target === 'number' ? player.grapple_target : undefined,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -3883,6 +3930,15 @@ export class NetworkManager {
         }
         if (message.status === 'no_ammo') {
           this.onNoAmmo?.();
+        }
+        break;
+
+      case 'deck_level_ack':
+        // Server echoes the authoritative deck level after every player_set_deck request.
+        // If the transition was rejected, deckLevel differs from what the client requested —
+        // fire the callback so RenderSystem and PredictionEngine can roll back.
+        if (typeof message.deckLevel === 'number') {
+          this.onDeckLevelAck?.(message.deckLevel);
         }
         break;
 

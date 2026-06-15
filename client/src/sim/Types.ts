@@ -11,6 +11,8 @@ export interface InputFrame {
   movement: Vec2; // Movement vector (normalized, in world coordinates)
   rotation: number; // Player aim direction in radians (for server protocol)
   actions: number; // Bitmask for actions
+  grappleReelIn?: boolean;  // True while LMB is held with grapple attached — mirrors server reel-in force
+  grappleReelOut?: boolean; // True while RMB is held with grapple attached — skips rope constraint (rope extending)
 }
 
 /**
@@ -131,6 +133,13 @@ export interface Player {
   // Used by client-side prediction to match the server exactly.
   speedMult?: number;  // Effective walk-speed multiplier in [0.3, 1.0]. Absent = 1.0 (unloaded).
   canSprint?: boolean; // False when carry ratio >= 85 % of capacity. Absent = true.
+
+  // Grapple hook state — absent when hook is idle (GRAPPLE_IDLE=0).
+  grappleState?: number;      // 1 = flying, 2 = attached
+  grappleX?: number;          // current world X of the hook tip
+  grappleY?: number;          // current world Y of the hook tip
+  grappleRopeLength?: number; // current max rope length in px (from server grapple_rope)
+  grappleTargetType?: number; // 0=none 1=item 2=ship 3=player 4=npc (only set when ATTACHED)
 }
 
 /**

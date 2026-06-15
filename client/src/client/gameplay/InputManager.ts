@@ -33,6 +33,7 @@ interface InputState {
   leftMouseDown: boolean;
   rightMouseDown: boolean;
   leftMouseReleased: boolean;
+  rightMouseReleased: boolean;
   
   // Gamepad (future)
   gamepadConnected: boolean;
@@ -133,6 +134,8 @@ export class InputManager {
   public onAimEnd: (() => void) | null = null;
   /** Called at the very start of any right-click (button 2 down). Return true to consume the event and skip all other right-click handling. */
   public onBeforeRightClick: (() => boolean) | null = null;
+  /** Fired once on the frame Space is pressed (not repeated). Used for grapple release etc. */
+  public onSpaceJustPressed: (() => void) | null = null;
   /** Called before any mouse-down is processed (any button). Return true to suppress all input logic for that click (e.g. when a radial menu is open). */
   public onBeforeMouseInput: (() => boolean) | null = null;
   /** Called at the very start of any left-click (button 0 down, after UI/shift/ctrl checks).
@@ -365,6 +368,7 @@ export class InputManager {
       leftMouseDown: false,
       rightMouseDown: false,
       leftMouseReleased: false,
+      rightMouseReleased: false,
       gamepadConnected: false,
       gamepadState: null
     };
@@ -597,6 +601,16 @@ export class InputManager {
     return this.inputState.mouseWorldPosition.clone();
   }
   
+  /** True for the single frame when the left mouse button was released. */
+  isLeftMouseJustReleased(): boolean {
+    return this.inputState.leftMouseReleased;
+  }
+
+  /** True while the left mouse button is held down. */
+  isLeftMouseDown(): boolean {
+    return this.inputState.leftMouseDown;
+  }
+
   /**
    * Check if a specific action is currently active
    */
@@ -1191,7 +1205,13 @@ export class InputManager {
   }
   
   private resetFrameFlags(): void {
-    this.inputState.leftMouseReleased = false;
+    this.inputState.leftMouseReleased  = false;
+    this.inputState.rightMouseReleased = false;
+  }
+
+  /** True for the single frame when the right mouse button was released. */
+  isRightMouseJustReleased(): boolean {
+    return this.inputState.rightMouseReleased;
   }
 
   /** Start a repeating heartbeat that refreshes the server's movement state while keys are held. */
@@ -1246,6 +1266,11 @@ export class InputManager {
   private onKeyDown(event: KeyboardEvent): void {
     if (event.key === 'Alt') { this.altKeyHeld = true; event.preventDefault(); }
     this.inputState.pressedKeys.add(event.code);
+
+    // Fire single-shot space callback (no repeat) before any other processing.
+    if (event.code === 'Space' && !event.repeat && this.onSpaceJustPressed) {
+      this.onSpaceJustPressed();
+    }
     
     // Update action mappings
     for (const mapping of this.actionMappings) {
@@ -1724,6 +1749,8 @@ export class InputManager {
         this._middleShiftDown = false;
       }
     } else if (event.button === 2) { // Right mouse button
+      // Always record a release, even when the original down was consumed by onBeforeRightClick.
+      this.inputState.rightMouseReleased = true;
       if (this.inputState.rightMouseDown) {
         this.inputState.rightMouseDown = false;
         if (this.onAimEnd) this.onAimEnd();

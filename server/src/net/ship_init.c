@@ -47,6 +47,9 @@ void tick_sinking_ships(void) {
         for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
             if (!players[pi].active || players[pi].parent_ship_id != sunk_id) continue;
             players[pi].parent_ship_id      = 0;
+            players[pi].deck_level          = 1; /* reset so next boarding starts upper deck */
+            players[pi].local_x             = 0.0f; /* clear stale ship-local coords */
+            players[pi].local_y             = 0.0f;
             players[pi].movement_state      = PLAYER_STATE_SWIMMING;
             players[pi].is_mounted          = false;
             players[pi].mounted_module_id   = 0;

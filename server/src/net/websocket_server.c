@@ -223,6 +223,66 @@ typedef struct {
 static DroppedItem dropped_items[MAX_DROPPED_ITEMS];
 static uint32_t    next_dropped_item_id = 1;
 
+/* ── Grapple hook system ──────────────────────────────────────────────────────
+ * Each connected player slot has one grapple hook entry.  Hooks travel as
+ * projectiles, attach to the first valid target in range, then pull that
+ * target toward the player (items) or the player toward the target (ships).
+ * The client holds left-click to maintain the hook; releasing the button sends
+ * "release_grapple" which immediately detaches.  A 5-second server-side
+ * timeout auto-releases stale hooks (e.g. on client disconnect / lag). */
+
+#define GRAPPLE_SPEED          300.0f   /* px/s hook travel speed (600px max / 2s) */
+#define GRAPPLE_MIN_RANGE      100.0f   /* range at 0 % charge                   */
+#define GRAPPLE_MAX_RANGE      600.0f   /* range at 100 % charge                 */
+#define GRAPPLE_MAX_CHARGE_MS  1500u    /* ms to reach full charge               */
+#define GRAPPLE_PULL_SPEED     350.0f   /* px/s pull velocity (items toward player) */
+#define GRAPPLE_PULL_PLAYER    300.0f   /* px/s pull speed for players / NPCs    */
+#define GRAPPLE_HIT_R_ITEM      80.0f   /* hit radius for dropped items          */
+#define GRAPPLE_HIT_R_SHIP     140.0f   /* hit radius for ships (approx hull)    */
+#define GRAPPLE_HIT_R_ENTITY    55.0f   /* hit radius for players / NPCs         */
+#define GRAPPLE_DETACH_DIST     80.0f   /* auto-detach when target this close    */
+#define GRAPPLE_TIMEOUT_MS    5000u     /* safety auto-release timeout           */
+#define GRAPPLE_COOLDOWN_MS    500u     /* minimum time between fire attempts    */
+#define GRAPPLE_REEL_PULL       90.0f   /* px/s player moves when reeling in to ship */
+#define GRAPPLE_REEL_RATE       90.0f   /* px/s rope_length changes for non-ship targets */
+#define GRAPPLE_ROPE_MIN        30.0f   /* shortest rope before auto-detach      */
+
+typedef enum { GRAPPLE_IDLE = 0, GRAPPLE_FLYING = 1, GRAPPLE_ATTACHED = 2 } GrappleState;
+
+#define GRAPPLE_TARGET_NONE         0
+#define GRAPPLE_TARGET_DROPPED_ITEM 1
+#define GRAPPLE_TARGET_SHIP         2
+#define GRAPPLE_TARGET_PLAYER       3
+#define GRAPPLE_TARGET_NPC          4
+
+typedef struct {
+    bool         active;        /* slot is in use                                */
+    int          player_idx;    /* index into players[]                          */
+    GrappleState state;
+    float        hook_x, hook_y;
+    float        vel_x, vel_y;  /* direction the hook is flying                  */
+    float        origin_x, origin_y;
+    int          target_type;   /* GRAPPLE_TARGET_* once attached                */
+    uint32_t     target_id;     /* id of attached entity                         */
+    uint32_t     fire_time_ms;
+    float        max_range;     /* charge-scaled range for this shot (px)        */
+    float        rope_length;   /* current max allowed rope length (px)          */
+    bool         reel_in;       /* player is actively pulling rope in            */
+    bool         reel_out;      /* player is actively letting rope out           */
+} GrappleHook;
+
+static GrappleHook grapple_hooks[WS_MAX_CLIENTS];
+
+static void grapple_detach(int slot) {
+    grapple_hooks[slot].active      = false;
+    grapple_hooks[slot].state       = GRAPPLE_IDLE;
+    grapple_hooks[slot].target_type = GRAPPLE_TARGET_NONE;
+    grapple_hooks[slot].target_id   = 0;
+    grapple_hooks[slot].rope_length = 0.0f;
+    grapple_hooks[slot].reel_in     = false;
+    grapple_hooks[slot].reel_out    = false;
+}
+
 /* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
  * Offloads non-authoritative JSON serialization from the main tick thread.
  * The authoritative simulation and send loop remain single-threaded.
@@ -700,6 +760,43 @@ void ship_world_to_local(const SimpleShip* ship, float world_x, float world_y, f
     float sin_r = sinf(-ship->rotation);
     *local_x = dx * cos_r - dy * sin_r;
     *local_y = dx * sin_r + dy * cos_r;
+}
+
+/*
+ * Ray from local origin (0,0) in direction (ldx,ldy) — find the first intersection
+ * with the ship's hull polygon (ship-local space).  Writes the intersection local
+ * coordinates into out_lx/out_ly and returns true.  Falls back to a circle of
+ * radius `fallback_r` if no polygon edge is hit.
+ */
+static bool grapple_ray_hull_intersect(const struct Ship* sim_ship,
+                                        float ldx, float ldy, float fallback_r,
+                                        float* out_lx, float* out_ly) {
+    uint8_t n = sim_ship->hull_vertex_count;
+    float best_t = 1e9f;
+    for (uint8_t i = 0; i < n; i++) {
+        uint8_t j = (i + 1) % n;
+        float ax = Q16_TO_FLOAT(sim_ship->hull_vertices[i].x);
+        float ay = Q16_TO_FLOAT(sim_ship->hull_vertices[i].y);
+        float bx = Q16_TO_FLOAT(sim_ship->hull_vertices[j].x);
+        float by = Q16_TO_FLOAT(sim_ship->hull_vertices[j].y);
+        float edx = bx - ax;
+        float edy = by - ay;
+        float det = ldy * edx - ldx * edy;
+        if (fabsf(det) < 1e-6f) continue;
+        float t = (ay * edx - ax * edy) / det;
+        float s = (ldx * ay - ldy * ax) / det;
+        if (t > 0.001f && s >= 0.0f && s <= 1.0f && t < best_t) {
+            best_t = t;
+        }
+    }
+    if (best_t < 1e8f) {
+        *out_lx = ldx * best_t;
+        *out_ly = ldy * best_t;
+        return true;
+    }
+    *out_lx = ldx * fallback_r;
+    *out_ly = ldy * fallback_r;
+    return false;
 }
 
 // Helper: minimum distance from a local point (server float units) to the nearest hull edge segment.
@@ -1301,9 +1398,9 @@ static void resolve_player_module_collisions(const SimpleShip* ship,
             float rlx = dx * c_r - dy * s_r;
             float rly = dx * s_r + dy * c_r;
 
-            // Ramp half-extents in ramp-local pixels. Kept slightly smaller
-            // than the client's state-machine snap zone (±35) so the climb
-            // transition fires before the player presses into a wall.
+            // Ramp half-extents in ramp-local pixels.
+            // Must stay ≤ CLIMB_ZONE (28) so the player-set-deck zone check
+            // can still reach the -X wall from outside the collision box.
             const float HX = 22.0f;
             const float HY = 22.0f;
 
@@ -1674,7 +1771,12 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
     player->local_x = 0.0f;
     player->local_y = 0.0f;
     player->movement_state = PLAYER_STATE_SWIMMING;
-    
+    /* Reset to upper-deck so the swimming snapshot never carries stale lower-deck
+     * state into the next ship boarding (walk-off gate checks deck_level != 0).
+     * RenderSystem resets _playerDeckLevel to 1 when carrierId == 0, so this
+     * keeps the server in sync with what the client will show. */
+    player->deck_level = 1;
+
     // Keep some of the ship's velocity (player carries momentum)
     player->velocity_x *= 0.5f;
     player->velocity_y *= 0.5f;
@@ -2014,6 +2116,26 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                     : 0),
                 _snap_spd_mult, _snap_can_sprint ? "true" : "false",
                 inv_buf);
+        /* Append active grapple state so the client can render the rope.
+         * Only included when the hook is in flight or attached. */
+        {
+            const GrappleHook* _gh = &grapple_hooks[p];
+            if (_gh->active && _gh->state != GRAPPLE_IDLE) {
+                int _glen = (int)strlen(player_entry);
+                /* Inject before the closing '}' */
+                if (_glen > 1 && player_entry[_glen - 1] == '}') {
+                    char _gbuf[128];
+                    snprintf(_gbuf, sizeof(_gbuf),
+                        ",\"grapple_state\":%d,\"grapple_x\":%.1f,\"grapple_y\":%.1f,\"grapple_rope\":%.1f,\"grapple_target\":%d}",
+                        (int)_gh->state, _gh->hook_x, _gh->hook_y, _gh->rope_length,
+                        (_gh->state == GRAPPLE_ATTACHED) ? _gh->target_type : GRAPPLE_TARGET_NONE);
+                    /* Replace the last '}' with the grapple suffix. */
+                    player_entry[_glen - 1] = '\0';
+                    strncat(player_entry, _gbuf,
+                            sizeof(player_entry) - strlen(player_entry) - 1);
+                }
+            }
+        }
         /* Capture per-entry for AOI-filtered per-client assembly. */
         {
             int _pelen = (int)strlen(player_entry);
@@ -3228,6 +3350,366 @@ static void handle_pickup_item(WebSocketPlayer* player,
 }
 
 
+
+// ── Grapple hook handlers ─────────────────────────────────────────────────────
+
+/** Fire the grapple hook from player_idx toward (target_x, target_y).
+ *  charge: 0.0 (minimum range) … 1.0 (full range), clamped server-side. */
+static void handle_fire_grapple(int player_idx, float target_x, float target_y,
+                                 float charge, uint32_t now_ms)
+{
+    WebSocketPlayer* player = &players[player_idx];
+
+    /* Must be holding a grapple hook in the active slot. */
+    uint8_t aslot = player->inventory.active_slot;
+    if (aslot >= INVENTORY_SLOTS ||
+        player->inventory.slots[aslot].item != ITEM_GRAPPLE_HOOK ||
+        player->inventory.slots[aslot].quantity == 0) {
+        return;
+    }
+
+    GrappleHook* gh = &grapple_hooks[player_idx];
+
+    /* Cooldown check — prevent rapid re-fire. */
+    if (gh->active && (now_ms - gh->fire_time_ms) < GRAPPLE_COOLDOWN_MS) return;
+
+    /* Cancel any existing hook first. */
+    grapple_detach(player_idx);
+
+    /* Clamp and scale charge to actual range. */
+    if (charge < 0.0f) charge = 0.0f;
+    if (charge > 1.0f) charge = 1.0f;
+    float actual_range = GRAPPLE_MIN_RANGE + charge * (GRAPPLE_MAX_RANGE - GRAPPLE_MIN_RANGE);
+
+    /* Compute normalised direction toward target. */
+    float ox = player->x, oy = player->y;
+    float dx = target_x - ox, dy = target_y - oy;
+    float dist = sqrtf(dx * dx + dy * dy);
+    if (dist < 1.0f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
+    float nx = dx / dist, ny = dy / dist;
+
+    gh->active       = true;
+    gh->player_idx   = player_idx;
+    gh->state        = GRAPPLE_FLYING;
+    gh->hook_x       = ox;
+    gh->hook_y       = oy;
+    gh->vel_x        = nx * GRAPPLE_SPEED;
+    gh->vel_y        = ny * GRAPPLE_SPEED;
+    gh->origin_x     = ox;
+    gh->origin_y     = oy;
+    gh->target_type  = GRAPPLE_TARGET_NONE;
+    gh->target_id    = 0;
+    gh->fire_time_ms = now_ms;
+    gh->max_range    = actual_range;
+
+    log_info("🪝  Player %u fired grapple charge=%.2f range=%.0f toward (%.0f,%.0f)",
+             player->player_id, charge, actual_range, target_x, target_y);
+}
+
+/** Detach the grapple hook for a given player index. */
+static void handle_release_grapple(int player_idx)
+{
+    if (grapple_hooks[player_idx].active) {
+        log_info("🪝  Player %u released grapple",
+                 players[player_idx].player_id);
+    }
+    grapple_detach(player_idx);
+}
+
+/** Per-tick grapple physics.  Called from the main server tick with dt seconds. */
+static void update_grapple_hooks(float dt, uint32_t now_ms)
+{
+    for (int si = 0; si < WS_MAX_CLIENTS; si++) {
+        GrappleHook* gh = &grapple_hooks[si];
+        if (!gh->active) continue;
+
+        WebSocketPlayer* owner = &players[si];
+        if (!owner->active) { grapple_detach(si); continue; }
+
+        /* Safety timeout — only for FLYING hooks; attached hooks persist until
+         * explicitly released, reeled past max, or the target disappears. */
+        if (gh->state == GRAPPLE_FLYING &&
+            now_ms - gh->fire_time_ms > GRAPPLE_TIMEOUT_MS) {
+            grapple_detach(si);
+            continue;
+        }
+
+        if (gh->state == GRAPPLE_FLYING) {
+            /* Advance hook position. */
+            gh->hook_x += gh->vel_x * dt;
+            gh->hook_y += gh->vel_y * dt;
+
+            /* Out-of-range check (uses per-shot charge-scaled range). */
+            float rdx = gh->hook_x - gh->origin_x;
+            float rdy = gh->hook_y - gh->origin_y;
+            if (rdx * rdx + rdy * rdy > gh->max_range * gh->max_range) {
+                grapple_detach(si);
+                continue;
+            }
+
+            /* ── Hit detection ──────────────────────────────────────────────── */
+            bool hit = false;
+
+            /* Dropped items. */
+            for (int di = 0; di < (int)MAX_DROPPED_ITEMS && !hit; di++) {
+                if (!dropped_items[di].active) continue;
+                float ddx = gh->hook_x - dropped_items[di].x;
+                float ddy = gh->hook_y - dropped_items[di].y;
+                if (ddx * ddx + ddy * ddy <= GRAPPLE_HIT_R_ITEM * GRAPPLE_HIT_R_ITEM) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_DROPPED_ITEM;
+                    gh->target_id   = (uint32_t)di; /* array index */
+                    gh->hook_x      = dropped_items[di].x;
+                    gh->hook_y      = dropped_items[di].y;
+                    hit = true;
+                }
+            }
+
+            /* Ships — attach at actual hull edge, stored in ship-local space. */
+            for (int shp = 0; shp < ship_count && !hit; shp++) {
+                if (!ships[shp].active) continue;
+                float sdx = gh->hook_x - ships[shp].x;
+                float sdy = gh->hook_y - ships[shp].y;
+                if (sdx * sdx + sdy * sdy <= GRAPPLE_HIT_R_SHIP * GRAPPLE_HIT_R_SHIP) {
+                    /* Direction from ship center to hook in world space. */
+                    float _slen = sqrtf(sdx * sdx + sdy * sdy);
+                    float _enx = (_slen > 0.5f) ? sdx / _slen : 1.0f;
+                    float _eny = (_slen > 0.5f) ? sdy / _slen : 0.0f;
+
+                    /* Convert direction to ship-local space. */
+                    float _rot  = ships[shp].rotation;
+                    float _cosR =  cosf(_rot);
+                    float _sinR =  sinf(_rot);
+                    float _ldx  =  _enx * _cosR + _eny * _sinR;
+                    float _ldy  = -_enx * _sinR + _eny * _cosR;
+
+                    /* Find true hull-edge intersection in local space. */
+                    float _lhx, _lhy;
+                    struct Ship* _sim = find_sim_ship((uint32_t)ships[shp].ship_id);
+                    if (_sim && _sim->hull_vertex_count >= 3) {
+                        grapple_ray_hull_intersect(_sim, _ldx, _ldy,
+                                                   GRAPPLE_HIT_R_SHIP, &_lhx, &_lhy);
+                    } else {
+                        /* Fallback: circular approximation. */
+                        _lhx = _ldx * GRAPPLE_HIT_R_SHIP;
+                        _lhy = _ldy * GRAPPLE_HIT_R_SHIP;
+                    }
+
+                    /* World position of the hull edge point. */
+                    float _ex = ships[shp].x + _lhx * _cosR - _lhy * _sinR;
+                    float _ey = ships[shp].y + _lhx * _sinR + _lhy * _cosR;
+
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_SHIP;
+                    gh->target_id   = (uint32_t)ships[shp].ship_id;
+                    gh->hook_x      = _ex;
+                    gh->hook_y      = _ey;
+                    /* Store LOCAL-space offset so the hook rotates with the ship. */
+                    gh->vel_x       = _lhx;
+                    gh->vel_y       = _lhy;
+                    hit = true;
+                }
+            }
+
+            /* Other players. */
+            for (int pi = 0; pi < WS_MAX_CLIENTS && !hit; pi++) {
+                if (pi == si) continue;
+                if (!players[pi].active) continue;
+                float pdx = gh->hook_x - players[pi].x;
+                float pdy = gh->hook_y - players[pi].y;
+                if (pdx * pdx + pdy * pdy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_PLAYER;
+                    gh->target_id   = players[pi].player_id;
+                    gh->hook_x      = players[pi].x;
+                    gh->hook_y      = players[pi].y;
+                    hit = true;
+                }
+            }
+
+            /* World NPCs. */
+            for (int ni = 0; ni < world_npc_count && !hit; ni++) {
+                if (!world_npcs[ni].active) continue;
+                float ndx = gh->hook_x - world_npcs[ni].x;
+                float ndy = gh->hook_y - world_npcs[ni].y;
+                if (ndx * ndx + ndy * ndy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_NPC;
+                    gh->target_id   = (uint32_t)ni; /* array index */
+                    gh->hook_x      = world_npcs[ni].x;
+                    gh->hook_y      = world_npcs[ni].y;
+                    hit = true;
+                }
+            }
+
+        } else if (gh->state == GRAPPLE_ATTACHED) {
+            /* ── Rope-length init on first attached tick ─────────────────────── */
+            if (gh->rope_length <= 0.0f) {
+                float _irx = gh->hook_x - owner->x;
+                float _iry = gh->hook_y - owner->y;
+                gh->rope_length = sqrtf(_irx * _irx + _iry * _iry);
+                if (gh->rope_length < GRAPPLE_ROPE_MIN) gh->rope_length = GRAPPLE_ROPE_MIN;
+                gh->fire_time_ms = now_ms; /* reset timeout clock from attachment moment */
+            }
+
+            /* ── Reel out (non-ship targets: also shortens rope_length for reel-in) ── */
+            if (gh->reel_out) {
+                gh->rope_length += GRAPPLE_REEL_RATE * dt;
+                if (gh->rope_length >= gh->max_range) {
+                    log_info("🪝  Player %u rope paid out to max — grapple snapped",
+                             players[si].player_id);
+                    grapple_detach(si);
+                    continue;
+                }
+            }
+            /* Non-ship reel-in: shorten rope_length so constraint does the pull. */
+            if (gh->reel_in && gh->target_type != GRAPPLE_TARGET_SHIP) {
+                gh->rope_length -= GRAPPLE_REEL_RATE * dt;
+                if (gh->rope_length < GRAPPLE_ROPE_MIN) gh->rope_length = GRAPPLE_ROPE_MIN;
+            }
+
+            /* ── Pull logic ─────────────────────────────────────────────────── */
+
+            switch (gh->target_type) {
+
+            case GRAPPLE_TARGET_DROPPED_ITEM: {
+                int di = (int)gh->target_id;
+                if (di < 0 || di >= (int)MAX_DROPPED_ITEMS || !dropped_items[di].active) {
+                    grapple_detach(si); break;
+                }
+                /* Pull item toward player only when it is farther than the current rope. */
+                float idx = owner->x - dropped_items[di].x;
+                float idy = owner->y - dropped_items[di].y;
+                float idist = sqrtf(idx * idx + idy * idy);
+                if (idist < GRAPPLE_DETACH_DIST) {
+                    /* Auto pick-up: attempt to give item to player. */
+                    bool stacked = false;
+                    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                        InventorySlot* isl = &owner->inventory.slots[s];
+                        if (isl->item == (ItemKind)dropped_items[di].item_kind &&
+                            isl->quantity > 0 && isl->quantity < 99) {
+                            int add = (int)dropped_items[di].quantity;
+                            if (isl->quantity + add > 99) add = 99 - isl->quantity;
+                            isl->quantity += (uint8_t)add;
+                            dropped_items[di].quantity -= (uint8_t)add;
+                            stacked = true;
+                        }
+                    }
+                    if (!stacked || dropped_items[di].quantity == 0) {
+                        if (dropped_items[di].quantity > 0) {
+                            for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                                InventorySlot* isl = &owner->inventory.slots[s];
+                                if (isl->item == ITEM_NONE || isl->quantity == 0) {
+                                    isl->item     = (ItemKind)dropped_items[di].item_kind;
+                                    isl->quantity = dropped_items[di].quantity;
+                                    dropped_items[di].quantity = 0;
+                                    break;
+                                }
+                            }
+                        }
+                        dropped_items[di].active = false;
+                    }
+                    grapple_detach(si);
+                } else if (idist > gh->rope_length) {
+                    float step = GRAPPLE_PULL_SPEED * dt / idist;
+                    dropped_items[di].x += idx * step;
+                    dropped_items[di].y += idy * step;
+                    gh->hook_x = dropped_items[di].x;
+                    gh->hook_y = dropped_items[di].y;
+                }
+                break;
+            }
+
+            case GRAPPLE_TARGET_SHIP: {
+                SimpleShip* tship = find_ship((uint16_t)gh->target_id);
+                if (!tship || !tship->active) { grapple_detach(si); break; }
+
+                /* Hook locked to local-space offset, rotated with ship. */
+                float _hcosR = cosf(tship->rotation);
+                float _hsinR = sinf(tship->rotation);
+                gh->hook_x = tship->x + gh->vel_x * _hcosR - gh->vel_y * _hsinR;
+                gh->hook_y = tship->y + gh->vel_x * _hsinR + gh->vel_y * _hcosR;
+
+                /* Vector from hook to player. */
+                float tdx   = owner->x - gh->hook_x;
+                float tdy   = owner->y - gh->hook_y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < 0.5f) break;
+
+                float nx = tdx / tdist;
+                float ny = tdy / tdist;
+
+                if (gh->reel_in) {
+                    /* ── Mode A: LMB held — actively pull player toward ship ────── */
+                    float step   = GRAPPLE_REEL_PULL * dt;
+                    float newdist = tdist - step;
+                    if (newdist < GRAPPLE_ROPE_MIN) newdist = GRAPPLE_ROPE_MIN;
+                    step = tdist - newdist;  /* actual movement this tick */
+                    if (step > 0.0f) {
+                        owner->x -= nx * step;
+                        owner->y -= ny * step;
+                        gh->rope_length = newdist;  /* track where the rope currently sits */
+                    }
+                    if (newdist <= GRAPPLE_DETACH_DIST) {
+                        grapple_detach(si); break;
+                    }
+                } else if (!gh->reel_out) {
+                    /* ── Mode B: idle — instant rope constraint (hard stop at rope_length) ── */
+                    if (tdist > gh->rope_length) {
+                        float over = tdist - gh->rope_length;
+                        owner->x -= nx * over;
+                        owner->y -= ny * over;
+                    }
+                }
+                /* ── Mode C: RMB held — rope extends freely, no constraint ──────── */
+                /* (rope_length is already being extended by reel_out section above) */
+                break;
+            }
+
+            case GRAPPLE_TARGET_PLAYER: {
+                WebSocketPlayer* tgt = find_player(gh->target_id);
+                if (!tgt || !tgt->active) { grapple_detach(si); break; }
+
+                float tdx = owner->x - tgt->x;
+                float tdy = owner->y - tgt->y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < GRAPPLE_DETACH_DIST) { grapple_detach(si); break; }
+                if (tdist > gh->rope_length) {
+                    float step = GRAPPLE_PULL_PLAYER * dt / tdist;
+                    tgt->x += tdx * step;
+                    tgt->y += tdy * step;
+                }
+                gh->hook_x = tgt->x;
+                gh->hook_y = tgt->y;
+                break;
+            }
+
+            case GRAPPLE_TARGET_NPC: {
+                int ni = (int)gh->target_id;
+                if (ni < 0 || ni >= world_npc_count || !world_npcs[ni].active) {
+                    grapple_detach(si); break;
+                }
+                float tdx = owner->x - world_npcs[ni].x;
+                float tdy = owner->y - world_npcs[ni].y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < GRAPPLE_DETACH_DIST) { grapple_detach(si); break; }
+                if (tdist > gh->rope_length) {
+                    float step = GRAPPLE_PULL_PLAYER * dt / tdist;
+                    world_npcs[ni].x += tdx * step;
+                    world_npcs[ni].y += tdy * step;
+                }
+                gh->hook_x = world_npcs[ni].x;
+                gh->hook_y = world_npcs[ni].y;
+                break;
+            }
+
+            default:
+                grapple_detach(si);
+                break;
+            }
+        }
+    }
+}
 
 // ── Player persistence ──────────────────────────────────────────────────────
 #include "net/player_persistence.h"
@@ -5868,6 +6350,101 @@ int websocket_server_update(struct Sim* sim) {
                                                 player->player_id);
                                             websocket_server_broadcast(block_msg);
                                         }
+                                    } else if (strcmp(action, "fire_grapple") == 0) {
+                                        /* Fire grapple toward target position.
+                                         * Requires ITEM_GRAPPLE_HOOK in active slot.
+                                         * Expects: {"action":"fire_grapple","target":{"x":...,"y":...},"charge":0.0-1.0} */
+                                        float tgx = player->x, tgy = player->y;
+                                        float tcharge = 1.0f;
+                                        const char* tg_start = strstr(payload, "\"target\":{");
+                                        if (tg_start) {
+                                            const char* xp = strstr(tg_start, "\"x\":");
+                                            const char* yp = strstr(tg_start, "\"y\":");
+                                            if (xp) tgx = strtof(xp + 4, NULL);
+                                            if (yp) tgy = strtof(yp + 4, NULL);
+                                        }
+                                        const char* cp = strstr(payload, "\"charge\":");
+                                        if (cp) tcharge = strtof(cp + 9, NULL);
+                                        /* Find this player's slot index. */
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] == player) {
+                                                handle_fire_grapple(_gsi, tgx, tgy, tcharge, get_time_ms());
+                                                break;
+                                            }
+                                        }
+                                    } else if (strcmp(action, "release_grapple") == 0) {
+                                        /* Player released left-click — detach the hook. */
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] == player) {
+                                                handle_release_grapple(_gsi);
+                                                break;
+                                            }
+                                        }
+                                    } else if (strcmp(action, "grapple_reel_start") == 0) {
+                                        /* Start reeling in or out.
+                                         * Expects {"action":"grapple_reel_start","direction":"in"|"out"} */
+                                        const char* dirp = strstr(payload, "\"direction\":\"");
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] == player) {
+                                                GrappleHook* _gh = &grapple_hooks[_gsi];
+                                                if (_gh->active && _gh->state == GRAPPLE_ATTACHED) {
+                                                    if (dirp && strncmp(dirp + 13, "out", 3) == 0) {
+                                                        _gh->reel_out = true;
+                                                        _gh->reel_in  = false;
+                                                    } else {
+                                                        _gh->reel_in  = true;
+                                                        _gh->reel_out = false;
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    } else if (strcmp(action, "grapple_reel_stop") == 0) {
+                                        /* Stop reeling — rope stays at current length. */
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] == player) {
+                                                grapple_hooks[_gsi].reel_in  = false;
+                                                grapple_hooks[_gsi].reel_out = false;
+                                                break;
+                                            }
+                                        }
+                                    } else if (strcmp(action, "board_ship") == 0) {
+                                        /* Board a ship via grapple — validate & execute.
+                                         * Client sends this after its boarding timer fills. */
+                                        for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                                            if (&players[_gsi] != player) continue;
+                                            GrappleHook* _gh = &grapple_hooks[_gsi];
+                                            if (!_gh->active || _gh->state != GRAPPLE_ATTACHED ||
+                                                _gh->target_type != GRAPPLE_TARGET_SHIP) break;
+
+                                            SimpleShip* _bship = find_ship((uint16_t)_gh->target_id);
+                                            if (!_bship || !_bship->active) break;
+
+                                            /* Only allow boarding non-ghost, non-own ships. */
+                                            if (_bship->ship_type == SHIP_TYPE_GHOST) break;
+                                            if (player->parent_ship_id == _bship->ship_id) break;
+
+                                            /* Validate proximity — player must be near the hull. */
+                                            float _bdx = player->x - _gh->hook_x;
+                                            float _bdy = player->y - _gh->hook_y;
+                                            float _bdist = sqrtf(_bdx*_bdx + _bdy*_bdy);
+                                            if (_bdist > 100.0f) break; /* too far away */
+
+                                            /* Convert player world pos to ship local for boarding point. */
+                                            float _blx, _bly;
+                                            ship_world_to_local(_bship, player->x, player->y, &_blx, &_bly);
+                                            /* Clamp to deck bounds so player spawns on walkable area. */
+                                            if (_blx < _bship->deck_min_x) _blx = _bship->deck_min_x;
+                                            if (_blx > _bship->deck_max_x) _blx = _bship->deck_max_x;
+                                            if (_bly < _bship->deck_min_y) _bly = _bship->deck_min_y;
+                                            if (_bly > _bship->deck_max_y) _bly = _bship->deck_max_y;
+
+                                            log_info("🪝  Player %u boarding ship %u via grapple",
+                                                     player->player_id, _bship->ship_id);
+                                            grapple_detach(_gsi);
+                                            board_player_on_ship(player, _bship, _blx, _bly);
+                                            break;
+                                        }
                                     }
                                     
                                     if (response[0] == '\0') strcpy(response, "{\"type\":\"message_ack\",\"status\":\"action_processed\"}");
@@ -6636,10 +7213,13 @@ int websocket_server_update(struct Sim* sim) {
                                                 // (must match RenderSystem.RAMP_SNAP_POINTS + place_ramp)
                                                 const float snap_x[2] = { 220.0f, -140.0f };
                                                 const float snap_y[2] = {   0.0f,    0.0f };
-                                                // Both fall and climb use the same zone (matches ramp visual
-                                                // half-extent 25 + 2 px network-jitter cushion = 27).
+                                                // FALL_ZONE matches the ramp visual half-extent (25) + 2 px jitter = 27,
+                                                // clamped to 22 so only the correct (top) face opens the hole.
+                                                // CLIMB_ZONE is wider (28) to cover the full legal approach range:
+                                                // ramp wall is at rlx = -22, player radius pushes them to rlx ≈ -14,
+                                                // so with up to ~10 px server/client position drift we need ≥ 24; 28 gives headroom.
                                                 const float FALL_ZONE  = 22.0f;
-                                                const float CLIMB_ZONE = 22.0f;
+                                                const float CLIMB_ZONE = 28.0f;
                                                 const float MATCH_TOL_SRV = CLIENT_TO_SERVER(20.0f);
                                                 float plx = sd_player->local_x;
                                                 float ply = sd_player->local_y;
@@ -6685,12 +7265,19 @@ int websocket_server_update(struct Sim* sim) {
                                                             if (rlx > 0) allow = true;
                                                         }
                                                     } else {
-                                                        // Lower → Upper (climb): requires ramp,
-                                                        // only from bottom/dark face (rlx < 0).
+                                                        // Lower → Upper (climb): requires ramp.
+                                                        // Ideal check: player must be on the bottom/dark face (rlx < 0).
+                                                        // However, due to server/client position drift of up to ~10 px
+                                                        // (one movement tick at walk speed + sub-tick accumulation), the
+                                                        // server's local_x can be slightly ahead of the client snapshot
+                                                        // that triggered the send, making rlx slightly positive even
+                                                        // though the client correctly detected the dark face.
+                                                        // We relax the threshold to rlx < 12 to absorb this drift while
+                                                        // still blocking attempts from deep inside the wrong face.
                                                         if (ramp) {
                                                             float rrot = Q16_TO_FLOAT(ramp->local_rot);
                                                             float rlx = dx * cosf(-rrot) - dy * sinf(-rrot);
-                                                            if (rlx < 0) allow = true;
+                                                            if (rlx < 12.0f) allow = true;
                                                         }
                                                     }
                                                 }
@@ -6700,14 +7287,20 @@ int websocket_server_update(struct Sim* sim) {
                                         if (allow) {
                                             sd_player->deck_level = (uint8_t)dl;
                                         } else {
-                                            log_debug("player_set_deck rejected: player=%u current=%u requested=%d",
-                                                      (unsigned)client->player_id,
-                                                      (unsigned)sd_player->deck_level, dl);
+                                            log_info("player_set_deck rejected: player=%u local=(%.1f,%.1f) current_deck=%u requested=%d",
+                                                     (unsigned)client->player_id,
+                                                     sd_player->local_x, sd_player->local_y,
+                                                     (unsigned)sd_player->deck_level, dl);
                                         }
+                                        // Always echo the authoritative deck level back to the
+                                        // client so it can roll back _playerDeckLevel and deckId
+                                        // if the validation rejected the transition.
+                                        snprintf(response, sizeof(response),
+                                                 "{\"type\":\"deck_level_ack\",\"deckLevel\":%u}",
+                                                 (unsigned)sd_player->deck_level);
                                     }
                                 }
                             }
-                            response[0] = '\0'; // No reply needed
                         } else if (strcmp(msg_type, "place_ramp") == 0) {
                             // PLACE RAMP: add a ramp module at the specified snap-point index.
                             // Payload: {"type":"place_ramp","shipId":N,"snapIndex":0|1}
@@ -13027,6 +13620,10 @@ void websocket_server_tick(float dt) {
                                     /* On ship deck — flag as on-ship */
                                     if (ws_player->parent_ship_id == 0) {
                                         ws_player->parent_ship_id = _zship->ship_id;
+                                        /* Boarding always lands on the upper deck.
+                                         * Must be explicit here because we skip
+                                         * board_player_on_ship() in the scaffold path. */
+                                        ws_player->deck_level     = 1;
                                         ws_player->on_dock_id     = 0;
                                         ws_player->velocity_x     = 0.0f;
                                         ws_player->velocity_y     = 0.0f;
@@ -13063,6 +13660,7 @@ void websocket_server_tick(float dt) {
                                     ws_player->controlling_ship_id = 0;
                                 }
                                 ws_player->parent_ship_id  = 0;
+                                ws_player->deck_level      = 1; /* reset so next boarding starts upper deck */
                                 ws_player->on_dock_id      = 0;
                                 ws_player->movement_state  = PLAYER_STATE_SWIMMING;
                                 sim_player->ship_id        = INVALID_ENTITY_ID;
@@ -13151,13 +13749,18 @@ void websocket_server_tick(float dt) {
                                                                 &new_local_x, &new_local_y);
                             }
 
-                            // Upper-deck only: walking off the hull edge dismounts into water.
-                            // Lower-deck players are contained above and never trip this path.
-                            if (ws_player->deck_level != 0 &&
-                                is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
-                                // Player walked off the edge - dismount into water
-                                log_info("🌊 Player %u walked off the deck of ship %u (tick movement)", 
-                                         ws_player->player_id, player_ship->ship_id);
+                            // Dismount if the player is outside the hull polygon.
+                            // Upper deck: player walked off a live edge or exited through a breach.
+                            // Lower deck: hull containment was skipped for a dead-plank edge and
+                            //             the player passed through (hull breach from below).
+                            if (is_outside_deck(player_ship->ship_id, new_local_x, new_local_y)) {
+                                if (ws_player->deck_level == 0) {
+                                    log_info("🌊 Player %u breached lower-deck hull of ship %u (dead plank)",
+                                             ws_player->player_id, player_ship->ship_id);
+                                } else {
+                                    log_info("🌊 Player %u walked off the deck of ship %u (tick movement)",
+                                             ws_player->player_id, player_ship->ship_id);
+                                }
                                 
                                 /* Commit new_local_x/y so dismount_player_from_ship re-derives the
                                  * hull-edge world position instead of the stale previous-tick local.
@@ -14363,6 +14966,10 @@ void websocket_server_tick(float dt) {
             }
         }
     }
+
+    /* ===== GRAPPLE HOOK PHYSICS TICK =========================================
+       Advance flying hooks and apply pull forces each server tick. */
+    update_grapple_hooks(dt, current_time);
 
     // ===== APPLY WIND-BASED SHIP MOVEMENT =====
     if (global_sim && global_sim->ship_count > 0) {
