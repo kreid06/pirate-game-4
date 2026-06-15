@@ -215,6 +215,14 @@ export class RenderSystem {
   public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
   /** Read-only access to the current player deck level for placement decisions. */
   public get playerDeckLevel(): number { return this._playerDeckLevel; }
+  /**
+   * Force-set the deck level from an external authority (e.g. server ack after rejection).
+   * Does NOT fire onDeckLevelChange — the caller is responsible for updating PredictionEngine
+   * and must NOT re-send player_set_deck to avoid an echo loop.
+   */
+  public forceSetDeckLevel(deckLevel: number): void {
+    this._playerDeckLevel = deckLevel === 0 ? 0 : 1;
+  }
   /** Current ramp facing index in build mode: 0=+x, 1=+y, 2=-x, 3=-y (top/light end direction). */
   private rampFacing: number = 0;
   /** Player position info used by the hover tooltip to determine interact range. */
@@ -254,6 +262,16 @@ export class RenderSystem {
    *  worker delivers a new ray set. RenderSystem compares this to skip
    *  redundant fog redraws at render-frame rate (60-120 Hz). */
   public fogRayVersion = 0;
+
+  /** 0 = not charging, 0–1 = current grapple wind-up progress.
+   *  Set by ClientApplication each frame while the player holds LMB. */
+  public grappleChargeProgress = 0;
+  /** World-space radius (px) of the projected grapple shot at current charge. */
+  public grappleProjectedRange = 0;
+  /** World-space aim target while winding up — null when not charging. */
+  public grappleAimWorldPos: { x: number; y: number } | null = null;
+  /** 0–1 boarding progress when grappled onto a ship and reeled in close; 0 = not boarding. */
+  public grappleBoardingProgress = 0;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
@@ -9071,24 +9089,37 @@ export class RenderSystem {
       if (_lp && _lp.carrierId !== 0) {
         const _cs = renderShips.find(s => s.id === _lp.carrierId);
         if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1)) {
-          // Player ship-local position
-          const _dx = _lp.position.x - _cs.position.x;
-          const _dy = _lp.position.y - _cs.position.y;
-          const _cos = Math.cos(-_cs.rotation);
-          const _sin = Math.sin(-_cs.rotation);
-          const _lx = _dx * _cos - _dy * _sin;
-          const _ly = _dx * _sin + _dy * _cos;
+          // Player ship-local position — prefer localPosition (seeded from the server's
+          // local_x / local_y and kept current by the prediction engine) over re-deriving
+          // from the world-space round-trip (world_pos - ship_pos → rotate), which
+          // introduces an extra floating-point conversion and can be slightly stale when
+          // the ship is rotating.  Falling back to world-pos conversion when localPosition
+          // is absent (e.g. swimming player) keeps behaviour correct.
+          let _lx: number;
+          let _ly: number;
+          if (_lp.localPosition) {
+            _lx = _lp.localPosition.x;
+            _ly = _lp.localPosition.y;
+          } else {
+            const _dx = _lp.position.x - _cs.position.x;
+            const _dy = _lp.position.y - _cs.position.y;
+            const _cos = Math.cos(-_cs.rotation);
+            const _sin = Math.sin(-_cs.rotation);
+            _lx = _dx * _cos - _dy * _sin;
+            _ly = _dx * _sin + _dy * _cos;
+          }
 
           // Detection radius around each snap-point (px in ship-local).
-          // Must match server FALL_ZONE / CLIMB_ZONE (websocket_server.c ~6615).
-          // Both fall and climb use the same zone for consistent behaviour.
-          const _ZONE = 22;
+          // Fall zone: 22 px — matches server FALL_ZONE.
+          // Climb zone: 28 px — matches server CLIMB_ZONE (widened to absorb server/client drift).
+          const _FALL_ZONE  = 22;
+          const _CLIMB_ZONE = 28;
 
           if (this._playerDeckLevel === 1) {
             // Upper deck — fall through empty holes, or enter a ramp from its top (light) face
             const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
-              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              if (Math.abs(drx) >= _FALL_ZONE || Math.abs(dry) >= _FALL_ZONE) return false;
               // Hatch cover blocks any fall-through
               const hatchMod = _cs.modules.find(
                 m => m.kind === 'hatch_cover' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
@@ -9106,17 +9137,21 @@ export class RenderSystem {
           }
 
           if (this._playerDeckLevel === 0) {
-            // Lower deck — climb back up via the bottom/dark face of a ramp
+            // Lower deck — climb back up via the bottom/dark face of a ramp.
+            // Use CLIMB_ZONE (28) which is wider than FALL_ZONE (22) to absorb the server/client
+            // position drift of up to ~10 px (one movement tick + sub-tick accumulation).
+            // The face threshold is relaxed to rlx < 12 (mirrors server rlx < 12.0f) so a
+            // slightly ahead server position still allows the climb to succeed.
             const climbing = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
-              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              if (Math.abs(drx) >= _CLIMB_ZONE || Math.abs(dry) >= _CLIMB_ZONE) return false;
               const rampMod = _cs.modules.find(
                 m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
               );
               if (!rampMod) return false;
-              // Only climb from the bottom/dark face (ramp-local x < 0)
+              // Climb from the bottom/dark face; threshold relaxed to rlx < 12 to match server.
               const rlx = drx * Math.cos(-rampMod.localRot) - dry * Math.sin(-rampMod.localRot);
-              return rlx < 0;
+              return rlx < 12;
             });
             if (climbing) {
               this._playerDeckLevel = 1;
@@ -16779,17 +16814,15 @@ export class RenderSystem {
       const FLYING   = 1;
       const ATTACHED = 2;
 
-      // Rope — dashed brown line from player to hook
+      // Rope — solid line from player to hook
       this.ctx.save();
       this.ctx.globalAlpha = _playerDeckAlpha;
       this.ctx.strokeStyle = player.grappleState === ATTACHED ? '#c68642' : '#a06030';
       this.ctx.lineWidth = Math.max(1.5, 2 * zoom);
-      this.ctx.setLineDash(player.grappleState === FLYING ? [6, 4] : []);
       this.ctx.beginPath();
       this.ctx.moveTo(screenPos.x, screenPos.y);
       this.ctx.lineTo(hookScreen.x, hookScreen.y);
       this.ctx.stroke();
-      this.ctx.setLineDash([]);
 
       // Hook tip — small filled circle + a tiny claw shape
       const hookR = Math.max(4, 5 * zoom);
@@ -16800,6 +16833,149 @@ export class RenderSystem {
       this.ctx.arc(hookScreen.x, hookScreen.y, hookR, 0, Math.PI * 2);
       this.ctx.fill();
       this.ctx.stroke();
+      this.ctx.restore();
+    }
+
+    // ── Grapple boarding progress bar (local player only) ────────────────
+    // Arc ring near the hook tip fills clockwise as boarding progresses.
+    if (player.id === this.localPlayerId &&
+        this.grappleBoardingProgress > 0 &&
+        player.grappleX !== undefined && player.grappleY !== undefined) {
+      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
+      const zoom = camera.zoom;
+      const prog = this.grappleBoardingProgress;
+
+      this.ctx.save();
+      const boardR   = Math.max(18, 22 * zoom);
+      const boardThk = Math.max(3, 4 * zoom);
+
+      // Faint track ring
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, boardR, 0, Math.PI * 2);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      this.ctx.lineWidth   = boardThk;
+      this.ctx.stroke();
+
+      // Filled arc — clockwise from 12 o'clock, colour shifts green→gold
+      const r = Math.round(50  + 205 * prog);
+      const g = Math.round(220 - 20  * prog);
+      const b = Math.round(50  - 50  * prog);
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, boardR,
+        -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2);
+      this.ctx.strokeStyle = `rgb(${r},${g},${b})`;
+      this.ctx.lineWidth   = boardThk;
+      this.ctx.stroke();
+
+      // "BOARDING" label underneath
+      const fontSize = Math.max(9, 11 * zoom);
+      this.ctx.font      = `bold ${fontSize}px monospace`;
+      this.ctx.fillStyle = `rgb(${r},${g},${b})`;
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText('BOARDING', hookScreen.x, hookScreen.y + boardR + fontSize + 2);
+
+      this.ctx.restore();
+    }
+
+    // ── Grapple wind-up charge indicator (local player only) ──────────────
+    // Shown while the player holds LMB to charge a grapple shot.
+    //   1. Small radial arc ring around the player — fills clockwise as charge builds
+    //   2. Directional aim line toward the mouse — grows to the projected range
+    if (player.id === this.localPlayerId && this.grappleChargeProgress > 0) {
+      const charge = this.grappleChargeProgress;
+      const zoom   = camera.zoom;
+      const now    = performance.now();
+
+      // Lerp colour: gray(0%) → orange(50%) → gold-red(100%)
+      const r = Math.round(charge < 0.5 ? 160 + 95 * (charge * 2) : 255);
+      const g = Math.round(charge < 0.5 ? 160 + 40 * (charge * 2) : Math.max(30, 200 - 170 * ((charge - 0.5) * 2)));
+      const b = Math.round(120 * (1 - charge));
+      const chargeColor = `rgb(${r},${g},${b})`;
+
+      this.ctx.save();
+
+      // 1. Compact arc ring just outside the player circle
+      const arcR         = scaledRadius + Math.max(4, 5 * zoom);
+      const arcThickness = Math.max(2.5, 3.5 * zoom);
+      // Faint track
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, arcR, 0, Math.PI * 2);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      this.ctx.lineWidth   = arcThickness;
+      this.ctx.stroke();
+      // Charged arc — clockwise from 12 o'clock
+      this.ctx.beginPath();
+      this.ctx.arc(
+        screenPos.x, screenPos.y, arcR,
+        -Math.PI / 2,
+        -Math.PI / 2 + Math.PI * 2 * charge
+      );
+      this.ctx.strokeStyle  = chargeColor;
+      this.ctx.lineWidth    = arcThickness;
+      this.ctx.shadowColor  = chargeColor;
+      this.ctx.shadowBlur   = 5;
+      this.ctx.stroke();
+      this.ctx.shadowBlur = 0;
+
+      // 2. Aim line — draw only when we have a valid aim target
+      const aim = this.grappleAimWorldPos;
+      if (aim) {
+        const aimScreen = camera.worldToScreen(Vec2.from(aim.x, aim.y));
+        const adx = aimScreen.x - screenPos.x;
+        const ady = aimScreen.y - screenPos.y;
+        const rawDist = Math.sqrt(adx * adx + ady * ady);
+        const ux = rawDist > 0.5 ? adx / rawDist : 1;
+        const uy = rawDist > 0.5 ? ady / rawDist : 0;
+
+        // Line length grows with charge (screen pixels)
+        const lineLen = this.grappleProjectedRange * zoom;
+        // Start just outside the player circle
+        const startX = screenPos.x + ux * (scaledRadius + 2);
+        const startY = screenPos.y + uy * (scaledRadius + 2);
+        const tipX   = screenPos.x + ux * lineLen;
+        const tipY   = screenPos.y + uy * lineLen;
+
+        // Traveling dash effect — dashes appear to scroll toward the tip
+        const dashLen   = 8;
+        const gapLen    = 6;
+        const dashCycle = dashLen + gapLen;
+        this.ctx.setLineDash([dashLen, gapLen]);
+        this.ctx.lineDashOffset = -(now / 30) % dashCycle;
+        this.ctx.strokeStyle    = chargeColor;
+        this.ctx.lineWidth      = Math.max(1.5, 2 * zoom);
+        this.ctx.shadowColor    = chargeColor;
+        this.ctx.shadowBlur     = 4;
+        this.ctx.beginPath();
+        this.ctx.moveTo(startX, startY);
+        this.ctx.lineTo(tipX, tipY);
+        this.ctx.stroke();
+        this.ctx.setLineDash([]);
+        this.ctx.shadowBlur = 0;
+
+        // Hook tip — small filled circle at the projected landing point
+        const tipR = Math.max(3, 4 * zoom);
+        this.ctx.beginPath();
+        this.ctx.arc(tipX, tipY, tipR, 0, Math.PI * 2);
+        this.ctx.fillStyle   = chargeColor;
+        this.ctx.shadowColor = chargeColor;
+        this.ctx.shadowBlur  = 6;
+        this.ctx.fill();
+        this.ctx.shadowBlur = 0;
+
+        // Charge percentage label just above the tip
+        if (charge >= 0.1) {
+          const pct = Math.round(charge * 100);
+          const fs  = Math.max(10, Math.round(11 * zoom));
+          this.ctx.font         = `bold ${fs}px sans-serif`;
+          this.ctx.textAlign    = 'center';
+          this.ctx.fillStyle    = chargeColor;
+          this.ctx.shadowColor  = 'rgba(0,0,0,0.9)';
+          this.ctx.shadowBlur   = 4;
+          this.ctx.fillText(`${pct}%`, tipX, tipY - tipR - 4);
+          this.ctx.shadowBlur = 0;
+        }
+      }
+
       this.ctx.restore();
     }
 
