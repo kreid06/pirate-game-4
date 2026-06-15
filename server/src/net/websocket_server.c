@@ -1991,7 +1991,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     }
     if (_to < (int)sizeof(out->tmb_json) - 1) out->tmb_json[_to++] = ']';
     out->tmb_json[_to] = '\0';
-    out->tmb_len = (int)strlen(out->tmb_json);
+    out->tmb_len = _to;
 
     int _do = snprintf(out->ditem_json, sizeof(out->ditem_json), "[");
     bool _df = true;
@@ -2009,7 +2009,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     }
     if (_do < (int)sizeof(out->ditem_json) - 1) out->ditem_json[_do++] = ']';
     out->ditem_json[_do] = '\0';
-    out->ditem_len = (int)strlen(out->ditem_json);
+    out->ditem_len = _do;
 
     int _co = snprintf(out->co_json, sizeof(out->co_json), "[");
     bool _cf = true;
@@ -2027,18 +2027,17 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     }
     if (_co < (int)sizeof(out->co_json) - 1) out->co_json[_co++] = ']';
     out->co_json[_co] = '\0';
-    out->co_len = (int)strlen(out->co_json);
+    out->co_len = _co;
 
-    int players_offset = 0;
-    players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "[");
-    bool first_player = true;
+    /* players_json is not used in the send path — the per-client AOI assembly
+     * reads player_entry[] directly (same pattern as npcs_json, skipped above).
+     * Skip building the combined blob to avoid a redundant 65 KB buffer write. */
+    out->players_json[0] = '\0';
+    out->players_len = 0;
     int active_count = 0;
     memset(out->player_entry_active, 0, sizeof(out->player_entry_active));
     for (int p = 0; p < WS_MAX_CLIENTS; p++) {
         if (!snap->players[p].active) continue;
-        if (!first_player) {
-            players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, ",");
-        }
 
         char inv_buf[1024];
         int inv_off = 0;
@@ -2158,12 +2157,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             out->player_world_y[p] = _pwy;
             out->player_entry_active[p] = true;
         }
-        players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "%s", player_entry);
-        first_player = false;
         active_count++;
     }
-    players_offset += snprintf(out->players_json + players_offset, sizeof(out->players_json) - players_offset, "]");
-    out->players_len = (int)strlen(out->players_json);
     out->active_player_count = active_count;
 
     int projectiles_offset = 0;
@@ -2174,8 +2169,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     for (uint16_t p = 0; p < _pc; p++) {
         const struct Projectile* proj = &snap->projectiles[p];
         if (!first_projectile) {
-            projectiles_offset += snprintf(out->projectiles_json + projectiles_offset,
-                                           sizeof(out->projectiles_json) - projectiles_offset, ",");
+            if (projectiles_offset < (int)sizeof(out->projectiles_json) - 1)
+                out->projectiles_json[projectiles_offset++] = ',';
         }
         float proj_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
         float proj_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
@@ -2188,7 +2183,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         first_projectile = false;
     }
     projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "]");
-    out->projectiles_len = (int)strlen(out->projectiles_json);
+    out->projectiles_len = projectiles_offset;
 
     /* NPC entries: serialise directly into per-entry cache; no combined blob.
      * The old approach wrote all NPCs into npcs_json[32768], but with up to
@@ -2272,7 +2267,8 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 break;
             }
             if (!first_ship) {
-                ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, ",");
+                if (ships_offset < (int)sizeof(out->ships_json) - 1)
+                    out->ships_json[ships_offset++] = ',';
             }
 
             float pos_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.x));
@@ -2488,8 +2484,8 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 break;
             }
             if (!first_ship) {
-                ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, ",");
-                if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
+                if (ships_offset < (int)sizeof(out->ships_json) - 1)
+                    out->ships_json[ships_offset++] = ',';
             }
             char ship_entry[16384];
             int offset = snprintf(ship_entry, sizeof(ship_entry),
