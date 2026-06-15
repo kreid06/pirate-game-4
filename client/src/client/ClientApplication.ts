@@ -4178,33 +4178,50 @@ export class ClientApplication {
             }
 
             // ── Boarding timer ────────────────────────────────────────────────
-            // Activates when grapple is ATTACHED to a ship and the player has reeled
-            // in close enough to the hull. Fires board_ship after BOARD_TIME_MS.
-            const BOARD_TIME_MS   = 2500;  // time to complete boarding sequence
-            const BOARD_ROPE_THRESHOLD = 80; // px from hook → player when boarding is eligible
+            // Activates when grapple is ATTACHED to a ship AND the player is
+            // touching the ship hull (within hull-collision range). The bar only
+            // fills while LMB is held; releasing LMB pauses/resets the bar.
+            const BOARD_TIME_MS       = 2500; // full hold duration to complete boarding
+            const BOARD_HULL_RANGE    = 90;   // px from hook — trigger boarding before old auto-detach range
             const GRAPPLE_TARGET_SHIP = 2;
 
-            const isShipGrapple = isAttached && player.grappleTargetType === GRAPPLE_TARGET_SHIP;
-            const isCloseEnough = isShipGrapple &&
+            const isShipGrapple  = isAttached && player.grappleTargetType === GRAPPLE_TARGET_SHIP;
+            const isAtHull       = isShipGrapple &&
               player.grappleX !== undefined && player.grappleY !== undefined &&
-              player.grappleRopeLength !== undefined &&
-              player.grappleRopeLength <= BOARD_ROPE_THRESHOLD;
+              (() => {
+                const dx = player.position.x - player.grappleX!;
+                const dy = player.position.y - player.grappleY!;
+                return Math.sqrt(dx * dx + dy * dy) <= BOARD_HULL_RANGE;
+              })();
+            const isHoldingLMB   = this.inputManager.isLeftMouseDown();
+            const canBoard       = isAtHull && isHoldingLMB;
 
-            if (isCloseEnough) {
+            if (canBoard) {
               if (this._grappleBoardingStartMs === null) {
                 this._grappleBoardingStartMs = performance.now();
+                // Stop reel-in so the hook stays pinned at the hull — continuing to
+                // reel would hit GRAPPLE_DETACH_DIST and detach the hook mid-boarding.
+                if (this._grappleReelInActive) {
+                  this._grappleReelInActive = false;
+                  this.networkManager.sendGrappleReelStop();
+                }
               }
               const elapsed = performance.now() - this._grappleBoardingStartMs;
               this._grappleBoardingProgress = Math.min(1, elapsed / BOARD_TIME_MS);
               if (this._grappleBoardingProgress >= 1) {
-                // Boarding complete — send action and reset
                 this.networkManager.sendBoardShip();
                 this._grappleBoardingStartMs = null;
                 this._grappleBoardingProgress = 0;
+                // Optimistically set deck=1 immediately — server always boards at upper deck.
+                // The carrier-change handler in onServerWorldState will confirm once the
+                // snapshot arrives; this just closes the window where the client has no ship.
+                this.renderSystem.forceSetDeckLevel(1);
+                this.predictionEngine.setLocalPlayerDeckLevel(1);
+                this.renderSystem.setJustBoarded();
                 this._releaseGrapple();
               }
             } else {
-              // Reset boarding if player moves away or detaches
+              // Pause/reset: LMB released or player moved away from hull
               if (this._grappleBoardingStartMs !== null) {
                 this._grappleBoardingStartMs = null;
                 this._grappleBoardingProgress = 0;
@@ -5128,6 +5145,15 @@ export class ClientApplication {
             console.log(`⚓ [BOARD] Boarded ship ${newCarrierId} (was: ${this.previousCarrierId ?? 'none'}) — syncing ammo type & crew tasks`);
             this.inputManager.resetAmmoType();
             this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId, player.companyId ?? 0);
+
+            // Authoritative deck sync: server always boards at deck 1.
+            // Align all three deck sources (render, prediction, server) immediately so
+            // the ramp state machine doesn't start from a stale or 0 value.
+            const serverDeck = player.deckId ?? 1;
+            this.renderSystem.forceSetDeckLevel(serverDeck);
+            this.predictionEngine.setLocalPlayerDeckLevel(serverDeck);
+            // Mark that we just boarded — RenderSystem will skip ramp detection briefly.
+            this.renderSystem.setJustBoarded();
           }
           this.previousCarrierId = newCarrierId;
         }

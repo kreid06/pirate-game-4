@@ -216,6 +216,20 @@ export class RenderSystem {
   /** Read-only access to the current player deck level for placement decisions. */
   public get playerDeckLevel(): number { return this._playerDeckLevel; }
   /**
+   * Timestamp (performance.now) of the most recent boarding event.
+   * Ramp fall-through detection is suppressed for 500 ms after boarding so a
+   * hull-contact spawn position near a ramp hole can't immediately push the
+   * player to the lower deck before server/client positions converge.
+   */
+  private _boardedAtMs: number = -Infinity;
+  private readonly _BOARD_GRACE_MS = 500;
+
+  /** Call immediately after boarding (grapple or any path) to start the grace window. */
+  public setJustBoarded(): void {
+    this._boardedAtMs = performance.now();
+  }
+
+  /**
    * Force-set the deck level from an external authority (e.g. server ack after rejection).
    * Does NOT fire onDeckLevelChange — the caller is responsible for updating PredictionEngine
    * and must NOT re-send player_set_deck to avoid an echo loop.
@@ -9115,7 +9129,9 @@ export class RenderSystem {
           const _FALL_ZONE  = 22;
           const _CLIMB_ZONE = 28;
 
-          if (this._playerDeckLevel === 1) {
+          const _inBoardingGrace = (performance.now() - this._boardedAtMs) < this._BOARD_GRACE_MS;
+
+          if (this._playerDeckLevel === 1 && !_inBoardingGrace) {
             // Upper deck — fall through empty holes, or enter a ramp from its top (light) face
             const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
