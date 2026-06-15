@@ -775,10 +775,13 @@ static bool grapple_ray_hull_intersect(const struct Ship* sim_ship,
     float best_t = 1e9f;
     for (uint8_t i = 0; i < n; i++) {
         uint8_t j = (i + 1) % n;
-        float ax = Q16_TO_FLOAT(sim_ship->hull_vertices[i].x);
-        float ay = Q16_TO_FLOAT(sim_ship->hull_vertices[i].y);
-        float bx = Q16_TO_FLOAT(sim_ship->hull_vertices[j].x);
-        float by = Q16_TO_FLOAT(sim_ship->hull_vertices[j].y);
+        /* Hull vertices are in server (sim) units — convert to client units so
+         * the intersection t-value matches the client-space coordinates used
+         * everywhere else in the grapple code (ships[s].x, hook_x, etc.). */
+        float ax = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].x));
+        float ay = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].y));
+        float bx = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[j].x));
+        float by = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[j].y));
         float edx = bx - ax;
         float edy = by - ay;
         float det = ldy * edx - ldx * edy;
@@ -3388,11 +3391,16 @@ static void handle_fire_grapple(int player_idx, float target_x, float target_y,
     if (dist < 1.0f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
     float nx = dx / dist, ny = dy / dist;
 
+    /* Spawn hook slightly ahead of the player so it starts outside the ship's
+     * GRAPPLE_HIT_R_SHIP radius when fired from a deck.  origin_x/y stays at
+     * the player position so max-range is measured from the fire point. */
+#define GRAPPLE_SPAWN_OFFSET 30.0f   /* px forward along aim */
+
     gh->active       = true;
     gh->player_idx   = player_idx;
     gh->state        = GRAPPLE_FLYING;
-    gh->hook_x       = ox;
-    gh->hook_y       = oy;
+    gh->hook_x       = ox + nx * GRAPPLE_SPAWN_OFFSET;
+    gh->hook_y       = oy + ny * GRAPPLE_SPAWN_OFFSET;
     gh->vel_x        = nx * GRAPPLE_SPEED;
     gh->vel_y        = ny * GRAPPLE_SPEED;
     gh->origin_x     = ox;
@@ -3465,9 +3473,33 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
             }
 
-            /* Ships — attach at actual hull edge, stored in ship-local space. */
-            for (int shp = 0; shp < ship_count && !hit; shp++) {
+            /* Ships — attach at actual hull edge, stored in ship-local space.
+             * Guards:
+             *  1. Skip the player's own ship (boarded via parent_ship_id OR scaffold).
+             *  2. Require the hook to have travelled at least GRAPPLE_MIN_SHIP_TRAVEL px
+             *     before any ship can be hit — prevents instant snap when spawning inside
+             *     the 140 px hit radius on a deck. */
+#define GRAPPLE_MIN_SHIP_TRAVEL 80.0f   /* px — must clear own hull before ship hits register */
+            float _travel_sq = rdx * rdx + rdy * rdy;
+            bool _can_hit_ship = (_travel_sq >= GRAPPLE_MIN_SHIP_TRAVEL * GRAPPLE_MIN_SHIP_TRAVEL);
+
+            /* Resolve which ship ID the player is currently associated with (boarded or scaffold). */
+            uint32_t _own_ship_id = (uint32_t)owner->parent_ship_id;
+            if (_own_ship_id == 0 && owner->on_dock_id != 0) {
+                for (int _dsi = 0; _dsi < (int)placed_structure_count; _dsi++) {
+                    PlacedStructure* _ds = &placed_structures[_dsi];
+                    if (_ds->active && _ds->id == owner->on_dock_id &&
+                        _ds->type == STRUCT_SHIPYARD && _ds->scaffolded_ship_id != 0) {
+                        _own_ship_id = _ds->scaffolded_ship_id;
+                        break;
+                    }
+                }
+            }
+
+            for (int shp = 0; shp < ship_count && !hit && _can_hit_ship; shp++) {
                 if (!ships[shp].active) continue;
+                /* Skip own ship (boarded or scaffolded). */
+                if (_own_ship_id != 0 && (uint32_t)ships[shp].ship_id == _own_ship_id) continue;
                 float sdx = gh->hook_x - ships[shp].x;
                 float sdy = gh->hook_y - ships[shp].y;
                 if (sdx * sdx + sdy * sdy <= GRAPPLE_HIT_R_SHIP * GRAPPLE_HIT_R_SHIP) {
@@ -3483,7 +3515,10 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                     float _ldx  =  _enx * _cosR + _eny * _sinR;
                     float _ldy  = -_enx * _sinR + _eny * _cosR;
 
-                    /* Find true hull-edge intersection in local space. */
+                    /* Find true hull-edge intersection in local space, then pull
+                     * the hook inward by GRAPPLE_HULL_INSET so it sits on the
+                     * visible plank surface rather than the outer collision edge. */
+#define GRAPPLE_HULL_INSET 17.0f   /* px inward from polygon edge → visible plank */
                     float _lhx, _lhy;
                     struct Ship* _sim = find_sim_ship((uint32_t)ships[shp].ship_id);
                     if (_sim && _sim->hull_vertex_count >= 3) {
@@ -3494,8 +3529,11 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                         _lhx = _ldx * GRAPPLE_HIT_R_SHIP;
                         _lhy = _ldy * GRAPPLE_HIT_R_SHIP;
                     }
+                    /* Nudge inward along the ray direction. */
+                    _lhx -= _ldx * GRAPPLE_HULL_INSET;
+                    _lhy -= _ldy * GRAPPLE_HULL_INSET;
 
-                    /* World position of the hull edge point. */
+                    /* World position of the hull surface point. */
                     float _ex = ships[shp].x + _lhx * _cosR - _lhy * _sinR;
                     float _ey = ships[shp].y + _lhx * _sinR + _lhy * _cosR;
 
@@ -3650,8 +3688,12 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                         owner->y -= ny * step;
                         gh->rope_length = newdist;  /* track where the rope currently sits */
                     }
-                    if (newdist <= GRAPPLE_DETACH_DIST) {
-                        grapple_detach(si); break;
+                    /* For ship targets the player boards via the boarding sequence —
+                     * don't auto-detach here; the client stops reel-in once boarding
+                     * begins, so this branch is inactive during the boarding window. */
+                    if (newdist <= GRAPPLE_ROPE_MIN) {
+                        /* Clamp at minimum — do NOT detach so boarding can complete. */
+                        gh->rope_length = GRAPPLE_ROPE_MIN;
                     }
                 } else if (!gh->reel_out) {
                     /* ── Mode B: idle — instant rope constraint (hard stop at rope_length) ── */
@@ -6443,6 +6485,11 @@ int websocket_server_update(struct Sim* sim) {
                                                      player->player_id, _bship->ship_id);
                                             grapple_detach(_gsi);
                                             board_player_on_ship(player, _bship, _blx, _bly);
+                                            /* Explicit deck ack so the client doesn't wait for the
+                                             * next snapshot to learn the authoritative deck level. */
+                                            snprintf(response, 256,
+                                                "{\"type\":\"deck_level_ack\",\"deckLevel\":%d}",
+                                                (int)player->deck_level);
                                             break;
                                         }
                                     }
