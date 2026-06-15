@@ -119,6 +119,12 @@ export class PredictionEngine {
   // server moves the client can't know about (teleport, respawn, forced dismount): when the
   // server places us further than this many units from the running prediction, adopt it.
   private static readonly FORCED_CORRECTION_THRESHOLD = 60.0;
+
+  // Track the client tick when the local player boarded a ship (carrierId 0 → >0).
+  // Used to widen the server-deck-trust window so a single boarding frame isn't the
+  // only moment the server's authoritative deck_level is applied.
+  private _boardingClientTick: number = -1;
+  private static readonly BOARDING_DECK_TRUST_TICKS = 15; // ~125 ms at 8ms/tick
   
   // Input validation
   private inputValidation: InputValidationMetrics = {
@@ -341,13 +347,25 @@ export class PredictionEngine {
           // deck_level (one RTT later) the snapshot still carries the old deck.  Overwriting
           // with the stale server value every tick would apply the WRONG per-deck collision
           // filter for the full RTT, letting players walk through ramp walls or fall through
-          // upper-deck floors.  We keep the client value — EXCEPT when the player just boarded
-          // a ship (carrierId changed 0 → non-zero): in that case the server's deck_level is
-          // the ground-truth initial deck and must not be overridden by a swimming-player's
-          // stale deckId (which is always 1 from the RenderSystem off-ship reset).
-          deckId: (serverLocal.carrierId > 0 && runningLocal.carrierId === 0)
-            ? serverLocal.deckId   // boarding transition: trust server's initial deck_level
-            : runningLocal.deckId, // normal walking / ramp transition: keep client value
+          // upper-deck floors.  We keep the client value — EXCEPT within the first
+          // BOARDING_DECK_TRUST_TICKS ticks after boarding (carrierId changed 0 → non-zero),
+          // where we trust the server's authoritative deck_level unconditionally.
+          deckId: (() => {
+            const boardingNow = serverLocal.carrierId > 0 && runningLocal.carrierId === 0;
+            if (boardingNow) {
+              // Record the tick we first saw the boarding so the grace window can be measured.
+              this._boardingClientTick = this.clientTick;
+            }
+            const inBoardingWindow = this._boardingClientTick >= 0 &&
+              (this.clientTick - this._boardingClientTick) < PredictionEngine.BOARDING_DECK_TRUST_TICKS;
+            // Reset boarding window when the player dismounts
+            if (serverLocal.carrierId === 0 && runningLocal.carrierId > 0) {
+              this._boardingClientTick = -1;
+            }
+            return (boardingNow || inBoardingWindow)
+              ? serverLocal.deckId   // boarding window: trust server's authoritative deck_level
+              : runningLocal.deckId; // normal walking / ramp transition: keep client value
+          })(),
         }
       : { ...runningLocal };
 
