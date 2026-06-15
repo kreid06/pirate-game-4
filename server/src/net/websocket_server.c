@@ -988,19 +988,22 @@ static bool ws_player_walk_target(WebSocketPlayer* p,
 
     if (fresh) {
         /* Distance the client is allowed to have travelled since we last committed.
-         * Use the SPRINT ceiling (walk * 2) regardless of the player's current
-         * is_sprinting flag.  The server's sprint state lags behind the client by
-         * one network RTT on deployed servers; if we clamp with the walk ceiling
-         * while the client is still predicting at sprint speed (or vice versa) the
-         * position gets clamped every tick, producing a visible rubber-band.
-         * Using sprint speed as the ceiling still blocks true teleport cheats while
-         * eliminating false corrections during sprint-state transitions. */
+         * Callers pass the effective walk speed (already 2× base when sprinting).
+         * We multiply by 2 here to absorb walk↔sprint state lag: the server's
+         * is_sprinting flag lags the client by one RTT, so during the transition the
+         * server may still pass base walk speed while the client is sprinting.
+         * walk_speed_client × 2 = sprint speed, which just covers a legitimately
+         * sprinting client without allowing a true speed hack. */
         float elapsed = (p->last_pos_adopt_ms != 0u && now > p->last_pos_adopt_ms)
                         ? (float)(now - p->last_pos_adopt_ms) / 1000.0f
                         : dt;
         if (elapsed > 0.5f) elapsed = 0.5f;          /* cap after a stream gap */
-        float sprint_speed = walk_speed_client * 2.0f; /* sprint ceiling regardless of state */
-        float max_step = sprint_speed * elapsed * 2.5f + 8.0f; /* tolerance + epsilon */
+        /* Anti-cheat ceiling: callers pass the effective speed (already 2× walk when
+         * sprinting). A 2× margin absorbs walk↔sprint state lag — the server's sprint
+         * flag lags one RTT, so a non-sprinting walk_speed_client × 2 equals sprint
+         * speed, just fitting a sprinting client.  A second internal doubling (the bug
+         * in the previous version) produced a 4–10× walk ceiling, allowing speed hacks. */
+        float max_step = walk_speed_client * elapsed * 2.0f + 8.0f;
 
         float dx = p->client_pos_x - p->x;
         float dy = p->client_pos_y - p->y;
@@ -13099,11 +13102,11 @@ void websocket_server_tick(float dt) {
                                                  ? (float)(_now_ship - ws_player->last_pos_adopt_ms) / 1000.0f
                                                  : dt;
                                 if (_elapsed > 0.5f) _elapsed = 0.5f;
-                                /* Use sprint ceiling for max_step (see ws_player_walk_target comment):
-                                 * the server's sprint state lags by one RTT; clamping to walk speed
-                                 * while the client predicts sprint (or vice versa) causes rubber-band. */
+                                /* Sprint ceiling for max_step: server sprint state lags one RTT;
+                                 * using walk speed would clamp a legitimately sprinting client.
+                                 * 2.0× sprint is the anti-cheat ceiling (matches ws_player_walk_target). */
                                 float _sprint_ceil = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult * 2.0f;
-                                float _max_step = _sprint_ceil * _elapsed * 2.5f + 8.0f;
+                                float _max_step = _sprint_ceil * _elapsed * 2.0f + 8.0f;
                                 float _dlx = _cl_lx - ws_player->local_x;
                                 float _dly = _cl_ly - ws_player->local_y;
                                 float _dl  = sqrtf(_dlx * _dlx + _dly * _dly);
