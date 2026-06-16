@@ -6390,6 +6390,8 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 /* Stamina cost — if depleted, deal cost as HP damage instead of blocking */
                                                 const uint16_t SWORD_STAMINA_COST = 25u;
+                                                player->stamina_last_used_ms = now_ms;
+                                                player->sword_last_attack_ms = now_ms;
                                                 if (player->stamina >= SWORD_STAMINA_COST) {
                                                     player->stamina -= SWORD_STAMINA_COST;
                                                 } else {
@@ -6402,8 +6404,6 @@ int websocket_server_update(struct Sim* sim) {
                                                     player->health -= _sdmg;
                                                     player->last_damage_ms = now_ms;
                                                 }
-                                                player->stamina_last_used_ms = now_ms;
-                                                player->sword_last_attack_ms = now_ms;
 
                                                 const float SWORD_RANGE  = 45.0f;
                                                 const float SWORD_RANGE2 = SWORD_RANGE * SWORD_RANGE;
@@ -6591,6 +6591,8 @@ int websocket_server_update(struct Sim* sim) {
                                                     goto sword_attack_done;
                                                 }
                                                 /* Stamina cost — if depleted, deal cost as HP damage instead of blocking */
+                                                player->stamina_last_used_ms = now_ms;
+                                                player->sword_last_attack_ms = now_ms;
                                                 if (player->stamina >= melee_stamina) {
                                                     player->stamina -= melee_stamina;
                                                 } else {
@@ -6603,8 +6605,6 @@ int websocket_server_update(struct Sim* sim) {
                                                     player->health -= _mdmg;
                                                     player->last_damage_ms = now_ms;
                                                 }
-                                                player->stamina_last_used_ms = now_ms;
-                                                player->sword_last_attack_ms = now_ms;
 
                                                 float atk_dx = target_x - player->x;
                                                 float atk_dy = target_y - player->y;

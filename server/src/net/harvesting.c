@@ -76,6 +76,7 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
     }
 
     /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
+    player->stamina_last_used_ms = get_time_ms();
     if (player->stamina >= HARVEST_STAMINA_COST) {
         player->stamina -= HARVEST_STAMINA_COST;
     } else {
@@ -88,7 +89,6 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         player->health -= _dmg;
         player->last_damage_ms = get_time_ms();
     }
-    player->stamina_last_used_ms = get_time_ms();
 
     /* Find the island definition */
     IslandDef *isl = (IslandDef *)get_island_for_player(player);
@@ -262,6 +262,7 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
     }
 
     /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
+    player->stamina_last_used_ms = get_time_ms();
     if (player->stamina >= HARVEST_STAMINA_COST) {
         player->stamina -= HARVEST_STAMINA_COST;
     } else {
@@ -274,7 +275,6 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         player->health -= _dmg;
         player->last_damage_ms = get_time_ms();
     }
-    player->stamina_last_used_ms = get_time_ms();
 
     {
         IslandDef *isl = (IslandDef *)get_island_for_player(player);
@@ -420,6 +420,7 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
+    player->stamina_last_used_ms = get_time_ms();
     if (player->stamina >= HARVEST_STAMINA_COST) {
         player->stamina -= HARVEST_STAMINA_COST;
     } else {
@@ -432,7 +433,6 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         player->health -= _dmg;
         player->last_damage_ms = get_time_ms();
     }
-    player->stamina_last_used_ms = get_time_ms();
 
     {
         IslandDef *isl = (IslandDef *)get_island_for_player(player);

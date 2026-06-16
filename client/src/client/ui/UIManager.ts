@@ -3717,8 +3717,8 @@ class HUDElement implements UIElement {
     const XP_BAR_H = 6;
     const GAP      = 3;
     const PANEL_PAD = 4;
-    // Show the oxygen bar while swimming or while oxygen is depleted
-    const showOxygen = isSwimming || oxygen < maxOxygen;
+    // Show the oxygen bar only once it starts depleting (not just on entering water)
+    const showOxygen = oxygen < maxOxygen;
     const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP + (showOxygen ? BAR_H + GAP : 0);
     const panelY   = hotbarY - panelH - 4;
     const barX     = startX + PANEL_PAD;
