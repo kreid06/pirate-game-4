@@ -144,6 +144,10 @@ export class ClientApplication {
   private predictedWorldState: WorldState | null = null;
   /** Predicted state from the previous fixed tick — used for sub-tick position lerp. */
   private prevPredictedWorldState: WorldState | null = null;
+  /** Interpolated world state cached once per RAF frame (start of gameLoop) and reused
+   *  by both updateClient (camera follow, up to 5×) and renderFrame (rendering).
+   *  Avoids up to 6 O(buffer-size) scans of the snapshot buffer per display frame. */
+  private _frameInterpolatedState: WorldState | null = null;
   /** Wall-clock time of the previous render frame (ms) — for smooth-error-correction decay. */
   private _lastRenderTime = 0;
   /** Single bound game-loop reference to avoid allocating a closure every frame. */
@@ -193,6 +197,11 @@ export class ClientApplication {
   // Result arrives async (1-frame lag) which is imperceptible for fog.
   private _fogWorker: Worker | null = null;
   private _fogWorkerReady = false; // true once INIT has been sent
+  // Throttle fog worker posts to ~30 Hz (every 4th client tick at 120 Hz).
+  // The blur(48px) redraw in RenderSystem is skipped when rays are unchanged,
+  // so reducing the post rate directly reduces the most expensive canvas op.
+  private _fogTickCounter = 0;
+  private static readonly FOG_POST_EVERY_N_TICKS = 4; // 120 Hz / 4 = 30 Hz
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
@@ -346,6 +355,30 @@ export class ClientApplication {
   private lastRenderLogTime = 0;
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
   private swordLastAttackMs = 0;
+
+  /** Timestamp (performance.now, ms) when the player started holding LMB for grapple wind-up.
+   *  null means no active wind-up in progress. */
+  private _grappleChargeStartMs: number | null = null;
+
+  /** Max wind-up time (ms) — matches GRAPPLE_MAX_CHARGE_MS on the server. */
+  private readonly GRAPPLE_MAX_CHARGE_MS = 1500;
+  /** Min range at 0% charge (px, world space) — matches GRAPPLE_MIN_RANGE server constant. */
+  private readonly GRAPPLE_MIN_RANGE = 100;
+  /** Max range at 100% charge (px) — matches GRAPPLE_MAX_RANGE server constant. */
+  private readonly GRAPPLE_MAX_RANGE = 600;
+
+  private _grappleBoardingStartMs: number | null = null; // ms timestamp when boarding began
+  private _grappleBoardingProgress = 0;                  // 0–1, exposed to RenderSystem
+  /** Set to true the moment sendBoardShip() is sent; prevents the boarding timer from
+   *  restarting on subsequent frames while the server is still processing the request
+   *  and the grapple hook is still in ATTACHED state. Cleared when grapple detaches. */
+  private _grappleBoardingSent = false;
+  /** True while we have sent grapple_reel_start in; cleared on stop/detach. */
+  private _grappleReelInActive = false;
+  /** True while we have sent grapple_reel_start out; cleared on stop/detach. */
+  private _grappleReelOutActive = false;
+  /** Active hotbar slot from the last frame — used to detect slot switches. */
+  private _prevActiveSlot = -1;
   
   // Loading overlay DOM state
   private _loadingOverlay: HTMLElement | null = null;
@@ -469,6 +502,7 @@ export class ClientApplication {
         this.predictionEngine.setLocalPlayerDeckLevel(deckLevel);
       };
 
+
       // Initialize rename dialog (needs canvas to position the HTML input overlay)
       this.renameDialog = new ShipRenameDialog(this.canvas);
       this.renameDialog.onConfirm = (shipId, name) => {
@@ -520,6 +554,16 @@ export class ClientApplication {
       this.networkManager = new NetworkManager(this.config.network);
       this.networkManager.setWorldStateHandler(this.onServerWorldState.bind(this));
       this.networkManager.setConnectionStateHandler(this.onConnectionStateChanged.bind(this));
+
+      // Server echoes the authoritative deck level after every player_set_deck request.
+      // If validation was rejected the echoed level differs from what we requested —
+      // roll back both the render state machine and the prediction engine immediately.
+      this.networkManager.onDeckLevelAck = (deckLevel: number) => {
+        if (this.renderSystem.playerDeckLevel !== deckLevel) {
+          this.renderSystem.forceSetDeckLevel(deckLevel);
+          this.predictionEngine.setLocalPlayerDeckLevel(deckLevel);
+        }
+      };
       this.networkManager.onPlayerAck = () => {
         this._playerAckReceived = true;
         if (this.state === ClientState.CONNECTED) {
@@ -965,6 +1009,42 @@ export class ClientApplication {
       // Initialize Input System
       this.inputManager = new InputManager(this.canvas, this.config.input);
       this.inputManager.onInputFrame = this.onInputFrame.bind(this);
+
+      // Right-click: cancel charge OR start reel-out when attached.
+      this.inputManager.onBeforeRightClick = (): boolean => {
+        // Cancel wind-up
+        if (this._grappleChargeStartMs !== null) {
+          this._grappleChargeStartMs = null;
+          this.renderSystem.grappleChargeProgress = 0;
+          this.renderSystem.grappleAimWorldPos    = null;
+          return true;
+        }
+        // Start reel-out when hook is attached
+        const _rmbPid = this.networkManager.getAssignedPlayerId();
+        const _rmbWs  = this.predictedWorldState || this.authoritativeWorldState;
+        const _rmbP   = _rmbPid !== null ? _rmbWs?.players.find(p => p.id === _rmbPid) : null;
+        if (_rmbP?.grappleState === 2 && !this._grappleReelOutActive) {
+          this._grappleReelOutActive = true;
+          if (this._grappleReelInActive) {
+            this._grappleReelInActive = false;
+          }
+          this.networkManager.sendGrappleReelStart('out');
+          return true; // consume — skip camera aim / block
+        }
+        return false;
+      };
+
+      // Spacebar releases grapple when flying or attached.
+      this.inputManager.onSpaceJustPressed = () => {
+        const _spcPid = this.networkManager.getAssignedPlayerId();
+        const _spcWs  = this.predictedWorldState || this.authoritativeWorldState;
+        const _spcP   = _spcPid !== null ? _spcWs?.players.find(p => p.id === _spcPid) : null;
+        const _spcGs  = _spcP?.grappleState ?? 0;
+        if (_spcGs === 2 || _spcGs === 1) { // ATTACHED or FLYING
+          this._stopGrappleReel();
+          this.networkManager.sendReleaseGrapple();
+        }
+      };
       
       // HYBRID PROTOCOL: Wire up state change callbacks
       this.inputManager.onMovementStateChange = (movement, isMoving, isSprinting) => {
@@ -1144,6 +1224,23 @@ export class ClientApplication {
             this.uiManager?.startHammerMinigame((won) => {
               if (won) this.networkManager.sendUseHammer(shipId, moduleId);
             });
+            return;
+          }
+          // Grapple hook — hold LMB to wind up (idle) or reel in (attached).
+          if (activeItem === 'grapple_hook' && player && !player.isMounted) {
+            const ATTACHED = 2;
+            if (player.grappleState === ATTACHED) {
+              // Start reeling in while LMB is held.
+              if (!this._grappleReelInActive) {
+                this._grappleReelInActive = true;
+                if (this._grappleReelOutActive) {
+                  this._grappleReelOutActive = false;
+                }
+                this.networkManager.sendGrappleReelStart('in');
+              }
+            } else if (!player.grappleState && this._grappleChargeStartMs === null) {
+              this._grappleChargeStartMs = performance.now();
+            }
             return;
           }
           // Not a hammer click — check for sword
@@ -3142,6 +3239,8 @@ export class ClientApplication {
         this._fogWorker.onmessage = (e: MessageEvent<ArrayBuffer>) => {
           // Swap in the worker's result buffer directly — zero copy on the main thread.
           this._rayHitDist = new Float32Array(e.data);
+          // Increment version so RenderSystem knows to re-render the fog canvas.
+          this.renderSystem.fogRayVersion++;
         };
         this._fogWorker.postMessage({
           type: 'INIT',
@@ -3209,6 +3308,21 @@ export class ClientApplication {
         menu.onTakeAll = (tombId) => {
           this.networkManager.sendCollectTombstone(tombId);
         };
+      };
+      this.networkManager.onWreckPositionUpdate = (id, x, y) => {
+        this.renderSystem.updateWreckPosition(id, x, y);
+      };
+      this.networkManager.onWreckLoot = (playerId, x, y, wood, fiber, metal, stone) => {
+        const myId = this.networkManager.getAssignedPlayerId();
+        const isMe = (myId !== null && playerId === myId);
+        const pos  = Vec2.from(x, y);
+        // Stagger each resource line slightly upward so they don't overlap.
+        let offset = 0;
+        const STEP = 22;
+        if (wood  > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${wood} wood`,  isMe ? '#c8a96e' : '#8b7355'); offset += STEP; }
+        if (fiber > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${fiber} fiber`, isMe ? '#a3d977' : '#6b8c4e'); offset += STEP; }
+        if (metal > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${metal} metal`, isMe ? '#a0c8e8' : '#607080'); offset += STEP; }
+        if (stone > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${stone} stone`, isMe ? '#c8c0a8' : '#7a7060'); }
       };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
@@ -3840,6 +3954,26 @@ export class ClientApplication {
     this.predictionEngine.setCollisionContext(ctx);
   }
 
+  /** Send reel-stop if currently reeling, and clear state flags. */
+  private _stopGrappleReel(): void {
+    if (this._grappleReelInActive || this._grappleReelOutActive) {
+      this.networkManager.sendGrappleReelStop();
+    }
+    this._grappleReelInActive  = false;
+    this._grappleReelOutActive = false;
+  }
+
+  /** Full grapple cleanup — stop reel + detach. */
+  private _releaseGrapple(): void {
+    this._stopGrappleReel();
+    this._grappleChargeStartMs = null;
+    this._grappleBoardingStartMs = null;
+    this._grappleBoardingProgress = 0;
+    this.renderSystem.grappleChargeProgress = 0;
+    this.renderSystem.grappleAimWorldPos    = null;
+    this.networkManager.sendReleaseGrapple();
+  }
+
   /**
    * Main game loop - handles timing, input, prediction, and rendering
    */
@@ -3858,6 +3992,12 @@ export class ClientApplication {
     // Update FPS tracking
     this.updateFPSTracking(deltaTime);
     
+    // Compute the interpolated state once per RAF frame and cache it.
+    // updateClient (camera follow) and renderFrame both need it; without caching
+    // getInterpolatedState does an O(snapshot-buffer) scan on every call, which
+    // would fire up to 6× per display frame (5 catch-up ticks + 1 render).
+    this._frameInterpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
+
     // Fixed timestep client updates (prediction, input processing).
     // Cap the number of catch-up ticks per frame: after a long stall (tab refocus, GC, a heavy
     // frame) the accumulator can hold many ticks' worth of time. Running all of them in one
@@ -3902,6 +4042,12 @@ export class ClientApplication {
     // don't flicker with highlight glows through the overlay.
     const _respawnOpen = this.uiManager?.isRespawnScreenVisible() ?? false;
     this.renderSystem.updateMousePosition(_respawnOpen ? Vec2.from(-999999, -999999) : mouseWorld);
+
+    // Capture per-frame mouse flags BEFORE inputManager.update() calls resetFrameFlags(),
+    // which clears them. Anything that needs "was released this frame" must use these captures.
+    const _lmbJustReleased = this.inputManager.isLeftMouseJustReleased();
+    const _rmbJustReleased = this.inputManager.isRightMouseJustReleased();
+
     this.inputManager.update(dt);
     
     // Update prediction engine (client-side simulation)
@@ -3915,9 +4061,13 @@ export class ClientApplication {
       // Snapshot previous state for sub-tick position lerp in renderFrame
       this.prevPredictedWorldState = this.predictedWorldState;
 
+      const _rawInputFrame = this.inputManager.getCurrentInputFrame();
+      // Inject grapple reel flags so Physics.ts can mirror server-side rope behaviour
+      if (this._grappleReelInActive)  _rawInputFrame.grappleReelIn  = true;
+      if (this._grappleReelOutActive) _rawInputFrame.grappleReelOut = true;
       this.predictedWorldState = this.predictionEngine.update(
         this.authoritativeWorldState,
-        this.inputManager.getCurrentInputFrame(),
+        _rawInputFrame,
         dt
       );
       
@@ -3926,7 +4076,7 @@ export class ClientApplication {
       // 30 Hz server cadence into camera motion (perceived as choppy movement). updateCamera
       // only reads the local player, so splicing it into the interpolated world is sufficient.
       if (this.predictedWorldState) {
-        const _interp = this.predictionEngine.getInterpolatedState(performance.now());
+        const _interp = this._frameInterpolatedState;
         const _assignedId = this.networkManager.getAssignedPlayerId();
         let _cameraFollowState: WorldState = this.predictedWorldState;
         if (_interp && _assignedId !== null) {
@@ -3968,13 +4118,19 @@ export class ClientApplication {
           // --- Dynamic view-range / AOI ---
           // Cast rays against island coastlines to compute per-direction visibility
           // distances. Used for the fog mask (RenderSystem) and server AOI hint.
+          // Worker posts are throttled to ~30 Hz (every N ticks) — fog doesn't
+          // need to update at the full 120 Hz client tick rate, and the
+          // RenderSystem dirty flag skips the blur(48px) when rays are unchanged.
+          this._fogTickCounter++;
           if (this._fogWorkerReady && this._fogWorker) {
-            // Off-thread: dispatch position to worker, use previous frame's result now.
-            this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
+            if (this._fogTickCounter % ClientApplication.FOG_POST_EVERY_N_TICKS === 0) {
+              this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
+            }
           } else {
             // Fallback: synchronous (before first ISLANDS message, or if worker unavailable).
             const islands = this.renderSystem.getIslands();
             this.computeViewRays(player.position, islands);
+            this.renderSystem.fogRayVersion++;
           }
 
           // Smooth openness so the fog/zoom doesn't jitter when near a polygon edge
@@ -3990,6 +4146,133 @@ export class ClientApplication {
 
           // Expose average view distance for server AOI hint (client units)
           this.networkManager.viewRadius = raySum / N;
+
+          // ── Grapple hook wind-up / fire / reel / release ───────────────────
+          {
+            const gSlot = player.inventory?.activeSlot ?? 0;
+            const gItem = player.inventory?.slots[gSlot]?.item;
+            const isGrappleEquipped = gItem === 'grapple_hook' && !player.isMounted;
+            const ATTACHED = 2;
+            const isAttached = player.grappleState === ATTACHED;
+
+            // ── Hotbar-switch or un-equip → release grapple ──────────────────
+            if (this._prevActiveSlot !== -1 && this._prevActiveSlot !== gSlot && (player.grappleState ?? 0) > 0) {
+              this._releaseGrapple();
+            }
+            this._prevActiveSlot = gSlot;
+
+            // ── Cancel charge if grapple un-equipped ─────────────────────────
+            if (this._grappleChargeStartMs !== null && !isGrappleEquipped) {
+              this._grappleChargeStartMs = null;
+            }
+
+            // ── Clear reel flags if grapple detached ─────────────────────────
+            if (!isAttached && (this._grappleReelInActive || this._grappleReelOutActive)) {
+              this._stopGrappleReel();
+            }
+
+            // ── LMB released ─────────────────────────────────────────────────
+            if (_lmbJustReleased) {
+              if (isGrappleEquipped) {
+                if (this._grappleChargeStartMs !== null) {
+                  // Wind-up complete → fire.
+                  const elapsed = performance.now() - this._grappleChargeStartMs;
+                  const charge  = Math.min(1, elapsed / this.GRAPPLE_MAX_CHARGE_MS);
+                  this.networkManager.sendFireGrapple(this.inputManager.getMouseWorldPosition(), charge);
+                  this._grappleChargeStartMs = null;
+                } else if (isAttached && this._grappleReelInActive) {
+                  // Stop reeling in on LMB release.
+                  this._grappleReelInActive = false;
+                  this.networkManager.sendGrappleReelStop();
+                }
+              } else {
+                this._grappleChargeStartMs = null;
+              }
+            }
+
+            // ── RMB released → stop reel-out ─────────────────────────────────
+            if (_rmbJustReleased && this._grappleReelOutActive) {
+              this._grappleReelOutActive = false;
+              this.networkManager.sendGrappleReelStop();
+            }
+
+            // ── Boarding timer ────────────────────────────────────────────────
+            // Activates when grapple is ATTACHED to a ship AND the player is
+            // close enough to the hull to board (within BOARD_HULL_RANGE of the hook).
+            // Once started, the timer keeps running as long as LMB is held and the
+            // grapple stays ATTACHED — brief position jitter (semi-authority corrections)
+            // no longer resets the bar.  Only LMB release or grapple detach abort it.
+            const BOARD_TIME_MS       = 2500;
+            const BOARD_HULL_RANGE    = 120; // px from hook — slightly generous to survive corrections
+            const GRAPPLE_TARGET_SHIP = 2;
+
+            const isShipGrapple  = isAttached && player.grappleTargetType === GRAPPLE_TARGET_SHIP;
+            const isHoldingLMB   = this.inputManager.isLeftMouseDown();
+
+            // Proximity check used ONLY to START boarding (not to cancel it).
+            const isNearHull = isShipGrapple &&
+              player.grappleX !== undefined && player.grappleY !== undefined &&
+              (() => {
+                const dx = player.position.x - player.grappleX!;
+                const dy = player.position.y - player.grappleY!;
+                return Math.sqrt(dx * dx + dy * dy) <= BOARD_HULL_RANGE;
+              })();
+
+            // Boarding is active once started: keep running if LMB is held + grapple attached.
+            // This prevents server position corrections from resetting the bar mid-fill.
+            const boardingActive = this._grappleBoardingStartMs !== null;
+            const canBoard       = (isNearHull || boardingActive) && isShipGrapple && isHoldingLMB;
+
+            // Clear the sent-flag once the server has confirmed the grapple is gone
+            // (grappleState no longer ATTACHED). This is the authoritative signal that
+            // the previous boarding request was fully processed.
+            if (!isAttached && this._grappleBoardingSent) {
+              this._grappleBoardingSent = false;
+            }
+
+            if (canBoard && !this._grappleBoardingSent) {
+              if (this._grappleBoardingStartMs === null) {
+                this._grappleBoardingStartMs = performance.now();
+                // Stop reel-in so the hook stays pinned at the hull — continuing to
+                // reel would hit GRAPPLE_DETACH_DIST and detach the hook mid-boarding.
+                if (this._grappleReelInActive) {
+                  this._grappleReelInActive = false;
+                  this.networkManager.sendGrappleReelStop();
+                }
+              }
+              const elapsed = performance.now() - this._grappleBoardingStartMs;
+              this._grappleBoardingProgress = Math.min(1, elapsed / BOARD_TIME_MS);
+              if (this._grappleBoardingProgress >= 1) {
+                this.networkManager.sendBoardShip();
+                this._grappleBoardingStartMs = null;
+                this._grappleBoardingProgress = 0;
+                this._grappleBoardingSent = true;
+                this.renderSystem.forceSetDeckLevel(1);
+                this.predictionEngine.setLocalPlayerDeckLevel(1);
+                this.renderSystem.setJustBoarded();
+                this._releaseGrapple();
+              }
+            } else if (!canBoard || this._grappleBoardingSent) {
+              // Cancel: LMB released, grapple detached, or boarding already sent.
+              if (this._grappleBoardingStartMs !== null) {
+                this._grappleBoardingStartMs = null;
+                this._grappleBoardingProgress = 0;
+              }
+            }
+
+            // Push charge progress + aim to RenderSystem every frame.
+            let chargeProgress = 0;
+            if (isGrappleEquipped && this._grappleChargeStartMs !== null) {
+              chargeProgress = Math.min(1, (performance.now() - this._grappleChargeStartMs) / this.GRAPPLE_MAX_CHARGE_MS);
+            }
+            this.renderSystem.grappleChargeProgress = chargeProgress;
+            this.renderSystem.grappleProjectedRange = this.GRAPPLE_MIN_RANGE
+              + chargeProgress * (this.GRAPPLE_MAX_RANGE - this.GRAPPLE_MIN_RANGE);
+            this.renderSystem.grappleAimWorldPos = chargeProgress > 0
+              ? this.inputManager.getMouseWorldPosition()
+              : null;
+            this.renderSystem.grappleBoardingProgress = this._grappleBoardingProgress;
+          }
         }
       }
       
@@ -4069,9 +4352,10 @@ export class ClientApplication {
    * Render a frame with interpolation
    */
   private renderFrame(alpha: number): void {
-    // Get interpolated state for smooth rendering of other entities
+    // Use the interpolated state cached at the start of gameLoop — avoids a
+    // redundant O(snapshot-buffer) scan that would duplicate updateClient's work.
     const currentTime = performance.now();
-    const interpolatedState = this.predictionEngine.getInterpolatedState(currentTime);
+    const interpolatedState = this._frameInterpolatedState;
 
     // Frame delta (seconds) for decaying the smooth-error-correction offset.
     const _renderDt = this._lastRenderTime > 0
@@ -4893,6 +5177,15 @@ export class ClientApplication {
             console.log(`⚓ [BOARD] Boarded ship ${newCarrierId} (was: ${this.previousCarrierId ?? 'none'}) — syncing ammo type & crew tasks`);
             this.inputManager.resetAmmoType();
             this.uiManager.syncCrewFromBoarding(worldState.npcs, newCarrierId, player.companyId ?? 0);
+
+            // Authoritative deck sync: server always boards at deck 1.
+            // Align all three deck sources (render, prediction, server) immediately so
+            // the ramp state machine doesn't start from a stale or 0 value.
+            const serverDeck = player.deckId ?? 1;
+            this.renderSystem.forceSetDeckLevel(serverDeck);
+            this.predictionEngine.setLocalPlayerDeckLevel(serverDeck);
+            // Mark that we just boarded — RenderSystem will skip ramp detection briefly.
+            this.renderSystem.setJustBoarded();
           }
           this.previousCarrierId = newCarrierId;
         }

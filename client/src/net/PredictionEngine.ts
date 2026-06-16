@@ -119,11 +119,13 @@ export class PredictionEngine {
   // server moves the client can't know about (teleport, respawn, forced dismount, cannon
   // knockback): when the server places us further than this many units from the running
   // prediction, adopt it.
-  //
-  // Must be LESS THAN SMOOTH_ERROR_MAX so that medium corrections (e.g. 20–60 px cannon
-  // knockback) go through the smooth visual-offset path rather than being ignored outright.
-  // Setting this equal to SMOOTH_ERROR_MAX makes the smooth path unreachable (dead code).
-  private static readonly FORCED_CORRECTION_THRESHOLD = 20.0;
+  private static readonly FORCED_CORRECTION_THRESHOLD = 60.0;
+
+  // Track the client tick when the local player boarded a ship (carrierId 0 → >0).
+  // Used to widen the server-deck-trust window so a single boarding frame isn't the
+  // only moment the server's authoritative deck_level is applied.
+  private _boardingClientTick: number = -1;
+  private static readonly BOARDING_DECK_TRUST_TICKS = 15; // ~125 ms at 8ms/tick
   
   // Input validation
   private inputValidation: InputValidationMetrics = {
@@ -340,15 +342,31 @@ export class PredictionEngine {
           localPosition: serverLocal.isMounted
             ? serverLocal.localPosition
             : (runningLocal.localPosition ?? serverLocal.localPosition),
-          // deckId: CLIENT semi-authority — the RenderSystem state machine transitions this
-          // immediately when the player enters/exits a ramp zone, then sends player_set_deck
-          // to the server. Until the server echoes back the new deck_level (one RTT later),
-          // the snapshot still carries the old deck. Overwriting with the stale server value
-          // every merge would apply the WRONG per-deck collision filter for the full RTT,
-          // letting players walk through ramp walls or fall through upper-deck floors.
-          // We keep the client's locally-transitioned value; forced corrections (teleport /
-          // respawn) set it directly in onAuthoritativeState's position-correction block.
-          deckId: runningLocal.deckId,
+          // deckId: CLIENT semi-authority during ramp transitions — the RenderSystem state
+          // machine transitions this immediately when the player enters/exits a ramp zone,
+          // then sends player_set_deck to the server.  Until the server echoes back the new
+          // deck_level (one RTT later) the snapshot still carries the old deck.  Overwriting
+          // with the stale server value every tick would apply the WRONG per-deck collision
+          // filter for the full RTT, letting players walk through ramp walls or fall through
+          // upper-deck floors.  We keep the client value — EXCEPT within the first
+          // BOARDING_DECK_TRUST_TICKS ticks after boarding (carrierId changed 0 → non-zero),
+          // where we trust the server's authoritative deck_level unconditionally.
+          deckId: (() => {
+            const boardingNow = serverLocal.carrierId > 0 && runningLocal.carrierId === 0;
+            if (boardingNow) {
+              // Record the tick we first saw the boarding so the grace window can be measured.
+              this._boardingClientTick = this.clientTick;
+            }
+            const inBoardingWindow = this._boardingClientTick >= 0 &&
+              (this.clientTick - this._boardingClientTick) < PredictionEngine.BOARDING_DECK_TRUST_TICKS;
+            // Reset boarding window when the player dismounts
+            if (serverLocal.carrierId === 0 && runningLocal.carrierId > 0) {
+              this._boardingClientTick = -1;
+            }
+            return (boardingNow || inBoardingWindow)
+              ? serverLocal.deckId   // boarding window: trust server's authoritative deck_level
+              : runningLocal.deckId; // normal walking / ramp transition: keep client value
+          })(),
         }
       : { ...runningLocal };
 

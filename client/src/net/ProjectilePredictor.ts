@@ -117,8 +117,10 @@ export class ProjectilePredictor {
       }
     }
 
-    // Rebuild the known-ID set for next frame
-    this.knownServerIds = new Set(serverProjectiles.map(p => p.id));
+    // Update the known-ID set in-place instead of allocating a new Set + array
+    // every reconcile call (~30 Hz). Clear + re-add is O(n) with no allocation.
+    this.knownServerIds.clear();
+    for (const sp of serverProjectiles) this.knownServerIds.add(sp.id);
 
     // Try to match each new server projectile to an unconfirmed prediction
     for (const sp of newServerProjectiles) {

@@ -215,6 +215,28 @@ export class RenderSystem {
   public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
   /** Read-only access to the current player deck level for placement decisions. */
   public get playerDeckLevel(): number { return this._playerDeckLevel; }
+  /**
+   * Timestamp (performance.now) of the most recent boarding event.
+   * Ramp fall-through detection is suppressed for 500 ms after boarding so a
+   * hull-contact spawn position near a ramp hole can't immediately push the
+   * player to the lower deck before server/client positions converge.
+   */
+  private _boardedAtMs: number = -Infinity;
+  private readonly _BOARD_GRACE_MS = 500;
+
+  /** Call immediately after boarding (grapple or any path) to start the grace window. */
+  public setJustBoarded(): void {
+    this._boardedAtMs = performance.now();
+  }
+
+  /**
+   * Force-set the deck level from an external authority (e.g. server ack after rejection).
+   * Does NOT fire onDeckLevelChange — the caller is responsible for updating PredictionEngine
+   * and must NOT re-send player_set_deck to avoid an echo loop.
+   */
+  public forceSetDeckLevel(deckLevel: number): void {
+    this._playerDeckLevel = deckLevel === 0 ? 0 : 1;
+  }
   /** Current ramp facing index in build mode: 0=+x, 1=+y, 2=-x, 3=-y (top/light end direction). */
   private rampFacing: number = 0;
   /** Player position info used by the hover tooltip to determine interact range. */
@@ -242,6 +264,28 @@ export class RenderSystem {
   public fogRayHitDist: Float32Array | null = null;
   /** Off-screen canvas reused for fog-mask compositing. */
   private _fogCanvas: HTMLCanvasElement | null = null;
+  /** Camera state captured when the fog canvas was last rendered.
+   *  Used for dirty-detection so we skip the expensive blur(48px) redraw
+   *  when neither the ray data nor the camera has changed since last frame. */
+  private _fogLastRayVersion = -1;
+  private _fogLastCamX = NaN;
+  private _fogLastCamY = NaN;
+  private _fogLastZoom = NaN;
+  private _fogLastRot  = NaN;
+  /** Monotonic counter incremented by ClientApplication whenever the fog
+   *  worker delivers a new ray set. RenderSystem compares this to skip
+   *  redundant fog redraws at render-frame rate (60-120 Hz). */
+  public fogRayVersion = 0;
+
+  /** 0 = not charging, 0–1 = current grapple wind-up progress.
+   *  Set by ClientApplication each frame while the player holds LMB. */
+  public grappleChargeProgress = 0;
+  /** World-space radius (px) of the projected grapple shot at current charge. */
+  public grappleProjectedRange = 0;
+  /** World-space aim target while winding up — null when not charging. */
+  public grappleAimWorldPos: { x: number; y: number } | null = null;
+  /** 0–1 boarding progress when grappled onto a ship and reeled in close; 0 = not boarding. */
+  public grappleBoardingProgress = 0;
   /** Cached local player company for the current frame — set at start of renderWorld. */
   private _localCompanyId: number = 0;
   /** Cached local player for the current frame — set once in renderWorld, shared by all draw methods. */
@@ -2812,6 +2856,11 @@ export class RenderSystem {
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
+  updateWreckPosition(id: number, x: number, y: number): void {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'wreck');
+    if (s) { s.x = x; s.y = y; }
+  }
+
   removePlacedStructure(id: number): void {
     const s = this.placedStructures.find(p => p.id === id);
     if (s) {
@@ -4611,14 +4660,15 @@ export class RenderSystem {
     const localPlayer = this._cachedLocalPlayer;
     if (!localPlayer) return;
 
-    const N      = hitDist.length;
+    const N = hitDist.length;
     if (N === 0) return;
 
+    // Read camera state once — avoids two getState() calls that each clone a Vec2.
+    const camZoom = camera.zoom;
+    const camRot  = camera.rotation;
     const screenPos = camera.worldToScreen(localPlayer.position);
-    const cx   = screenPos.x;
-    const cy   = screenPos.y;
-    const zoom = camera.getState().zoom;
-    const cameraRotation = camera.getState().rotation;
+    const cx = screenPos.x;
+    const cy = screenPos.y;
     const TWO_PI = Math.PI * 2;
     const { width, height } = this.canvas;
 
@@ -4627,7 +4677,33 @@ export class RenderSystem {
       this._fogCanvas = document.createElement('canvas');
       this._fogCanvas.width  = width;
       this._fogCanvas.height = height;
+      // Force a full redraw on resize
+      this._fogLastRayVersion = -1;
     }
+
+    // Skip the expensive blur(48px) redraw when nothing has changed.
+    // The fog rays update at ~30 Hz (worker cadence); the render loop runs at
+    // 60-120 Hz, so most frames can just re-blit the cached fog canvas.
+    const camMoved = cx   !== this._fogLastCamX || cy   !== this._fogLastCamY
+                  || camZoom !== this._fogLastZoom  || camRot  !== this._fogLastRot;
+    const raysDirty = this.fogRayVersion !== this._fogLastRayVersion;
+
+    if (!raysDirty && !camMoved) {
+      // Nothing changed — blit the already-rendered fog canvas directly.
+      this.ctx.save();
+      this.ctx.globalAlpha = 0.68;
+      this.ctx.drawImage(this._fogCanvas, 0, 0);
+      this.ctx.restore();
+      return;
+    }
+
+    // Record the camera/ray state for next frame's dirty check.
+    this._fogLastRayVersion = this.fogRayVersion;
+    this._fogLastCamX = cx;
+    this._fogLastCamY = cy;
+    this._fogLastZoom = camZoom;
+    this._fogLastRot  = camRot;
+
     const fc   = this._fogCanvas;
     const fctx = fc.getContext('2d')!;
 
@@ -4643,8 +4719,8 @@ export class RenderSystem {
       fctx.moveTo(cx, cy);
       for (let i = 0; i <= N; i++) {
         const idx   = i % N;
-        const angle = idx * TWO_PI / N - cameraRotation;
-        const dist  = hitDist[idx] * zoom * scale;
+        const angle = idx * TWO_PI / N - camRot;
+        const dist  = hitDist[idx] * camZoom * scale;
         fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
       }
       fctx.closePath();
@@ -5817,10 +5893,21 @@ export class RenderSystem {
       return order(a.type) - order(b.type);
     });
 
+    // Expand sorted with world-wrap shadow copies so structures (including wrecks)
+    // that cross the wrap boundary are rendered correctly when the world parallaxes.
+    // getWrapRenderOffsets always includes {dx:0,dy:0} so canonical entries are kept.
+    const sortedWrapped: PlacedStructure[] = [];
+    for (const s of sorted) {
+      const offsets = this.getWrapRenderOffsets(Vec2.from(s.x, s.y), camera, 200);
+      for (const off of offsets) {
+        sortedWrapped.push(off.dx === 0 && off.dy === 0 ? s : { ...s, x: s.x + off.dx, y: s.y + off.dy });
+      }
+    }
+
     // TILE = 50 CLIENT units (= 5 server units after ×WORLD_SCALE_FACTOR=10).
     // Half-extents in CLIENT units: shipyard 445 (= TILE*17.8/2), flag_fort ~70, fortress ~90.
     const STRUCT_TILE = 50;
-    for (const s of sorted) {
+    for (const s of sortedWrapped) {
       // World-space bounding radius for each structure type.
       // isWorldPositionVisible margin is in CLIENT units — same space as s.x / s.y.
       const _halfExt = s.type === 'shipyard'         ? STRUCT_TILE * 17.8 / 2   // 445
@@ -7145,7 +7232,7 @@ export class RenderSystem {
     // ── Quality-tier markers ─────────────────────────────────────────────
     // Structures crafted from a quality blueprint carry a rolled tier. Draw a
     // small tier-colored gem above each so the world shows item prestige.
-    for (const s of sorted) {
+    for (const s of sortedWrapped) {
       if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
       const _qHalfExt = s.type === 'shipyard' ? STRUCT_TILE * 17.8 / 2 : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
       if (!this.fogVisibleAt(s.x, s.y, _qHalfExt)) continue;
@@ -9031,25 +9118,43 @@ export class RenderSystem {
       const _lp = renderPlayers.find(p => p.id === this.localPlayerId);
       if (_lp && _lp.carrierId !== 0) {
         const _cs = renderShips.find(s => s.id === _lp.carrierId);
-        if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1)) {
-          // Player ship-local position
-          const _dx = _lp.position.x - _cs.position.x;
-          const _dy = _lp.position.y - _cs.position.y;
-          const _cos = Math.cos(-_cs.rotation);
-          const _sin = Math.sin(-_cs.rotation);
-          const _lx = _dx * _cos - _dy * _sin;
-          const _ly = _dx * _sin + _dy * _cos;
+        // Only run the fall-through state machine when there is an INTACT upper deck
+        // (health > 0). A destroyed deck (health=0) is kept in ship.modules but should
+        // be treated as absent — the ship reverts to a single-deck hull.
+        if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1 && (m.health === undefined || m.health > 0))) {
+          // Player ship-local position — prefer localPosition (seeded from the server's
+          // local_x / local_y and kept current by the prediction engine) over re-deriving
+          // from the world-space round-trip (world_pos - ship_pos → rotate), which
+          // introduces an extra floating-point conversion and can be slightly stale when
+          // the ship is rotating.  Falling back to world-pos conversion when localPosition
+          // is absent (e.g. swimming player) keeps behaviour correct.
+          let _lx: number;
+          let _ly: number;
+          if (_lp.localPosition) {
+            _lx = _lp.localPosition.x;
+            _ly = _lp.localPosition.y;
+          } else {
+            const _dx = _lp.position.x - _cs.position.x;
+            const _dy = _lp.position.y - _cs.position.y;
+            const _cos = Math.cos(-_cs.rotation);
+            const _sin = Math.sin(-_cs.rotation);
+            _lx = _dx * _cos - _dy * _sin;
+            _ly = _dx * _sin + _dy * _cos;
+          }
 
           // Detection radius around each snap-point (px in ship-local).
-          // Must match server FALL_ZONE / CLIMB_ZONE (websocket_server.c ~6615).
-          // Both fall and climb use the same zone for consistent behaviour.
-          const _ZONE = 22;
+          // Fall zone: 22 px — matches server FALL_ZONE.
+          // Climb zone: 28 px — matches server CLIMB_ZONE (widened to absorb server/client drift).
+          const _FALL_ZONE  = 22;
+          const _CLIMB_ZONE = 28;
 
-          if (this._playerDeckLevel === 1) {
+          const _inBoardingGrace = (performance.now() - this._boardedAtMs) < this._BOARD_GRACE_MS;
+
+          if (this._playerDeckLevel === 1 && !_inBoardingGrace) {
             // Upper deck — fall through empty holes, or enter a ramp from its top (light) face
             const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
-              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              if (Math.abs(drx) >= _FALL_ZONE || Math.abs(dry) >= _FALL_ZONE) return false;
               // Hatch cover blocks any fall-through
               const hatchMod = _cs.modules.find(
                 m => m.kind === 'hatch_cover' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
@@ -9067,17 +9172,21 @@ export class RenderSystem {
           }
 
           if (this._playerDeckLevel === 0) {
-            // Lower deck — climb back up via the bottom/dark face of a ramp
+            // Lower deck — climb back up via the bottom/dark face of a ramp.
+            // Use CLIMB_ZONE (28) which is wider than FALL_ZONE (22) to absorb the server/client
+            // position drift of up to ~10 px (one movement tick + sub-tick accumulation).
+            // The face threshold is relaxed to rlx < 12 (mirrors server rlx < 12.0f) so a
+            // slightly ahead server position still allows the climb to succeed.
             const climbing = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
-              if (Math.abs(drx) >= _ZONE || Math.abs(dry) >= _ZONE) return false;
+              if (Math.abs(drx) >= _CLIMB_ZONE || Math.abs(dry) >= _CLIMB_ZONE) return false;
               const rampMod = _cs.modules.find(
                 m => m.kind === 'ramp' && Math.abs(m.localPos.x - sp.x) < 20 && Math.abs(m.localPos.y - sp.y) < 20
               );
               if (!rampMod) return false;
-              // Only climb from the bottom/dark face (ramp-local x < 0)
+              // Climb from the bottom/dark face; threshold relaxed to rlx < 12 to match server.
               const rlx = drx * Math.cos(-rampMod.localRot) - dry * Math.sin(-rampMod.localRot);
-              return rlx < 0;
+              return rlx < 12;
             });
             if (climbing) {
               this._playerDeckLevel = 1;
@@ -11232,9 +11341,12 @@ export class RenderSystem {
       const localY = dx * sin + dy * cos;
 
       // Gunport cannon ghosts are on the lower deck (deck 0).
-      // Show when player is on deck 0 OR when the ship has no upper deck (single-deck ships
-      // keep _playerDeckLevel=1 because the deck-level update only runs when an upper deck exists).
-      const _shipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+      // Show when player is on deck 0 OR when the ship has no INTACT upper deck.
+      // A deck module with health=0 is destroyed (kept in ship.modules with hp=0) — treat it
+      // as absent so hover detection works without requiring the player to be on deck 0.
+      const _shipHasUpperDeck = ship.modules.some(
+        m => m.kind === 'deck' && m.deckId === 1 && (m.health === undefined || m.health > 0),
+      );
       if (this._playerDeckLevel !== 0 && _shipHasUpperDeck) continue;
       for (const mod of ship.modules) {
         if (mod.kind !== 'gunport') continue;
@@ -11329,10 +11441,13 @@ export class RenderSystem {
     }
 
     // ── Ghost cannons at gunport positions (no cannon installed yet) ──────
-    // Show when player is on deck 0, OR when the ship has no upper deck (single-deck ships
-    // have _playerDeckLevel=1 since the level detector only activates with an upper deck).
+    // Show when player is on deck 0, OR when the ship has no INTACT upper deck.
+    // A deck module with health=0 is destroyed (kept in ship.modules with hp=0) — treat it
+    // as absent so ghosts appear without requiring the player to be on deck 0.
     const gpHalfWGhost = 11; // match visual gpHalfW
-    const _gpShipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    const _gpShipHasUpperDeck = ship.modules.some(
+      m => m.kind === 'deck' && m.deckId === 1 && (m.health === undefined || m.health > 0),
+    );
     if (this._playerDeckLevel === 0 || !_gpShipHasUpperDeck) for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
       // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
@@ -16730,6 +16845,179 @@ export class RenderSystem {
       // Draw the name text
       this.ctx.fillStyle = '#ffffff';
       this.ctx.fillText(player.name, screenPos.x, nameY);
+    }
+
+    // ── Grapple hook rope + tip ────────────────────────────────────────────
+    // Rendered only when the hook is actively flying (1) or attached (2).
+    if (player.grappleState && player.grappleX !== undefined && player.grappleY !== undefined) {
+      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
+      const zoom = camera.zoom;
+      const FLYING   = 1;
+      const ATTACHED = 2;
+
+      // Rope — solid line from player to hook
+      this.ctx.save();
+      this.ctx.globalAlpha = _playerDeckAlpha;
+      this.ctx.strokeStyle = player.grappleState === ATTACHED ? '#c68642' : '#a06030';
+      this.ctx.lineWidth = Math.max(1.5, 2 * zoom);
+      this.ctx.beginPath();
+      this.ctx.moveTo(screenPos.x, screenPos.y);
+      this.ctx.lineTo(hookScreen.x, hookScreen.y);
+      this.ctx.stroke();
+
+      // Hook tip — small filled circle + a tiny claw shape
+      const hookR = Math.max(4, 5 * zoom);
+      this.ctx.fillStyle   = player.grappleState === ATTACHED ? '#e8a840' : '#cccccc';
+      this.ctx.strokeStyle = '#333333';
+      this.ctx.lineWidth   = 1.5;
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, hookR, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
+
+    // ── Grapple boarding progress bar (local player only) ────────────────
+    // Arc ring near the hook tip fills clockwise as boarding progresses.
+    if (player.id === this.localPlayerId &&
+        this.grappleBoardingProgress > 0 &&
+        player.grappleX !== undefined && player.grappleY !== undefined) {
+      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
+      const zoom = camera.zoom;
+      const prog = this.grappleBoardingProgress;
+
+      this.ctx.save();
+      const boardR   = Math.max(18, 22 * zoom);
+      const boardThk = Math.max(3, 4 * zoom);
+
+      // Faint track ring
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, boardR, 0, Math.PI * 2);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      this.ctx.lineWidth   = boardThk;
+      this.ctx.stroke();
+
+      // Filled arc — clockwise from 12 o'clock, colour shifts green→gold
+      const r = Math.round(50  + 205 * prog);
+      const g = Math.round(220 - 20  * prog);
+      const b = Math.round(50  - 50  * prog);
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, boardR,
+        -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2);
+      this.ctx.strokeStyle = `rgb(${r},${g},${b})`;
+      this.ctx.lineWidth   = boardThk;
+      this.ctx.stroke();
+
+      // "BOARDING" label underneath
+      const fontSize = Math.max(9, 11 * zoom);
+      this.ctx.font      = `bold ${fontSize}px monospace`;
+      this.ctx.fillStyle = `rgb(${r},${g},${b})`;
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText('BOARDING', hookScreen.x, hookScreen.y + boardR + fontSize + 2);
+
+      this.ctx.restore();
+    }
+
+    // ── Grapple wind-up charge indicator (local player only) ──────────────
+    // Shown while the player holds LMB to charge a grapple shot.
+    //   1. Small radial arc ring around the player — fills clockwise as charge builds
+    //   2. Directional aim line toward the mouse — grows to the projected range
+    if (player.id === this.localPlayerId && this.grappleChargeProgress > 0) {
+      const charge = this.grappleChargeProgress;
+      const zoom   = camera.zoom;
+      const now    = performance.now();
+
+      // Lerp colour: gray(0%) → orange(50%) → gold-red(100%)
+      const r = Math.round(charge < 0.5 ? 160 + 95 * (charge * 2) : 255);
+      const g = Math.round(charge < 0.5 ? 160 + 40 * (charge * 2) : Math.max(30, 200 - 170 * ((charge - 0.5) * 2)));
+      const b = Math.round(120 * (1 - charge));
+      const chargeColor = `rgb(${r},${g},${b})`;
+
+      this.ctx.save();
+
+      // 1. Compact arc ring just outside the player circle
+      const arcR         = scaledRadius + Math.max(4, 5 * zoom);
+      const arcThickness = Math.max(2.5, 3.5 * zoom);
+      // Faint track
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, arcR, 0, Math.PI * 2);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      this.ctx.lineWidth   = arcThickness;
+      this.ctx.stroke();
+      // Charged arc — clockwise from 12 o'clock
+      this.ctx.beginPath();
+      this.ctx.arc(
+        screenPos.x, screenPos.y, arcR,
+        -Math.PI / 2,
+        -Math.PI / 2 + Math.PI * 2 * charge
+      );
+      this.ctx.strokeStyle  = chargeColor;
+      this.ctx.lineWidth    = arcThickness;
+      this.ctx.shadowColor  = chargeColor;
+      this.ctx.shadowBlur   = 5;
+      this.ctx.stroke();
+      this.ctx.shadowBlur = 0;
+
+      // 2. Aim line — draw only when we have a valid aim target
+      const aim = this.grappleAimWorldPos;
+      if (aim) {
+        const aimScreen = camera.worldToScreen(Vec2.from(aim.x, aim.y));
+        const adx = aimScreen.x - screenPos.x;
+        const ady = aimScreen.y - screenPos.y;
+        const rawDist = Math.sqrt(adx * adx + ady * ady);
+        const ux = rawDist > 0.5 ? adx / rawDist : 1;
+        const uy = rawDist > 0.5 ? ady / rawDist : 0;
+
+        // Line length grows with charge (screen pixels)
+        const lineLen = this.grappleProjectedRange * zoom;
+        // Start just outside the player circle
+        const startX = screenPos.x + ux * (scaledRadius + 2);
+        const startY = screenPos.y + uy * (scaledRadius + 2);
+        const tipX   = screenPos.x + ux * lineLen;
+        const tipY   = screenPos.y + uy * lineLen;
+
+        // Traveling dash effect — dashes appear to scroll toward the tip
+        const dashLen   = 8;
+        const gapLen    = 6;
+        const dashCycle = dashLen + gapLen;
+        this.ctx.setLineDash([dashLen, gapLen]);
+        this.ctx.lineDashOffset = -(now / 30) % dashCycle;
+        this.ctx.strokeStyle    = chargeColor;
+        this.ctx.lineWidth      = Math.max(1.5, 2 * zoom);
+        this.ctx.shadowColor    = chargeColor;
+        this.ctx.shadowBlur     = 4;
+        this.ctx.beginPath();
+        this.ctx.moveTo(startX, startY);
+        this.ctx.lineTo(tipX, tipY);
+        this.ctx.stroke();
+        this.ctx.setLineDash([]);
+        this.ctx.shadowBlur = 0;
+
+        // Hook tip — small filled circle at the projected landing point
+        const tipR = Math.max(3, 4 * zoom);
+        this.ctx.beginPath();
+        this.ctx.arc(tipX, tipY, tipR, 0, Math.PI * 2);
+        this.ctx.fillStyle   = chargeColor;
+        this.ctx.shadowColor = chargeColor;
+        this.ctx.shadowBlur  = 6;
+        this.ctx.fill();
+        this.ctx.shadowBlur = 0;
+
+        // Charge percentage label just above the tip
+        if (charge >= 0.1) {
+          const pct = Math.round(charge * 100);
+          const fs  = Math.max(10, Math.round(11 * zoom));
+          this.ctx.font         = `bold ${fs}px sans-serif`;
+          this.ctx.textAlign    = 'center';
+          this.ctx.fillStyle    = chargeColor;
+          this.ctx.shadowColor  = 'rgba(0,0,0,0.9)';
+          this.ctx.shadowBlur   = 4;
+          this.ctx.fillText(`${pct}%`, tipX, tipY - tipR - 4);
+          this.ctx.shadowBlur = 0;
+        }
+      }
+
+      this.ctx.restore();
     }
 
     this.ctx.restore();

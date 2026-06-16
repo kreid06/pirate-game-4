@@ -551,10 +551,10 @@ static char *read_file_to_buf(const char *path, size_t *out_len) {
     if (sz <= 0 || sz > 64 * 1024 * 1024 /* 64 MiB max */) { fclose(f); return NULL; }
     char *buf = malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return NULL; }
-    fread(buf, 1, (size_t)sz, f);
+    size_t got = fread(buf, 1, (size_t)sz, f);
     fclose(f);
-    buf[sz] = '\0';
-    if (out_len) *out_len = (size_t)sz;
+    buf[got] = '\0';
+    if (out_len) *out_len = got;
     return buf;
 }
 
@@ -1224,8 +1224,8 @@ int world_load(const char *path) {
             if (csz > 0 && csz < 32768) {
                 char *cbuf = (char *)malloc((size_t)csz + 1);
                 if (cbuf) {
-                    fread(cbuf, 1, (size_t)csz, fc);
-                    cbuf[csz] = '\0';
+                    size_t cgot = fread(cbuf, 1, (size_t)csz, fc);
+                    cbuf[cgot] = '\0';
                     /* Parse next_id */
                     unsigned nid = 0;
                     const char *np = strstr(cbuf, "\"next_id\"");

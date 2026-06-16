@@ -47,6 +47,9 @@ void tick_sinking_ships(void) {
         for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
             if (!players[pi].active || players[pi].parent_ship_id != sunk_id) continue;
             players[pi].parent_ship_id      = 0;
+            players[pi].deck_level          = 1; /* reset so next boarding starts upper deck */
+            players[pi].local_x             = 0.0f; /* clear stale ship-local coords */
+            players[pi].local_y             = 0.0f;
             players[pi].movement_state      = PLAYER_STATE_SWIMMING;
             players[pi].is_mounted          = false;
             players[pi].mounted_module_id   = 0;
@@ -1364,6 +1367,7 @@ void load_ghost_spawns(const char *path) {
     ghost_fleet_count    = 0;
     ghost_spawn_count    = 0;
     ghost_spawns_enabled = false;
+    ghost_global_max_cap = 0;   /* reset so the file value always wins */
 
     /* Reset spawn queue */
     spawn_queue_head = 0;

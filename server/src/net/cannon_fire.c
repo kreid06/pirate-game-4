@@ -1102,6 +1102,11 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             float dx = npc->x - muzzle_x, dy = npc->y - muzzle_y;
             float dist = sqrtf(dx*dx + dy*dy);
             if (dist > GRAPE_RANGE) continue;
+            /* Lower-deck crew are shielded by an intact upper deck. */
+            if (npc->deck_level == 0 && npc->ship_id != 0) {
+                SimpleShip* _gs = find_ship((uint16_t)npc->ship_id);
+                if (ship_has_intact_upper_deck(_gs)) continue;
+            }
             if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
             float nx = dx / dist, ny = dy / dist;
             float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);
@@ -1136,6 +1141,11 @@ void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw,
             float dx = wp->x - muzzle_x, dy = wp->y - muzzle_y;
             float dist = sqrtf(dx*dx + dy*dy);
             if (dist > GRAPE_RANGE) continue;
+            /* Lower-deck players are shielded by an intact upper deck. */
+            if (wp->deck_level == 0 && wp->parent_ship_id != 0) {
+                SimpleShip* _gs = find_ship(wp->parent_ship_id);
+                if (ship_has_intact_upper_deck(_gs)) continue;
+            }
             if (dist < 0.01f) { dx = 1.0f; dy = 0.0f; dist = 1.0f; }
             float nx = dx / dist, ny = dy / dist;
             float fdir_x = cosf(fire_angle), fdir_y = sinf(fire_angle);

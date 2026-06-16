@@ -111,6 +111,10 @@ export interface ShipModule {
   localRot: number;             // Rotation relative to ship orientation (radians)
   occupiedBy: number | null;    // Player/entity ID currently using this module
   stateBits: number;            // Bit flags for module state (ModuleStateBits)
+  /** Current HP of the module (0 = fully destroyed). Mirrors server "health" field.
+   *  Used to skip collision walls on destroyed modules (e.g. ramp U-shape).
+   *  Absent when the server did not send a health value (older protocol). */
+  health?: number;
   /** Rolled quality tier (0..6) of the blueprint this module was crafted from.
    *  Used to tint/outline the module. Absent for plain (un-rolled) modules. */
   qualityTier?: number;

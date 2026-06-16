@@ -53,7 +53,9 @@ export class Camera {
   }
   
   /**
-   * Get current camera state (immutable)
+   * Get current camera state (immutable).
+   * NOTE: clones the position Vec2 — use the direct accessors `zoom` and
+   * `rotation` in hot paths (render loop) to avoid per-frame allocation.
    */
   getState(): CameraState {
     return {
@@ -62,6 +64,12 @@ export class Camera {
       rotation: this.state.rotation
     };
   }
+
+  /** Direct read-only accessors — no allocation, safe for use in hot paths. */
+  get zoom(): number     { return this.state.zoom; }
+  get rotation(): number { return this.state.rotation; }
+  get positionX(): number { return this.state.position.x; }
+  get positionY(): number { return this.state.position.y; }
   
   /**
    * Set camera position directly

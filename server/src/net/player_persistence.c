@@ -200,9 +200,9 @@ bool load_player_from_file(WebSocketPlayer *p) {
 
     char *buf = (char *)malloc((size_t)sz + 1);
     if (!buf) { fclose(f); return false; }
-    fread(buf, 1, (size_t)sz, f);
+    size_t got = fread(buf, 1, (size_t)sz, f);
     fclose(f);
-    buf[sz] = '\0';
+    buf[got] = '\0';
 
     unsigned tmp = 0;
     float ftmp = 0.f;
