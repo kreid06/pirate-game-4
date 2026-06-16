@@ -3312,17 +3312,19 @@ export class ClientApplication {
       this.networkManager.onWreckPositionUpdate = (id, x, y) => {
         this.renderSystem.updateWreckPosition(id, x, y);
       };
-      this.networkManager.onWreckLoot = (playerId, x, y, wood, fiber, metal, stone) => {
+      this.networkManager.onWreckLoot = (playerId, x, y, wood, fiber, metal, stone, items, blueprints) => {
         const myId = this.networkManager.getAssignedPlayerId();
         const isMe = (myId !== null && playerId === myId);
         const pos  = Vec2.from(x, y);
-        // Stagger each resource line slightly upward so they don't overlap.
+        // Stagger each loot line slightly upward so they don't overlap.
         let offset = 0;
         const STEP = 22;
         if (wood  > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${wood} wood`,  isMe ? '#c8a96e' : '#8b7355'); offset += STEP; }
         if (fiber > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${fiber} fiber`, isMe ? '#a3d977' : '#6b8c4e'); offset += STEP; }
         if (metal > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${metal} metal`, isMe ? '#a0c8e8' : '#607080'); offset += STEP; }
-        if (stone > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${stone} stone`, isMe ? '#c8c0a8' : '#7a7060'); }
+        if (stone > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${stone} stone`, isMe ? '#c8c0a8' : '#7a7060'); offset += STEP; }
+        if (items > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${items} item${items > 1 ? 's' : ''}`, isMe ? '#ffd86e' : '#9a8a50'); offset += STEP; }
+        if (blueprints > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${blueprints} schematic${blueprints > 1 ? 's' : ''}`, isMe ? '#c89bff' : '#6e5a90'); }
       };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
