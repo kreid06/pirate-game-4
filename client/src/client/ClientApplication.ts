@@ -367,10 +367,12 @@ export class ClientApplication {
   /** Max range at 100% charge (px) — matches GRAPPLE_MAX_RANGE server constant. */
   private readonly GRAPPLE_MAX_RANGE = 600;
 
-  /** True while the server has a grapple hook in the ATTACHED state for this player. */
-  private _grappleIsAttached = false;
   private _grappleBoardingStartMs: number | null = null; // ms timestamp when boarding began
   private _grappleBoardingProgress = 0;                  // 0–1, exposed to RenderSystem
+  /** Set to true the moment sendBoardShip() is sent; prevents the boarding timer from
+   *  restarting on subsequent frames while the server is still processing the request
+   *  and the grapple hook is still in ATTACHED state. Cleared when grapple detaches. */
+  private _grappleBoardingSent = false;
   /** True while we have sent grapple_reel_start in; cleared on stop/detach. */
   private _grappleReelInActive = false;
   /** True while we have sent grapple_reel_start out; cleared on stop/detach. */
@@ -1018,7 +1020,10 @@ export class ClientApplication {
           return true;
         }
         // Start reel-out when hook is attached
-        if (this._grappleIsAttached && !this._grappleReelOutActive) {
+        const _rmbPid = this.networkManager.getAssignedPlayerId();
+        const _rmbWs  = this.predictedWorldState || this.authoritativeWorldState;
+        const _rmbP   = _rmbPid !== null ? _rmbWs?.players.find(p => p.id === _rmbPid) : null;
+        if (_rmbP?.grappleState === 2 && !this._grappleReelOutActive) {
           this._grappleReelOutActive = true;
           if (this._grappleReelInActive) {
             this._grappleReelInActive = false;
@@ -1031,11 +1036,11 @@ export class ClientApplication {
 
       // Spacebar releases grapple when flying or attached.
       this.inputManager.onSpaceJustPressed = () => {
-        if (this._grappleIsAttached || (() => {
-          const pid = this.networkManager.getAssignedPlayerId();
-          const p = this.predictedWorldState?.players.find(pp => pp.id === pid);
-          return p?.grappleState === 1; // FLYING
-        })()) {
+        const _spcPid = this.networkManager.getAssignedPlayerId();
+        const _spcWs  = this.predictedWorldState || this.authoritativeWorldState;
+        const _spcP   = _spcPid !== null ? _spcWs?.players.find(p => p.id === _spcPid) : null;
+        const _spcGs  = _spcP?.grappleState ?? 0;
+        if (_spcGs === 2 || _spcGs === 1) { // ATTACHED or FLYING
           this._stopGrappleReel();
           this.networkManager.sendReleaseGrapple();
         }
@@ -3947,6 +3952,8 @@ export class ClientApplication {
   private _releaseGrapple(): void {
     this._stopGrappleReel();
     this._grappleChargeStartMs = null;
+    this._grappleBoardingStartMs = null;
+    this._grappleBoardingProgress = 0;
     this.renderSystem.grappleChargeProgress = 0;
     this.renderSystem.grappleAimWorldPos    = null;
     this.networkManager.sendReleaseGrapple();
@@ -4133,9 +4140,6 @@ export class ClientApplication {
             const ATTACHED = 2;
             const isAttached = player.grappleState === ATTACHED;
 
-            // Track attached state for onBeforeRightClick / onSpaceJustPressed closures.
-            this._grappleIsAttached = isAttached;
-
             // ── Hotbar-switch or un-equip → release grapple ──────────────────
             if (this._prevActiveSlot !== -1 && this._prevActiveSlot !== gSlot && (player.grappleState ?? 0) > 0) {
               this._releaseGrapple();
@@ -4196,7 +4200,14 @@ export class ClientApplication {
             const isHoldingLMB   = this.inputManager.isLeftMouseDown();
             const canBoard       = isAtHull && isHoldingLMB;
 
-            if (canBoard) {
+            // Clear the sent-flag once the server has confirmed the grapple is gone
+            // (grappleState no longer ATTACHED). This is the authoritative signal that
+            // the previous boarding request was fully processed.
+            if (!isAttached && this._grappleBoardingSent) {
+              this._grappleBoardingSent = false;
+            }
+
+            if (canBoard && !this._grappleBoardingSent) {
               if (this._grappleBoardingStartMs === null) {
                 this._grappleBoardingStartMs = performance.now();
                 // Stop reel-in so the hook stays pinned at the hull — continuing to
@@ -4212,6 +4223,7 @@ export class ClientApplication {
                 this.networkManager.sendBoardShip();
                 this._grappleBoardingStartMs = null;
                 this._grappleBoardingProgress = 0;
+                this._grappleBoardingSent = true; // block re-entry until server confirms detach
                 // Optimistically set deck=1 immediately — server always boards at upper deck.
                 // The carrier-change handler in onServerWorldState will confirm once the
                 // snapshot arrives; this just closes the window where the client has no ship.
@@ -4220,8 +4232,8 @@ export class ClientApplication {
                 this.renderSystem.setJustBoarded();
                 this._releaseGrapple();
               }
-            } else {
-              // Pause/reset: LMB released or player moved away from hull
+            } else if (!canBoard || this._grappleBoardingSent) {
+              // Pause/reset: LMB released, player moved away, or boarding already sent
               if (this._grappleBoardingStartMs !== null) {
                 this._grappleBoardingStartMs = null;
                 this._grappleBoardingProgress = 0;

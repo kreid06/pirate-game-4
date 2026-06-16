@@ -254,6 +254,8 @@ typedef enum { GRAPPLE_IDLE = 0, GRAPPLE_FLYING = 1, GRAPPLE_ATTACHED = 2 } Grap
 #define GRAPPLE_TARGET_SHIP         2
 #define GRAPPLE_TARGET_PLAYER       3
 #define GRAPPLE_TARGET_NPC          4
+#define GRAPPLE_TARGET_WRECK        5   /* PlacedStructure STRUCT_WRECK (chest_ruin flotsam) */
+#define GRAPPLE_HIT_R_WRECK        90.0f  /* hit radius for wreck structures */
 
 typedef struct {
     bool         active;        /* slot is in use                                */
@@ -3352,6 +3354,29 @@ static void handle_pickup_item(WebSocketPlayer* player,
 
 // ── Grapple hook handlers ─────────────────────────────────────────────────────
 
+/**
+ * Squared distance from point (px, py) to segment (ax,ay)→(bx,by).
+ * Optionally returns the closest point on the segment in (*cx, *cy).
+ * Used for line-based grapple hit detection so the rope can snag targets
+ * anywhere along its length, not just at the hook tip.
+ */
+static float grapple_seg_dist_sq(float px, float py,
+                                  float ax, float ay,
+                                  float bx, float by,
+                                  float* cx, float* cy)
+{
+    float dx = bx - ax, dy = by - ay;
+    float len2 = dx*dx + dy*dy;
+    float t = (len2 > 0.0f) ? ((px-ax)*dx + (py-ay)*dy) / len2 : 0.0f;
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    float nx = ax + t*dx, ny = ay + t*dy;
+    if (cx) *cx = nx;
+    if (cy) *cy = ny;
+    float ex = px - nx, ey = py - ny;
+    return ex*ex + ey*ey;
+}
+
 /** Fire the grapple hook from player_idx toward (target_x, target_y).
  *  charge: 0.0 (minimum range) … 1.0 (full range), clamped server-side. */
 static void handle_fire_grapple(int player_idx, float target_x, float target_y,
@@ -3454,15 +3479,25 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
             /* ── Hit detection ──────────────────────────────────────────────── */
             bool hit = false;
 
-            /* Dropped items. */
+            /* Dropped items — tip AND rope-line check so flotsam can be snagged
+             * anywhere along the rope's travel path, not just at the hook tip. */
             for (int di = 0; di < (int)MAX_DROPPED_ITEMS && !hit; di++) {
                 if (!dropped_items[di].active) continue;
                 float ddx = gh->hook_x - dropped_items[di].x;
                 float ddy = gh->hook_y - dropped_items[di].y;
-                if (ddx * ddx + ddy * ddy <= GRAPPLE_HIT_R_ITEM * GRAPPLE_HIT_R_ITEM) {
+                bool _tip_item = (ddx*ddx + ddy*ddy <= GRAPPLE_HIT_R_ITEM * GRAPPLE_HIT_R_ITEM);
+                bool _line_item = false;
+                if (!_tip_item) {
+                    float _dsq = grapple_seg_dist_sq(
+                        dropped_items[di].x, dropped_items[di].y,
+                        gh->origin_x, gh->origin_y,
+                        gh->hook_x, gh->hook_y, NULL, NULL);
+                    _line_item = (_dsq <= GRAPPLE_HIT_R_ITEM * GRAPPLE_HIT_R_ITEM);
+                }
+                if (_tip_item || _line_item) {
                     gh->state       = GRAPPLE_ATTACHED;
                     gh->target_type = GRAPPLE_TARGET_DROPPED_ITEM;
-                    gh->target_id   = (uint32_t)di; /* array index */
+                    gh->target_id   = (uint32_t)di;
                     gh->hook_x      = dropped_items[di].x;
                     gh->hook_y      = dropped_items[di].y;
                     hit = true;
@@ -3498,7 +3533,25 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 if (_own_ship_id != 0 && (uint32_t)ships[shp].ship_id == _own_ship_id) continue;
                 float sdx = gh->hook_x - ships[shp].x;
                 float sdy = gh->hook_y - ships[shp].y;
-                if (sdx * sdx + sdy * sdy <= GRAPPLE_HIT_R_SHIP * GRAPPLE_HIT_R_SHIP) {
+                bool _tip_ship = (sdx*sdx + sdy*sdy <= GRAPPLE_HIT_R_SHIP * GRAPPLE_HIT_R_SHIP);
+                /* Rope-line check: if the segment from origin→hook passes within the ship
+                 * hit radius, treat the closest rope point as the effective hook position. */
+                if (!_tip_ship) {
+                    float _cpx, _cpy;
+                    float _ldsq = grapple_seg_dist_sq(
+                        ships[shp].x, ships[shp].y,
+                        gh->origin_x, gh->origin_y,
+                        gh->hook_x, gh->hook_y, &_cpx, &_cpy);
+                    if (_ldsq <= GRAPPLE_HIT_R_SHIP * GRAPPLE_HIT_R_SHIP) {
+                        /* Reposition hook at the rope catch-point before attachment. */
+                        gh->hook_x = _cpx;
+                        gh->hook_y = _cpy;
+                        sdx = gh->hook_x - ships[shp].x;
+                        sdy = gh->hook_y - ships[shp].y;
+                        _tip_ship = true; /* fall through to attachment */
+                    }
+                }
+                if (_tip_ship) {
                     /* Direction from ship center to hook in world space. */
                     float _slen = sqrtf(sdx * sdx + sdy * sdy);
                     float _enx = (_slen > 0.5f) ? sdx / _slen : 1.0f;
@@ -3542,16 +3595,24 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                     gh->vel_x       = _lhx;
                     gh->vel_y       = _lhy;
                     hit = true;
-                }
+                } /* _tip_ship */
             }
 
-            /* Other players. */
+            /* Other players — tip AND rope-line check. */
             for (int pi = 0; pi < WS_MAX_CLIENTS && !hit; pi++) {
                 if (pi == si) continue;
                 if (!players[pi].active) continue;
                 float pdx = gh->hook_x - players[pi].x;
                 float pdy = gh->hook_y - players[pi].y;
-                if (pdx * pdx + pdy * pdy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY) {
+                bool _tip_pl = (pdx*pdx + pdy*pdy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY);
+                if (!_tip_pl) {
+                    float _pdsq = grapple_seg_dist_sq(
+                        players[pi].x, players[pi].y,
+                        gh->origin_x, gh->origin_y,
+                        gh->hook_x, gh->hook_y, NULL, NULL);
+                    _tip_pl = (_pdsq <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY);
+                }
+                if (_tip_pl) {
                     gh->state       = GRAPPLE_ATTACHED;
                     gh->target_type = GRAPPLE_TARGET_PLAYER;
                     gh->target_id   = players[pi].player_id;
@@ -3561,17 +3622,49 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
             }
 
-            /* World NPCs. */
+            /* World NPCs — tip AND rope-line check. */
             for (int ni = 0; ni < world_npc_count && !hit; ni++) {
                 if (!world_npcs[ni].active) continue;
                 float ndx = gh->hook_x - world_npcs[ni].x;
                 float ndy = gh->hook_y - world_npcs[ni].y;
-                if (ndx * ndx + ndy * ndy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY) {
+                bool _tip_npc = (ndx*ndx + ndy*ndy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY);
+                if (!_tip_npc) {
+                    float _ndsq = grapple_seg_dist_sq(
+                        world_npcs[ni].x, world_npcs[ni].y,
+                        gh->origin_x, gh->origin_y,
+                        gh->hook_x, gh->hook_y, NULL, NULL);
+                    _tip_npc = (_ndsq <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY);
+                }
+                if (_tip_npc) {
                     gh->state       = GRAPPLE_ATTACHED;
                     gh->target_type = GRAPPLE_TARGET_NPC;
-                    gh->target_id   = (uint32_t)ni; /* array index */
+                    gh->target_id   = (uint32_t)ni;
                     gh->hook_x      = world_npcs[ni].x;
                     gh->hook_y      = world_npcs[ni].y;
+                    hit = true;
+                }
+            }
+
+            /* Wreck structures (chest_ruin flotsam) — tip AND rope-line check. */
+            for (int wi = 0; wi < (int)placed_structure_count && !hit; wi++) {
+                PlacedStructure* wr = &placed_structures[wi];
+                if (!wr->active || wr->type != STRUCT_WRECK) continue;
+                float wdx = gh->hook_x - wr->x;
+                float wdy = gh->hook_y - wr->y;
+                bool _tip_wr = (wdx*wdx + wdy*wdy <= GRAPPLE_HIT_R_WRECK * GRAPPLE_HIT_R_WRECK);
+                if (!_tip_wr) {
+                    float _wdsq = grapple_seg_dist_sq(
+                        wr->x, wr->y,
+                        gh->origin_x, gh->origin_y,
+                        gh->hook_x, gh->hook_y, NULL, NULL);
+                    _tip_wr = (_wdsq <= GRAPPLE_HIT_R_WRECK * GRAPPLE_HIT_R_WRECK);
+                }
+                if (_tip_wr) {
+                    gh->state       = GRAPPLE_ATTACHED;
+                    gh->target_type = GRAPPLE_TARGET_WRECK;
+                    gh->target_id   = (uint32_t)wi;
+                    gh->hook_x      = wr->x;
+                    gh->hook_y      = wr->y;
                     hit = true;
                 }
             }
@@ -3738,6 +3831,44 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
                 gh->hook_x = world_npcs[ni].x;
                 gh->hook_y = world_npcs[ni].y;
+                break;
+            }
+
+            case GRAPPLE_TARGET_WRECK: {
+                int wi = (int)gh->target_id;
+                if (wi < 0 || wi >= (int)placed_structure_count ||
+                    !placed_structures[wi].active ||
+                    placed_structures[wi].type != STRUCT_WRECK) {
+                    grapple_detach(si); break;
+                }
+                PlacedStructure* twr = &placed_structures[wi];
+                float tdx   = owner->x - twr->x;
+                float tdy   = owner->y - twr->y;
+                float tdist = sqrtf(tdx * tdx + tdy * tdy);
+                if (tdist < GRAPPLE_DETACH_DIST) {
+                    /* Auto-salvage: grant all cached resources to the player. */
+                    if (twr->chest_wood  > 0) res_grant(owner, RES_WOOD_ID,  (int)twr->chest_wood);
+                    if (twr->chest_fiber > 0) res_grant(owner, RES_FIBER_ID, (int)twr->chest_fiber);
+                    if (twr->chest_metal > 0) res_grant(owner, RES_METAL_ID, (int)twr->chest_metal);
+                    if (twr->chest_stone > 0) res_grant(owner, RES_STONE_ID, (int)twr->chest_stone);
+                    /* Despawn the wreck. */
+                    uint32_t wreck_id = twr->id;
+                    twr->active = false;
+                    char wbcast[96];
+                    snprintf(wbcast, sizeof(wbcast),
+                             "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)wreck_id);
+                    websocket_server_broadcast(wbcast);
+                    grapple_detach(si);
+                    break;
+                }
+                /* Pull wreck toward player. */
+                if (tdist > gh->rope_length) {
+                    float step = GRAPPLE_PULL_SPEED * dt / tdist;
+                    twr->x += tdx * step;
+                    twr->y += tdy * step;
+                }
+                gh->hook_x = twr->x;
+                gh->hook_y = twr->y;
                 break;
             }
 
