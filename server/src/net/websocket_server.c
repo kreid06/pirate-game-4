@@ -1992,14 +1992,16 @@ void detach_tombstones_from_ship(uint16_t ship_id) {
     for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
         Tombstone* t = &tombstones[_ti];
         if (!t->active || t->ship_id != ship_id) continue;
-        /* Convert local position to world coords using the ship's final transform */
+        /* Convert local position to world coords using the ship's final transform,
+         * then detach. Only orphan the tombstone if the conversion succeeded —
+         * if find_ship returned NULL the coordinates were never updated, so leaving
+         * the tombstone attached is safer than orphaning it with stale position data. */
         if (ship) {
             ship_local_to_world(ship, t->local_x, t->local_y, &t->x, &t->y);
+            t->ship_id = 0;
+            t->local_x = 0.0f;
+            t->local_y = 0.0f;
         }
-        /* Detach from ship so the snapshot fallback uses the now-correct t->x/y */
-        t->ship_id = 0;
-        t->local_x = 0.0f;
-        t->local_y = 0.0f;
     }
 }
 
