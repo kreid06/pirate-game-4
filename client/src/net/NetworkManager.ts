@@ -795,7 +795,7 @@ export class NetworkManager {
   /** Fired every grapple-pull tick to update a wreck's world position. */
   public onWreckPositionUpdate: ((id: number, x: number, y: number) => void) | null = null;
   /** Fired when a grappled wreck is auto-salvaged — shows a loot notification. */
-  public onWreckLoot: ((playerId: number, x: number, y: number, wood: number, fiber: number, metal: number, stone: number) => void) | null = null;
+  public onWreckLoot: ((playerId: number, x: number, y: number, wood: number, fiber: number, metal: number, stone: number, items: number, blueprints: number) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server confirms a craft_item request. */
@@ -3472,6 +3472,8 @@ export class NetworkManager {
             message.fiber ?? 0,
             message.metal ?? 0,
             message.stone ?? 0,
+            message.items ?? 0,
+            message.blueprints ?? 0,
           );
         }
         break;

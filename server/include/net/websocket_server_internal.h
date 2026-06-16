@@ -144,6 +144,8 @@ WeaponGroup* find_weapon_group(uint16_t ship_id, uint32_t cannon_id, uint8_t com
 void fire_swivel(SimpleShip* ship, ShipModule* sw, ShipModule* gsw, WebSocketPlayer* player, uint8_t ammo_type);
 void res_refund_module_demolish(WebSocketPlayer *player, ModuleTypeId type, q16_t health, q16_t max_health);
 bool craft_grant(WebSocketPlayer* player, ItemKind item, int amount);
+bool schematic_add(WebSocketPlayer* player, ItemKind item, uint8_t crafts,
+                   const QualityPayload* q);
 void broadcast_json_all(const char* json);
 void update_flame_waves(uint32_t time_elapsed);
 void player_die(WebSocketPlayer* player);
