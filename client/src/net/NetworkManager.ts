@@ -2804,6 +2804,8 @@ export class NetworkManager {
             maxHealth: player.max_health ?? 100,
             stamina: player.stamina ?? undefined,
             maxStamina: player.max_stamina ?? 100,
+            oxygen: player.oxygen ?? undefined,
+            maxOxygen: player.max_oxygen ?? 100,
             onIslandId: player.on_island ?? 0,
             onDockId: player.on_dock ?? 0,
             level: player.player_level ?? 1,

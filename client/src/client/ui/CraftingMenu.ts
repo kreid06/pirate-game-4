@@ -351,7 +351,7 @@ const ROW_H      = 68;
 const ROW_GAP    = 6;
 const CONTENT_PAD = 10;
 /** Schematic rows are slightly taller to fit the tier + stat summary lines. */
-const SCHEM_ROW_H = 80;
+const SCHEM_ROW_H = 92;
 
 const CATEGORIES: { id: Category; icon: string }[] = [
   { id: 'Weapons',    icon: '⚔' },
@@ -940,6 +940,17 @@ export class CraftingMenu {
         ctx.fillText(seg, sx, ry + 50);
         sx += ctx.measureText(seg).width;
         drew = true;
+      }
+
+      // Tier bonus badge: "+N×10% Resist & Dmg" shown for tier ≥ 1
+      if (s.tier >= 1) {
+        const bonusPct = s.tier * 10;
+        const bonusLabel = `+${bonusPct}% Tier Bonus (Resist & Dmg)`;
+        ctx.font = 'bold 10px Georgia, serif';
+        ctx.fillStyle = col;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText(bonusLabel, textX, ry + 63);
       }
 
       // Craft button (enabled while crafts remain)

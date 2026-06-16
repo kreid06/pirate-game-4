@@ -3025,6 +3025,21 @@ export class PlayerMenu {
               ctx.fillText(pill, pillX + 3, rowY + BP_ROW_H / 2);
               pillX += pillW + 3;
             }
+
+            // Tier bonus pill — shown for tier ≥ 1
+            if (bp.tier >= 1 && pillX < MAX_PILL_X - 20) {
+              const bonusPill = `+${bp.tier * 10}% T`;
+              ctx.font = '9px Georgia, serif';
+              const pillW = ctx.measureText(bonusPill).width + 6;
+              if (pillX + pillW <= MAX_PILL_X) {
+                ctx.fillStyle = 'rgba(80,50,10,0.6)';
+                ctx.beginPath();
+                ctx.roundRect(pillX, rowY + 3, pillW, BP_ROW_H - 6, 2);
+                ctx.fill();
+                ctx.fillStyle = col;
+                ctx.fillText(bonusPill, pillX + 3, rowY + BP_ROW_H / 2);
+              }
+            }
           } // end for (bi) blueprint rows
         } // end if (varExpanded)
       } // end if (blueprints.length > 0)

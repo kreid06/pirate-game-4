@@ -18,6 +18,14 @@
 /* Display tier band 0..6 from a continuous quality float. */
 int quality_tier(float quality);
 
+/*
+ * Flat bonus added to STAT_DURABILITY and STAT_WEAPON_DAMAGE per tier level.
+ * Tier 1 → +10%, Tier 2 → +20%, …, Tier 6 → +60%.
+ * Applied AFTER the quality cap so high-tier blueprints always beat lower-tier
+ * ones regardless of the random roll.
+ */
+#define QUALITY_TIER_BONUS_PER_TIER 0.10f
+
 /* Encode / decode helpers. */
 uint8_t quality_to_q8(float quality);
 float   quality_from_q8(uint8_t q8);

@@ -651,6 +651,10 @@ typedef struct WebSocketPlayer {
     uint32_t hp_regen_accum_ms;   // Accumulated ms since last passive HP regen tick
     uint32_t last_damage_ms;      // Wall-clock ms of last time this player took damage (delays regen)
 
+    // Oxygen pool — depletes when swimming with no stamina; suffocation damage at 0
+    uint16_t oxygen;             // Current oxygen (0–max_oxygen)
+    uint16_t max_oxygen;         // Max oxygen (always 100)
+
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
     uint32_t player_xp;          // accumulated XP

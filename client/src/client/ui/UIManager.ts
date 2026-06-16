@@ -898,6 +898,46 @@ export class UIManager {
       this.tombstoneMenu.render(ctx);
     }
 
+    // ── Suffocation / low-oxygen vignette ─────────────────────────────────
+    // Shown while swimming with stamina = 0 and oxygen < max.
+    // Deepens from a subtle blue tint to a full dark overlay as oxygen depletes.
+    {
+      const _vigPlayer = context.worldState.players.find(p => p.id === context.assignedPlayerId)
+        ?? context.worldState.players[0];
+      if (_vigPlayer) {
+        const _vigO2    = _vigPlayer.oxygen    ?? (_vigPlayer.maxOxygen ?? 100);
+        const _vigMaxO2 = _vigPlayer.maxOxygen ?? 100;
+        const _vigSt    = _vigPlayer.stamina   ?? (_vigPlayer.maxStamina ?? 100);
+        const _isSwim   = _vigPlayer.state === 'swimming';
+        if (_isSwim && _vigSt <= 0 && _vigO2 < _vigMaxO2) {
+          const _depleted = _vigMaxO2 > 0 ? 1 - _vigO2 / _vigMaxO2 : 1;
+          // Alpha: 0 at full O2, up to 0.75 when depleted
+          const _vigAlpha = _depleted * 0.75;
+          // Pulse the vignette when critically low (O2 < 25%)
+          const _pulse = (_vigO2 / _vigMaxO2 < 0.25)
+            ? 0.7 + 0.3 * Math.sin(performance.now() / 200) : 1;
+          ctx.save();
+          const _cw = ctx.canvas.width, _ch = ctx.canvas.height;
+          // Radial gradient: dark blue edges → transparent centre
+          const _grad = ctx.createRadialGradient(
+            _cw / 2, _ch / 2, _ch * 0.15,
+            _cw / 2, _ch / 2, _ch * 0.72,
+          );
+          _grad.addColorStop(0, 'rgba(0,20,60,0)');
+          _grad.addColorStop(1, `rgba(0,10,40,${(_vigAlpha * _pulse).toFixed(3)})`);
+          ctx.fillStyle = _grad;
+          ctx.fillRect(0, 0, _cw, _ch);
+          // Thin bright-blue border ring when nearly suffocating
+          if (_vigO2 / _vigMaxO2 < 0.25) {
+            ctx.strokeStyle = `rgba(30,160,255,${(0.25 * _pulse).toFixed(3)})`;
+            ctx.lineWidth = 6;
+            ctx.strokeRect(0, 0, _cw, _ch);
+          }
+          ctx.restore();
+        }
+      }
+    }
+
     // White flash — very topmost, fades out after respawn
     if (this._flashHolding) {
       ctx.save();
@@ -3607,13 +3647,16 @@ class HUDElement implements UIElement {
     }
 
     // Health / stamina bars above hotbar
-    const maxSt = player.maxStamina ?? 100;
-    const st    = player.stamina    ?? maxSt;
+    const maxSt  = player.maxStamina ?? 100;
+    const st     = player.stamina    ?? maxSt;
+    const maxO2  = player.maxOxygen  ?? 100;
+    const o2     = player.oxygen     ?? maxO2;
+    const isSwimming = (player.state === 'swimming');
     const _lvl = player.level ?? 1;
     const _xp  = player.xp ?? 0;
     this._cachedPlayerLevel = _lvl;
     this._cachedPlayerXp    = _xp;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, o2, maxO2, isSwimming, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     // In ship build mode, show the build schematic hotbar instead
@@ -3655,6 +3698,9 @@ class HUDElement implements UIElement {
     maxHealth: number,
     stamina: number,
     maxStamina: number,
+    oxygen: number,
+    maxOxygen: number,
+    isSwimming: boolean,
     level = 1,
     xp = 0,
     statPoints = 0,
@@ -3671,7 +3717,9 @@ class HUDElement implements UIElement {
     const XP_BAR_H = 6;
     const GAP      = 3;
     const PANEL_PAD = 4;
-    const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP;
+    // Show the oxygen bar while swimming or while oxygen is depleted
+    const showOxygen = isSwimming || oxygen < maxOxygen;
+    const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP + (showOxygen ? BAR_H + GAP : 0);
     const panelY   = hotbarY - panelH - 4;
     const barX     = startX + PANEL_PAD;
     const barW     = totalW - PANEL_PAD * 2;
@@ -3796,6 +3844,41 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
     ctx.fillText(`${Math.ceil(stamina)}/${maxStamina}`, barX + barW - 4, stY + BAR_H / 2);
+
+    // ── Oxygen bar (only while swimming or oxygen is not full) ─────────────
+    if (showOxygen) {
+      const o2Y    = stY + BAR_H + GAP;
+      const o2Ratio = maxOxygen > 0 ? Math.max(0, Math.min(1, oxygen / maxOxygen)) : 1;
+      const o2Crit  = o2Ratio < 0.25;
+      const o2Warn  = o2Ratio < 0.50;
+      // Pulse the bar border when critically low
+      const o2Pulse = o2Crit ? 0.55 + 0.45 * Math.sin(performance.now() / 250) : 1;
+      const o2Color = o2Crit ? `rgba(30,160,255,${o2Pulse.toFixed(2)})` : o2Warn ? '#2299ee' : '#44bbff';
+
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(barX, o2Y, barW, BAR_H);
+      ctx.fillStyle = o2Color;
+      ctx.fillRect(barX, o2Y, Math.round(barW * o2Ratio), BAR_H);
+      // Change-flash overlay
+      this._tickFlash('bar-o2', o2Ratio);
+      const _o2Fa = this._flashAlpha('bar-o2');
+      if (_o2Fa > 0) {
+        ctx.fillStyle = `rgba(255,255,255,${_o2Fa.toFixed(2)})`;
+        ctx.fillRect(barX, o2Y, barW, BAR_H);
+      }
+      ctx.strokeStyle = o2Crit ? `rgba(30,200,255,${o2Pulse.toFixed(2)})` : 'rgba(255,255,255,0.20)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(barX, o2Y, barW, BAR_H);
+
+      ctx.font = 'bold 9px Georgia, serif';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(255,255,255,0.80)';
+      ctx.fillText('O₂', barX + 4, o2Y + BAR_H / 2);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = o2Crit ? '#88ddff' : 'rgba(255,255,255,0.70)';
+      ctx.fillText(`${Math.ceil(oxygen)}/${maxOxygen}`, barX + barW - 4, o2Y + BAR_H / 2);
+    }
 
     // ── Combat mode indicator ──────────────────────────────────────────────
     const indicatorW = 114;

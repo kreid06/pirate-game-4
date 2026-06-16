@@ -144,6 +144,10 @@ void tick_sinking_ships(void) {
             }
         }
 
+        /* Convert any tombstones attached to this ship to world coords so they
+         * persist in the world after the ship is removed from the ships array. */
+        detach_tombstones_from_ship((uint16_t)sunk_id);
+
         /* Swap-and-pop */
         ships[s] = ships[ship_count - 1];
         memset(&ships[ship_count - 1], 0, sizeof(SimpleShip));

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include "net/harvesting.h"
+#include "net/websocket_server_internal.h"
 #include "net/npc_agents.h"
 #include "net/claim.h"
 #include "util/time.h"
@@ -74,13 +75,19 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         (void)equipped; /* referenced below at wood grant */
     }
 
-    /* Stamina check */
-    if (player->stamina < HARVEST_STAMINA_COST) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_failure\",\"reason\":\"no_stamina\"}");
-        goto send_and_ret;
+    /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
+    if (player->stamina >= HARVEST_STAMINA_COST) {
+        player->stamina -= HARVEST_STAMINA_COST;
+    } else {
+        uint16_t _dmg = HARVEST_STAMINA_COST;
+        player->stamina = 0;
+        if (_dmg >= player->health) {
+            player_die(player);
+            goto send_and_ret;
+        }
+        player->health -= _dmg;
+        player->last_damage_ms = get_time_ms();
     }
-    player->stamina -= HARVEST_STAMINA_COST;
     player->stamina_last_used_ms = get_time_ms();
 
     /* Find the island definition */
@@ -254,13 +261,19 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         }
     }
 
-    /* Stamina check */
-    if (player->stamina < HARVEST_STAMINA_COST) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_rock_failure\",\"reason\":\"no_stamina\"}");
-        goto send_rock_ret;
+    /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
+    if (player->stamina >= HARVEST_STAMINA_COST) {
+        player->stamina -= HARVEST_STAMINA_COST;
+    } else {
+        uint16_t _dmg = HARVEST_STAMINA_COST;
+        player->stamina = 0;
+        if (_dmg >= player->health) {
+            player_die(player);
+            goto send_rock_ret;
+        }
+        player->health -= _dmg;
+        player->last_damage_ms = get_time_ms();
     }
-    player->stamina -= HARVEST_STAMINA_COST;
     player->stamina_last_used_ms = get_time_ms();
 
     {
@@ -406,13 +419,19 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Stamina check */
-    if (player->stamina < HARVEST_STAMINA_COST) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_boulder_failure\",\"reason\":\"no_stamina\"}");
-        goto send_boulder_ret;
+    /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
+    if (player->stamina >= HARVEST_STAMINA_COST) {
+        player->stamina -= HARVEST_STAMINA_COST;
+    } else {
+        uint16_t _dmg = HARVEST_STAMINA_COST;
+        player->stamina = 0;
+        if (_dmg >= player->health) {
+            player_die(player);
+            goto send_boulder_ret;
+        }
+        player->health -= _dmg;
+        player->last_damage_ms = get_time_ms();
     }
-    player->stamina -= HARVEST_STAMINA_COST;
     player->stamina_last_used_ms = get_time_ms();
 
     {

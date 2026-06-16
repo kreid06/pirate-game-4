@@ -92,6 +92,29 @@ void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient*
 }
 
 /**
+ * Normalize helm control inputs to neutral.
+ * Called whenever a player leaves the helm (dismount, death, disconnect).
+ * Rudder is centred and reverse thrust cleared; sail openness is left as-is
+ * so the sails remain deployed at whatever setting the helmsman last used.
+ */
+void helm_release_controls(uint16_t ship_id) {
+    if (!ship_id) return;
+
+    /* Sim ship carries rudder angles */
+    struct Ship* sim = find_sim_ship(ship_id);
+    if (sim) {
+        sim->target_rudder_angle = 0.0f;
+        sim->rudder_angle        = 0.0f;
+    }
+
+    /* SimpleShip carries reverse_thrust */
+    SimpleShip* ss = find_ship(ship_id);
+    if (ss) {
+        ss->reverse_thrust = false;
+    }
+}
+
+/**
  * Handle sail angle control from helm-mounted player
  */
 void handle_ship_sail_angle_control(WebSocketPlayer* player, struct WebSocketClient* client, SimpleShip* ship, float desired_angle) {

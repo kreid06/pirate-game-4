@@ -1798,6 +1798,19 @@ void dismount_player_from_ship(WebSocketPlayer* player, const char* reason) {
     
     // Clear mounted state if player was on a module
     if (player->is_mounted) {
+        /* If the player was at the helm, normalize all steering inputs. */
+        if (player->controlling_ship_id != 0) {
+            helm_release_controls(player->controlling_ship_id);
+            SimpleShip* ctrl_ship = find_ship(player->controlling_ship_id);
+            if (ctrl_ship) {
+                ShipModule* hmod = find_module_by_id(ctrl_ship, player->mounted_module_id);
+                if (hmod && (hmod->type_id == MODULE_TYPE_HELM ||
+                             hmod->type_id == MODULE_TYPE_STEERING_WHEEL)) {
+                    hmod->data.helm.occupied_by = 0;
+                    hmod->state_bits &= ~MODULE_STATE_OCCUPIED;
+                }
+            }
+        }
         player->is_mounted = false;
         player->mounted_module_id = 0;
         player->controlling_ship_id = 0;
@@ -1967,6 +1980,29 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
     *wy = t->y;
 }
 
+/**
+ * Called when a ship is about to be despawned.
+ * Converts every tombstone attached to that ship from ship-local coordinates
+ * to world-space and clears the ship attachment so the tombstones persist in
+ * the world after the ship is gone.
+ */
+void detach_tombstones_from_ship(uint16_t ship_id) {
+    if (!ship_id) return;
+    SimpleShip* ship = find_ship(ship_id);
+    for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
+        Tombstone* t = &tombstones[_ti];
+        if (!t->active || t->ship_id != ship_id) continue;
+        /* Convert local position to world coords using the ship's final transform */
+        if (ship) {
+            ship_local_to_world(ship, t->local_x, t->local_y, &t->x, &t->y);
+        }
+        /* Detach from ship so the snapshot fallback uses the now-correct t->x/y */
+        t->ship_id = 0;
+        t->local_x = 0.0f;
+        t->local_y = 0.0f;
+    }
+}
+
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
     build_ships_blob_from_snapshot(snap, out);
 
@@ -2106,7 +2142,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"deck_level\":%u,\"state\":\"%s\","
                 "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
                 "\"company\":%u,\"health\":%u,\"max_health\":%u,"
-                "\"stamina\":%u,\"max_stamina\":%u,"
+                "\"stamina\":%u,\"max_stamina\":%u,\"oxygen\":%u,\"max_oxygen\":%u,"
                 "\"on_island\":%u,\"on_dock\":%u,"
                 "\"player_level\":%u,\"player_xp\":%u,"
                 "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
@@ -2127,6 +2163,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 snap->players[p].company_id,
                 snap->players[p].health, snap->players[p].max_health,
                 snap->players[p].stamina, snap->players[p].max_stamina,
+                snap->players[p].oxygen,  snap->players[p].max_oxygen,
                 snap->players[p].on_island_id, snap->players[p].on_dock_id,
                 (unsigned)snap->players[p].player_level,
                 (unsigned)snap->players[p].player_xp,
@@ -2846,6 +2883,25 @@ void player_die(WebSocketPlayer* player) {
     /* Wipe player inventory regardless of whether a tombstone was created */
     memset(&player->inventory, 0, sizeof(PlayerInventory));
     player->inventory.active_slot = 255; /* sentinel: nothing equipped */
+
+    /* If the player was at the helm, release all steering inputs so the ship
+     * doesn't keep turning or reversing with no one at the wheel. */
+    if (player->is_mounted && player->controlling_ship_id != 0) {
+        helm_release_controls(player->controlling_ship_id);
+        /* Clear occupancy on the helm module itself */
+        SimpleShip* ctrl_ship = find_ship(player->controlling_ship_id);
+        if (ctrl_ship) {
+            ShipModule* hmod = find_module_by_id(ctrl_ship, player->mounted_module_id);
+            if (hmod && (hmod->type_id == MODULE_TYPE_HELM ||
+                         hmod->type_id == MODULE_TYPE_STEERING_WHEEL)) {
+                hmod->data.helm.occupied_by = 0;
+                hmod->state_bits &= ~MODULE_STATE_OCCUPIED;
+            }
+        }
+        player->is_mounted          = false;
+        player->mounted_module_id   = 0;
+        player->controlling_ship_id = 0;
+    }
 
     /* Detach any active grapple hook on death.  The dead player's slot stays
      * active (is_dead=true), so the per-tick !owner->active cleanup never fires,
@@ -4075,6 +4131,8 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].max_health = 100;
             players[i].stamina = 100;
             players[i].max_stamina = 100;
+            players[i].oxygen     = 100;
+            players[i].max_oxygen = 100;
             players[i].player_level = 1;
             players[i].player_xp = 0;
             players[i].stat_health = 0;
@@ -4191,6 +4249,7 @@ static void remove_player(uint32_t player_id) {
                             case MODULE_TYPE_HELM:
                             case MODULE_TYPE_STEERING_WHEEL:
                                 mod->data.helm.occupied_by = 0;
+                                helm_release_controls(ms->ship_id);
                                 break;
                             case MODULE_TYPE_SEAT:
                                 mod->data.seat.occupied_by = 0;
@@ -4877,6 +4936,8 @@ int websocket_server_update(struct Sim* sim) {
                                     // Re-derive max_stamina from loaded stat_stamina
                                     player->max_stamina = (uint16_t)(100u + 10u * (uint32_t)player->stat_stamina);
                                     player->stamina     = player->max_stamina; // always full on login
+                                    player->oxygen      = 100u;                // always full on login
+                                    player->max_oxygen  = 100u;
 
                                     // If position was restored, sync the sim entity position too
                                     if (resumed && global_sim && player->sim_entity_id != 0) {
@@ -6327,14 +6388,20 @@ int websocket_server_update(struct Sim* sim) {
                                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"sword_cooldown\"}");
                                                     goto sword_attack_done;
                                                 }
-                                                /* Stamina check — attacks cost 25 ST */
+                                                /* Stamina cost — if depleted, deal cost as HP damage instead of blocking */
                                                 const uint16_t SWORD_STAMINA_COST = 25u;
-                                                if (player->stamina < SWORD_STAMINA_COST) {
-                                                    log_info("⚔️  Player %u attack rejected: no stamina (%u)", player->player_id, player->stamina);
-                                                    strcpy(response, "{\"type\":\"message_ack\",\"status\":\"no_stamina\"}");
-                                                    goto sword_attack_done;
+                                                if (player->stamina >= SWORD_STAMINA_COST) {
+                                                    player->stamina -= SWORD_STAMINA_COST;
+                                                } else {
+                                                    uint16_t _sdmg = SWORD_STAMINA_COST;
+                                                    player->stamina = 0;
+                                                    if (_sdmg >= player->health) {
+                                                        player_die(player);
+                                                        goto sword_attack_done;
+                                                    }
+                                                    player->health -= _sdmg;
+                                                    player->last_damage_ms = now_ms;
                                                 }
-                                                player->stamina -= SWORD_STAMINA_COST;
                                                 player->stamina_last_used_ms = now_ms;
                                                 player->sword_last_attack_ms = now_ms;
 
@@ -6523,10 +6590,19 @@ int websocket_server_update(struct Sim* sim) {
                                                 if (now_ms - player->sword_last_attack_ms < melee_cooldown_ms) {
                                                     goto sword_attack_done;
                                                 }
-                                                if (player->stamina < melee_stamina) {
-                                                    goto sword_attack_done;
+                                                /* Stamina cost — if depleted, deal cost as HP damage instead of blocking */
+                                                if (player->stamina >= melee_stamina) {
+                                                    player->stamina -= melee_stamina;
+                                                } else {
+                                                    uint16_t _mdmg = melee_stamina;
+                                                    player->stamina = 0;
+                                                    if (_mdmg >= player->health) {
+                                                        player_die(player);
+                                                        goto sword_attack_done;
+                                                    }
+                                                    player->health -= _mdmg;
+                                                    player->last_damage_ms = now_ms;
                                                 }
-                                                player->stamina -= melee_stamina;
                                                 player->stamina_last_used_ms = now_ms;
                                                 player->sword_last_attack_ms = now_ms;
 
@@ -13884,12 +13960,15 @@ void websocket_server_tick(float dt) {
                     ws_player->movement_direction_x = 0.0f;
                     ws_player->movement_direction_y = 0.0f;
                 } else {
-                    /* ── Stamina drain (sprint) / regen ─────────────────────────────────
-                     * Drain 40 ST/s while sprinting, regen 20 ST/s otherwise.
-                     * Regen is delayed 2 s after the last stamina use.
+                    /* ── Stamina drain (sprint / swim) / regen ──────────────────────────
+                     * Sprint (walking): drain 40 ST/s while sprinting.
+                     * Swimming:         drain 1 ST/s passively; regen is suppressed.
+                     * Regen:            20%/s of max, delayed 2 s after last use,
+                     *                   blocked entirely while in water.
                      * Cancel sprint immediately if stamina hits 0. */
                     {
-                        const float SPRINT_DRAIN_PER_S = 40.0f;
+                        const float SPRINT_DRAIN_PER_S  = 40.0f;
+                        const float SWIM_DRAIN_PER_S    =  1.0f;
                         /* Regen at 20% of max_stamina per second — scales with upgrades */
                         const float STAMINA_REGEN_PCT_PER_S = 0.20f;
                         const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
@@ -13905,6 +13984,7 @@ void websocket_server_tick(float dt) {
                         float _st_carry_r   = (_st_cap > 0.0f) ? (_st_inv_kg / _st_cap) : 0.0f;
                         bool  _sprint_ok    = (_st_carry_r < 0.85f);
                         if (ws_player->is_sprinting && ws_player->is_moving && !is_swimming && _sprint_ok) {
+                            /* Sprint drain */
                             uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
                             if (drain >= ws_player->stamina) {
                                 ws_player->stamina = 0;
@@ -13913,8 +13993,17 @@ void websocket_server_tick(float dt) {
                                 ws_player->stamina -= drain;
                             }
                             ws_player->stamina_last_used_ms = now_st;
-                        } else if (ws_player->stamina < ws_player->max_stamina
+                        } else if (is_swimming && ws_player->stamina > 0) {
+                            /* Swimming drain — continuous 1 ST/s regardless of movement */
+                            uint16_t swim_drain = (uint16_t)(SWIM_DRAIN_PER_S * dt + 0.5f);
+                            if (swim_drain < 1) swim_drain = 1;
+                            ws_player->stamina = (swim_drain >= ws_player->stamina)
+                                ? 0 : (uint16_t)(ws_player->stamina - swim_drain);
+                            ws_player->stamina_last_used_ms = now_st; /* block regen */
+                        } else if (!is_swimming
+                                   && ws_player->stamina < ws_player->max_stamina
                                    && (now_st - ws_player->stamina_last_used_ms) >= STAMINA_REGEN_DELAY_MS) {
+                            /* Regen only on land/ship, after delay */
                             float regen_per_s = STAMINA_REGEN_PCT_PER_S * (float)ws_player->max_stamina;
                             uint16_t gain = (uint16_t)(regen_per_s * dt + 0.5f);
                             if (gain < 1) gain = 1; /* always regen at least 1 per tick */
@@ -13922,6 +14011,43 @@ void websocket_server_tick(float dt) {
                             ws_player->stamina = (newSt > ws_player->max_stamina)
                                 ? ws_player->max_stamina : (uint16_t)newSt;
                         }
+
+                    /* ── Oxygen drain / suffocation / regen ──────────────────────────────
+                     * Oxygen drains at 5/s while swimming with stamina = 0.
+                     * At 0 oxygen the player takes 10 HP/s suffocation damage.
+                     * Oxygen refills at 20/s when not in the water. */
+                    {
+                        const float OXYGEN_DRAIN_PER_S  =  5.0f;
+                        const float OXYGEN_REGEN_PER_S  = 20.0f;
+                        const float SUFFOC_DAMAGE_PER_S = 10.0f;
+
+                        if (is_swimming && ws_player->stamina == 0) {
+                            /* Drain oxygen */
+                            uint16_t o_drain = (uint16_t)(OXYGEN_DRAIN_PER_S * dt + 0.5f);
+                            if (o_drain < 1) o_drain = 1;
+                            if (o_drain >= ws_player->oxygen) {
+                                ws_player->oxygen = 0;
+                                /* Suffocation damage */
+                                uint16_t suf_dmg = (uint16_t)(SUFFOC_DAMAGE_PER_S * dt + 0.5f);
+                                if (suf_dmg < 1) suf_dmg = 1;
+                                if (suf_dmg >= ws_player->health) {
+                                    player_die(ws_player);
+                                } else {
+                                    ws_player->health     -= suf_dmg;
+                                    ws_player->last_damage_ms = now_st;
+                                }
+                            } else {
+                                ws_player->oxygen -= o_drain;
+                            }
+                        } else if (!is_swimming && ws_player->oxygen < ws_player->max_oxygen) {
+                            /* Regen oxygen when back on land / ship */
+                            uint16_t o_gain = (uint16_t)(OXYGEN_REGEN_PER_S * dt + 0.5f);
+                            if (o_gain < 1) o_gain = 1;
+                            uint32_t newO = (uint32_t)ws_player->oxygen + o_gain;
+                            ws_player->oxygen = (newO > ws_player->max_oxygen)
+                                ? ws_player->max_oxygen : (uint16_t)newO;
+                        }
+                    }
                     }
                     /* ── Passive HP regeneration ─────────────────────────────────────────
                      * Recover 2 HP every 5 seconds when alive, not at full health,

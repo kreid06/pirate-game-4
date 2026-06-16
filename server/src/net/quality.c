@@ -118,6 +118,13 @@ void quality_roll_payload(ItemKind item, float quality, uint32_t *rng_state,
 
     out->quality_q8 = quality_to_q8(quality);
 
+    /* Tier bonus: +QUALITY_TIER_BONUS_PER_TIER per tier level, applied to
+     * durability (resistance) and weapon damage after the quality roll cap.
+     * This guarantees higher-tier blueprints always outperform lower-tier
+     * ones regardless of the random spread. */
+    int tier = quality_tier(quality);
+    float tier_bonus = (float)tier * QUALITY_TIER_BONUS_PER_TIER;
+
     for (int s = 0; s < STAT_COUNT; s++) {
         if (caps[s] == 0) { out->stat_mult_q8[s] = 0; continue; }
 
@@ -125,11 +132,16 @@ void quality_roll_payload(ItemKind item, float quality, uint32_t *rng_state,
         float step  = (cap - 1.0f) / 7.0f;
         float r     = 0.25f + quality_rand_unit(rng_state);   /* [0.25, 1.25) */
         float bonus = step * (quality + 1.0f) * r;
-        float final = 1.0f + bonus;
-        if (final < 1.0f) final = 1.0f;
-        if (final > cap)  final = cap;
+        float final_mult = 1.0f + bonus;
+        if (final_mult < 1.0f) final_mult = 1.0f;
+        if (final_mult > cap)  final_mult = cap;
 
-        float m = final * 256.0f;
+        /* Apply per-tier flat bonus to resistance (durability) and damage. */
+        if (s == STAT_DURABILITY || s == STAT_WEAPON_DAMAGE) {
+            final_mult += tier_bonus;
+        }
+
+        float m = final_mult * 256.0f;
         if (m > 65535.0f) m = 65535.0f;
         out->stat_mult_q8[s] = (uint16_t)(m + 0.5f);
     }

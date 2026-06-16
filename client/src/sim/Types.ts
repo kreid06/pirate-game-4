@@ -109,6 +109,8 @@ export interface Player {
   // Stamina
   stamina?: number;    // current stamina (absent = full)
   maxStamina?: number; // max stamina (default 100)
+  oxygen?: number;     // current oxygen (absent = full); depletes while swimming with 0 stamina
+  maxOxygen?: number;  // max oxygen (default 100)
 
   // Survival stats (0–100; 100 = full)
   hunger?: number;   // food level (absent = full)
