@@ -1970,6 +1970,24 @@ static void tombstone_world_pos(const Tombstone* t, float* wx, float* wy) {
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
     build_ships_blob_from_snapshot(snap, out);
 
+    /* One-pass lookup table reused by tombstone and other ship-anchored loops.
+     * Avoids per-tombstone O(ship_count) scans for the ship position+rotation
+     * needed to transform tombstone local coords to world coords. */
+    const SimpleShip* _tmb_ss_lut[SHIP_ID_LOOKUP_SIZE];
+    memset(_tmb_ss_lut, 0, sizeof(_tmb_ss_lut));
+    {
+        int _lsc = snap->ship_count;
+        if (_lsc < 0) _lsc = 0;
+        if (_lsc > MAX_SIMPLE_SHIPS) _lsc = MAX_SIMPLE_SHIPS;
+        for (int _li = 0; _li < _lsc; _li++) {
+            if (snap->ships[_li].active) {
+                uint32_t _sid = snap->ships[_li].ship_id;
+                if (_sid > 0 && _sid < SHIP_ID_LOOKUP_SIZE)
+                    _tmb_ss_lut[_sid] = &snap->ships[_li];
+            }
+        }
+    }
+
     int _to = snprintf(out->tmb_json, sizeof(out->tmb_json), "[");
     bool _tf = true;
     for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
@@ -1979,16 +1997,9 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         float _tx = snap->tombstones[_ti].x;
         float _ty = snap->tombstones[_ti].y;
         if (snap->tombstones[_ti].ship_id != 0) {
-            const SimpleShip* _ship = NULL;
-            int _sc = snap->ship_count;
-            if (_sc < 0) _sc = 0;
-            if (_sc > MAX_SIMPLE_SHIPS) _sc = MAX_SIMPLE_SHIPS;
-            for (int _si = 0; _si < _sc; _si++) {
-                if (snap->ships[_si].active && snap->ships[_si].ship_id == snap->tombstones[_ti].ship_id) {
-                    _ship = &snap->ships[_si];
-                    break;
-                }
-            }
+            uint32_t _tsid = snap->tombstones[_ti].ship_id;
+            const SimpleShip* _ship = (_tsid > 0 && _tsid < SHIP_ID_LOOKUP_SIZE)
+                ? _tmb_ss_lut[_tsid] : NULL;
             if (_ship) {
                 float _c = cosf(_ship->rotation), _s = sinf(_ship->rotation);
                 _tx = _ship->x + (snap->tombstones[_ti].local_x * _c - snap->tombstones[_ti].local_y * _s);
@@ -2267,6 +2278,25 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
     bool first_ship = true;
     out->aoi_ship_count = 0;
 
+    /* One-pass lookup table: ship_id → SimpleShip*.
+     * Eliminates the O(ship_count) scan per sim-ship below, cutting worst-case
+     * 200×200 = 40 000 comparisons per blob build down to a single 200-entry pass
+     * plus MAX_SHIPS O(1) lookups. */
+    const SimpleShip* _ss_lut[SHIP_ID_LOOKUP_SIZE];
+    memset(_ss_lut, 0, sizeof(_ss_lut));
+    {
+        int _lsc = snap->ship_count;
+        if (_lsc < 0) _lsc = 0;
+        if (_lsc > MAX_SIMPLE_SHIPS) _lsc = MAX_SIMPLE_SHIPS;
+        for (int _li = 0; _li < _lsc; _li++) {
+            if (snap->ships[_li].active) {
+                uint32_t _sid = snap->ships[_li].ship_id;
+                if (_sid > 0 && _sid < SHIP_ID_LOOKUP_SIZE)
+                    _ss_lut[_sid] = &snap->ships[_li];
+            }
+        }
+    }
+
     if (snap->sim_ship_count > 0) {
         uint16_t _ssc = snap->sim_ship_count;
         if (_ssc > MAX_SHIPS) _ssc = MAX_SHIPS;
@@ -2291,16 +2321,8 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
             float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f);
 
-            const SimpleShip* simple_ship = NULL;
-            int _sc = snap->ship_count;
-            if (_sc < 0) _sc = 0;
-            if (_sc > MAX_SIMPLE_SHIPS) _sc = MAX_SIMPLE_SHIPS;
-            for (int _i = 0; _i < _sc; _i++) {
-                if (snap->ships[_i].active && snap->ships[_i].ship_id == ship->id) {
-                    simple_ship = &snap->ships[_i];
-                    break;
-                }
-            }
+            const SimpleShip* simple_ship = (ship->id > 0 && ship->id < SHIP_ID_LOOKUP_SIZE)
+                ? _ss_lut[ship->id] : NULL;
 
             char ship_entry[16384];
             float hull_health_pct = (simple_ship && simple_ship->ship_type == SHIP_TYPE_GHOST)
