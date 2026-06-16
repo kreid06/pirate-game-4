@@ -610,11 +610,13 @@ void handle_module_unmount(WebSocketPlayer* player, struct WebSocketClient* clie
                 break;
             case MODULE_TYPE_HELM:
             case MODULE_TYPE_STEERING_WHEEL:
+                module->state_bits &= ~MODULE_STATE_OCCUPIED;
                 module->data.helm.occupied_by = 0;
                 helm_release_controls(target_ship->ship_id);
                 player->controlling_ship_id = 0;
                 break;
             case MODULE_TYPE_SEAT:
+                module->state_bits &= ~MODULE_STATE_OCCUPIED;
                 module->data.seat.occupied_by = 0;
                 break;
             default:

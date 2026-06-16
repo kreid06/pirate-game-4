@@ -10995,10 +10995,11 @@ int websocket_server_update(struct Sim* sim) {
                                     npc->npc_level  = 1;
                                     npc->max_health = 100;
                                     npc->health     = 100;
-                                    npc->stamina     = 100;
-                                    npc->max_stamina = 100;
-                                    npc->oxygen      = 100;
-                                    npc->max_oxygen  = 100;
+                                    npc->stamina              = 100;
+                                    npc->max_stamina          = 100;
+                                    npc->stamina_last_used_ms = 0;
+                                    npc->oxygen               = 100;
+                                    npc->max_oxygen           = 100;
                                     g_npcs_dirty = true;
 
                                     const char *company_names[] = {"Unclaimed","Solo","Pirates","Navy"};

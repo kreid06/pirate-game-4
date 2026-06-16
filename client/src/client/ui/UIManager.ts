@@ -3853,7 +3853,8 @@ class HUDElement implements UIElement {
       const o2Warn  = o2Ratio < 0.50;
       // Pulse the bar border when critically low
       const o2Pulse = o2Crit ? 0.55 + 0.45 * Math.sin(performance.now() / 250) : 1;
-      const o2Color = o2Crit ? `rgba(30,160,255,${o2Pulse.toFixed(2)})` : o2Warn ? '#2299ee' : '#44bbff';
+      // Fill is always fully opaque so the bar level is always readable; pulse only affects the border
+      const o2Color = o2Crit ? '#1e9fff' : o2Warn ? '#2299ee' : '#44bbff';
 
       ctx.fillStyle = 'rgba(255,255,255,0.08)';
       ctx.fillRect(barX, o2Y, barW, BAR_H);
