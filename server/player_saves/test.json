@@ -1,11 +1,11 @@
 {
   "name": "test",
   "player_id": 1000,
-  "x": 30888.770,
-  "y": 72151.125,
-  "parent_ship_id": 5,
-  "local_x": -90.962,
-  "local_y": -72.096,
+  "x": 67201.914,
+  "y": 28284.426,
+  "parent_ship_id": 4,
+  "local_x": -63.943,
+  "local_y": -25.544,
   "deck_level": 1,
   "health": 200,
   "max_health": 200,
@@ -23,10 +23,10 @@
   "feet": 0,
   "hands": 0,
   "shield": 0,
-  "res_wood": 96,
-  "res_fiber": 80,
-  "res_metal": 186,
-  "res_stone": 24,
+  "res_wood": 38,
+  "res_fiber": 15,
+  "res_metal": 20,
+  "res_stone": 4,
   "slots": [{"item":15,"qty":1},{"item":25,"qty":1},{"item":6,"qty":1},{"item":42,"qty":1},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0},{"item":0,"qty":0}],
-  "schematics": [{"item":16,"crafts":26,"q":3,"sm":[309,0,0,0,0]},{"item":13,"crafts":3,"q":3,"sm":[340,0,0,0,0]},{"item":20,"crafts":8,"q":2,"sm":[322,0,0,0,0]},{"item":18,"crafts":13,"q":3,"sm":[339,0,0,0,0]},{"item":26,"crafts":3,"q":4,"sm":[354,0,0,0,0]}]
+  "schematics": [{"item":16,"crafts":26,"q":3,"sm":[309,0,0,0,0]},{"item":26,"crafts":3,"q":4,"sm":[354,0,0,0,0]},{"item":20,"crafts":8,"q":2,"sm":[322,0,0,0,0]},{"item":18,"crafts":13,"q":3,"sm":[339,0,0,0,0]}]
 }

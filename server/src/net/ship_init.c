@@ -1367,6 +1367,7 @@ void load_ghost_spawns(const char *path) {
     ghost_fleet_count    = 0;
     ghost_spawn_count    = 0;
     ghost_spawns_enabled = false;
+    ghost_global_max_cap = 0;   /* reset so the file value always wins */
 
     /* Reset spawn queue */
     spawn_queue_head = 0;

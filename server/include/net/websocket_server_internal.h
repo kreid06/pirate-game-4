@@ -94,6 +94,23 @@ extern uint16_t next_structure_id;
 // ── Helper function declarations ──────────────────────────────────────────────
 
 SimpleShip* find_ship(uint16_t ship_id);
+
+/**
+ * Returns true if `ship` has at least one intact upper-deck module
+ * (MODULE_TYPE_DECK with deck_id==1 and health>0).
+ * Used to decide whether lower-deck crew are shielded from cannonball damage.
+ */
+static inline bool ship_has_intact_upper_deck(const SimpleShip* ship) {
+    if (!ship) return false;
+    for (uint8_t _dm = 0; _dm < ship->module_count; _dm++) {
+        const ShipModule* _mod = &ship->modules[_dm];
+        if (_mod->type_id == MODULE_TYPE_DECK &&
+            _mod->deck_id  == 1 &&
+            _mod->health   >  0)
+            return true;
+    }
+    return false;
+}
 /* Alias used in some call sites */
 #define find_ship_by_id find_ship
 struct Ship* find_sim_ship(uint32_t ship_id);

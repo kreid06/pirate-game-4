@@ -355,11 +355,17 @@ function updatePlayerWithDetection(
   }
 
   // ── Grapple constraint — mirrors server update_grapple_hooks logic ─────────
-  // Run for all movement states so the constraint is consistent with server.
+  // ONLY applies for SHIP targets (targetType=2): the server pulls the *player*
+  // toward the ship hull while reeling.  For every other target type — dropped
+  // item (1), player (3), npc (4), wreck (5) — the server moves the TARGET toward
+  // the player and the player stays put, so applying a player constraint here would
+  // fight the server and cause rubber-banding.
+  const GRAPPLE_TARGET_SHIP_TYPE = 2;
   if (player.grappleState === 2 &&
+      player.grappleTargetType === GRAPPLE_TARGET_SHIP_TYPE &&
       player.grappleX !== undefined && player.grappleY !== undefined) {
     const GRAPPLE_REEL_PULL = 90.0;  // px/s — must match server GRAPPLE_REEL_PULL
-    const GRAPPLE_ROPE_MIN  = 10.0;  // px   — must match server GRAPPLE_ROPE_MIN
+    const GRAPPLE_ROPE_MIN  = 30.0;  // px   — must match server GRAPPLE_ROPE_MIN
 
     const gx = player.grappleX;
     const gy = player.grappleY;
@@ -709,14 +715,18 @@ function resolveShipDeckCollisions(
     }
   }
 
-  // ── 3. Hull polygon containment (both decks, 2 passes) ──────────────────
-  // Lower deck: mirrors server resolve_player_hull_containment — if the nearest plank edge
-  //   is breached (plank dead), containment is skipped so the player can exit through the gap.
-  // Upper deck: added for prediction quality — prevents the client from predicting the player
-  //   walking through live planks for one RTT while waiting for the server dismount snapshot.
-  //   Dead-plank breaches are still allowed (same plank-alive check), matching the server's
-  //   behaviour where a hull breach also triggers dismount via is_outside_deck.
-  if (ship.hull.length >= 3) {
+  // ── 3. Hull polygon containment (lower deck only) ───────────────────────
+  // Mirrors server: resolve_player_hull_containment is gated on deck_level == 0.
+  // On the upper deck the server applies NO hull containment — the player can
+  // freely walk off the edge; the server detects the exit via is_outside_deck and
+  // then calls dismount_player_from_ship.  Applying containment here for the upper
+  // deck causes the client to report an "inside hull" position every tick, so the
+  // server (which adopts the client's semi-authoritative position) never sees the
+  // player go outside and therefore never fires the dismount — the player becomes
+  // permanently stuck at the hull edge.  Removing containment for deck_level != 0
+  // lets the client correctly predict the player stepping off, which then triggers
+  // the server dismount and matching forced-correction on the client side.
+  if (playerDeckLevel === 0 && ship.hull.length >= 3) {
     const hull = ship.hull;
     const nv = hull.length;
     const slotHealth = buildPlankSlotHealth(ship);
