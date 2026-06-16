@@ -3903,9 +3903,16 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                      * The previous version only handled the resource cache, so blueprint/
                      * item wrecks (normal sea wrecks) gave the player nothing. */
 
-                    /* 1. Resource cache (chest-ruin wrecks). */
+                    /* 1. Resource cache (chest-ruin wrecks).
+                     * Capture quantities, clear the wreck fields BEFORE granting so that
+                     * if the wreck survives (inventory full for items/blueprints) a second
+                     * grapple approach cannot re-grant the same resources (duplication). */
                     int _lw = (int)twr->chest_wood,  _lf = (int)twr->chest_fiber;
                     int _lm = (int)twr->chest_metal, _ls = (int)twr->chest_stone;
+                    twr->chest_wood  = 0;
+                    twr->chest_fiber = 0;
+                    twr->chest_metal = 0;
+                    twr->chest_stone = 0;
                     if (_lw > 0) res_grant(owner, RES_WOOD_ID,  _lw);
                     if (_lf > 0) res_grant(owner, RES_FIBER_ID, _lf);
                     if (_lm > 0) res_grant(owner, RES_METAL_ID, _lm);
