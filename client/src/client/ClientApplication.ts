@@ -3309,6 +3309,21 @@ export class ClientApplication {
           this.networkManager.sendCollectTombstone(tombId);
         };
       };
+      this.networkManager.onWreckPositionUpdate = (id, x, y) => {
+        this.renderSystem.updateWreckPosition(id, x, y);
+      };
+      this.networkManager.onWreckLoot = (playerId, x, y, wood, fiber, metal, stone) => {
+        const myId = this.networkManager.getAssignedPlayerId();
+        const isMe = (myId !== null && playerId === myId);
+        const pos  = Vec2.from(x, y);
+        // Stagger each resource line slightly upward so they don't overlap.
+        let offset = 0;
+        const STEP = 22;
+        if (wood  > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${wood} wood`,  isMe ? '#c8a96e' : '#8b7355'); offset += STEP; }
+        if (fiber > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${fiber} fiber`, isMe ? '#a3d977' : '#6b8c4e'); offset += STEP; }
+        if (metal > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${metal} metal`, isMe ? '#a0c8e8' : '#607080'); offset += STEP; }
+        if (stone > 0) { this.renderSystem.spawnResourcePickup(Vec2.from(pos.x, pos.y - offset), `+${stone} stone`, isMe ? '#c8c0a8' : '#7a7060'); }
+      };
       this.networkManager.onStructureDemolished = (id, x, y) => {
         const _sdComp = this._structureCompanyMap.get(id) ?? -1;
         const _sdLastHp = this.renderSystem.getPlacedStructureById(id)?.hp ?? 3000;
@@ -4183,22 +4198,30 @@ export class ClientApplication {
 
             // ── Boarding timer ────────────────────────────────────────────────
             // Activates when grapple is ATTACHED to a ship AND the player is
-            // touching the ship hull (within hull-collision range). The bar only
-            // fills while LMB is held; releasing LMB pauses/resets the bar.
-            const BOARD_TIME_MS       = 2500; // full hold duration to complete boarding
-            const BOARD_HULL_RANGE    = 90;   // px from hook — trigger boarding before old auto-detach range
+            // close enough to the hull to board (within BOARD_HULL_RANGE of the hook).
+            // Once started, the timer keeps running as long as LMB is held and the
+            // grapple stays ATTACHED — brief position jitter (semi-authority corrections)
+            // no longer resets the bar.  Only LMB release or grapple detach abort it.
+            const BOARD_TIME_MS       = 2500;
+            const BOARD_HULL_RANGE    = 120; // px from hook — slightly generous to survive corrections
             const GRAPPLE_TARGET_SHIP = 2;
 
             const isShipGrapple  = isAttached && player.grappleTargetType === GRAPPLE_TARGET_SHIP;
-            const isAtHull       = isShipGrapple &&
+            const isHoldingLMB   = this.inputManager.isLeftMouseDown();
+
+            // Proximity check used ONLY to START boarding (not to cancel it).
+            const isNearHull = isShipGrapple &&
               player.grappleX !== undefined && player.grappleY !== undefined &&
               (() => {
                 const dx = player.position.x - player.grappleX!;
                 const dy = player.position.y - player.grappleY!;
                 return Math.sqrt(dx * dx + dy * dy) <= BOARD_HULL_RANGE;
               })();
-            const isHoldingLMB   = this.inputManager.isLeftMouseDown();
-            const canBoard       = isAtHull && isHoldingLMB;
+
+            // Boarding is active once started: keep running if LMB is held + grapple attached.
+            // This prevents server position corrections from resetting the bar mid-fill.
+            const boardingActive = this._grappleBoardingStartMs !== null;
+            const canBoard       = (isNearHull || boardingActive) && isShipGrapple && isHoldingLMB;
 
             // Clear the sent-flag once the server has confirmed the grapple is gone
             // (grappleState no longer ATTACHED). This is the authoritative signal that
@@ -4223,17 +4246,14 @@ export class ClientApplication {
                 this.networkManager.sendBoardShip();
                 this._grappleBoardingStartMs = null;
                 this._grappleBoardingProgress = 0;
-                this._grappleBoardingSent = true; // block re-entry until server confirms detach
-                // Optimistically set deck=1 immediately — server always boards at upper deck.
-                // The carrier-change handler in onServerWorldState will confirm once the
-                // snapshot arrives; this just closes the window where the client has no ship.
+                this._grappleBoardingSent = true;
                 this.renderSystem.forceSetDeckLevel(1);
                 this.predictionEngine.setLocalPlayerDeckLevel(1);
                 this.renderSystem.setJustBoarded();
                 this._releaseGrapple();
               }
             } else if (!canBoard || this._grappleBoardingSent) {
-              // Pause/reset: LMB released, player moved away, or boarding already sent
+              // Cancel: LMB released, grapple detached, or boarding already sent.
               if (this._grappleBoardingStartMs !== null) {
                 this._grappleBoardingStartMs = null;
                 this._grappleBoardingProgress = 0;

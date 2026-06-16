@@ -1748,6 +1748,16 @@ void board_player_on_ship(WebSocketPlayer* player, SimpleShip* ship, float local
     player->velocity_x = ship->velocity_x;
     player->velocity_y = ship->velocity_y;
 
+    /* Invalidate the pre-boarding client position so the semi-authority
+     * position-adoption logic in the movement tick does NOT treat the
+     * stale water/grapple position as a valid target for the newly
+     * boarded player.  Without this the movement tick converts the last
+     * reported world position (in the ocean) to ship-local space and
+     * immediately starts chasing it, yanking the player away from the
+     * deck boarding point. */
+    player->client_pos_ms      = 0;
+    player->last_pos_adopt_ms  = 0;
+
     recalc_ship_mass(ship);
     log_info("⚓ Player %u boarded ship %u at local (%.1f, %.1f) — ship mass now %.0f kg",
              player->player_id, ship->ship_id, player->local_x, player->local_y, ship->mass);
@@ -2815,6 +2825,17 @@ void player_die(WebSocketPlayer* player) {
     memset(&player->inventory, 0, sizeof(PlayerInventory));
     player->inventory.active_slot = 255; /* sentinel: nothing equipped */
 
+    /* Detach any active grapple hook on death.  The dead player's slot stays
+     * active (is_dead=true), so the per-tick !owner->active cleanup never fires,
+     * and an ATTACHED hook has no timeout — without this a dead player would keep
+     * reeling a target (or their own corpse) toward a ship indefinitely. */
+    {
+        int _slot = (int)(player - players);
+        if (_slot >= 0 && _slot < WS_MAX_CLIENTS && grapple_hooks[_slot].active) {
+            grapple_detach(_slot);
+        }
+    }
+
     player->health  = 0;
     player->is_dead = true;
     player->fire_timer_ms = 0; /* extinguish any active burn on death */
@@ -3622,9 +3643,14 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
             }
 
-            /* World NPCs — tip AND rope-line check. */
-            for (int ni = 0; ni < world_npc_count && !hit; ni++) {
+            /* World NPCs — tip AND rope-line check.
+             * Requires the same minimum travel as ships so that NPCs standing on
+             * the player's own deck cannot be snagged the moment the hook spawns.
+             * Also skip NPCs that belong to the player's own ship (no self-grapple). */
+            for (int ni = 0; ni < world_npc_count && !hit && _can_hit_ship; ni++) {
                 if (!world_npcs[ni].active) continue;
+                /* Skip NPCs on the player's own ship. */
+                if (_own_ship_id != 0 && world_npcs[ni].ship_id == _own_ship_id) continue;
                 float ndx = gh->hook_x - world_npcs[ni].x;
                 float ndy = gh->hook_y - world_npcs[ni].y;
                 bool _tip_npc = (ndx*ndx + ndy*ndy <= GRAPPLE_HIT_R_ENTITY * GRAPPLE_HIT_R_ENTITY);
@@ -3645,8 +3671,10 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
             }
 
-            /* Wreck structures (chest_ruin flotsam) — tip AND rope-line check. */
-            for (int wi = 0; wi < (int)placed_structure_count && !hit; wi++) {
+            /* Wreck structures (chest_ruin flotsam) — tip AND rope-line check.
+             * Requires minimum travel so a wreck sitting next to the player's
+             * ship does not immediately swallow the hook the moment it spawns. */
+            for (int wi = 0; wi < (int)placed_structure_count && !hit && _can_hit_ship; wi++) {
                 PlacedStructure* wr = &placed_structures[wi];
                 if (!wr->active || wr->type != STRUCT_WRECK) continue;
                 float wdx = gh->hook_x - wr->x;
@@ -3846,11 +3874,24 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 float tdy   = owner->y - twr->y;
                 float tdist = sqrtf(tdx * tdx + tdy * tdy);
                 if (tdist < GRAPPLE_DETACH_DIST) {
-                    /* Auto-salvage: grant all cached resources to the player. */
-                    if (twr->chest_wood  > 0) res_grant(owner, RES_WOOD_ID,  (int)twr->chest_wood);
-                    if (twr->chest_fiber > 0) res_grant(owner, RES_FIBER_ID, (int)twr->chest_fiber);
-                    if (twr->chest_metal > 0) res_grant(owner, RES_METAL_ID, (int)twr->chest_metal);
-                    if (twr->chest_stone > 0) res_grant(owner, RES_STONE_ID, (int)twr->chest_stone);
+                    /* Auto-salvage: capture loot quantities then grant. */
+                    int _lw = (int)twr->chest_wood,  _lf = (int)twr->chest_fiber;
+                    int _lm = (int)twr->chest_metal, _ls = (int)twr->chest_stone;
+                    if (_lw > 0) res_grant(owner, RES_WOOD_ID,  _lw);
+                    if (_lf > 0) res_grant(owner, RES_FIBER_ID, _lf);
+                    if (_lm > 0) res_grant(owner, RES_METAL_ID, _lm);
+                    if (_ls > 0) res_grant(owner, RES_STONE_ID, _ls);
+                    /* Notify the salvaging player what they received. */
+                    {
+                        char _loot[256];
+                        snprintf(_loot, sizeof(_loot),
+                            "{\"type\":\"wreck_loot\",\"playerId\":%u"
+                            ",\"x\":%.1f,\"y\":%.1f"
+                            ",\"wood\":%d,\"fiber\":%d,\"metal\":%d,\"stone\":%d}",
+                            owner->player_id, owner->x, owner->y,
+                            _lw, _lf, _lm, _ls);
+                        websocket_server_broadcast(_loot);
+                    }
                     /* Despawn the wreck. */
                     uint32_t wreck_id = twr->id;
                     twr->active = false;
@@ -3861,14 +3902,26 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                     grapple_detach(si);
                     break;
                 }
-                /* Pull wreck toward player. */
-                if (tdist > gh->rope_length) {
+                /* Pull wreck toward player at a constant speed — no rope_length
+                 * gate here because for wrecks the wreck moves, not the player. */
+                {
                     float step = GRAPPLE_PULL_SPEED * dt / tdist;
+                    if (step > 1.0f) step = 1.0f; /* clamp: never overshoot */
                     twr->x += tdx * step;
                     twr->y += tdy * step;
                 }
                 gh->hook_x = twr->x;
                 gh->hook_y = twr->y;
+                /* Shrink rope so the client rope visual follows the closing distance. */
+                gh->rope_length = tdist;
+                /* Broadcast the new wreck position so all clients see it move. */
+                {
+                    char _wu[128];
+                    snprintf(_wu, sizeof(_wu),
+                        "{\"type\":\"wreck_update\",\"id\":%u,\"x\":%.1f,\"y\":%.1f}",
+                        (unsigned)twr->id, twr->x, twr->y);
+                    websocket_server_broadcast(_wu);
+                }
                 break;
             }
 
@@ -6593,11 +6646,15 @@ int websocket_server_update(struct Sim* sim) {
                                             if (_bship->ship_type == SHIP_TYPE_GHOST) break;
                                             if (player->parent_ship_id == _bship->ship_id) break;
 
-                                            /* Validate proximity — player must be near the hull. */
+                                            /* Validate proximity — player must be near the hull.
+                                             * Tolerance is set slightly above the client's boarding
+                                             * trigger range (BOARD_HULL_RANGE=120px) plus prediction
+                                             * error, so a client-initiated board is never silently
+                                             * rejected (which would desync deck state). */
                                             float _bdx = player->x - _gh->hook_x;
                                             float _bdy = player->y - _gh->hook_y;
                                             float _bdist = sqrtf(_bdx*_bdx + _bdy*_bdy);
-                                            if (_bdist > 100.0f) break; /* too far away */
+                                            if (_bdist > 140.0f) break; /* too far away */
 
                                             /* Convert player world pos to ship local for boarding point. */
                                             float _blx, _bly;
@@ -10455,6 +10512,7 @@ int websocket_server_update(struct Sim* sim) {
                              *   /SpawnEntity <crewmember> [neutral|pirates|navy]
                              *   /SpawnShip [brigantine|ghost|sloop|cutter]
                              *   /KillAllGhosts
+                             *   /GiveItemToPlayer <name|id> <item_id> <quantity>
                              */
                             char cmd_str[256] = "";
                             char *p_cmd = strstr(payload, "\"command\":");
@@ -11456,6 +11514,111 @@ int websocket_server_update(struct Sim* sim) {
                                     "{\"type\":\"command_response\",\"success\":true,"
                                     "\"text\":\"Sank %d ghost ship(s). Spawner will repopulate shortly.\"}",
                                     kg_count);
+
+                            } else if (strcmp(cmd_name, "giveitemtoplayer") == 0) {
+                                /* /GiveItemToPlayer <player name|id> <item_id> <quantity>
+                                 * Grants <quantity> of <item_id> to the named player's inventory.
+                                 * item_id is the numeric ItemKind value.
+                                 * quantity is clamped to 1-99 per slot; multiple slots are used if needed.
+                                 * Only allowed by admins / privileged players. */
+                                char gi_player[64] = "", gi_item_s[16] = "", gi_qty_s[16] = "";
+                                {
+                                    const char *p = cmd_body;
+                                    while (*p && *p != ' ') p++;   /* skip command name */
+                                    while (*p == ' ') p++;
+                                    int ai = 0;
+                                    while (*p && *p != ' ' && ai < 63) gi_player[ai++] = *p++;
+                                    gi_player[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != ' ' && ai < 15) gi_item_s[ai++] = *p++;
+                                    gi_item_s[ai] = '\0';
+                                    while (*p == ' ') p++;
+                                    ai = 0;
+                                    while (*p && *p != ' ' && ai < 15) gi_qty_s[ai++] = *p++;
+                                    gi_qty_s[ai] = '\0';
+                                }
+
+                                if (gi_player[0] == '\0' || gi_item_s[0] == '\0' || gi_qty_s[0] == '\0') {
+                                    snprintf(response, sizeof(response),
+                                        "{\"type\":\"command_response\",\"success\":false,"
+                                        "\"text\":\"Usage: /GiveItemToPlayer <name|id> <item_id> <quantity>\"}");
+                                } else {
+                                    /* Find target player by numeric ID or case-insensitive name prefix */
+                                    WebSocketPlayer *gi_target = NULL;
+                                    {
+                                        int _is_num = (gi_player[0] >= '0' && gi_player[0] <= '9');
+                                        if (_is_num) {
+                                            unsigned int _tid = (unsigned int)atoi(gi_player);
+                                            for (int _pi = 0; _pi < WS_MAX_CLIENTS && !gi_target; _pi++)
+                                                if (players[_pi].active && players[_pi].player_id == _tid)
+                                                    gi_target = &players[_pi];
+                                        } else {
+                                            char _ln[64]; int _li = 0;
+                                            while (gi_player[_li] && _li < 63) {
+                                                _ln[_li] = (gi_player[_li] >= 'A' && gi_player[_li] <= 'Z')
+                                                    ? gi_player[_li] + 32 : gi_player[_li]; _li++;
+                                            }
+                                            _ln[_li] = '\0';
+                                            for (int _pi = 0; _pi < WS_MAX_CLIENTS && !gi_target; _pi++) {
+                                                if (!players[_pi].active) continue;
+                                                char _lpn[64]; int _pj = 0;
+                                                while (players[_pi].name[_pj] && _pj < 63) {
+                                                    _lpn[_pj] = (players[_pi].name[_pj] >= 'A' && players[_pi].name[_pj] <= 'Z')
+                                                        ? players[_pi].name[_pj] + 32 : players[_pi].name[_pj];
+                                                    _pj++;
+                                                }
+                                                _lpn[_pj] = '\0';
+                                                if (strstr(_lpn, _ln)) gi_target = &players[_pi];
+                                            }
+                                        }
+                                    }
+
+                                    int gi_item_id = atoi(gi_item_s);
+                                    int gi_qty     = atoi(gi_qty_s);
+
+                                    if (!gi_target) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Player '%s' not found.\"}",
+                                            gi_player);
+                                    } else if (gi_item_id <= 0 || gi_item_id >= 64) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Invalid item_id %d. Must be 1–63.\"}",
+                                            gi_item_id);
+                                    } else if (gi_qty <= 0 || gi_qty > 9900) {
+                                        snprintf(response, sizeof(response),
+                                            "{\"type\":\"command_response\",\"success\":false,"
+                                            "\"text\":\"Invalid quantity %d. Must be 1–9900.\"}",
+                                            gi_qty);
+                                    } else {
+                                        /* Grant in batches of 99 (one slot per batch) until all granted */
+                                        int remaining = gi_qty;
+                                        int granted   = 0;
+                                        while (remaining > 0) {
+                                            int batch = remaining > 99 ? 99 : remaining;
+                                            if (!craft_grant(gi_target, (ItemKind)gi_item_id, batch)) break;
+                                            granted   += batch;
+                                            remaining -= batch;
+                                        }
+                                        log_info("🎁 /GiveItemToPlayer: gave %d×item%d to player %u (%s) by player %u",
+                                                 granted, gi_item_id,
+                                                 gi_target->player_id, gi_target->name,
+                                                 client->player_id);
+                                        if (granted == gi_qty) {
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"command_response\",\"success\":true,"
+                                                "\"text\":\"Gave %d×item[%d] to %s.\"}",
+                                                granted, gi_item_id, gi_target->name);
+                                        } else {
+                                            snprintf(response, sizeof(response),
+                                                "{\"type\":\"command_response\",\"success\":false,"
+                                                "\"text\":\"Gave %d/%d×item[%d] to %s — inventory full.\"}",
+                                                granted, gi_qty, gi_item_id, gi_target->name);
+                                        }
+                                    }
+                                }
 
                             } else {
                                 snprintf(response, sizeof(response),
@@ -13074,6 +13237,13 @@ void websocket_server_tick(float dt) {
                 float dy = npc->y - py;
                 if (dx * dx + dy * dy > hit_r2) continue;
 
+                /* Lower-deck crew are shielded by an intact upper deck — the deck
+                 * absorbs the cannonball before it can reach crew below. */
+                if (!is_flame && npc->deck_level == 0 && npc->ship_id != 0) {
+                    SimpleShip* _npc_ship = find_ship((uint16_t)npc->ship_id);
+                    if (ship_has_intact_upper_deck(_npc_ship)) continue;
+                }
+
                 if (is_flame) {
                     /* Pass-through: ignite NPC; broadcast only on first ignition */
                     if (npc->fire_timer_ms == 0) {
@@ -13140,6 +13310,12 @@ void websocket_server_tick(float dt) {
                 float dx = wp->x - px;
                 float dy = wp->y - py;
                 if (dx * dx + dy * dy > hit_r2) continue;
+
+                /* Lower-deck players are shielded by an intact upper deck. */
+                if (!is_flame && wp->deck_level == 0 && wp->parent_ship_id != 0) {
+                    SimpleShip* _wp_ship = find_ship(wp->parent_ship_id);
+                    if (ship_has_intact_upper_deck(_wp_ship)) continue;
+                }
 
                 if (is_flame) {
                     if (wp->fire_timer_ms == 0) {

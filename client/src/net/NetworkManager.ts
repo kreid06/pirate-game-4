@@ -792,6 +792,10 @@ export class NetworkManager {
   public onWreckSpawned: ((wreck: PlacedStructure) => void) | null = null;
   /** Fired when a shipwreck is removed (salvaged or auto-despawned). */
   public onWreckRemoved: ((id: number) => void) | null = null;
+  /** Fired every grapple-pull tick to update a wreck's world position. */
+  public onWreckPositionUpdate: ((id: number, x: number, y: number) => void) | null = null;
+  /** Fired when a grappled wreck is auto-salvaged — shows a loot notification. */
+  public onWreckLoot: ((playerId: number, x: number, y: number, wood: number, fiber: number, metal: number, stone: number) => void) | null = null;
   /** Fired when the server confirms a workbench can be opened (E-key interact). */
   public onCraftingOpen: ((structureId: number, structureType: string) => void) | null = null;
   /** Fired when the server confirms a craft_item request. */
@@ -3448,6 +3452,28 @@ export class NetworkManager {
       case 'wreck_removed':
         this.onWreckRemoved?.(message.id ?? 0);
         this.onStructureDemolished?.(message.id ?? 0);
+        break;
+
+      case 'wreck_update':
+        // Move an existing wreck to the reported position (sent every tick while grapple-pulled).
+        if (typeof message.id === 'number' && typeof message.x === 'number' && typeof message.y === 'number') {
+          this.onWreckPositionUpdate?.(message.id, message.x, message.y);
+        }
+        break;
+
+      case 'wreck_loot':
+        // Auto-salvage notification sent when a grappled wreck is pulled to the player.
+        if (typeof message.playerId === 'number') {
+          this.onWreckLoot?.(
+            message.playerId,
+            message.x ?? 0,
+            message.y ?? 0,
+            message.wood  ?? 0,
+            message.fiber ?? 0,
+            message.metal ?? 0,
+            message.stone ?? 0,
+          );
+        }
         break;
 
       case 'territory_update':

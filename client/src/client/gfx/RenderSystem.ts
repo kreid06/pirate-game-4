@@ -2856,6 +2856,11 @@ export class RenderSystem {
   }
 
   /** Remove a single structure by id (e.g. after server confirms demolish). */
+  updateWreckPosition(id: number, x: number, y: number): void {
+    const s = this.placedStructures.find(p => p.id === id && p.type === 'wreck');
+    if (s) { s.x = x; s.y = y; }
+  }
+
   removePlacedStructure(id: number): void {
     const s = this.placedStructures.find(p => p.id === id);
     if (s) {
@@ -5888,10 +5893,21 @@ export class RenderSystem {
       return order(a.type) - order(b.type);
     });
 
+    // Expand sorted with world-wrap shadow copies so structures (including wrecks)
+    // that cross the wrap boundary are rendered correctly when the world parallaxes.
+    // getWrapRenderOffsets always includes {dx:0,dy:0} so canonical entries are kept.
+    const sortedWrapped: PlacedStructure[] = [];
+    for (const s of sorted) {
+      const offsets = this.getWrapRenderOffsets(Vec2.from(s.x, s.y), camera, 200);
+      for (const off of offsets) {
+        sortedWrapped.push(off.dx === 0 && off.dy === 0 ? s : { ...s, x: s.x + off.dx, y: s.y + off.dy });
+      }
+    }
+
     // TILE = 50 CLIENT units (= 5 server units after ×WORLD_SCALE_FACTOR=10).
     // Half-extents in CLIENT units: shipyard 445 (= TILE*17.8/2), flag_fort ~70, fortress ~90.
     const STRUCT_TILE = 50;
-    for (const s of sorted) {
+    for (const s of sortedWrapped) {
       // World-space bounding radius for each structure type.
       // isWorldPositionVisible margin is in CLIENT units — same space as s.x / s.y.
       const _halfExt = s.type === 'shipyard'         ? STRUCT_TILE * 17.8 / 2   // 445
@@ -7216,7 +7232,7 @@ export class RenderSystem {
     // ── Quality-tier markers ─────────────────────────────────────────────
     // Structures crafted from a quality blueprint carry a rolled tier. Draw a
     // small tier-colored gem above each so the world shows item prestige.
-    for (const s of sorted) {
+    for (const s of sortedWrapped) {
       if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
       const _qHalfExt = s.type === 'shipyard' ? STRUCT_TILE * 17.8 / 2 : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
       if (!this.fogVisibleAt(s.x, s.y, _qHalfExt)) continue;
@@ -9102,7 +9118,10 @@ export class RenderSystem {
       const _lp = renderPlayers.find(p => p.id === this.localPlayerId);
       if (_lp && _lp.carrierId !== 0) {
         const _cs = renderShips.find(s => s.id === _lp.carrierId);
-        if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1)) {
+        // Only run the fall-through state machine when there is an INTACT upper deck
+        // (health > 0). A destroyed deck (health=0) is kept in ship.modules but should
+        // be treated as absent — the ship reverts to a single-deck hull.
+        if (_cs && _cs.modules.some(m => m.kind === 'deck' && m.deckId === 1 && (m.health === undefined || m.health > 0))) {
           // Player ship-local position — prefer localPosition (seeded from the server's
           // local_x / local_y and kept current by the prediction engine) over re-deriving
           // from the world-space round-trip (world_pos - ship_pos → rotate), which
@@ -11322,9 +11341,12 @@ export class RenderSystem {
       const localY = dx * sin + dy * cos;
 
       // Gunport cannon ghosts are on the lower deck (deck 0).
-      // Show when player is on deck 0 OR when the ship has no upper deck (single-deck ships
-      // keep _playerDeckLevel=1 because the deck-level update only runs when an upper deck exists).
-      const _shipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+      // Show when player is on deck 0 OR when the ship has no INTACT upper deck.
+      // A deck module with health=0 is destroyed (kept in ship.modules with hp=0) — treat it
+      // as absent so hover detection works without requiring the player to be on deck 0.
+      const _shipHasUpperDeck = ship.modules.some(
+        m => m.kind === 'deck' && m.deckId === 1 && (m.health === undefined || m.health > 0),
+      );
       if (this._playerDeckLevel !== 0 && _shipHasUpperDeck) continue;
       for (const mod of ship.modules) {
         if (mod.kind !== 'gunport') continue;
@@ -11419,10 +11441,13 @@ export class RenderSystem {
     }
 
     // ── Ghost cannons at gunport positions (no cannon installed yet) ──────
-    // Show when player is on deck 0, OR when the ship has no upper deck (single-deck ships
-    // have _playerDeckLevel=1 since the level detector only activates with an upper deck).
+    // Show when player is on deck 0, OR when the ship has no INTACT upper deck.
+    // A deck module with health=0 is destroyed (kept in ship.modules with hp=0) — treat it
+    // as absent so ghosts appear without requiring the player to be on deck 0.
     const gpHalfWGhost = 11; // match visual gpHalfW
-    const _gpShipHasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    const _gpShipHasUpperDeck = ship.modules.some(
+      m => m.kind === 'deck' && m.deckId === 1 && (m.health === undefined || m.health > 0),
+    );
     if (this._playerDeckLevel === 0 || !_gpShipHasUpperDeck) for (const mod of ship.modules) {
       if (mod.kind !== 'gunport') continue;
       // Skip if a cannon is already linked to this gunport (match by snap_idx, not position,
