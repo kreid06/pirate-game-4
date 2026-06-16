@@ -908,7 +908,7 @@ export class UIManager {
         const _vigO2    = _vigPlayer.oxygen    ?? (_vigPlayer.maxOxygen ?? 100);
         const _vigMaxO2 = _vigPlayer.maxOxygen ?? 100;
         const _vigSt    = _vigPlayer.stamina   ?? (_vigPlayer.maxStamina ?? 100);
-        const _isSwim   = _vigPlayer.state === 'swimming';
+        const _isSwim   = _vigPlayer.movementState === 'swimming';
         if (_isSwim && _vigSt <= 0 && _vigO2 < _vigMaxO2) {
           const _depleted = _vigMaxO2 > 0 ? 1 - _vigO2 / _vigMaxO2 : 1;
           // Alpha: 0 at full O2, up to 0.75 when depleted
@@ -3651,7 +3651,7 @@ class HUDElement implements UIElement {
     const st     = player.stamina    ?? maxSt;
     const maxO2  = player.maxOxygen  ?? 100;
     const o2     = player.oxygen     ?? maxO2;
-    const isSwimming = (player.state === 'swimming');
+    const isSwimming = (player.movementState === 'swimming');
     const _lvl = player.level ?? 1;
     const _xp  = player.xp ?? 0;
     this._cachedPlayerLevel = _lvl;

@@ -95,6 +95,7 @@ export interface Player {
   // Enhanced movement data from server (for reconciliation & debugging)
   isMoving?: boolean; // Is player actively moving (from hybrid protocol)
   movementDirection?: Vec2; // Server's stored movement direction (normalized)
+  movementState?: string; // Raw movement state string from server (e.g. 'swimming', 'WALKING')
 
   // Inventory
   inventory: PlayerInventory;

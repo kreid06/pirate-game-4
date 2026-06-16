@@ -2756,6 +2756,7 @@ export class NetworkManager {
             carrierId: player.parent_ship || 0, // Server sends parent_ship
             deckId: player.deck_index ?? player.deck_level ?? player.deckId ?? 1, // deck_level: 0=lower, 1=upper (default upper)
             onDeck: player.state === 'WALKING' || player.state === 'onship', // Server sends state field (WALKING, SWIMMING, etc.)
+            movementState: player.state ?? undefined,
             
             // Local (ship-relative) position — only valid when on a ship.
             // The server always serialises local_x/local_y (0,0 when swimming),
