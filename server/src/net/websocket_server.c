@@ -3899,31 +3899,80 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 float tdy   = owner->y - twr->y;
                 float tdist = sqrtf(tdx * tdx + tdy * tdy);
                 if (tdist < GRAPPLE_DETACH_DIST) {
-                    /* Auto-salvage: capture loot quantities then grant. */
+                    /* Auto-salvage: a wreck can hold THREE kinds of loot. Grant all:
+                     *   1. Resource cache  (chest_ruin) → res_grant into resource pool
+                     *   2. Blueprints      (ship-wreck) → schematic_add into schematic store
+                     *   3. Item loot       (ship-wreck) → craft_grant into item inventory
+                     * The previous version only handled the resource cache, so blueprint/
+                     * item wrecks (normal sea wrecks) gave the player nothing. */
+
+                    /* 1. Resource cache (chest-ruin wrecks). */
                     int _lw = (int)twr->chest_wood,  _lf = (int)twr->chest_fiber;
                     int _lm = (int)twr->chest_metal, _ls = (int)twr->chest_stone;
                     if (_lw > 0) res_grant(owner, RES_WOOD_ID,  _lw);
                     if (_lf > 0) res_grant(owner, RES_FIBER_ID, _lf);
                     if (_lm > 0) res_grant(owner, RES_METAL_ID, _lm);
                     if (_ls > 0) res_grant(owner, RES_STONE_ID, _ls);
-                    /* Notify the salvaging player what they received. */
+
+                    /* 2. Blueprints → persistent schematic inventory. */
+                    int _bp_granted = 0;
+                    for (int _bi = 0; _bi < 6; _bi++) {
+                        if (twr->wreck_bp_items[_bi] == 0) continue;
+                        if (schematic_add(owner, (ItemKind)twr->wreck_bp_items[_bi],
+                                          twr->wreck_bp_crafts[_bi],
+                                          &twr->wreck_bp_quality[_bi])) {
+                            twr->wreck_bp_items[_bi]  = 0;
+                            twr->wreck_bp_crafts[_bi] = 0;
+                            if (twr->wreck_bp_count > 0) twr->wreck_bp_count--;
+                            _bp_granted++;
+                        }
+                    }
+
+                    /* 3. Item loot → item inventory. */
+                    int _items_granted = 0;
+                    for (int _li = 0; _li < 6; _li++) {
+                        if (twr->wreck_items[_li] == 0 || twr->wreck_qtys[_li] == 0) continue;
+                        if (craft_grant(owner, (ItemKind)twr->wreck_items[_li],
+                                        (int)twr->wreck_qtys[_li])) {
+                            twr->wreck_items[_li] = 0;
+                            twr->wreck_qtys[_li]  = 0;
+                            if (twr->wreck_loot_count > 0) twr->wreck_loot_count--;
+                            _items_granted++;
+                        }
+                    }
+
+                    /* Notify the salvaging player what resources they received
+                     * (item/blueprint pickups surface via their own grant paths). */
                     {
                         char _loot[256];
                         snprintf(_loot, sizeof(_loot),
                             "{\"type\":\"wreck_loot\",\"playerId\":%u"
                             ",\"x\":%.1f,\"y\":%.1f"
-                            ",\"wood\":%d,\"fiber\":%d,\"metal\":%d,\"stone\":%d}",
+                            ",\"wood\":%d,\"fiber\":%d,\"metal\":%d,\"stone\":%d"
+                            ",\"items\":%d,\"blueprints\":%d}",
                             owner->player_id, owner->x, owner->y,
-                            _lw, _lf, _lm, _ls);
+                            _lw, _lf, _lm, _ls, _items_granted, _bp_granted);
                         websocket_server_broadcast(_loot);
                     }
-                    /* Despawn the wreck. */
-                    uint32_t wreck_id = twr->id;
-                    twr->active = false;
-                    char wbcast[96];
-                    snprintf(wbcast, sizeof(wbcast),
-                             "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)wreck_id);
-                    websocket_server_broadcast(wbcast);
+
+                    /* If the inventory was full and loot remains, leave the wreck in
+                     * place so the player can free space and salvage the rest by hand. */
+                    bool _fully_looted = (twr->wreck_bp_count == 0 && twr->wreck_loot_count == 0);
+                    if (_fully_looted) {
+                        uint32_t wreck_id = twr->id;
+                        twr->active = false;
+                        char wbcast[96];
+                        snprintf(wbcast, sizeof(wbcast),
+                                 "{\"type\":\"wreck_removed\",\"id\":%u}", (unsigned)wreck_id);
+                        websocket_server_broadcast(wbcast);
+                    } else {
+                        char wbcast[128];
+                        snprintf(wbcast, sizeof(wbcast),
+                                 "{\"type\":\"wreck_updated\",\"id\":%u,\"loot_count\":%u,\"bp_count\":%u}",
+                                 (unsigned)twr->id,
+                                 (unsigned)twr->wreck_loot_count, (unsigned)twr->wreck_bp_count);
+                        websocket_server_broadcast(wbcast);
+                    }
                     grapple_detach(si);
                     break;
                 }
