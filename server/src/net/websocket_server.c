@@ -10988,11 +10988,15 @@ int websocket_server_update(struct Sim* sim) {
                                         npc->target_local_x  = npc->x;
                                         npc->target_local_y  = npc->y;
                                     }
-                                    strncpy(npc->name,     "Crewmember",         sizeof(npc->name)     - 1);
+                                    generate_pirate_name(npc->id, npc->name, sizeof(npc->name));
                                     strncpy(npc->dialogue, "Aye aye, Captain!",  sizeof(npc->dialogue) - 1);
                                     npc->npc_level  = 1;
                                     npc->max_health = 100;
                                     npc->health     = 100;
+                                    npc->stamina     = 100;
+                                    npc->max_stamina = 100;
+                                    npc->oxygen      = 100;
+                                    npc->max_oxygen  = 100;
                                     g_npcs_dirty = true;
 
                                     const char *company_names[] = {"Unclaimed","Solo","Pirates","Navy"};

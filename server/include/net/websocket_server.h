@@ -236,6 +236,15 @@ typedef struct WorldNpc {
     uint32_t      hp_regen_accum_ms; // accumulates ms; triggers +2 HP every 5 s
     uint32_t      last_damage_ms;    // timestamp (get_time_ms) of last damage taken
 
+    // ── Stamina (drains while swimming; blocks regen while in water) ─────────
+    uint16_t      stamina;           // current stamina (0–max_stamina)
+    uint16_t      max_stamina;       // always 100 for NPCs
+    uint32_t      stamina_last_used_ms; // wall-clock ms of last drain (regen delayed 2 s)
+
+    // ── Oxygen (depletes when swimming with stamina = 0; suffocation at 0) ──
+    uint16_t      oxygen;            // current oxygen (0–max_oxygen)
+    uint16_t      max_oxygen;        // always 100
+
     // ── Task lock ───────────────────────────────────────────────────────────
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.

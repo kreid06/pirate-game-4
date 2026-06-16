@@ -58,12 +58,22 @@ void tick_sinking_ships(void) {
             players[pi].y = SERVER_TO_CLIENT(CLIENT_TO_SERVER(wy));
         }
 
-        /* Eject any remaining NPCs — clear ship_id so they are orphaned in the world */
+        /* Eject any remaining NPCs — convert local coords to world, then orphan them */
         for (int ni = 0; ni < world_npc_count; ni++) {
-            if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
-            world_npcs[ni].ship_id  = 0;
-            world_npcs[ni].in_water = true;
-            world_npcs[ni].fire_timer_ms = 0;
+            WorldNpc* _enpc = &world_npcs[ni];
+            if (!_enpc->active || _enpc->ship_id != sunk_id) continue;
+            /* Preserve the NPC's exact world position so local_x/y can serve as
+             * world coords (off-ship NPCs use local_x/y == world x/y). */
+            ship_local_to_world(ship, _enpc->local_x, _enpc->local_y, &_enpc->x, &_enpc->y);
+            _enpc->local_x = _enpc->x;
+            _enpc->local_y = _enpc->y;
+            _enpc->ship_id  = 0;
+            _enpc->in_water = true;
+            _enpc->fire_timer_ms = 0;
+            /* Reset stamina/oxygen so the NPC has a fair chance to survive
+             * and swim to a ship rather than drowning instantly. */
+            _enpc->stamina  = _enpc->max_stamina;
+            _enpc->oxygen   = _enpc->max_oxygen;
         }
 
         /* Destroy in sim */

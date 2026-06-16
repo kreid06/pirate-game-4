@@ -136,9 +136,12 @@ void quality_roll_payload(ItemKind item, float quality, uint32_t *rng_state,
         if (final_mult < 1.0f) final_mult = 1.0f;
         if (final_mult > cap)  final_mult = cap;
 
-        /* Apply per-tier flat bonus to resistance (durability) and damage. */
+        /* Apply per-tier multiplicative bonus to resistance (durability) and damage.
+         * Scales proportionally to the quality roll: a tier-6 item at max quality
+         * gets 60% more on top of its quality-capped value.
+         * e.g. quality_mult=1.5, tier 6 → 1.5 × 1.60 = 2.40 */
         if (s == STAT_DURABILITY || s == STAT_WEAPON_DAMAGE) {
-            final_mult += tier_bonus;
+            final_mult *= (1.0f + tier_bonus);
         }
 
         float m = final_mult * 256.0f;

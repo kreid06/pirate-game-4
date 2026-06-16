@@ -307,7 +307,7 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
  *
  * Pool sizes: 12 adj × 16 first  +  16 first × 16 epithets  =  448 distinct names.
  * ──────────────────────────────────────────────────────────────────────────── */
-static void generate_pirate_name(uint32_t seed, char* out, size_t out_size) {
+void generate_pirate_name(uint32_t seed, char* out, size_t out_size) {
     static const char* const FIRST_NAMES[] = {
         "Jack",       "Sam",       "Finn",   "Morgan", "Billy",    "Tom",
         "Ned",        "Rafe",      "Sven",   "Drake",  "Davy",     "Walt",
@@ -404,6 +404,11 @@ uint32_t spawn_ship_crew(uint16_t ship_id) {
     npc->health      = npc->max_health;
     npc->xp          = 0;
     npc->deck_level  = 1; /* crew operate on the upper deck */
+    npc->stamina            = 100;
+    npc->max_stamina        = 100;
+    npc->stamina_last_used_ms = 0;
+    npc->oxygen             = 100;
+    npc->max_oxygen         = 100;
 
     /* Stagger idle positions along ship centreline */
     int slot_idx = (int)(npc->id % 9);
@@ -457,6 +462,11 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
     npc->max_health  = 100;
     npc->health      = 100;
     npc->xp          = 0;
+    npc->stamina            = 100;
+    npc->max_stamina        = 100;
+    npc->stamina_last_used_ms = 0;
+    npc->oxygen             = 100;
+    npc->max_oxygen         = 100;
 
     log_info("👻 Unclaimed NPC '%s' (id %u) in water at (%.0f, %.0f)",
              npc->name, npc->id, npc->x, npc->y);
@@ -718,6 +728,70 @@ void tick_world_npcs(float dt) {
                 }
             } else {
                 npc->hp_regen_accum_ms = 0;
+            }
+        }
+
+        /* ── Swim stamina drain / oxygen / suffocation ────────────────────────
+         * While in water: stamina drains at 1/s (same as players).
+         * When stamina = 0 and still in water: oxygen drains at 5/s.
+         * When oxygen = 0: NPC takes 10 HP/s suffocation damage; at 0 HP it dies. */
+        {
+            const float NPC_SWIM_DRAIN_PER_S  = 1.0f;
+            const float NPC_O2_DRAIN_PER_S    = 5.0f;
+            const float NPC_O2_REGEN_PER_S    = 20.0f;
+            const float NPC_SUFFOC_DMG_PER_S  = 10.0f;
+            const uint32_t NPC_STAM_REGEN_DELAY = 2000u; /* 2 s off-water before stam regen */
+
+            if (npc->in_water) {
+                uint32_t now_sw = get_time_ms();
+                if (npc->stamina > 0) {
+                    /* Drain stamina */
+                    uint16_t sw_drain = (uint16_t)(NPC_SWIM_DRAIN_PER_S * dt + 0.5f);
+                    if (sw_drain < 1) sw_drain = 1;
+                    npc->stamina = (sw_drain >= npc->stamina) ? 0 : (uint16_t)(npc->stamina - sw_drain);
+                    npc->stamina_last_used_ms = now_sw;
+                } else {
+                    /* Stamina empty — drain oxygen */
+                    uint16_t o2_drain = (uint16_t)(NPC_O2_DRAIN_PER_S * dt + 0.5f);
+                    if (o2_drain < 1) o2_drain = 1;
+                    if (o2_drain >= npc->oxygen) {
+                        npc->oxygen = 0;
+                        /* Suffocation damage */
+                        uint16_t suf = (uint16_t)(NPC_SUFFOC_DMG_PER_S * dt + 0.5f);
+                        if (suf < 1) suf = 1;
+                        npc->last_damage_ms = now_sw;
+                        if (suf >= npc->health) {
+                            npc->health = 0;
+                            npc->active = false;
+                            while (world_npc_count > 0 && !world_npcs[world_npc_count - 1].active)
+                                world_npc_count--;
+                            continue; /* NPC is gone — skip rest of loop body */
+                        }
+                        npc->health -= suf;
+                    } else {
+                        npc->oxygen -= o2_drain;
+                    }
+                    npc->stamina_last_used_ms = now_sw;
+                }
+            } else {
+                /* On land / ship — regen stamina after delay */
+                uint32_t now_sw = get_time_ms();
+                if (npc->stamina < npc->max_stamina &&
+                    npc->stamina_last_used_ms > 0 &&
+                    (now_sw - npc->stamina_last_used_ms) >= NPC_STAM_REGEN_DELAY) {
+                    uint16_t gain = (uint16_t)(20.0f * dt + 0.5f); /* 20 ST/s regen */
+                    if (gain < 1) gain = 1;
+                    uint32_t newSt = (uint32_t)npc->stamina + gain;
+                    npc->stamina = (newSt > npc->max_stamina)
+                        ? npc->max_stamina : (uint16_t)newSt;
+                }
+                /* Regen oxygen quickly when out of water */
+                if (npc->oxygen < npc->max_oxygen) {
+                    uint16_t o2_gain = (uint16_t)(NPC_O2_REGEN_PER_S * dt + 0.5f);
+                    if (o2_gain < 1) o2_gain = 1;
+                    uint32_t newO = (uint32_t)npc->oxygen + o2_gain;
+                    npc->oxygen = (newO > npc->max_oxygen) ? npc->max_oxygen : (uint16_t)newO;
+                }
             }
         }
 

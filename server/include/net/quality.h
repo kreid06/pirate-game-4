@@ -19,10 +19,12 @@
 int quality_tier(float quality);
 
 /*
- * Flat bonus added to STAT_DURABILITY and STAT_WEAPON_DAMAGE per tier level.
- * Tier 1 → +10%, Tier 2 → +20%, …, Tier 6 → +60%.
- * Applied AFTER the quality cap so high-tier blueprints always beat lower-tier
- * ones regardless of the random roll.
+ * Multiplicative bonus applied to STAT_DURABILITY and STAT_WEAPON_DAMAGE
+ * per tier level, after the quality roll cap.
+ *   final = quality_mult × (1 + tier × QUALITY_TIER_BONUS_PER_TIER)
+ * Tier 1 → ×1.10, Tier 2 → ×1.20, …, Tier 6 → ×1.60.
+ * Intentionally exceeds the quality cap — higher-tier blueprints always
+ * outperform lower-tier ones regardless of the random roll.
  */
 #define QUALITY_TIER_BONUS_PER_TIER 0.10f
 
