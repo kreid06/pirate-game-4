@@ -2058,7 +2058,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         }
     }
 
-    int _to = snprintf(out->tmb_json, sizeof(out->tmb_json), "[");
+    out->tmb_json[0] = '[';
+    int _to = 1;
     bool _tf = true;
     for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
         if (!snap->tombstones[_ti].active) continue;
@@ -2086,7 +2087,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     out->tmb_json[_to] = '\0';
     out->tmb_len = _to;
 
-    int _do = snprintf(out->ditem_json, sizeof(out->ditem_json), "[");
+    out->ditem_json[0] = '[';
+    int _do = 1;
     bool _df = true;
     for (int _di = 0; _di < (int)MAX_DROPPED_ITEMS; _di++) {
         if (!snap->dropped_items[_di].active) continue;
@@ -2104,7 +2106,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     out->ditem_json[_do] = '\0';
     out->ditem_len = _do;
 
-    int _co = snprintf(out->co_json, sizeof(out->co_json), "[");
+    out->co_json[0] = '[';
+    int _co = 1;
     bool _cf = true;
     int _dcc = snap->dynamic_company_count;
     if (_dcc < 0) _dcc = 0;
@@ -2256,7 +2259,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     out->active_player_count = active_count;
 
     int projectiles_offset = 0;
-    projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "[");
+    out->projectiles_json[projectiles_offset++] = '[';
     bool first_projectile = true;
     uint16_t _pc = snap->projectile_count;
     if (_pc > MAX_PROJECTILES) _pc = MAX_PROJECTILES;
@@ -2276,7 +2279,9 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                                        proj->id, proj_x, proj_y, proj_vx, proj_vy, proj->type, proj->owner_id);
         first_projectile = false;
     }
-    projectiles_offset += snprintf(out->projectiles_json + projectiles_offset, sizeof(out->projectiles_json) - projectiles_offset, "]");
+    if (projectiles_offset < (int)sizeof(out->projectiles_json) - 1)
+        out->projectiles_json[projectiles_offset++] = ']';
+    out->projectiles_json[projectiles_offset] = '\0';
     out->projectiles_len = projectiles_offset;
 
     /* NPC entries: serialise directly into per-entry cache; no combined blob.
@@ -2345,7 +2350,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
 
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
     int ships_offset = 0;
-    ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, "[");
+    out->ships_json[ships_offset++] = '[';
     bool first_ship = true;
     out->aoi_ship_count = 0;
 
@@ -2689,7 +2694,9 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             first_ship = false;
         }
     }
-    ships_offset += snprintf(out->ships_json + ships_offset, sizeof(out->ships_json) - ships_offset, "]");
+    if (ships_offset < (int)sizeof(out->ships_json) - 1)
+        out->ships_json[ships_offset++] = ']';
+    out->ships_json[ships_offset] = '\0';
     out->ships_len = ships_offset;
 }
 
@@ -12504,7 +12511,8 @@ int websocket_server_update(struct Sim* sim) {
             const float _view_r2 = _view_r * _view_r;
 
             char* per_ship_json = per_ship_json_pool[_send_count];
-            int _soff = snprintf(per_ship_json, PER_SHIP_BUF, "[");
+            per_ship_json[0] = '[';
+            int _soff = 1;
             bool _sfirst = true;
             for (int _si = 0; _si < aoi_ship_count; _si++) {
                 float _dx = shared_blob_cache.aoi_ship_px[_si] - _cx, _dy = shared_blob_cache.aoi_ship_py[_si] - _cy;
