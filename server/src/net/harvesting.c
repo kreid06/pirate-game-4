@@ -84,6 +84,17 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         player->stamina = 0;
         if (_dmg >= player->health) {
             player_die(player);
+            /* Broadcast ENTITY_HIT so the dead player's client opens the respawn screen. */
+            {
+                char _hit[256];
+                snprintf(_hit, sizeof(_hit),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                    "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                    "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    player->player_id, player->x, player->y,
+                    (unsigned)_dmg, (unsigned)player->max_health);
+                websocket_server_broadcast(_hit);
+            }
             goto send_and_ret;
         }
         player->health -= _dmg;
@@ -270,6 +281,17 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         player->stamina = 0;
         if (_dmg >= player->health) {
             player_die(player);
+            /* Broadcast ENTITY_HIT so the dead player's client opens the respawn screen. */
+            {
+                char _hit[256];
+                snprintf(_hit, sizeof(_hit),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                    "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                    "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    player->player_id, player->x, player->y,
+                    (unsigned)_dmg, (unsigned)player->max_health);
+                websocket_server_broadcast(_hit);
+            }
             goto send_rock_ret;
         }
         player->health -= _dmg;
@@ -428,6 +450,17 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         player->stamina = 0;
         if (_dmg >= player->health) {
             player_die(player);
+            /* Broadcast ENTITY_HIT so the dead player's client opens the respawn screen. */
+            {
+                char _hit[256];
+                snprintf(_hit, sizeof(_hit),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                    "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                    "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    player->player_id, player->x, player->y,
+                    (unsigned)_dmg, (unsigned)player->max_health);
+                websocket_server_broadcast(_hit);
+            }
             goto send_boulder_ret;
         }
         player->health -= _dmg;
