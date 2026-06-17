@@ -150,6 +150,11 @@ export class RenderSystem {
   public ghostCanAfford: boolean = true;
   /** Set by ClientApplication each frame: false when the player can't afford the active land build. */
   public landGhostCanAfford: boolean = true;
+  /**
+   * Quality tier of the currently-selected plank blueprint (0 = Standard / none).
+   * Set each frame by ClientApplication so ghost plank slots tint to the tier colour.
+   */
+  public ghostPlankTier: number = 0;
   /** Optional per-kind affordability callback for plan markers — set by ClientApplication. */
   public landAffordabilityCheck: ((kind: string) => boolean) | null = null;
   private buildMode: boolean = false;
@@ -10516,6 +10521,75 @@ export class RenderSystem {
       }
     }
 
+    // Hover highlight + quality-tier overlay pass for placed planks
+    if (!isGhostShip) {
+      const _hoveredId = this.hoveredModule?.module?.id;
+      for (const plank of planks) {
+        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+        const plankData = plank.moduleData;
+        if (plankData.health <= 0) continue;
+
+        const isHovered = plank.id === _hoveredId;
+        const _qt = plank.qualityTier;
+        const _hasQT = typeof _qt === 'number' && _qt >= 1;
+
+        if (!isHovered && !_hasQT) continue;
+
+        const isCurved = plankData.isCurved || false;
+        const pos = plank.localPos;
+        const rot = plank.localRot;
+        const length = plankData.length;
+        const width  = plankData.width;
+
+        this.ctx.save();
+
+        if (isHovered) {
+          // Hover glow: semi-transparent white border highlight
+          const _hlCol = _hasQT ? tierColor(_qt!) : '#aaccff';
+          this.ctx.shadowColor = _hlCol;
+          this.ctx.shadowBlur  = 8;
+          this.ctx.strokeStyle = _hlCol;
+          this.ctx.lineWidth   = 2;
+          this.ctx.globalAlpha = 0.55;
+          if (isCurved && plankData.curveData) {
+            this.drawCurvedPlank(plankData.curveData, width, 'transparent', _hlCol);
+          } else {
+            this.ctx.save();
+            this.ctx.translate(pos.x, pos.y);
+            this.ctx.rotate(rot);
+            this.ctx.strokeRect(-length / 2, -width / 2, length, width);
+            this.ctx.restore();
+          }
+          this.ctx.globalAlpha = 1.0;
+          this.ctx.shadowBlur  = 0;
+        }
+
+        if (_hasQT) {
+          // Quality-tier tint: subtle coloured inner highlight
+          const _col = tierColor(_qt!);
+          const _h = _col.replace('#', '');
+          const _r = parseInt(_h.substring(0, 2), 16);
+          const _g = parseInt(_h.substring(2, 4), 16);
+          const _b = parseInt(_h.substring(4, 6), 16);
+          const _tintA = isHovered ? 0.28 : 0.15;
+          const _tintFill = `rgba(${_r},${_g},${_b},${_tintA})`;
+          this.ctx.globalAlpha = 1.0;
+          if (isCurved && plankData.curveData) {
+            this.drawCurvedPlank(plankData.curveData, width * 0.55, _tintFill, 'transparent');
+          } else {
+            this.ctx.save();
+            this.ctx.translate(pos.x, pos.y);
+            this.ctx.rotate(rot);
+            this.ctx.fillStyle = _tintFill;
+            this.ctx.fillRect(-length / 2 + 2, -width / 2 + 1, length - 4, width - 2);
+            this.ctx.restore();
+          }
+        }
+
+        this.ctx.restore();
+      }
+    }
+
     // Water flood tint: blue overlay painted on top of each plank
     if (floodTint > 0) {
       const tintAlpha = floodTint * 0.50 * (phase1Alpha < 1 ? phase1Alpha : 1);
@@ -10620,6 +10694,20 @@ export class RenderSystem {
     const missing = template.filter(seg => !presentKeys.has(`${seg.sectionName}_${seg.index}`));
     if (missing.length === 0) return;
 
+    // When a quality blueprint is selected, tint the ghost slots to the tier colour.
+    const _pt = this.ghostPlankTier;
+    const _hasTier = _pt >= 1;
+    const _tierHex = _hasTier ? tierColor(_pt) : null;
+
+    // Convert tier hex (#rrggbb) to rgb components for alpha-composited fills.
+    let _tr = 0, _tg = 180, _tb = 60;
+    if (_tierHex) {
+      const _h = _tierHex.replace('#', '');
+      _tr = parseInt(_h.substring(0, 2), 16);
+      _tg = parseInt(_h.substring(2, 4), 16);
+      _tb = parseInt(_h.substring(4, 6), 16);
+    }
+
     this.ctx.save();
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
@@ -10634,8 +10722,15 @@ export class RenderSystem {
         this.hoveredPlankSlot?.segmentIndex === seg.index;
 
       const _canAfford = !isHovered || this.ghostCanAfford;
-      const fillColor   = isHovered ? (_canAfford ? 'rgba(0, 230, 80, 0.70)' : 'rgba(230, 60, 40, 0.70)') : 'rgba(0, 180, 60, 0.35)';
-      const strokeColor = isHovered ? (_canAfford ? '#00ff55' : '#ff3333') : '#00cc44';
+      // Tier-tinted colours when a blueprint is selected; default green otherwise.
+      const fillColor   = isHovered
+        ? (_canAfford
+            ? `rgba(${_tr}, ${_tg}, ${_tb}, 0.70)`
+            : 'rgba(230, 60, 40, 0.70)')
+        : `rgba(${_tr}, ${_tg}, ${_tb}, ${_hasTier ? 0.45 : 0.35})`;
+      const strokeColor = isHovered
+        ? (_canAfford ? (_tierHex ?? '#00ff55') : '#ff3333')
+        : (_tierHex ?? '#00cc44');
       const lineWidth   = isHovered ? 2.5 : 1.5;
 
       this.ctx.fillStyle   = fillColor;
@@ -10656,14 +10751,15 @@ export class RenderSystem {
         );
         this.ctx.restore();
 
-        // Hovered: add a pulsing bright inner highlight
+        // Hovered: add a pulsing bright inner highlight (tier-tinted when blueprint active)
         if (isHovered) {
+          const _hlCol = _hasTier ? `rgba(${_tr},${_tg},${_tb},1)` : '#aaffcc';
           this.ctx.save();
           this.ctx.globalAlpha = 0.35;
           this.drawCurvedPlank(
             { start: seg.curveStart, control: seg.curveControl, end: seg.curveEnd, t1: seg.t1, t2: seg.t2 },
             seg.thickness * 0.5,
-            '#aaffcc',
+            _hlCol,
             'transparent'
           );
           this.ctx.globalAlpha = 1.0;
@@ -10687,7 +10783,7 @@ export class RenderSystem {
 
         if (isHovered) {
           this.ctx.globalAlpha = 0.35;
-          this.ctx.fillStyle = '#aaffcc';
+          this.ctx.fillStyle = _hasTier ? `rgba(${_tr},${_tg},${_tb},1)` : '#aaffcc';
           this.ctx.fillRect(-halfLen, -halfThick * 0.5, len, seg.thickness * 0.5);
           this.ctx.globalAlpha = 1.0;
         }
@@ -18726,8 +18822,11 @@ export class RenderSystem {
     // Quality tier — overrides name colour, accent bar and border when present
     const qt        = module.qualityTier;
     const hasQuality = typeof qt === 'number' && qt >= 1;
-    const qCol      = hasQuality ? tierColor(qt!) : null;
-    const qName     = hasQuality ? tierName(qt!)  : null;
+    // For missing plank slots, use the selected blueprint tier for accent colouring
+    const _ghostTier = (moduleData.kind === 'plank' && (moduleData as any).health === 0 && this.ghostPlankTier > 0)
+      ? this.ghostPlankTier : null;
+    const qCol      = hasQuality ? tierColor(qt!) : _ghostTier !== null ? tierColor(_ghostTier) : null;
+    const qName     = hasQuality ? tierName(qt!)  : _ghostTier !== null ? tierName(_ghostTier)  : null;
     const accentCol = qCol ?? meta.color;
     const borderCol = qCol ?? meta.border;
 
@@ -18748,10 +18847,19 @@ export class RenderSystem {
       const hp    = Math.round(moduleData.health);
       const maxHp = moduleData.maxHealth ?? 10000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
-      stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      if (!hasQuality) {
-        // Plain plank — show material-derived quality label
-        stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+      if (hp === 0) {
+        // Missing plank slot — show placement blueprint hint
+        if (this.ghostPlankTier > 0) {
+          stats.push({ label: 'Blueprint', value: tierName(this.ghostPlankTier), color: tierColor(this.ghostPlankTier) });
+        } else {
+          stats.push({ label: 'Blueprint', value: 'Standard' });
+        }
+      } else {
+        stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+        if (!hasQuality) {
+          // Plain placed plank — show material-derived quality label
+          stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+        }
       }
       if (moduleData.sectionName) stats.push({ label: 'Section', value: moduleData.sectionName });
     } else if (moduleData.kind === 'cannon') {
@@ -18826,6 +18934,9 @@ export class RenderSystem {
       if (typeof qt === 'number' && qt >= 1) {
         stats.push({ label: 'Tier Bonus', value: `+${qt * 10}% resist & dmg`, color: qCol! });
       }
+    } else if (_ghostTier !== null) {
+      // Missing plank slot with blueprint selected — show preview tier bonus
+      stats.push({ label: 'Tier Bonus', value: `+${_ghostTier * 10}% resist & dmg`, color: qCol! });
     }
 
     // Weight
@@ -18932,10 +19043,11 @@ export class RenderSystem {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'top';
 
-    // Name — tier-colored when quality, white otherwise
+    // Name — tier-colored when quality or blueprint selected for missing slot
     ctx.font      = 'bold 14px Georgia, serif';
     ctx.fillStyle = qCol ?? '#ffffff';
-    ctx.fillText(hasQuality ? `${qName} ${meta.name}` : meta.name, tx + PAD + 4, cy);
+    const _showQName = hasQuality || _ghostTier !== null;
+    ctx.fillText(_showQName ? `${qName} ${meta.name}` : meta.name, tx + PAD + 4, cy);
     cy += NAME_H + 4;
 
     // ID + kind
@@ -19289,9 +19401,10 @@ export class RenderSystem {
         }
       }
 
-      // Edge margin — module center must be at least module-radius inset from hull boundary
-      // Swivels are the exception: they mount on the rail within 2–30 px of the hull edge
-      if (valid) {
+      // Edge margin — module center must be at least module-radius inset from hull boundary.
+      // Planks and decks snap to fixed slots and never need a cursor-edge check.
+      // Swivels are the exception: they mount on the rail within 2–30 px of the hull edge.
+      if (valid && kind !== 'plank' && kind !== 'deck') {
         const edgeDist = PolygonUtils.distanceToPolygonEdge(Vec2.from(localX, localY), nearestShip.hull);
         if (kind === 'swivel') {
           if (edgeDist > 30) { valid = false; invalidReason = 'Must be on ship rail!'; }

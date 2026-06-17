@@ -245,6 +245,11 @@ typedef struct WorldNpc {
     uint16_t      oxygen;            // current oxygen (0–max_oxygen)
     uint16_t      max_oxygen;        // always 100
 
+    // ── Fractional accumulators — carry sub-unit drain/regen across 30 Hz ticks ──
+    float         stam_accum;        // fractional stamina drain carry
+    float         oxygen_accum;      // fractional oxygen drain/regen carry
+    float         suffoc_accum;      // fractional suffocation damage carry
+
     // ── Task lock ───────────────────────────────────────────────────────────
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.

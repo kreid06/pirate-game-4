@@ -43,6 +43,7 @@ interface GhostSpawn {
   level_max: number;
   count_min: number;
   count_max: number;
+  zone_cap: number;
   respawn_delay_s: number;
   active_count?: number;
 }
@@ -141,9 +142,10 @@ const $spY        = document.getElementById('sp-y')        as HTMLInputElement;
 const $spRadius   = document.getElementById('sp-radius')   as HTMLInputElement;
 const $spLvlMin   = document.getElementById('sp-lvl-min')  as HTMLInputElement;
 const $spLvlMax   = document.getElementById('sp-lvl-max')  as HTMLInputElement;
-const $spCntMin   = document.getElementById('sp-cnt-min')  as HTMLInputElement;
-const $spCntMax   = document.getElementById('sp-cnt-max')  as HTMLInputElement;
-const $spRespawn  = document.getElementById('sp-respawn')  as HTMLInputElement;
+const $spCntMin   = document.getElementById('sp-cnt-min')   as HTMLInputElement;
+const $spCntMax   = document.getElementById('sp-cnt-max')   as HTMLInputElement;
+const $spZoneCap  = document.getElementById('sp-zone-cap')  as HTMLInputElement;
+const $spRespawn  = document.getElementById('sp-respawn')   as HTMLInputElement;
 
 // Global cap + live count
 const $globalCap    = document.getElementById('global-cap')   as HTMLInputElement;
@@ -259,6 +261,7 @@ async function fetchWorld() {
         level_max:       s.level_max ?? 2,
         count_min:       s.count_min ?? 1,
         count_max:       s.count_max ?? 2,
+        zone_cap:        s.zone_cap  ?? 0,
         respawn_delay_s: s.respawn_delay_s ?? 120,
         active_count:    s.active_count ?? 0,
       })),
@@ -394,6 +397,7 @@ function selectSpawn(id: number | null) {
   $spLvlMax.value       = String(sp.level_max);
   $spCntMin.value       = String(sp.count_min);
   $spCntMax.value       = String(sp.count_max);
+  $spZoneCap.value      = String(sp.zone_cap ?? 0);
   $spRespawn.value      = String(sp.respawn_delay_s);
   refreshSpawnList();
 }
@@ -412,6 +416,7 @@ function applySpawnPanel() {
   sp.count_min       = clamp(parseInt($spCntMin.value)    || sp.count_min, 0, 10);
   sp.count_max       = clamp(parseInt($spCntMax.value)    || sp.count_max, 0, 10);
   if (sp.count_max < sp.count_min) sp.count_max = sp.count_min;
+  sp.zone_cap        = Math.max(0, parseInt($spZoneCap.value) || 0);
   sp.respawn_delay_s = clamp(parseFloat($spRespawn.value) || sp.respawn_delay_s, 10, 3600);
   refreshSpawnList();
   render();
@@ -438,6 +443,7 @@ function addSpawnAt(wx: number, wy: number) {
     level_max:       Math.max(1,   parseInt($defLvlMax.value)  || 3),
     count_min:       Math.max(0,   parseInt($defCntMin.value)  || 1),
     count_max:       Math.max(1,   parseInt($defCntMax.value)  || 2),
+    zone_cap:        0,
     respawn_delay_s: Math.max(10,  parseFloat($defRespawn.value) || 120),
     active_count:    0,
   };

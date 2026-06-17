@@ -887,6 +887,7 @@ typedef struct {
     float radius;
     int   level_min, level_max;
     int   count_min, count_max;
+    int   zone_cap;          /* hard per-zone ceiling (0 = same as count_max) */
     float respawn_delay_s;
     /* runtime */
     int   active_count;
@@ -1430,6 +1431,7 @@ void load_ghost_spawns(const char *path) {
         if (json_object_object_get_ex(e, "level_max",       &jv)) sp->level_max       = json_object_get_int(jv);
         if (json_object_object_get_ex(e, "count_min",       &jv)) sp->count_min       = json_object_get_int(jv);
         if (json_object_object_get_ex(e, "count_max",       &jv)) sp->count_max       = json_object_get_int(jv);
+        if (json_object_object_get_ex(e, "zone_cap",        &jv)) sp->zone_cap        = json_object_get_int(jv);
         if (json_object_object_get_ex(e, "respawn_delay_s", &jv)) sp->respawn_delay_s = (float)json_object_get_double(jv);
 
         /* Clamp */
@@ -1438,6 +1440,7 @@ void load_ghost_spawns(const char *path) {
         if (sp->level_max > 60) sp->level_max = 60;
         if (sp->count_min < 0) sp->count_min = 0;
         if (sp->count_max < sp->count_min) sp->count_max = sp->count_min;
+        if (sp->zone_cap < 0) sp->zone_cap = 0;
         if (sp->respawn_delay_s <= 0.0f) sp->respawn_delay_s = 60.0f;
         if (sp->radius <= 0.0f) sp->radius = 2000.0f;
 
@@ -1645,6 +1648,19 @@ static bool try_drain_spawn_queue(void) {
     if (ghost_global_max_cap > 0 && global_active >= ghost_global_max_cap) return false;
 
     SpawnQueueEntry e = spawn_queue[spawn_queue_head];
+
+    /* Enforce per-zone hard cap before we consume the queue entry */
+    if (e.spawn_idx >= 0 && e.spawn_idx < ghost_spawn_count) {
+        GhostSpawnPoint *_zsp = &ghost_spawns[e.spawn_idx];
+        int zone_hard_cap = _zsp->zone_cap > 0 ? _zsp->zone_cap : _zsp->count_max;
+        if (_zsp->active_count >= zone_hard_cap) {
+            /* Zone is at hard cap — discard this queued entry */
+            spawn_queue_head = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
+            spawn_queue_len--;
+            return false;
+        }
+    }
+
     spawn_queue_head  = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
     spawn_queue_len--;
 
@@ -1653,6 +1669,14 @@ static bool try_drain_spawn_queue(void) {
         int headroom = ghost_global_max_cap - global_active;
         if (headroom <= 0) return false;
         if (fleet_size > headroom) fleet_size = headroom;
+    }
+    /* Clamp fleet to zone hard cap headroom */
+    if (e.spawn_idx >= 0 && e.spawn_idx < ghost_spawn_count) {
+        GhostSpawnPoint *_zsp = &ghost_spawns[e.spawn_idx];
+        int zone_hard_cap = _zsp->zone_cap > 0 ? _zsp->zone_cap : _zsp->count_max;
+        int zone_headroom = zone_hard_cap - _zsp->active_count;
+        if (zone_headroom <= 0) return false;
+        if (fleet_size > zone_headroom) fleet_size = zone_headroom;
     }
 
     spawn_ghost_fleet(e.spawn_idx, fleet_size, e.level);
@@ -1722,6 +1746,14 @@ void tick_ghost_spawn_points(float dt) {
             if (fleet_size > headroom) fleet_size = headroom;
         }
 
+        /* Clamp to per-zone hard cap (zone_cap; falls back to count_max if unset) */
+        {
+            int zone_hard_cap = spn->zone_cap > 0 ? spn->zone_cap : spn->count_max;
+            int zone_headroom = zone_hard_cap - spn->active_count;
+            if (zone_headroom <= 0) continue;
+            if (fleet_size > zone_headroom) fleet_size = zone_headroom;
+        }
+
         global_active += fleet_size; /* optimistic accounting for subsequent zones */
         enqueue_spawn(sp, fleet_size, lvl);
     }
@@ -1753,13 +1785,13 @@ int ghost_spawns_to_json(char *buf, size_t buf_size) {
             "{\"id\":%d,\"label\":\"%s\","
             "\"x\":%.1f,\"y\":%.1f,\"radius\":%.1f,"
             "\"level_min\":%d,\"level_max\":%d,"
-            "\"count_min\":%d,\"count_max\":%d,"
+            "\"count_min\":%d,\"count_max\":%d,\"zone_cap\":%d,"
             "\"respawn_delay_s\":%.1f,"
             "\"active_count\":%d}",
             sp->id, sp->label,
             sp->x, sp->y, sp->radius,
             sp->level_min, sp->level_max,
-            sp->count_min, sp->count_max,
+            sp->count_min, sp->count_max, sp->zone_cap,
             sp->respawn_delay_s,
             sp->active_count);
         if (pos >= (int)buf_size - 4) return -1;

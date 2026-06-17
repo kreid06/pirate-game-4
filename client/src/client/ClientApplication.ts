@@ -4640,6 +4640,10 @@ export class ClientApplication {
             ? this._canAffordShipBuild(_effectiveKind)
             : true;
 
+        // Plank blueprint tier — drives ghost slot tint colour in drawMissingPlankGhosts.
+        this.renderSystem.ghostPlankTier =
+          this.uiManager.playerMenu.getVariantSchematic('plank')?.tier ?? 0;
+
         // Land build affordability — use ClientApplication.islandBuildMode directly
         // (RenderSystem.islandBuildKind is only set during the draw phase, too late)
         if (this.islandBuildMode || this.landBuildMenuOpen) {

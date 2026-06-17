@@ -285,6 +285,39 @@ static void grapple_detach(int slot) {
     grapple_hooks[slot].reel_out    = false;
 }
 
+/* ── Slim player snapshot — only the fields read by the blob worker. ─────────
+ * Omits schematics[128] (~1.8 KB/player, 175 KB/tick for 100 players) and all
+ * other per-player state that the blob serializer never touches.
+ */
+typedef struct {
+    bool             active;
+    uint32_t         player_id;
+    char             name[64];
+    float            x, y;
+    float            rotation;
+    float            velocity_x, velocity_y;
+    bool             is_moving;
+    float            movement_direction_x, movement_direction_y;
+    uint16_t         parent_ship_id;
+    float            local_x, local_y;
+    uint8_t          deck_level;
+    PlayerMovementState movement_state;
+    bool             is_mounted;
+    module_id_t      mounted_module_id;
+    uint16_t         controlling_ship_id;
+    uint8_t          company_id;
+    uint16_t         health, max_health;
+    uint16_t         stamina, max_stamina;
+    uint16_t         oxygen, max_oxygen;
+    uint32_t         on_island_id;
+    uint32_t         on_dock_id;
+    uint8_t          player_level;
+    uint32_t         player_xp;
+    uint8_t          stat_health, stat_damage, stat_stamina, stat_weight;
+    PlayerInventory  inventory;
+    uint16_t         res_wood, res_fiber, res_metal, res_stone;
+} BlobPlayer;
+
 /* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
  * Offloads non-authoritative JSON serialization from the main tick thread.
  * The authoritative simulation and send loop remain single-threaded.
@@ -297,7 +330,7 @@ typedef struct {
     int dynamic_company_count;
     int ship_count;
     SimpleShip ships[MAX_SIMPLE_SHIPS];
-    WebSocketPlayer players[WS_MAX_CLIENTS];
+    BlobPlayer players[WS_MAX_CLIENTS];   /* slim copy — no schematics[] */
     struct Ship sim_ships[MAX_SHIPS];
     uint16_t sim_ship_count;
     struct Projectile projectiles[MAX_PROJECTILES];
@@ -344,6 +377,27 @@ typedef struct {
     float npc_world_y[MAX_WORLD_NPCS];
     bool  npc_entry_active[MAX_WORLD_NPCS];
     int   npc_entry_count;
+
+    /* ── NPC dirty-flag caches ──────────────────────────────────────────────
+     * Compact key capturing every field written into npc_entry[n] JSON.
+     * If the key is unchanged from the last build, the snprintf is skipped
+     * and the previously built entry string is reused — saving ~640 B of
+     * string work per stationary NPC per tick. */
+    struct {
+        uint32_t id;
+        float    x, y, rotation;
+        uint32_t ship_id;
+        float    local_x, local_y;
+        uint32_t owner_player_id;
+        uint32_t assigned_weapon_id;
+        uint32_t xp;
+        uint16_t health, max_health;
+        uint8_t  state, role, company_id, deck_level;
+        uint8_t  npc_level;
+        uint8_t  stat_health, stat_damage, stat_stamina, stat_weight;
+        uint8_t  task_locked;
+        char     name[48];
+    } npc_key[MAX_WORLD_NPCS];
 } SharedBlobOutput;
 
 typedef struct {
@@ -1647,6 +1701,68 @@ static float player_inventory_weight(const WebSocketPlayer* p) {
     return w;
 }
 
+/* Copy the player fields needed by the blob worker into a BlobPlayer slot.
+ * Called from both the threaded submit path and the synchronous fallback. */
+static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
+    _dst->active               = _src->active;
+    _dst->player_id            = _src->player_id;
+    memcpy(_dst->name, _src->name, sizeof(_dst->name));
+    _dst->x                    = _src->x;
+    _dst->y                    = _src->y;
+    _dst->rotation             = _src->rotation;
+    _dst->velocity_x           = _src->velocity_x;
+    _dst->velocity_y           = _src->velocity_y;
+    _dst->is_moving            = _src->is_moving;
+    _dst->movement_direction_x = _src->movement_direction_x;
+    _dst->movement_direction_y = _src->movement_direction_y;
+    _dst->parent_ship_id       = _src->parent_ship_id;
+    _dst->local_x              = _src->local_x;
+    _dst->local_y              = _src->local_y;
+    _dst->deck_level           = _src->deck_level;
+    _dst->movement_state       = _src->movement_state;
+    _dst->is_mounted           = _src->is_mounted;
+    _dst->mounted_module_id    = _src->mounted_module_id;
+    _dst->controlling_ship_id  = _src->controlling_ship_id;
+    _dst->company_id           = _src->company_id;
+    _dst->health               = _src->health;
+    _dst->max_health           = _src->max_health;
+    _dst->stamina              = _src->stamina;
+    _dst->max_stamina          = _src->max_stamina;
+    _dst->oxygen               = _src->oxygen;
+    _dst->max_oxygen           = _src->max_oxygen;
+    _dst->on_island_id         = _src->on_island_id;
+    _dst->on_dock_id           = _src->on_dock_id;
+    _dst->player_level         = _src->player_level;
+    _dst->player_xp            = _src->player_xp;
+    _dst->stat_health          = _src->stat_health;
+    _dst->stat_damage          = _src->stat_damage;
+    _dst->stat_stamina         = _src->stat_stamina;
+    _dst->stat_weight          = _src->stat_weight;
+    _dst->inventory            = _src->inventory;
+    _dst->res_wood             = _src->res_wood;
+    _dst->res_fiber            = _src->res_fiber;
+    _dst->res_metal            = _src->res_metal;
+    _dst->res_stone            = _src->res_stone;
+}
+
+/* Same calculation over a BlobPlayer (slim snapshot copy used by the blob worker). */
+static float blob_player_inventory_weight(const BlobPlayer* p) {
+    float w = 0.0f;
+    for (int s = 0; s < INVENTORY_SLOTS; s++) {
+        unsigned kind = (unsigned)p->inventory.slots[s].item;
+        if (kind > 0 && kind < 64)
+            w += ITEM_WEIGHT_KG[kind] * (float)p->inventory.slots[s].quantity;
+    }
+#define _EQ(f) do { unsigned k=(unsigned)p->inventory.equipment.f; if(k>0&&k<64) w+=ITEM_WEIGHT_KG[k]; } while(0)
+    _EQ(helm); _EQ(torso); _EQ(legs); _EQ(feet); _EQ(hands); _EQ(shield);
+#undef _EQ
+    w += ITEM_WEIGHT_KG[ITEM_WOOD]  * (float)p->res_wood;
+    w += ITEM_WEIGHT_KG[ITEM_FIBER] * (float)p->res_fiber;
+    w += ITEM_WEIGHT_KG[ITEM_METAL] * (float)p->res_metal;
+    w += ITEM_WEIGHT_KG[ITEM_STONE] * (float)p->res_stone;
+    return w;
+}
+
 /**
  * Recompute ship->mass = base_mass + sum(player body + inventory) for all
  * players currently aboard.  Also writes the updated mass into the sim ship
@@ -2165,7 +2281,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                             (unsigned)snap->players[p].res_stone);
 
         /* Effective movement speed multiplier — accounts for carry weight. */
-        float _snap_inv_kg    = player_inventory_weight(&snap->players[p]);
+        float _snap_inv_kg    = blob_player_inventory_weight(&snap->players[p]);
         float _snap_carry_cap = 300.0f * (1.0f + (float)snap->players[p].stat_weight * 0.1f);
         float _snap_carry_r   = (_snap_carry_cap > 0.0f) ? (_snap_inv_kg / _snap_carry_cap) : 0.0f;
         float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
@@ -2302,34 +2418,89 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         const WorldNpc* npc = &snap->world_npcs[n];
         if (!npc->active) continue;
 
-        int _nlen = snprintf(out->npc_entry[n], sizeof(out->npc_entry[n]),
-            "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
-            "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-            "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
-            "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
-            "\"owner_id\":%u,"
-            "\"assigned_weapon_id\":%u,"
-            "\"deck_level\":%u,"
-            "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
-            "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-            "\"stat_points\":%u,\"locked\":%d}",
-            npc->id, npc->name,
-            npc->x, npc->y, npc->rotation,
-            npc->ship_id, npc->local_x, npc->local_y,
-            npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
-            npc->owner_player_id,
-            npc->assigned_weapon_id,
-            (unsigned)npc->deck_level,
-            (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
-            (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
-            (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
-                (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
-            (int)npc->task_locked);
-        if (_nlen < 0) _nlen = 0;
-        if (_nlen >= (int)sizeof(out->npc_entry[n]))
-            _nlen = (int)sizeof(out->npc_entry[n]) - 1;
-        out->npc_entry[n][_nlen] = '\0';
-        out->npc_entry_len[n] = _nlen;
+        /* Dirty-flag: skip snprintf if every serialized field is unchanged. */
+        __typeof__(out->npc_key[n]) *_k = &out->npc_key[n];
+        bool _dirty = (_k->id             != npc->id             ||
+                       _k->x              != npc->x              ||
+                       _k->y              != npc->y              ||
+                       _k->rotation       != npc->rotation       ||
+                       _k->ship_id        != npc->ship_id        ||
+                       _k->local_x        != npc->local_x        ||
+                       _k->local_y        != npc->local_y        ||
+                       _k->owner_player_id!= npc->owner_player_id||
+                       _k->assigned_weapon_id != npc->assigned_weapon_id ||
+                       _k->xp             != npc->xp             ||
+                       _k->health         != npc->health         ||
+                       _k->max_health     != npc->max_health     ||
+                       _k->state          != (uint8_t)npc->state ||
+                       _k->role           != (uint8_t)npc->role  ||
+                       _k->company_id     != npc->company_id     ||
+                       _k->deck_level     != (uint8_t)npc->deck_level ||
+                       _k->npc_level      != npc->npc_level      ||
+                       _k->stat_health    != npc->stat_health    ||
+                       _k->stat_damage    != npc->stat_damage    ||
+                       _k->stat_stamina   != npc->stat_stamina   ||
+                       _k->stat_weight    != npc->stat_weight    ||
+                       _k->task_locked    != (uint8_t)npc->task_locked ||
+                       strncmp(_k->name, npc->name, sizeof(_k->name)) != 0 ||
+                       out->npc_entry_len[n] == 0);
+
+        if (_dirty) {
+            int _nlen = snprintf(out->npc_entry[n], sizeof(out->npc_entry[n]),
+                "{\"id\":%u,\"name\":\"%s\",\"type\":0,"
+                "\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
+                "\"ship_id\":%u,\"local_x\":%.1f,\"local_y\":%.1f,"
+                "\"interact_radius\":%.1f,\"state\":%u,\"role\":%u,\"company\":%u,"
+                "\"owner_id\":%u,"
+                "\"assigned_weapon_id\":%u,"
+                "\"deck_level\":%u,"
+                "\"npc_level\":%u,\"health\":%u,\"max_health\":%u,\"xp\":%u,"
+                "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                "\"stat_points\":%u,\"locked\":%d}",
+                npc->id, npc->name,
+                npc->x, npc->y, npc->rotation,
+                npc->ship_id, npc->local_x, npc->local_y,
+                npc->interact_radius, (unsigned)npc->state, (unsigned)npc->role, (unsigned)npc->company_id,
+                npc->owner_player_id,
+                npc->assigned_weapon_id,
+                (unsigned)npc->deck_level,
+                (unsigned)npc->npc_level, (unsigned)npc->health, (unsigned)npc->max_health, npc->xp,
+                (unsigned)npc->stat_health, (unsigned)npc->stat_damage, (unsigned)npc->stat_stamina, (unsigned)npc->stat_weight,
+                (unsigned)((npc->npc_level > 0u ? (uint8_t)(npc->npc_level - 1u) : 0u) -
+                    (npc->stat_health + npc->stat_damage + npc->stat_stamina + npc->stat_weight)),
+                (int)npc->task_locked);
+            if (_nlen < 0) _nlen = 0;
+            if (_nlen >= (int)sizeof(out->npc_entry[n]))
+                _nlen = (int)sizeof(out->npc_entry[n]) - 1;
+            out->npc_entry[n][_nlen] = '\0';
+            out->npc_entry_len[n] = _nlen;
+
+            /* Update cached key */
+            _k->id              = npc->id;
+            _k->x               = npc->x;
+            _k->y               = npc->y;
+            _k->rotation        = npc->rotation;
+            _k->ship_id         = npc->ship_id;
+            _k->local_x         = npc->local_x;
+            _k->local_y         = npc->local_y;
+            _k->owner_player_id = npc->owner_player_id;
+            _k->assigned_weapon_id = npc->assigned_weapon_id;
+            _k->xp              = npc->xp;
+            _k->health          = npc->health;
+            _k->max_health      = npc->max_health;
+            _k->state           = (uint8_t)npc->state;
+            _k->role            = (uint8_t)npc->role;
+            _k->company_id      = npc->company_id;
+            _k->deck_level      = (uint8_t)npc->deck_level;
+            _k->npc_level       = npc->npc_level;
+            _k->stat_health     = npc->stat_health;
+            _k->stat_damage     = npc->stat_damage;
+            _k->stat_stamina    = npc->stat_stamina;
+            _k->stat_weight     = npc->stat_weight;
+            _k->task_locked     = (uint8_t)npc->task_locked;
+            strncpy(_k->name, npc->name, sizeof(_k->name) - 1);
+            _k->name[sizeof(_k->name) - 1] = '\0';
+        }
 
         float _nwx = npc->x, _nwy = npc->y;
         if (npc->ship_id != 0) {
@@ -2432,15 +2603,19 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 const ShipModule* module = &ship->modules[m];
                 if (module->type_id == MODULE_TYPE_PLANK) {
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                        "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d}",
+                        "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"qt\":%d,\"qd\":%u}",
                         m > 0 ? "," : "", module->id, module->type_id,
-                        (int)module->health, (int)module->target_health, (int)module->max_health);
+                        (int)module->health, (int)module->target_health, (int)module->max_health,
+                        module_quality_tier(module),
+                        (unsigned)module->quality.stat_mult_q8[STAT_DURABILITY]);
                 } else if (module->type_id == MODULE_TYPE_DECK) {
                     offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
-                        "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d,\"targetHealth\":%d,\"stateBits\":%u,\"deck_id\":%u}",
+                        "%s{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d,\"targetHealth\":%d,\"stateBits\":%u,\"deck_id\":%u,\"qt\":%d,\"qd\":%u}",
                         m > 0 ? "," : "", module->id, module->type_id,
                         (int)module->health, (int)module->max_health, (int)module->target_health,
-                        (unsigned)module->state_bits, (unsigned)module->deck_id);
+                        (unsigned)module->state_bits, (unsigned)module->deck_id,
+                        module_quality_tier(module),
+                        (unsigned)module->quality.stat_mult_q8[STAT_DURABILITY]);
                 } else {
                     float module_x = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.x));
                     float module_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(module->local_pos.y));
@@ -2774,7 +2949,8 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     g_blob_worker.job.dynamic_company_count = dynamic_company_count;
     g_blob_worker.job.ship_count = ship_count;
     memcpy(g_blob_worker.job.ships, ships, sizeof(ships));
-    memcpy(g_blob_worker.job.players, players, sizeof(players));
+    for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++)
+        copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
     g_blob_worker.job.sim_ship_count = 0;
     if (global_sim) {
         uint16_t _ss = global_sim->ship_count;
@@ -12416,7 +12592,8 @@ int websocket_server_update(struct Sim* sim) {
             _snap.dynamic_company_count = dynamic_company_count;
             _snap.ship_count = ship_count;
             memcpy(_snap.ships, ships, sizeof(ships));
-            memcpy(_snap.players, players, sizeof(players));
+            for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++)
+                copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
             _snap.sim_ship_count = 0;
             if (global_sim) {
                 uint16_t _ss = global_sim->ship_count;
@@ -14016,6 +14193,15 @@ void websocket_server_tick(float dt) {
                     }
                 }
 
+                /* ── Inventory weight — hoisted once per player per tick ──────────────
+                 * player_inventory_weight() would otherwise be called 3–5× in the
+                 * movement / stamina branches below with identical inputs.  Compute
+                 * once here so all branches share the cached result. */
+                float _ws_inv_kg   = player_inventory_weight(ws_player);
+                float _ws_carry_cap= 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
+                float _ws_carry_r  = (_ws_carry_cap > 0.0f) ? (_ws_inv_kg / _ws_carry_cap) : 0.0f;
+                bool  _ws_sprint_ok= (_ws_carry_r < 0.85f);
+
                 // Players who are mounted cannot move - they're locked to the module position
                 if (ws_player->is_dead) {
                     // Dead players cannot move; ensure movement state is cleared
@@ -14023,6 +14209,7 @@ void websocket_server_tick(float dt) {
                     ws_player->movement_direction_x = 0.0f;
                     ws_player->movement_direction_y = 0.0f;
                 } else {
+
                     /* ── Stamina drain (sprint / swim) / regen ──────────────────────────
                      * Sprint (walking): drain 40 ST/s while sprinting.
                      * Swimming:         drain 2 ST/s passively; regen is suppressed.
@@ -14037,16 +14224,7 @@ void websocket_server_tick(float dt) {
                         const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
                         uint32_t now_st = get_time_ms();
                         bool is_swimming = (ws_player->movement_state == PLAYER_STATE_SWIMMING);
-                        /* Mirror the weight gate used by the speed code: sprint is
-                         * only effective (and only drains stamina) when carrying
-                         * less than 85 % of capacity. Above that threshold the
-                         * client gets no speed bonus, so we must not drain stamina
-                         * either or holding Shift would waste the bar for nothing. */
-                        float _st_inv_kg    = player_inventory_weight(ws_player);
-                        float _st_cap       = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
-                        float _st_carry_r   = (_st_cap > 0.0f) ? (_st_inv_kg / _st_cap) : 0.0f;
-                        bool  _sprint_ok    = (_st_carry_r < 0.85f);
-                        if (ws_player->is_sprinting && ws_player->is_moving && !is_swimming && _sprint_ok) {
+                        if (ws_player->is_sprinting && ws_player->is_moving && !is_swimming && _ws_sprint_ok) {
                             /* Sprint drain — accumulate fractional ST so the per-second
                              * rate is honoured across 30 Hz ticks (dt ≈ 0.033). */
                             ws_player->stamina_accum += SPRINT_DRAIN_PER_S * dt;
@@ -14233,12 +14411,9 @@ void websocket_server_tick(float dt) {
                                 ship_world_to_local(_zship, ws_player->x, ws_player->y,
                                                     &ws_player->local_x, &ws_player->local_y);
                             }
-                            float _inv_kg_z    = player_inventory_weight(ws_player);
-                            float _carry_cap_z = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
-                            float _carry_r_z   = (_carry_cap_z > 0.0f) ? (_inv_kg_z / _carry_cap_z) : 0.0f;
-                            float _smult_z     = fmaxf(0.3f, 1.0f - _carry_r_z * 0.5f);
+                            float _smult_z = fmaxf(0.3f, 1.0f - _ws_carry_r * 0.5f);
                             float _zwalk = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _smult_z;
-                            if (ws_player->is_sprinting && _carry_r_z < 0.85f) _zwalk *= 2.0f;
+                            if (ws_player->is_sprinting && _ws_sprint_ok) _zwalk *= 2.0f;
                             /* Convert world-space input direction to ship-local space */
                             float _zcr =  cosf(_zship->rotation), _zsr = sinf(_zship->rotation);
                             float _zldx =  movement_x * _zcr + movement_y * _zsr;
@@ -14349,12 +14524,9 @@ void websocket_server_tick(float dt) {
                             
                             // Apply movement in local coordinates (direct velocity, not acceleration)
                             // Note: local_x/y are stored in CLIENT coordinates, so convert speed back to client
-                            float _inv_kg      = player_inventory_weight(ws_player);
-                            float _carry_cap   = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
-                            float _carry_ratio = (_carry_cap > 0.0f) ? (_inv_kg / _carry_cap) : 0.0f;
-                            float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
+                            float _speed_mult  = fmaxf(0.3f, 1.0f - _ws_carry_r * 0.5f);
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
-                            if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
+                            if (ws_player->is_sprinting && _ws_sprint_ok) walk_speed_client *= 2.0f;
 
                             /* Semi-authority: if the client reported a fresh world position, convert
                              * it to ship-local space and adopt it (speed-clamped) instead of
@@ -14503,12 +14675,9 @@ void websocket_server_tick(float dt) {
                             }
                         } else if (ws_player->on_island_id != 0) {
                             // ===== ISLAND WALKING (WORLD COORDINATES) =====
-                            float _inv_kg      = player_inventory_weight(ws_player);
-                            float _carry_cap   = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
-                            float _carry_ratio = (_carry_cap > 0.0f) ? (_inv_kg / _carry_cap) : 0.0f;
-                            float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
+                            float _speed_mult  = fmaxf(0.3f, 1.0f - _ws_carry_r * 0.5f);
                             float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
-                            if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
+                            if (ws_player->is_sprinting && _ws_sprint_ok) walk_speed_client *= 2.0f;
                             /* Semi-authority: adopt the client's reported world position (speed-clamped)
                              * when available, else integrate from direction. Collision/transition below
                              * runs on the result unchanged. */

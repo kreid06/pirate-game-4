@@ -53,10 +53,12 @@ export function itemDisplayName(itemId: number): string {
 
 /**
  * Format a q8 stat multiplier as a signed percentage (e.g. "+12%"), or null
- * when the stat does not apply to the item (q8 === 0).
+ * when the stat does not apply (q8 === 0) or has no bonus (q8 === 256 = 1.00×).
+ * Returning null for 256 prevents "+0%" labels from appearing on neutral base-value
+ * stats that happen to be tracked for the item type but carry no actual bonus.
  */
 export function statMultLabel(q8: number): string | null {
-  if (!q8) return null;
+  if (!q8 || q8 === 256) return null;
   const pct = Math.round((q8 / 256 - 1) * 100);
   return (pct >= 0 ? '+' : '') + pct + '%';
 }
