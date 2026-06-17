@@ -6628,6 +6628,18 @@ int websocket_server_update(struct Sim* sim) {
                                                     player->stamina = 0;
                                                     if (_sdmg >= player->health) {
                                                         player_die(player);
+                                                        /* Broadcast ENTITY_HIT so the dead player's
+                                                         * client opens the respawn screen. */
+                                                        {
+                                                            char _hit[256];
+                                                            snprintf(_hit, sizeof(_hit),
+                                                                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                                                                "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                                "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                                                                player->player_id, player->x, player->y,
+                                                                (unsigned)_sdmg, (unsigned)player->max_health);
+                                                            websocket_server_broadcast(_hit);
+                                                        }
                                                         goto sword_attack_done;
                                                     }
                                                     player->health -= _sdmg;
@@ -6829,6 +6841,18 @@ int websocket_server_update(struct Sim* sim) {
                                                     player->stamina = 0;
                                                     if (_mdmg >= player->health) {
                                                         player_die(player);
+                                                        /* Broadcast ENTITY_HIT so the dead player's
+                                                         * client opens the respawn screen. */
+                                                        {
+                                                            char _hit[256];
+                                                            snprintf(_hit, sizeof(_hit),
+                                                                "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                                                                "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                                                "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                                                                player->player_id, player->x, player->y,
+                                                                (unsigned)_mdmg, (unsigned)player->max_health);
+                                                            websocket_server_broadcast(_hit);
+                                                        }
                                                         goto sword_attack_done;
                                                     }
                                                     player->health -= _mdmg;
