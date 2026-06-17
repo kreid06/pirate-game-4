@@ -122,6 +122,8 @@ export interface ShipModule {
   qualityWeaponDmgQ8?: number;
   /** q8 sail-effectiveness multiplier (256=1.00x, 0=N/A). Present on masts. */
   qualitySailEffQ8?: number;
+  /** q8 durability/resistance multiplier (256=1.00x, 0=N/A). Present on planks/decks. */
+  qualityDurabilityQ8?: number;
   
   // Module-specific data (varies by kind)
   moduleData?: ModuleData;

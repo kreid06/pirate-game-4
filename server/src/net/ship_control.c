@@ -71,12 +71,24 @@ void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient*
         target_angle = 0.0f;    // Center rudder
     }
     
-    // Update simulation ship target rudder angle and reverse flag
+    // Update simulation ship target rudder angle and reverse flag.
+    // Reverse thrust is only permitted when all sails are fully closed.
     {
         struct Ship* _ss = find_sim_ship(ship->ship_id);
         if (_ss) _ss->target_rudder_angle = target_angle;
     }
-    ship->reverse_thrust = moving_backward;
+    if (moving_backward) {
+        /* Block reverse if any mast has openness > 0 */
+        bool sails_open = false;
+        for (uint8_t _m = 0; _m < ship->module_count && !sails_open; _m++) {
+            if (ship->modules[_m].type_id == MODULE_TYPE_MAST &&
+                ship->modules[_m].data.mast.openness > 0)
+                sails_open = true;
+        }
+        ship->reverse_thrust = !sails_open;
+    } else {
+        ship->reverse_thrust = false;
+    }
     
     // Send acknowledgment
     char response[256];

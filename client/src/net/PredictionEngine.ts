@@ -69,7 +69,8 @@ interface ServerStateEntry {
   worldState: WorldState;
   tick: number;
   timestamp: number;
-  receiveTime: number; // Client time when received
+  receiveTime: number; // Client time (performance.now) when received
+  serverTime: number;  // Server clock in ms (tick × SERVER_MS_PER_TICK) — monotonic, jitter-free
 }
 
 /**
@@ -99,6 +100,25 @@ export class PredictionEngine {
   // Server state buffer for interpolation
   private serverStateBuffer: ServerStateEntry[] = [];
   private static readonly MAX_SERVER_STATES = 10;
+
+  // ── Server-clock-locked interpolation timeline ──────────────────────────────
+  // Playback is paced on the server's own monotonic clock (derived from the snapshot
+  // `tick`, which the server sets to its get_time_ms()/33), NOT on packet ARRIVAL
+  // time. Arrival time carries network jitter, so using it stretches/compresses the
+  // interpolation alpha and makes remote ships micro-accelerate every frame. The
+  // server clock is regularly spaced, so interpolating against it is jitter-immune.
+  //
+  // serverClockOffset maps local→server time: serverTime ≈ localTime − serverClockOffset.
+  // Estimated as the MINIMUM observed (receiveTime − serverTime) so it locks onto the
+  // least-delayed packet (true offset), immune to per-packet jitter, then drifts slowly
+  // upward to follow genuine latency/clock skew increases.
+  private serverClockOffset: number | null = null;
+  private _lastClockSampleTime = 0;
+  // Server sends tick = get_time_ms()/33, so one tick = 33 ms of server time.
+  private static readonly SERVER_MS_PER_TICK = 33;
+  // Max upward drift of the clock offset (ms per second) when packets arrive later than
+  // the current estimate — slow enough to ignore jitter, fast enough to track real drift.
+  private static readonly CLOCK_DRIFT_MS_PER_S = 20;
   
   // Timing and lag compensation
   private clientTick = 0;
@@ -519,8 +539,12 @@ export class PredictionEngine {
       return this.authoritativeState;
     }
     
-    // Use interpolation buffer delay to smooth out network jitter
-    const renderTime = currentTime - this.config.interpolationBuffer;
+    // Render on the SERVER clock, not packet-arrival time. Map the local frame time
+    // into server-time via the jitter-immune offset, then step back by the buffer.
+    // Both the segment search and the alpha below use each snapshot's serverTime, so
+    // uneven packet arrival no longer distorts playback speed (the core of fix B).
+    const offset = this.serverClockOffset ?? 0;
+    const renderTime = (currentTime - offset) - this.config.interpolationBuffer;
     
     // Find two states to interpolate between
     let fromState: ServerStateEntry | null = null;
@@ -530,7 +554,7 @@ export class PredictionEngine {
       const current = this.serverStateBuffer[i];
       const next = this.serverStateBuffer[i + 1];
       
-      if (current.receiveTime <= renderTime && next.receiveTime >= renderTime) {
+      if (current.serverTime <= renderTime && next.serverTime >= renderTime) {
         fromState = current;
         toState = next;
         break;
@@ -548,8 +572,8 @@ export class PredictionEngine {
         // glide smoothly through the gap instead of freezing then snapping when
         // the next snapshot arrives. Cap at extrapolationLimit to avoid
         // diverging badly during a prolonged outage.
-        if (renderTime >= latestState.receiveTime) {
-          const staleDt = renderTime - latestState.receiveTime;
+        if (renderTime >= latestState.serverTime) {
+          const staleDt = renderTime - latestState.serverTime;
           if (staleDt > 0 && this.config.extrapolationLimit > 0) {
             const clampedDt = Math.min(staleDt, this.config.extrapolationLimit) / 1000;
             return this.extrapolateState(latestState.worldState, clampedDt);
@@ -558,9 +582,9 @@ export class PredictionEngine {
         }
         
         // If we're behind the buffer, use oldest state
-        if (renderTime < oldestState.receiveTime) {
+        if (renderTime < oldestState.serverTime) {
           if (Math.random() < 0.05) {
-            console.warn(`⚠️ Render time ${renderTime.toFixed(1)} behind oldest state ${oldestState.receiveTime.toFixed(1)} - buffer underrun`);
+            console.warn(`⚠️ Render time ${renderTime.toFixed(1)} behind oldest state ${oldestState.serverTime.toFixed(1)} - buffer underrun`);
           }
           return oldestState.worldState;
         }
@@ -568,17 +592,17 @@ export class PredictionEngine {
       return this.authoritativeState;
     }
     
-    // Calculate interpolation factor
-    const timeDelta = toState.receiveTime - fromState.receiveTime;
+    // Calculate interpolation factor from server-time spacing (regular, jitter-free).
+    const timeDelta = toState.serverTime - fromState.serverTime;
     if (timeDelta === 0) {
       return fromState.worldState;
     }
     
-    const alpha = (renderTime - fromState.receiveTime) / timeDelta;
+    const alpha = (renderTime - fromState.serverTime) / timeDelta;
     
-    // Debug: Log abnormal time deltas (server updates should be ~50ms at 20Hz)
-    if ((timeDelta < 30 || timeDelta > 100) && Math.random() < 0.02) {
-      console.warn(`⚠️ Unusual server update interval: ${timeDelta.toFixed(1)}ms (expected ~50ms at 20Hz)`);
+    // Debug: Log abnormal time deltas (server snapshots are 33–200ms apart at 5–30Hz)
+    if ((timeDelta < 30 || timeDelta > 220) && Math.random() < 0.02) {
+      console.warn(`⚠️ Unusual server snapshot interval: ${timeDelta.toFixed(1)}ms`);
     }
     
     // Be conservative with alpha - stay within known data
@@ -624,11 +648,30 @@ export class PredictionEngine {
    * Add server state to interpolation buffer
    */
   private addServerState(worldState: WorldState): void {
+    const receiveTime = performance.now();
+    // Server clock for this snapshot, reconstructed from its tick (= server get_time_ms()/33).
+    const serverTime = worldState.tick * PredictionEngine.SERVER_MS_PER_TICK;
+
+    // Maintain the local→server clock offset via min-tracking (least-delayed packet
+    // defines the true offset; jitter only ever adds delay). Snap down to any new
+    // minimum immediately, otherwise drift up slowly to follow real latency growth.
+    const sample = receiveTime - serverTime;
+    if (this.serverClockOffset === null || sample < this.serverClockOffset) {
+      this.serverClockOffset = sample;
+    } else {
+      const dtSec = this._lastClockSampleTime > 0
+        ? (receiveTime - this._lastClockSampleTime) / 1000 : 0;
+      const maxDrift = PredictionEngine.CLOCK_DRIFT_MS_PER_S * dtSec;
+      this.serverClockOffset += Math.min(sample - this.serverClockOffset, maxDrift);
+    }
+    this._lastClockSampleTime = receiveTime;
+
     const entry: ServerStateEntry = {
       worldState: this.cloneWorldState(worldState),
       tick: worldState.tick,
       timestamp: worldState.timestamp,
-      receiveTime: performance.now()
+      receiveTime,
+      serverTime,
     };
     
     this.serverStateBuffer.push(entry);

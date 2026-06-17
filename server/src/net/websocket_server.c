@@ -1127,6 +1127,38 @@ static bool ws_player_walk_target(WebSocketPlayer* p,
     return false;
 }
 
+/* Check if world position (x, y) is inside any island and, if so, set the player's
+ * on_island_id + WALKING state.  Returns true when a landing was found.
+ * Called at every dock/ship exit so the player doesn't oscillate in SWIMMING when
+ * they step directly from a dock/ship hull onto adjacent island shore. */
+static bool player_try_land_on_island(WebSocketPlayer *p, float x, float y) {
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        float dx = x - isl->x, dy = y - isl->y;
+        float ds = dx * dx + dy * dy;
+        bool on;
+        if (isl->vertex_count > 0) {
+            on = (ds < isl->poly_bound_r * isl->poly_bound_r)
+              && island_poly_contains(isl, x, y);
+        } else {
+            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+            if (ds >= broad_r * broad_r) { on = false; }
+            else {
+                float angle = atan2f(dy, dx);
+                float nr = island_boundary_r(isl->beach_radius_px,
+                                             isl->beach_bumps, angle);
+                on = (ds < nr * nr);
+            }
+        }
+        if (on) {
+            p->on_island_id    = (uint32_t)isl->id;
+            p->movement_state  = PLAYER_STATE_WALKING;
+            return true;
+        }
+    }
+    return false;
+}
+
 static void resolve_player_hull_containment(const SimpleShip* ship,
                                             float* new_local_x, float* new_local_y)
 {
@@ -2473,6 +2505,18 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->data.chest.fiber,
                             (unsigned)module->data.chest.metal,
                             (unsigned)module->data.chest.stone);
+                    } else if (module->type_id == MODULE_TYPE_PLANK ||
+                               module->type_id == MODULE_TYPE_DECK) {
+                        /* Planks and decks send quality tier + durability multiplier so the
+                         * client can display blueprint quality in hover tooltips and menus. */
+                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                            "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d,\"qd\":%u}",
+                            m > 0 ? "," : "", module->id, module->type_id,
+                            module_x, module_y, module_rot, (unsigned)module->state_bits,
+                            (int)module->health, (int)module->max_health,
+                            (unsigned)module->deck_id,
+                            module_quality_tier(module),
+                            (unsigned)module->quality.stat_mult_q8[STAT_DURABILITY]);
                     } else {
                         offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
                             "%s{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
@@ -7560,6 +7604,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 log_info("🔨 Player %u placed deck (level %u) on ship %u",
                                                          player->player_id, (unsigned)req_deck_lvl, sim_ship->id);
+                                                send_schematic_list(player, client);
                                                 strcpy(response, "{\"type\":\"message_ack\",\"status\":\"deck_placed\"}");
                                             }
                                         }
@@ -8361,6 +8406,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                                 log_info("🔨 Player %u placed plank %u (seq=%u slot=%d) on ship %u",
                                                          player->player_id, plank_id, ship_seq, missing_idx, sim_ship->id);
+                                                send_schematic_list(player, client);
                                                 snprintf(response, sizeof(response),
                                                     "{\"type\":\"message_ack\",\"status\":\"plank_placed\",\"plank_id\":%u}",
                                                     plank_id);
@@ -8806,11 +8852,12 @@ int websocket_server_update(struct Sim* sim) {
                                             // closer to the current aim angle than their current post.
                                             update_npc_cannon_sector(simple, simple->active_aim_angle);
 
-                                            log_info("🔨 Player %u placed cannon %u at (%.1f,%.1f) rot=%.2f on ship %u",
-                                                     player->player_id, new_id, local_x, local_y, rotation, sim_ship->id);
-                                            snprintf(response, sizeof(response),
-                                                "{\"type\":\"message_ack\",\"status\":\"cannon_placed_at\",\"cannon_id\":%u}",
-                                                new_id);
+                                             log_info("🔨 Player %u placed cannon %u at (%.1f,%.1f) rot=%.2f on ship %u",
+                                                      player->player_id, new_id, local_x, local_y, rotation, sim_ship->id);
+                                             send_schematic_list(player, client);
+                                             snprintf(response, sizeof(response),
+                                                 "{\"type\":\"message_ack\",\"status\":\"cannon_placed_at\",\"cannon_id\":%u}",
+                                                 new_id);
                                             } /* end overlap-check else */
                                         }
                                     }
@@ -8924,6 +8971,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                             log_info("⛵ Player %u placed mast %u at (%.1f,%.1f) on ship %u",
                                                      player->player_id, new_id, local_x, local_y, sim_ship->id);
+                                            send_schematic_list(player, client);
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"mast_placed_at\",\"mast_id\":%u}",
                                                 new_id);
@@ -13969,13 +14017,13 @@ void websocket_server_tick(float dt) {
                 } else {
                     /* ── Stamina drain (sprint / swim) / regen ──────────────────────────
                      * Sprint (walking): drain 40 ST/s while sprinting.
-                     * Swimming:         drain 1 ST/s passively; regen is suppressed.
+                     * Swimming:         drain 2 ST/s passively; regen is suppressed.
                      * Regen:            20%/s of max, delayed 2 s after last use,
                      *                   blocked entirely while in water.
                      * Cancel sprint immediately if stamina hits 0. */
                     {
                         const float SPRINT_DRAIN_PER_S  = 40.0f;
-                        const float SWIM_DRAIN_PER_S    =  1.0f;
+                        const float SWIM_DRAIN_PER_S    =  2.0f;
                         /* Regen at 20% of max_stamina per second — scales with upgrades */
                         const float STAMINA_REGEN_PCT_PER_S = 0.20f;
                         const uint32_t STAMINA_REGEN_DELAY_MS = 2000u;
@@ -13991,68 +14039,111 @@ void websocket_server_tick(float dt) {
                         float _st_carry_r   = (_st_cap > 0.0f) ? (_st_inv_kg / _st_cap) : 0.0f;
                         bool  _sprint_ok    = (_st_carry_r < 0.85f);
                         if (ws_player->is_sprinting && ws_player->is_moving && !is_swimming && _sprint_ok) {
-                            /* Sprint drain */
-                            uint16_t drain = (uint16_t)(SPRINT_DRAIN_PER_S * dt + 0.5f);
-                            if (drain >= ws_player->stamina) {
-                                ws_player->stamina = 0;
-                                ws_player->is_sprinting = false; /* cancel sprint */
-                            } else {
-                                ws_player->stamina -= drain;
+                            /* Sprint drain — accumulate fractional ST so the per-second
+                             * rate is honoured across 30 Hz ticks (dt ≈ 0.033). */
+                            ws_player->stamina_accum += SPRINT_DRAIN_PER_S * dt;
+                            uint16_t drain = (uint16_t)ws_player->stamina_accum;
+                            if (drain > 0) {
+                                ws_player->stamina_accum -= (float)drain;
+                                if (drain >= ws_player->stamina) {
+                                    ws_player->stamina = 0;
+                                    ws_player->is_sprinting = false; /* cancel sprint */
+                                } else {
+                                    ws_player->stamina -= drain;
+                                }
                             }
                             ws_player->stamina_last_used_ms = now_st;
                         } else if (is_swimming && ws_player->stamina > 0) {
-                            /* Swimming drain — continuous 1 ST/s regardless of movement */
-                            uint16_t swim_drain = (uint16_t)(SWIM_DRAIN_PER_S * dt + 0.5f);
-                            if (swim_drain < 1) swim_drain = 1;
-                            ws_player->stamina = (swim_drain >= ws_player->stamina)
-                                ? 0 : (uint16_t)(ws_player->stamina - swim_drain);
+                            /* Swimming drain — continuous 2 ST/s regardless of movement */
+                            ws_player->stamina_accum += SWIM_DRAIN_PER_S * dt;
+                            uint16_t swim_drain = (uint16_t)ws_player->stamina_accum;
+                            if (swim_drain > 0) {
+                                ws_player->stamina_accum -= (float)swim_drain;
+                                ws_player->stamina = (swim_drain >= ws_player->stamina)
+                                    ? 0 : (uint16_t)(ws_player->stamina - swim_drain);
+                            }
                             ws_player->stamina_last_used_ms = now_st; /* block regen */
                         } else if (!is_swimming
                                    && ws_player->stamina < ws_player->max_stamina
                                    && (now_st - ws_player->stamina_last_used_ms) >= STAMINA_REGEN_DELAY_MS) {
                             /* Regen only on land/ship, after delay */
                             float regen_per_s = STAMINA_REGEN_PCT_PER_S * (float)ws_player->max_stamina;
-                            uint16_t gain = (uint16_t)(regen_per_s * dt + 0.5f);
-                            if (gain < 1) gain = 1; /* always regen at least 1 per tick */
-                            uint32_t newSt = (uint32_t)ws_player->stamina + gain;
-                            ws_player->stamina = (newSt > ws_player->max_stamina)
-                                ? ws_player->max_stamina : (uint16_t)newSt;
+                            ws_player->stamina_accum += regen_per_s * dt;
+                            uint16_t gain = (uint16_t)ws_player->stamina_accum;
+                            if (gain > 0) {
+                                ws_player->stamina_accum -= (float)gain;
+                                uint32_t newSt = (uint32_t)ws_player->stamina + gain;
+                                ws_player->stamina = (newSt > ws_player->max_stamina)
+                                    ? ws_player->max_stamina : (uint16_t)newSt;
+                            }
+                        } else {
+                            /* Idle (no drain, no regen yet) — let the accumulator settle so
+                             * the next drain/regen starts cleanly without a stale carry. */
+                            ws_player->stamina_accum = 0.0f;
                         }
 
                     /* ── Oxygen drain / suffocation / regen ──────────────────────────────
-                     * Oxygen drains at 5/s while swimming with stamina = 0.
+                     * Oxygen drains at 4/s while swimming with stamina = 0.
                      * At 0 oxygen the player takes 10 HP/s suffocation damage.
-                     * Oxygen refills at 20/s when not in the water. */
+                     * Oxygen refills at 20/s when not in the water.
+                     * Rates accumulate fractionally so they're honoured across 30 Hz
+                     * ticks (dt ≈ 0.033) rather than firing a full unit every tick. */
                     {
-                        const float OXYGEN_DRAIN_PER_S  =  5.0f;
+                        const float OXYGEN_DRAIN_PER_S  =  4.0f;
                         const float OXYGEN_REGEN_PER_S  = 20.0f;
                         const float SUFFOC_DAMAGE_PER_S = 10.0f;
 
                         if (is_swimming && ws_player->stamina == 0) {
-                            /* Drain oxygen */
-                            uint16_t o_drain = (uint16_t)(OXYGEN_DRAIN_PER_S * dt + 0.5f);
-                            if (o_drain < 1) o_drain = 1;
-                            if (o_drain >= ws_player->oxygen) {
-                                ws_player->oxygen = 0;
-                                /* Suffocation damage */
-                                uint16_t suf_dmg = (uint16_t)(SUFFOC_DAMAGE_PER_S * dt + 0.5f);
-                                if (suf_dmg < 1) suf_dmg = 1;
-                                if (suf_dmg >= ws_player->health) {
-                                    player_die(ws_player);
-                                } else {
-                                    ws_player->health     -= suf_dmg;
-                                    ws_player->last_damage_ms = now_st;
+                            if (ws_player->oxygen > 0) {
+                                /* Drain oxygen */
+                                ws_player->oxygen_accum += OXYGEN_DRAIN_PER_S * dt;
+                                uint16_t o_drain = (uint16_t)ws_player->oxygen_accum;
+                                if (o_drain > 0) {
+                                    ws_player->oxygen_accum -= (float)o_drain;
+                                    ws_player->oxygen = (o_drain >= ws_player->oxygen)
+                                        ? 0 : (uint16_t)(ws_player->oxygen - o_drain);
                                 }
                             } else {
-                                ws_player->oxygen -= o_drain;
+                                /* Suffocation damage at 0 oxygen */
+                                ws_player->suffoc_accum += SUFFOC_DAMAGE_PER_S * dt;
+                                uint16_t suf_dmg = (uint16_t)ws_player->suffoc_accum;
+                                if (suf_dmg > 0) {
+                                    ws_player->suffoc_accum -= (float)suf_dmg;
+                                    ws_player->last_damage_ms = now_st;
+                                    if (suf_dmg >= ws_player->health) {
+                                        ws_player->health = 0;
+                                        player_die(ws_player);
+                                        /* Broadcast ENTITY_HIT killed=true so the client opens
+                                         * the respawn screen (same as every other lethal hit). */
+                                        char drown_msg[256];
+                                        snprintf(drown_msg, sizeof(drown_msg),
+                                            "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                                            "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                                            "\"damage\":%u,\"health\":0,\"maxHealth\":%u,"
+                                            "\"killed\":true}",
+                                            ws_player->player_id, ws_player->x, ws_player->y,
+                                            (unsigned)suf_dmg, (unsigned)ws_player->max_health);
+                                        websocket_server_broadcast(drown_msg);
+                                    } else {
+                                        ws_player->health -= suf_dmg;
+                                    }
+                                }
                             }
                         } else if (!is_swimming && ws_player->oxygen < ws_player->max_oxygen) {
                             /* Regen oxygen when back on land / ship */
-                            uint16_t o_gain = (uint16_t)(OXYGEN_REGEN_PER_S * dt + 0.5f);
-                            if (o_gain < 1) o_gain = 1;
-                            uint32_t newO = (uint32_t)ws_player->oxygen + o_gain;
-                            ws_player->oxygen = (newO > ws_player->max_oxygen)
-                                ? ws_player->max_oxygen : (uint16_t)newO;
+                            ws_player->oxygen_accum += OXYGEN_REGEN_PER_S * dt;
+                            uint16_t o_gain = (uint16_t)ws_player->oxygen_accum;
+                            if (o_gain > 0) {
+                                ws_player->oxygen_accum -= (float)o_gain;
+                                uint32_t newO = (uint32_t)ws_player->oxygen + o_gain;
+                                ws_player->oxygen = (newO > ws_player->max_oxygen)
+                                    ? ws_player->max_oxygen : (uint16_t)newO;
+                            }
+                            ws_player->suffoc_accum = 0.0f;
+                        } else {
+                            /* Not draining or regenerating — settle carries. */
+                            ws_player->oxygen_accum = 0.0f;
+                            ws_player->suffoc_accum = 0.0f;
                         }
                     }
                     }
@@ -14229,7 +14320,14 @@ void websocket_server_tick(float dt) {
                                 sim_player->relative_pos.y = 0;
                                 sim_player->velocity.x     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(movement_x * _zwalk));
                                 sim_player->velocity.y     = Q16_FROM_FLOAT(CLIENT_TO_SERVER(movement_y * _zwalk));
-                                log_info("🌊 P%u left shipyard zone into water", ws_player->player_id);
+                                /* Immediately check island: shipyard may sit against island shore */
+                                if (player_try_land_on_island(ws_player, _znwx, _znwy)) {
+                                    sim_player->velocity.x = 0;
+                                    sim_player->velocity.y = 0;
+                                    log_info("🏝️ P%u stepped from shipyard zone onto island", ws_player->player_id);
+                                } else {
+                                    log_info("🌊 P%u left shipyard zone into water", ws_player->player_id);
+                                }
                             }
                         } else if (on_ship && player_ship) {
                             // ===== ON-SHIP MOVEMENT (LOCAL COORDINATES) =====
@@ -14365,11 +14463,13 @@ void websocket_server_tick(float dt) {
                                     }
                                     if (!_onto_dock) {
                                         dismount_player_from_ship(ws_player, "walked_off_deck");
-                                        // Continue movement in water (set velocity to swim at max speed in movement direction)
-                                        ws_player->velocity_x = movement_x * SWIM_MAX_SPEED;
-                                        ws_player->velocity_y = movement_y * SWIM_MAX_SPEED;
-                                        // Clear simulation ship_id (now swimming)
                                         sim_player->ship_id = INVALID_ENTITY_ID;
+                                        /* Check if the hull exit landed on island shore */
+                                        if (!player_try_land_on_island(ws_player, ws_player->x, ws_player->y)) {
+                                            /* Not on island — swim away from the hull */
+                                            ws_player->velocity_x = movement_x * SWIM_MAX_SPEED;
+                                            ws_player->velocity_y = movement_y * SWIM_MAX_SPEED;
+                                        }
                                     }
                                 }
                             } else {
@@ -14591,6 +14691,11 @@ void websocket_server_tick(float dt) {
                                         CLIENT_TO_SERVER(movement_x * walk_speed_client));
                                     sim_player->velocity.y = Q16_FROM_FLOAT(
                                         CLIENT_TO_SERVER(movement_y * walk_speed_client));
+                                    /* Dock may be against island shore — land immediately if so */
+                                    if (player_try_land_on_island(ws_player, new_x, new_y)) {
+                                        sim_player->velocity.x = 0;
+                                        sim_player->velocity.y = 0;
+                                    }
                                 } else {
                                     dock_apply_player_collision(dock_sy, 8.0f, _hs, &new_x, &new_y);
                                     sim_player->velocity.x = 0;
@@ -14625,7 +14730,10 @@ void websocket_server_tick(float dt) {
                              * position delta so drag/deceleration still apply when the player
                              * releases keys. Falls back to legacy acceleration when no fresh
                              * position is available. */
-                            float _swim_speed_client = SERVER_TO_CLIENT(SWIM_MAX_SPEED);
+                            /* Half speed when stamina is depleted — exhausted swimmers struggle. */
+                            const float _eff_swim_speed = (ws_player->stamina == 0)
+                                ? SWIM_MAX_SPEED * 0.5f : SWIM_MAX_SPEED;
+                            float _swim_speed_client = SERVER_TO_CLIENT(_eff_swim_speed);
                             float _sw_new_x, _sw_new_y;
                             bool _sw_adopted = ws_player_walk_target(ws_player, movement_x, movement_y,
                                                                      _swim_speed_client, dt,
@@ -14647,10 +14755,10 @@ void websocket_server_tick(float dt) {
                                  * has the correct speed when the player stops. */
                                 float _sv_x = CLIENT_TO_SERVER(_sw_new_x - ws_player->x) / (dt > 0.0001f ? dt : 0.0001f);
                                 float _sv_y = CLIENT_TO_SERVER(_sw_new_y - ws_player->y) / (dt > 0.0001f ? dt : 0.0001f);
-                                /* Clamp derived velocity to SWIM_MAX_SPEED (rounding guard). */
+                                /* Clamp derived velocity to effective swim speed (rounding guard). */
                                 float _sv_spd = sqrtf(_sv_x * _sv_x + _sv_y * _sv_y);
-                                if (_sv_spd > SWIM_MAX_SPEED && _sv_spd > 1e-4f) {
-                                    float _sv_sc = SWIM_MAX_SPEED / _sv_spd;
+                                if (_sv_spd > _eff_swim_speed && _sv_spd > 1e-4f) {
+                                    float _sv_sc = _eff_swim_speed / _sv_spd;
                                     _sv_x *= _sv_sc;
                                     _sv_y *= _sv_sc;
                                 }
@@ -14669,8 +14777,8 @@ void websocket_server_tick(float dt) {
                                 float current_vx    = Q16_TO_FLOAT(sim_player->velocity.x);
                                 float current_vy    = Q16_TO_FLOAT(sim_player->velocity.y);
                                 float current_speed = sqrtf(current_vx * current_vx + current_vy * current_vy);
-                                if (current_speed > SWIM_MAX_SPEED) {
-                                    float scale = SWIM_MAX_SPEED / current_speed;
+                                if (current_speed > _eff_swim_speed) {
+                                    float scale = _eff_swim_speed / current_speed;
                                     sim_player->velocity.x = Q16_FROM_FLOAT(current_vx * scale);
                                     sim_player->velocity.y = Q16_FROM_FLOAT(current_vy * scale);
                                 }
@@ -14740,9 +14848,11 @@ void websocket_server_tick(float dt) {
                 }
                 
                 // Copy simulation position BACK to WebSocket player for rendering (scale to client coords)
-                // BUT: For players on ships, their world position is calculated from local coords + ship transform
-                // So we only copy back position for swimming players
-                if (!on_ship) {
+                // BUT: For players on ships, their world position is calculated from local coords + ship transform.
+                // Re-evaluate from parent_ship_id rather than the stale on_ship flag captured at tick-start:
+                // dismount_player_from_ship() may have cleared parent_ship_id mid-tick (e.g. walked off deck),
+                // in which case on_ship would still be true and block island/dock detection for a full tick.
+                if (ws_player->parent_ship_id == 0) {
                     ws_player->x = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.x));
                     ws_player->y = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_player->position.y));
                     /* ── World wrap (toroidal map) ──────────────────────────────────── */
@@ -14879,6 +14989,7 @@ void websocket_server_tick(float dt) {
                         if (!_dk || _dk->type != STRUCT_SHIPYARD) {
                             ws_player->on_dock_id = 0;
                             ws_player->movement_state = PLAYER_STATE_SWIMMING;
+                            player_try_land_on_island(ws_player, wx, wy);
                         } else {
                             float _dlx, _dly;
                             dock_world_to_local(_dk, wx, wy, &_dlx, &_dly);
@@ -14887,7 +14998,12 @@ void websocket_server_tick(float dt) {
                                 uint32_t _did = ws_player->on_dock_id;
                                 ws_player->on_dock_id = 0;
                                 ws_player->movement_state = PLAYER_STATE_SWIMMING;
-                                log_info("🌊 Player %u left dock %u", ws_player->player_id, _did);
+                                if (player_try_land_on_island(ws_player, wx, wy)) {
+                                    log_info("🏝️ Player %u stepped from dock %u onto island",
+                                             ws_player->player_id, _did);
+                                } else {
+                                    log_info("🌊 Player %u left dock %u", ws_player->player_id, _did);
+                                }
                             }
                         }
                     }
@@ -14976,28 +15092,14 @@ void websocket_server_tick(float dt) {
                 if (ship->company_id == COMPANY_GHOST) continue;
                 uint8_t desired = ship->desired_sail_openness;
 
-                /* Determine whether this ship has at least one NPC-manned mast.
-                 * If so, only manned masts respond to player sail control —
-                 * unmanned masts stay put.  When no mast is manned all masts
-                 * respond gradually so the ship can sail without crew. */
-                bool any_mast_manned = false;
-                for (uint8_t m = 0; m < ship->module_count; m++) {
-                    if (ship->modules[m].type_id == MODULE_TYPE_MAST &&
-                        is_mast_manned((uint16_t)ship->id, ship->modules[m].id)) {
-                        any_mast_manned = true;
-                        break;
-                    }
-                }
-
                 // For each mast on the ship, gradually adjust to desired openness.
-                // NPC riggers (via tick_npc_agents) give an instant response;
-                // unmanned masts are adjusted here at the same gradual rate
-                // only when no NPC is manning any mast on this ship.
+                // Sails only respond when a WorldNpc rigger is actively manning the
+                // mast — unmanned masts (and ships with no crew at all) stay frozen.
+                // NpcAgent riggers handle their own masts via tick_npc_agents.
                 for (uint8_t m = 0; m < ship->module_count; m++) {
                     if (ship->modules[m].type_id == MODULE_TYPE_MAST) {
-                        /* Skip unmanned masts when another mast is manned */
-                        if (any_mast_manned &&
-                            !is_mast_manned((uint16_t)ship->id, ship->modules[m].id))
+                        /* Only masts actively manned by a WorldNpc rigger respond. */
+                        if (!is_mast_manned((uint16_t)ship->id, ship->modules[m].id))
                             continue;
 
                         uint8_t current = ship->modules[m].data.mast.openness;

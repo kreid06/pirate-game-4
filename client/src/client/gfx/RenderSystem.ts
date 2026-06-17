@@ -11293,9 +11293,8 @@ export class RenderSystem {
     if (this._playerDeckLevel !== 1) return; // fixed cannon slots are upper-deck (deck_id=1)
 
     for (const ship of worldState.ships) {
-      const helm = ship.modules.find(m => m.kind === 'helm');
-      if (!helm) continue;
-      const base = helm.id;
+      const base = this._shipModuleBase(ship);
+      if (base === null) continue;
 
       const presentIds = new Set<number>();
       for (const m of ship.modules) presentIds.add(m.id);
@@ -11370,6 +11369,22 @@ export class RenderSystem {
   }
 
   /**
+   * Compute the helm-relative base ID for slot math without requiring the helm to be present.
+   *
+   * All module IDs are encoded as  (ship_seq << 8) | offset.  The helm is always at offset
+   * 0x02.  We can reconstruct the correct base from ANY module on the ship:
+   *   base = (anyModule.id & 0xFF00) | 0x02
+   *
+   * Returns null only when the ship has no modules at all (brand-new, pre-init state).
+   */
+  private _shipModuleBase(ship: Ship): number | null {
+    const helm = ship.modules.find(m => m.kind === 'helm');
+    if (helm) return helm.id;
+    if (ship.modules.length > 0) return (ship.modules[0].id & 0xFF00) | 0x02;
+    return null;
+  }
+
+  /**
    * Draw ghost outlines at missing cannon positions (cannon build mode).
    * @param gunportOnly When true, skip the fixed-position helm-offset slots and only draw
    *   ghost cannons at gunport snap positions (used in gunport build mode preview).
@@ -11377,9 +11392,8 @@ export class RenderSystem {
   private drawMissingCannonGhosts(ship: Ship, camera: Camera, gunportOnly = false): void {
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
-    const helm = ship.modules.find(m => m.kind === 'helm');
-    if (!helm) return;
-    const base = helm.id;
+    const base = this._shipModuleBase(ship);
+    if (base === null) return;
 
     const presentIds = new Set<number>();
     for (const m of ship.modules) presentIds.add(m.id);
@@ -11526,9 +11540,8 @@ export class RenderSystem {
     if (!this.mouseWorldPos) return;
 
     for (const ship of worldState.ships) {
-      const helm = ship.modules.find(m => m.kind === 'helm');
-      if (!helm) continue;
-      const base = helm.id;
+      const base = this._shipModuleBase(ship);
+      if (base === null) continue;
 
       const presentIds = new Set<number>();
       for (const m of ship.modules) presentIds.add(m.id);
@@ -11566,9 +11579,8 @@ export class RenderSystem {
     if (!this.mouseWorldPos) return;
 
     for (const ship of worldState.ships) {
-      const helm = ship.modules.find(m => m.kind === 'helm');
-      if (!helm) continue;
-      const base = helm.id;
+      const base = this._shipModuleBase(ship);
+      if (base === null) continue;
 
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -11630,9 +11642,8 @@ export class RenderSystem {
   private drawMissingMastGhosts(ship: Ship, camera: Camera): void {
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
-    const helm = ship.modules.find(m => m.kind === 'helm');
-    if (!helm) return;
-    const base = helm.id;
+    const base = this._shipModuleBase(ship);
+    if (base === null) return;
 
     const presentIds = new Set<number>();
     for (const m of ship.modules) presentIds.add(m.id);
@@ -18738,7 +18749,10 @@ export class RenderSystem {
       const maxHp = moduleData.maxHealth ?? 10000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+      if (!hasQuality) {
+        // Plain plank — show material-derived quality label
+        stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+      }
       if (moduleData.sectionName) stats.push({ label: 'Section', value: moduleData.sectionName });
     } else if (moduleData.kind === 'cannon') {
       const hp    = Math.round(moduleData.health);
@@ -18793,8 +18807,13 @@ export class RenderSystem {
 
     // Quality bonuses — shown when the module was crafted from a quality blueprint
     if (hasQuality) {
+      const qdRaw = module.qualityDurabilityQ8;
       const qwRaw = module.qualityWeaponDmgQ8;
       const qsRaw = module.qualitySailEffQ8;
+      if (typeof qdRaw === 'number' && qdRaw > 0) {
+        const lbl = statMultLabel(qdRaw);
+        if (lbl) stats.push({ label: 'Resist. Bonus', value: lbl, color: qCol! });
+      }
       if (typeof qwRaw === 'number' && qwRaw > 0) {
         const lbl = statMultLabel(qwRaw);
         if (lbl) stats.push({ label: 'Damage Bonus', value: lbl, color: qCol! });
@@ -18802,6 +18821,10 @@ export class RenderSystem {
       if (typeof qsRaw === 'number' && qsRaw > 0) {
         const lbl = statMultLabel(qsRaw);
         if (lbl) stats.push({ label: 'Sail Bonus', value: lbl, color: qCol! });
+      }
+      // Tier bonus (+N% resist & damage from blueprint tier multiplier)
+      if (typeof qt === 'number' && qt >= 1) {
+        stats.push({ label: 'Tier Bonus', value: `+${qt * 10}% resist & dmg`, color: qCol! });
       }
     }
 

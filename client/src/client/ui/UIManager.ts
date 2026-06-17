@@ -20,7 +20,7 @@ import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
 import { TombstoneMenu } from './TombstoneMenu.js';
 import { SalvageMenu } from './SalvageMenu.js';
-import { tierColor as _tierColor, tierName as _tierName } from '../../sim/Quality.js';
+import { tierColor as _tierColor, tierName as _tierName, statMultLabel as _statMultLabel, QUALITY_STAT_NAMES as _QUALITY_STAT_NAMES } from '../../sim/Quality.js';
 
 /**
  * UI render context
@@ -2778,6 +2778,8 @@ export class UIManager {
     _hudEl.setVariantForKind      = (kind, idx) => this.playerMenu.setVariantForKind(kind, idx);
     _hudEl.tierColorFn            = _tierColor;
     _hudEl.tierNameFn             = _tierName;
+    _hudEl.statMultLabelFn        = _statMultLabel;
+    _hudEl.qualityStatNamesFn     = () => _QUALITY_STAT_NAMES;
     this.elements.set(UIElementType.HUD, _hudEl);
     this._loadHotbars();
     
@@ -3398,7 +3400,7 @@ class HUDElement implements UIElement {
   /** Wired by UIManager so build-hotbar tooltip can show the active quality variant. */
   public getVariantTooltipInfo: (kind: string) => { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined = () => undefined;
   /** Wired by UIManager — returns quality blueprints available for a build kind. */
-  public getVariantsForKind: (kind: string) => Array<{ index: number; tier: number; crafts: number }> = () => [];
+  public getVariantsForKind: (kind: string) => Array<{ index: number; tier: number; crafts: number; stats: number[] }> = () => [];
   /** Wired by UIManager — persists a variant selection (null = Standard). */
   public setVariantForKind: (kind: string, index: number | null) => void = () => {};
 
@@ -4812,11 +4814,19 @@ class HUDElement implements UIElement {
 
     const variants = this.getVariantsForKind(popup.kind);
     const activeInfo = this.getVariantTooltipInfo(popup.kind);
-    const ROW_H = 24;
+    const ROW_H  = 24;  // primary row height
+    const PILL_H = 14;  // stat pill line height
     const PAD = 10;
-    const W = 210;
-    const totalRows = 1 + variants.length; // Standard row + one per blueprint
-    const totalH = PAD + totalRows * ROW_H + PAD;
+    const W = 230;
+
+    // Compute heights: each blueprint row with any non-zero stats gets an extra pill line
+    const statNames    = this.qualityStatNamesFn();
+    const hasPills = (bp: { stats: number[]; tier: number }) =>
+      bp.stats.some(s => s !== 0 && s !== 256) || bp.tier >= 1;
+    const totalH = PAD
+      + ROW_H /* Standard row */
+      + variants.reduce((acc, bp) => acc + ROW_H + (hasPills(bp) ? PILL_H : 0), 0)
+      + PAD;
 
     let px = popup.anchorX - W / 2;
     let py = popup.anchorY - totalH - 6;
@@ -4869,20 +4879,23 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillText('(resources only)', px + W - PAD, stdY + ROW_H / 2);
 
-    // Blueprint rows
+    // Blueprint rows — rowY tracked dynamically because pill lines vary per row
+    let bpCursorY = stdY + ROW_H;
     for (let bi = 0; bi < variants.length; bi++) {
-      const bp   = variants[bi];
-      const rowY = stdY + ROW_H + bi * ROW_H;
-      const col  = this._tierColorCache(bp.tier);
-      const tname = this._tierNameCache(bp.tier);
-      const isSel = activeInfo && this._activeVariantIndex(popup.kind) === bp.index;
+      const bp     = variants[bi];
+      const rowY   = bpCursorY;
+      const col    = this._tierColorCache(bp.tier);
+      const tname  = this._tierNameCache(bp.tier);
+      const isSel  = activeInfo && this._activeVariantIndex(popup.kind) === bp.index;
+      const pills  = hasPills(bp);
+      const thisRowH = ROW_H + (pills ? PILL_H : 0);
 
-      popup.hits.push({ index: bp.index, x: px, y: rowY, w: W, h: ROW_H });
+      popup.hits.push({ index: bp.index, x: px, y: rowY, w: W, h: thisRowH });
 
       if (isSel) {
         ctx.fillStyle = 'rgba(60,40,100,0.25)';
         ctx.beginPath();
-        ctx.roundRect(px + 2, rowY, W - 4, ROW_H, 3);
+        ctx.roundRect(px + 2, rowY, W - 4, thisRowH, 3);
         ctx.fill();
       }
 
@@ -4909,6 +4922,50 @@ class HUDElement implements UIElement {
       ctx.font      = '10px Georgia, serif';
       ctx.fillStyle = bp.crafts > 0 ? '#b0d0b0' : 'rgba(130,130,130,0.6)';
       ctx.fillText(`×${bp.crafts}`, px + PAD + 28 + tnameW + 6, rowY + ROW_H / 2);
+
+      // Stat pills on a secondary line
+      if (pills) {
+        const pillLineY = rowY + ROW_H;
+        let pillX = px + PAD;
+        const maxPillX = px + W - PAD;
+
+        // Per-stat pills (e.g. "D:+12%")
+        for (let si = 0; si < bp.stats.length && pillX < maxPillX - 24; si++) {
+          const lbl = this.statMultLabelFn(bp.stats[si]);
+          if (!lbl) continue;
+          const initial = (statNames[si] ?? '?')[0];
+          const pill = `${initial}:${lbl}`;
+          ctx.font = '9px Georgia, serif';
+          const pillW = ctx.measureText(pill).width + 6;
+          if (pillX + pillW > maxPillX) break;
+          ctx.fillStyle = 'rgba(50,80,50,0.55)';
+          ctx.beginPath();
+          ctx.roundRect(pillX, pillLineY + 2, pillW, PILL_H - 4, 2);
+          ctx.fill();
+          ctx.fillStyle = '#88ee88';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(pill, pillX + 3, pillLineY + PILL_H / 2);
+          pillX += pillW + 3;
+        }
+
+        // Tier bonus pill ("+N% T")
+        if (bp.tier >= 1 && pillX < maxPillX - 20) {
+          const bonusPill = `+${bp.tier * 10}% T`;
+          ctx.font = '9px Georgia, serif';
+          const pillW = ctx.measureText(bonusPill).width + 6;
+          if (pillX + pillW <= maxPillX) {
+            ctx.fillStyle = 'rgba(80,50,10,0.6)';
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillLineY + 2, pillW, PILL_H - 4, 2);
+            ctx.fill();
+            ctx.fillStyle = col;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(bonusPill, pillX + 3, pillLineY + PILL_H / 2);
+          }
+        }
+      }
+
+      bpCursorY += thisRowH;
     }
 
     ctx.restore();
@@ -4936,6 +4993,8 @@ class HUDElement implements UIElement {
   // These are set by UIManager after wiring:
   public tierColorFn: (tier: number) => string = () => '#ffffff';
   public tierNameFn:  (tier: number) => string = () => 'Unknown';
+  public statMultLabelFn: (q8: number) => string | null = () => null;
+  public qualityStatNamesFn: () => readonly string[] = () => [];
   private _tierColorCache(tier: number): string { return this.tierColorFn(tier); }
   private _tierNameCache(tier: number):  string { return this.tierNameFn(tier);  }
 

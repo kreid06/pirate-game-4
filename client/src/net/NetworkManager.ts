@@ -648,7 +648,7 @@ export class NetworkManager {
    *  so that plankHealthBuf lookups and damage-event module finds both work. */
   private readonly _shipTemplates = new Map<number, { planks: ShipModule[]; deck: ShipModule[]; ship: Ship }>();
   /** Plank-health lookup buffer — cleared and refilled each tick instead of being re-allocated. */
-  private readonly _plankHealthBuf = new Map<number, { health: number; targetHealth: number; maxHealth: number }>();
+  private readonly _plankHealthBuf = new Map<number, { health: number; targetHealth: number; maxHealth: number; qualityTier?: number; qualityDurabilityQ8?: number; qualityWeaponDmgQ8?: number }>();
 
   // Event callbacks
   public onWorldStateReceived: ((worldState: WorldState) => void) | null = null;
@@ -2499,7 +2499,7 @@ export class NetworkManager {
               const plankHealthBuf = this._plankHealthBuf;
               plankHealthBuf.clear();
               // Track health per deck_id (0=lower, 1=upper) — replaced single-deck variables
-              const deckHealthMap = new Map<number, { health: number; targetHealth: number; maxHealth: number; stateBits: number }>();
+              const deckHealthMap = new Map<number, { health: number; targetHealth: number; maxHealth: number; stateBits: number; qualityTier?: number; qualityDurabilityQ8?: number; qualityWeaponDmgQ8?: number }>();
               
               for (const mod of ship.modules) {
                 if (mod == null) {
@@ -2513,11 +2513,14 @@ export class NetworkManager {
                 const kind = MODULE_TYPE_MAP.toKind(mod.typeId);
                 
                 if (kind === 'plank') {
-                  // Plank: Server only sends health, client generates positions
+                  // Plank: Server only sends health + quality, client generates positions
                   plankHealthBuf.set(mod.id, {
                     health: mod.health ?? 10000,
                     targetHealth: mod.targetHealth ?? mod.maxHealth ?? 10000,
                     maxHealth: mod.maxHealth ?? 10000,
+                    qualityTier:         typeof mod.qt === 'number' && mod.qt >= 1 ? mod.qt : undefined,
+                    qualityDurabilityQ8: typeof mod.qd === 'number' ? mod.qd : undefined,
+                    qualityWeaponDmgQ8:  typeof mod.qw === 'number' ? mod.qw : undefined,
                   });
                 } else if (kind === 'deck') {
                   // Deck: client generates polygon from hull; only include if server confirms it exists
@@ -2531,6 +2534,9 @@ export class NetworkManager {
                       targetHealth: mod.targetHealth   ?? mod.maxHealth ?? deckHealth,
                       maxHealth:    mod.maxHealth      ?? deckHealth,
                       stateBits:    mod.stateBits      ?? 0,
+                      qualityTier:         typeof mod.qt === 'number' && mod.qt >= 1 ? mod.qt : undefined,
+                      qualityDurabilityQ8: typeof mod.qd === 'number' ? mod.qd : undefined,
+                      qualityWeaponDmgQ8:  typeof mod.qw === 'number' ? mod.qw : undefined,
                     });
                   }
                 } else {
@@ -2638,6 +2644,7 @@ export class NetworkManager {
                     qualityTier: typeof mod.qt === 'number' && mod.qt >= 0 ? mod.qt : undefined,
                     qualityWeaponDmgQ8: typeof mod.qw === 'number' ? mod.qw : undefined,
                     qualitySailEffQ8: typeof mod.qse === 'number' ? mod.qse : undefined,
+                    qualityDurabilityQ8: typeof mod.qd === 'number' ? mod.qd : undefined,
                     moduleData: moduleData
                   } as ShipModule);
                 }
@@ -2653,7 +2660,10 @@ export class NetworkManager {
                   const dhd  = deckHealthMap.get(p.deckId)!;
                   return {
                     ...p,
-                    stateBits: dhd.stateBits,
+                    stateBits:           dhd.stateBits,
+                    qualityTier:         dhd.qualityTier,
+                    qualityDurabilityQ8: dhd.qualityDurabilityQ8,
+                    qualityWeaponDmgQ8:  dhd.qualityWeaponDmgQ8,
                     moduleData: dmd ? {
                       ...dmd,
                       health:       dhd.health,
@@ -2671,6 +2681,9 @@ export class NetworkManager {
                   const md = p.moduleData;
                   return {
                     ...p,
+                    qualityTier:         d?.qualityTier,
+                    qualityDurabilityQ8: d?.qualityDurabilityQ8,
+                    qualityWeaponDmgQ8:  d?.qualityWeaponDmgQ8,
                     moduleData: md?.kind === 'plank'
                       ? { ...md,
                           health:       d ? d.health       : 0,

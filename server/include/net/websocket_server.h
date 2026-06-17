@@ -659,10 +659,13 @@ typedef struct WebSocketPlayer {
     uint32_t stamina_last_used_ms; // Wall-clock ms of last stamina drain (regen delayed 2 s after)
     uint32_t hp_regen_accum_ms;   // Accumulated ms since last passive HP regen tick
     uint32_t last_damage_ms;      // Wall-clock ms of last time this player took damage (delays regen)
+    float    stamina_accum;       // Fractional stamina drain/regen carry (per-second rates × dt)
 
     // Oxygen pool — depletes when swimming with no stamina; suffocation damage at 0
     uint16_t oxygen;             // Current oxygen (0–max_oxygen)
     uint16_t max_oxygen;         // Max oxygen (always 100)
+    float    oxygen_accum;       // Fractional oxygen drain/regen carry
+    float    suffoc_accum;       // Fractional suffocation damage carry
 
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
