@@ -65,6 +65,55 @@ export function statMultLabel(q8: number): string | null {
 
 /** Resource cost multiplier by tier (Crude=1×, Eternal=6×). */
 const TIER_COST_MULT = [1.0, 1.25, 1.5, 2.0, 3.0, 4.5, 6.0];
+
+/** Mirrors server QUALITY_TIER_BONUS_PER_TIER — applied to durability & weapon damage rolls. */
+export const QUALITY_TIER_BONUS_PER_TIER = 0.10;
+
+export const CANNON_HULL_BASE_DAMAGE   = 3000;
+export const CANNON_ENTITY_BASE_DAMAGE = 75;
+export const BAR_SHOT_ENTITY_BASE_DAMAGE = 15;
+
+/** Ship Damage attribute output multiplier (+4% per level above 1). */
+export function shipLevelDamageMult(damageLevel: number): number {
+  return 1 + 0.04 * Math.max(0, damageLevel - 1);
+}
+
+/** Tier multiplicative bonus: final = base × (1 + tier × 0.10). Mirrors server quality_roll_payload. */
+export function qualityTierBonusMult(tier: number): number {
+  const t = Math.max(0, Math.min(6, Math.floor(tier)));
+  return 1 + t * QUALITY_TIER_BONUS_PER_TIER;
+}
+
+/** Convert a server q8 stat multiplier to a float (256 = 1.00×). Includes tier bonus when rolled server-side. */
+export function qualityStatMultFromQ8(q8: number): number {
+  if (!q8) return 1;
+  return q8 / 256;
+}
+
+/** Effective cannon hull damage for UI (base × ship damage level × weapon quality q8). */
+export function computeCannonHullDamage(
+  baseDamage: number,
+  shipDamageLevel: number,
+  weaponDmgQ8?: number,
+  qualityTier?: number,
+): number {
+  let dmg = baseDamage * shipLevelDamageMult(shipDamageLevel);
+  if (weaponDmgQ8 && weaponDmgQ8 > 0) {
+    dmg *= qualityStatMultFromQ8(weaponDmgQ8);
+  } else if (typeof qualityTier === 'number' && qualityTier >= 1) {
+    dmg *= qualityTierBonusMult(qualityTier);
+  }
+  return Math.round(dmg);
+}
+
+/** Effective anti-personnel damage (cannonball 75 / bar shot 15 base × ship damage level only). */
+export function computeCannonEntityDamage(
+  baseDamage: number,
+  shipDamageLevel: number,
+): number {
+  return Math.round(baseDamage * shipLevelDamageMult(shipDamageLevel));
+}
+
 export function qualityCostMult(tier: number): number {
   const i = Math.max(0, Math.min(TIER_COST_MULT.length - 1, Math.floor(tier)));
   return TIER_COST_MULT[i];

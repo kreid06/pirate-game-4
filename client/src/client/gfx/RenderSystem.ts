@@ -18,7 +18,8 @@ import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
-import { tierColor, tierName, statMultLabel } from '../../sim/Quality.js';
+import { tierColor, tierName, statMultLabel, computeCannonHullDamage, computeCannonEntityDamage, CANNON_HULL_BASE_DAMAGE, CANNON_ENTITY_BASE_DAMAGE, BAR_SHOT_ENTITY_BASE_DAMAGE } from '../../sim/Quality.js';
+import { SHIP_ATTR_DAMAGE } from '../../sim/Types.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
 const GHOST_MAX_HULL_HP = 60000;
@@ -14064,6 +14065,7 @@ export class RenderSystem {
     const PLAYER_R = 16;
     for (const p of (this._cachedWorldPlayers ?? [])) {
       if (p.carrierId !== 0) continue;
+      if (p.movementState === 'SWIMMING') continue;
       const mx = p.position.x - ox, my = p.position.y - oy;
       const tp = mx * dx + my * dy;
       if (tp < 0 || tp > maxT) continue;
@@ -14072,21 +14074,13 @@ export class RenderSystem {
       tryHit(tp - Math.sqrt(PLAYER_R * PLAYER_R - perpSq), p.companyId);
     }
 
-    // ── 2. Free-standing NPCs ───────────────────────────────────────────
-    const NPC_R = 14;
-    for (const npc of (this._cachedWorldNpcs ?? [])) {
-      if (npc.shipId !== 0) continue;
-      const mx = npc.position.x - ox, my = npc.position.y - oy;
-      const tp = mx * dx + my * dy;
-      if (tp < 0 || tp > maxT) continue;
-      const perpSq = mx * mx + my * my - tp * tp;
-      if (perpSq > NPC_R * NPC_R) continue;
-      tryHit(tp - Math.sqrt(NPC_R * NPC_R - perpSq), npc.companyId);
-    }
+    // ── 2. Free-standing NPCs (swimming / off-ship) ─────────────────────
+    // Cannonball and bar shot skip swimmers — on-deck crew are checked in §3.
 
     // ── 3. Ships (hull + modules + on-ship entities) ────────────────────
     const MOD_R      = 20;
     const MAST_R     = 40; // matches server BAR_SHOT_SAIL_RADIUS = CLIENT_TO_SERVER(40) = 40 client px
+    const NPC_R      = 14;
     // Bar shot sweeps a spinning arc: barHalfL(10) + ballR(4) = 14 world px from the trajectory centre.
     // Added to non-mast targets so the guide matches the projectile's physical reach.
     const BAR_PROJ_R = isBarShot ? 14 : 0;
@@ -14121,21 +14115,23 @@ export class RenderSystem {
         tryHit(hitT, ship.companyId);
       }
 
-      // Players on this ship — bar shot ignores crew
-      if (!isBarShot) for (const p of (this._cachedWorldPlayers ?? [])) {
+      // Players on this ship — cannonball hits crew; bar shot hits crew (anti-personnel)
+      for (const p of (this._cachedWorldPlayers ?? [])) {
         if (p.carrierId !== ship.id || !p.localPosition) continue;
+        if (p.movementState === 'SWIMMING') continue;
         const pwx = ship.position.x + p.localPosition.x * sc - p.localPosition.y * ss;
         const pwy = ship.position.y + p.localPosition.x * ss + p.localPosition.y * sc;
         const mx = pwx - ox, my = pwy - oy;
         const tp = mx * dx + my * dy;
         if (tp < 0 || tp > maxT) continue;
         const perpSq = mx * mx + my * my - tp * tp;
-        if (perpSq > PLAYER_R * PLAYER_R) continue;
-        tryHit(tp - Math.sqrt(PLAYER_R * PLAYER_R - perpSq), p.companyId);
+        const hitR = isBarShot ? (PLAYER_R + BAR_PROJ_R) : PLAYER_R;
+        if (perpSq > hitR * hitR) continue;
+        tryHit(tp - Math.sqrt(hitR * hitR - perpSq), p.companyId);
       }
 
-      // NPCs on this ship — bar shot ignores crew
-      if (!isBarShot) for (const npc of (this._cachedWorldNpcs ?? [])) {
+      // NPCs on this ship — cannonball hits crew; bar shot hits crew (anti-personnel)
+      for (const npc of (this._cachedWorldNpcs ?? [])) {
         if (npc.shipId !== ship.id || !npc.localPosition) continue;
         const nwx = ship.position.x + npc.localPosition.x * sc - npc.localPosition.y * ss;
         const nwy = ship.position.y + npc.localPosition.x * ss + npc.localPosition.y * sc;
@@ -14143,8 +14139,9 @@ export class RenderSystem {
         const tp = mx * dx + my * dy;
         if (tp < 0 || tp > maxT) continue;
         const perpSq = mx * mx + my * my - tp * tp;
-        if (perpSq > NPC_R * NPC_R) continue;
-        tryHit(tp - Math.sqrt(NPC_R * NPC_R - perpSq), npc.companyId);
+        const hitR = isBarShot ? (NPC_R + BAR_PROJ_R) : NPC_R;
+        if (perpSq > hitR * hitR) continue;
+        tryHit(tp - Math.sqrt(hitR * hitR - perpSq), npc.companyId);
       }
     }
 
@@ -19554,7 +19551,14 @@ export class RenderSystem {
       const maxHp = (moduleData as any).maxHealth ?? 8000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      stats.push({ label: 'Base Damage',  value: '3000' });
+      const dmgLvl = ship.levelStats?.levels?.[SHIP_ATTR_DAMAGE] ?? 1;
+      const qwRaw  = module.qualityWeaponDmgQ8;
+      const qt     = module.qualityTier;
+      const entityBase = this.selectedAmmoType !== 0 ? BAR_SHOT_ENTITY_BASE_DAMAGE : CANNON_ENTITY_BASE_DAMAGE;
+      const hullDmg   = computeCannonHullDamage(CANNON_HULL_BASE_DAMAGE, dmgLvl, qwRaw, qt);
+      const crewDmg   = computeCannonEntityDamage(entityBase, dmgLvl);
+      stats.push({ label: 'Hull Damage', value: String(hullDmg) });
+      stats.push({ label: 'Crew Damage', value: String(crewDmg) });
       stats.push({ label: 'Reload',  value: `${(moduleData as any).reloadTime ?? 3.0}s` });
       if (!hasQuality) stats.push({ label: 'Quality', value: 'Common' });
     } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {

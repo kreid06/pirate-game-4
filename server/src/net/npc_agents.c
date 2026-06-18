@@ -335,6 +335,7 @@ void dispatch_gunner_to_weapon(WorldNpc* npc, SimpleShip* ship,
     npc->target_local_x     = cx - cosf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->target_local_y     = cy - sinf(barrel_angle) * CANNON_MOUNT_DIST;
     npc->state              = WORLD_NPC_STATE_MOVING;
+    npc->roam_wait_ms       = 0;
 
     /* Keep the corresponding NpcAgent's module_id in sync so that
      * tick_npc_agents can find and aim the correct cannon after dispatch. */
@@ -446,6 +447,7 @@ void assign_weapon_group_crew(SimpleShip* ship) {
             if (!npc->active || npc->ship_id != ship->ship_id) continue;
             if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
             if (npc->task_locked) continue; /* locked NPCs stay pinned to their current post */
+            if (npc->order_player_id != 0) continue; /* manual move/goto in progress */
             if (npc->assigned_weapon_id != 0) {
                 /* Only pull from a cannon whose NEEDED has expired */
                 ShipModule* cur = find_module_on_ship(ship, npc->assigned_weapon_id);
@@ -521,6 +523,7 @@ void update_npc_cannon_sector(SimpleShip* ship, float aim_angle) {
         if (npc->role != NPC_ROLE_GUNNER || !npc->wants_cannon) continue;
         /* Locked NPCs stay pinned to their current cannon regardless of sector changes */
         if (npc->task_locked) continue;
+        if (npc->order_player_id != 0) continue;
 
         /* NPC is already heading to or sitting at a cannon — keep them
          * unless their cannon's NEEDED has expired AND another cannon

@@ -254,9 +254,16 @@ typedef struct WorldNpc {
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.
 
+    // ── Manual move order (Move To / goto module) ───────────────────────────
+    // Non-zero while a player-issued walk/swim/board command is in progress.
+    // Blocks repairer auto-redirect, repairer roam, and cannon-sector re-dispatch.
+    // Cleared on arrival or when the issuing player moves out of command range.
+    uint32_t      order_player_id;
+
     // ── Boarding approach ──────────────────────────────────────────────────
-    // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a hull
-    // entry point.  On arrival it snaps aboard and walks to (boarding_local_x/y).
+    // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a ship.
+    // On hull contact (same company) it boards immediately and walks to (boarding_local_x/y).
+    // Enemy-company hulls require grapples (future) — no auto-board.
     uint16_t      boarding_ship_id;  // target ship to board; 0 = not boarding
     float         boarding_local_x;  // on-deck destination (ship-local) after boarding
     float         boarding_local_y;

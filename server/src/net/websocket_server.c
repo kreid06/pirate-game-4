@@ -10035,22 +10035,68 @@ int websocket_server_update(struct Sim* sim) {
                                 SimpleShip* ma_ship = find_ship(ma_player->parent_ship_id);
                                 if (ma_npc_ptr && ma_ship &&
                                     NPC_OWNED_BY(ma_npc_ptr, ma_player)) {
-                                    ma_npc_ptr->ship_id        = ma_player->parent_ship_id;
-                                    ma_npc_ptr->in_water       = false;
-                                    int slot_idx = (int)(ma_npc_ptr->id % 9);
-                                    ma_npc_ptr->local_x        = -200.0f + slot_idx * 50.0f;
-                                    ma_npc_ptr->local_y        = 0.0f;
-                                    ma_npc_ptr->idle_local_x   = ma_npc_ptr->local_x;
-                                    ma_npc_ptr->idle_local_y   = ma_npc_ptr->local_y;
-                                    ma_npc_ptr->target_local_x = ma_npc_ptr->local_x;
-                                    ma_npc_ptr->target_local_y = ma_npc_ptr->local_y;
-                                    ma_npc_ptr->state          = WORLD_NPC_STATE_IDLE;
-                                    ship_local_to_world(ma_ship,
-                                        ma_npc_ptr->local_x, ma_npc_ptr->local_y,
-                                        &ma_npc_ptr->x, &ma_npc_ptr->y);
-                                    log_info("⚓ NPC %u '%s' moved aboard ship %u for player %u",
-                                             ma_npc_id, ma_npc_ptr->name,
-                                             ma_player->parent_ship_id, ma_player->player_id);
+                                    int slot_idx = npc_alloc_ship_idle_slot(
+                                        ma_ship->ship_id, ma_npc_ptr->id);
+                                    float dest_lx, dest_ly;
+                                    npc_idle_slot_pos(slot_idx, &dest_lx, &dest_ly);
+
+                                    dismount_npc(ma_npc_ptr, find_ship(ma_npc_ptr->ship_id));
+                                    ma_npc_ptr->role               = NPC_ROLE_NONE;
+                                    ma_npc_ptr->assigned_weapon_id = 0;
+                                    ma_npc_ptr->wants_cannon       = false;
+                                    ma_npc_ptr->task_locked        = false;
+                                    ma_npc_ptr->deck_level         = 1;
+                                    ma_npc_ptr->roam_wait_ms       = 0;
+
+                                    if (ma_npc_ptr->ship_id == 0 || ma_npc_ptr->in_water) {
+                                        /* Off-ship: swim to the hull, then walk aboard */
+                                        ma_npc_ptr->ship_id          = 0;
+                                        ma_npc_ptr->in_water         = true;
+                                        ma_npc_ptr->local_x          = ma_npc_ptr->x;
+                                        ma_npc_ptr->local_y          = ma_npc_ptr->y;
+                                        ma_npc_ptr->boarding_ship_id = ma_ship->ship_id;
+                                        ma_npc_ptr->boarding_local_x = dest_lx;
+                                        ma_npc_ptr->boarding_local_y = dest_ly;
+                                        ma_npc_ptr->target_local_x   = ma_ship->x;
+                                        ma_npc_ptr->target_local_y   = ma_ship->y;
+                                        ma_npc_ptr->state            = WORLD_NPC_STATE_MOVING;
+                                        npc_set_manual_order(ma_npc_ptr, ma_player->player_id);
+                                        log_info("🌊 NPC %u '%s' swimming to ship %u for player %u",
+                                                 ma_npc_id, ma_npc_ptr->name,
+                                                 ma_ship->ship_id, ma_player->player_id);
+                                    } else if (ma_npc_ptr->ship_id == ma_ship->ship_id) {
+                                        /* Already aboard — walk to next free crew slot */
+                                        ma_npc_ptr->in_water         = false;
+                                        ma_npc_ptr->target_local_x   = dest_lx;
+                                        ma_npc_ptr->target_local_y   = dest_ly;
+                                        ma_npc_ptr->idle_local_x     = dest_lx;
+                                        ma_npc_ptr->idle_local_y     = dest_ly;
+                                        ma_npc_ptr->state            = WORLD_NPC_STATE_MOVING;
+                                        npc_set_manual_order(ma_npc_ptr, ma_player->player_id);
+                                        log_info("⚓ NPC %u '%s' walking to idle slot %d on ship %u",
+                                                 ma_npc_id, ma_npc_ptr->name, slot_idx, ma_ship->ship_id);
+                                    } else {
+                                        /* On another ship — detach and swim to the new one */
+                                        ma_npc_ptr->ship_id          = 0;
+                                        ma_npc_ptr->in_water         = true;
+                                        ma_npc_ptr->local_x          = ma_npc_ptr->x;
+                                        ma_npc_ptr->local_y          = ma_npc_ptr->y;
+                                        ma_npc_ptr->boarding_ship_id = ma_ship->ship_id;
+                                        ma_npc_ptr->boarding_local_x = dest_lx;
+                                        ma_npc_ptr->boarding_local_y = dest_ly;
+                                        ma_npc_ptr->target_local_x   = ma_ship->x;
+                                        ma_npc_ptr->target_local_y   = ma_ship->y;
+                                        ma_npc_ptr->state            = WORLD_NPC_STATE_MOVING;
+                                        npc_set_manual_order(ma_npc_ptr, ma_player->player_id);
+                                        log_info("🌊 NPC %u '%s' transferring to ship %u for player %u",
+                                                 ma_npc_id, ma_npc_ptr->name,
+                                                 ma_ship->ship_id, ma_player->player_id);
+                                    }
+                                    if (ma_npc_ptr->ship_id != 0) {
+                                        ship_local_to_world(ma_ship,
+                                            ma_npc_ptr->local_x, ma_npc_ptr->local_y,
+                                            &ma_npc_ptr->x, &ma_npc_ptr->y);
+                                    }
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"moved_aboard\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"cannot_move_aboard\"}");
@@ -10108,6 +10154,7 @@ int websocket_server_update(struct Sim* sim) {
                                     _dn->target_local_x     = _dn->idle_local_x;
                                     _dn->target_local_y     = _dn->idle_local_y;
                                     _dn->task_locked        = false; /* clear lock on dismiss */
+                                    npc_clear_manual_order(_dn);
                                     if (dn_ship) update_npc_cannon_sector(dn_ship, dn_ship->active_aim_angle);
                                     log_info("👋 dismiss_npc: NPC %u (%s) dismissed from module %u",
                                              _dn->id, _dn->name, dm_mod_id);
@@ -10163,6 +10210,7 @@ int websocket_server_update(struct Sim* sim) {
                                     dismount_npc(gm_npc, gm_ship);
                                     // Clear lock — Move To always unfastens the pin
                                     gm_npc->task_locked = false;
+                                    npc_set_manual_order(gm_npc, gm_player->player_id);
                                     if (gm_mod->type_id == MODULE_TYPE_CANNON ||
                                         gm_mod->type_id == MODULE_TYPE_SWIVEL) {
                                         gm_npc->role        = NPC_ROLE_GUNNER;
@@ -10225,6 +10273,7 @@ int websocket_server_update(struct Sim* sim) {
                                     tp_npc->task_locked        = false;
                                     tp_npc->assigned_weapon_id = 0;
                                     tp_npc->role               = NPC_ROLE_NONE;
+                                    npc_set_manual_order(tp_npc, tp_player->player_id);
 
                                     if (tp_ship_id != 0) {
                                         /* Board or walk on a specific ship */
@@ -13332,13 +13381,13 @@ void websocket_server_tick(float dt) {
                         world_npcs[ni].fire_timer_ms = 0;
                     }
 
-                    /* Ghost ship survivors: spawn 2-3 unclaimed recruitable sailors */
+                    /* Ghost ship survivors: 1–3 swimmers at the wreck, assigned to
+                     * the destroying company's faction. */
                     if (sinking_ship->ship_type == SHIP_TYPE_GHOST) {
-                        int n_survivors = 2 + (int)(next_world_npc_id % 2); /* 2 or 3 */
-                        for (int sv = 0; sv < n_survivors; sv++) {
-                            spawn_unclaimed_npc(sinking_ship->x, sinking_ship->y, sv);
-                        }
-                        /* Notify spawn-point system so the slot can respawn */
+                        uint16_t killer_id = sinking_ship->killer_ship_id;
+                        if (killer_id == 0 && ev->shooter_ship_id != 0)
+                            killer_id = (uint16_t)ev->shooter_ship_id;
+                        ghost_spawn_survivors(sinking_ship->x, sinking_ship->y, killer_id);
                         ghost_ship_sunk(sinking_ship->ship_id);
                     }
 
@@ -13723,18 +13772,33 @@ void websocket_server_tick(float dt) {
         }
     }
 
-    // ===== CANNONBALL / GRAPESHOT / LIQUID FLAME / CANISTER SHOT vs ENTITY HIT DETECTION =====
-    // Cannonballs (PROJ_TYPE_CANNONBALL) deal base 75 HP damage to NPCs and
-    // players.  Grapeshot (PROJ_TYPE_GRAPESHOT) uses a tighter hit radius (20 px)
-    // and lower damage (35 HP per pellet). Unmounted entities are knocked back.
-    // Liquid flame (PROJ_TYPE_LIQUID_FLAME) deals 0 direct HP damage but sets
-    // fire_timer_ms on hit entities (NPCs/players) and nearby wooden modules
-    // (planks, decks, masts). Fire burns for 10 seconds dealing DoT.
+    // ===== CANNONBALL / BAR SHOT / GRAPESHOT / CANISTER SHOT vs ENTITY HIT DETECTION =====
+    // Cannonballs (PROJ_TYPE_CANNONBALL) deal base 75 HP to on-deck crew.
+    // Bar shot (PROJ_TYPE_BAR_SHOT) passes through hull/masts but deals base 15 HP
+    // to on-deck crew (pass-through — projectile keeps flying).
+    // Swimming players and off-ship/in-water NPCs are skipped.
+    // Grapeshot / canister use hit-scan elsewhere; island cannons may still spawn them.
     if (global_sim) {
         const float ENTITY_HIT_RADIUS    = 40.0f;   // client pixels (cannonball)
         const float ENTITY_BASE_DAMAGE   = 75.0f;
+        const float BAR_SHOT_ENTITY_DAMAGE = 15.0f;
+        const float BAR_SHOT_HIT_RADIUS  = 20.0f;
         const float ENTITY_KNOCKBACK     = 40.0f;   // velocity impulse (client px/s)
         /* FIRE_DURATION_MS is a file-scope #define (10000 ms) */
+
+        #define ENTITY_PROJ_ENTERED_HIT(is_bar, ppx, ppy, px, py, ex, ey, rad) \
+            ({ \
+                float _hr  = (rad); \
+                float _hr2 = _hr * _hr; \
+                float _cdx = (ex) - (px), _cdy = (ey) - (py); \
+                float _cd2 = _cdx * _cdx + _cdy * _cdy; \
+                bool  _hit = (_cd2 <= _hr2); \
+                if (_hit && (is_bar)) { \
+                    float _pdx = (ex) - (ppx), _pdy = (ey) - (ppy); \
+                    _hit = (_pdx * _pdx + _pdy * _pdy) > _hr2; \
+                } \
+                _hit; \
+            })
 
         /* Helper: broadcast a FIRE_EFFECT event */
         #define BROADCAST_FIRE_EFFECT(msg_buf, ...) do { \
@@ -13755,11 +13819,16 @@ void websocket_server_tick(float dt) {
 
             // Only projectile types that harm entities directly
             // (PROJ_TYPE_LIQUID_FLAME removed — flamethrower is now instant hit-scan, no projectiles)
-            if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_GRAPESHOT &&
+            if (proj->type != PROJ_TYPE_CANNONBALL && proj->type != PROJ_TYPE_BAR_SHOT &&
+                proj->type != PROJ_TYPE_GRAPESHOT &&
                 proj->type != PROJ_TYPE_CANISTER_SHOT) { pi++; continue; }
 
-            float px = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
-            float py = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+            float px  = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.x));
+            float py  = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
+            float ppx = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->prev_position.x));
+            float ppy = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->prev_position.y));
+
+            bool is_bar_shot = (proj->type == PROJ_TYPE_BAR_SHOT);
 
             // Damage multiplier from firing ship level stats
             float dmg_mult = 1.0f;
@@ -13773,6 +13842,9 @@ void websocket_server_tick(float dt) {
             if (is_flame) {
                 ent_hit_radius = 30.0f;
                 damage         = 0.0f; /* fire DoT handled in 100ms tick */
+            } else if (is_bar_shot) {
+                ent_hit_radius = BAR_SHOT_HIT_RADIUS;
+                damage         = BAR_SHOT_ENTITY_DAMAGE * dmg_mult;
             } else if (proj->type == PROJ_TYPE_GRAPESHOT || proj->type == PROJ_TYPE_CANISTER_SHOT) {
                 ent_hit_radius = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 15.0f : 20.0f;
                 damage         = (proj->type == PROJ_TYPE_CANISTER_SHOT) ? 25.0f * dmg_mult : 35.0f * dmg_mult;
@@ -13781,22 +13853,32 @@ void websocket_server_tick(float dt) {
                 damage         = ENTITY_BASE_DAMAGE * dmg_mult;
             }
             float hit_r2  = ent_hit_radius * ent_hit_radius;
+            bool skip_swimmers = (proj->type == PROJ_TYPE_CANNONBALL || is_bar_shot);
 
             bool proj_consumed = false;
 
             // ── Check NPCs ──────────────────────────────────────────────────
-            // Flame iterates ALL NPCs (pass-through — never consumed).
+            // Flame and bar shot iterate ALL NPCs (pass-through — never consumed).
             // Other types stop at the first hit (proj_consumed).
-            for (int ni = 0; ni < world_npc_count && (is_flame || !proj_consumed); ni++) {
+            for (int ni = 0; ni < world_npc_count && (is_flame || is_bar_shot || !proj_consumed); ni++) {
                 WorldNpc* npc = &world_npcs[ni];
                 if (!npc->active) continue;
                 // No friendly fire: skip NPCs on the firing ship
                 if (proj->firing_ship_id != INVALID_ENTITY_ID &&
                     npc->ship_id == (uint32_t)proj->firing_ship_id) continue;
+                if (skip_swimmers && (npc->in_water || npc->ship_id == 0)) continue;
 
-                float dx = npc->x - px;
-                float dy = npc->y - py;
-                if (dx * dx + dy * dy > hit_r2) continue;
+                float dx, dy;
+                if (is_bar_shot) {
+                    if (!ENTITY_PROJ_ENTERED_HIT(true, ppx, ppy, px, py, npc->x, npc->y, ent_hit_radius))
+                        continue;
+                    dx = npc->x - px;
+                    dy = npc->y - py;
+                } else {
+                    dx = npc->x - px;
+                    dy = npc->y - py;
+                    if (dx * dx + dy * dy > hit_r2) continue;
+                }
 
                 /* Lower-deck crew are shielded by an intact upper deck — the deck
                  * absorbs the cannonball before it can reach crew below. */
@@ -13857,20 +13939,29 @@ void websocket_server_tick(float dt) {
                     }
                     log_info("💣 DESPAWN proj %u — NPC %u hit at (%.1f,%.1f) dmg=%.0f",
                              proj->id, npc->id, npc->x, npc->y, damage);
-                    proj_consumed = true;
+                    if (!is_bar_shot) proj_consumed = true;
                 }
             }
 
             // ── Check Players ────────────────────────────────────────────────
-            for (int wpi = 0; wpi < WS_MAX_CLIENTS && (is_flame || !proj_consumed); wpi++) {
+            for (int wpi = 0; wpi < WS_MAX_CLIENTS && (is_flame || is_bar_shot || !proj_consumed); wpi++) {
                 WebSocketPlayer* wp = &players[wpi];
                 if (!wp->active || wp->is_dead) continue; /* skip dead players */
                 if (proj->firing_ship_id != INVALID_ENTITY_ID &&
                     wp->parent_ship_id == (uint32_t)proj->firing_ship_id) continue;
+                if (skip_swimmers && wp->movement_state == PLAYER_STATE_SWIMMING) continue;
 
-                float dx = wp->x - px;
-                float dy = wp->y - py;
-                if (dx * dx + dy * dy > hit_r2) continue;
+                float dx, dy;
+                if (is_bar_shot) {
+                    if (!ENTITY_PROJ_ENTERED_HIT(true, ppx, ppy, px, py, wp->x, wp->y, ent_hit_radius))
+                        continue;
+                    dx = wp->x - px;
+                    dy = wp->y - py;
+                } else {
+                    dx = wp->x - px;
+                    dy = wp->y - py;
+                    if (dx * dx + dy * dy > hit_r2) continue;
+                }
 
                 /* Lower-deck players are shielded by an intact upper deck. */
                 if (!is_flame && wp->deck_level == 0 && wp->parent_ship_id != 0) {
@@ -13951,7 +14042,7 @@ void websocket_server_tick(float dt) {
                     log_info("💣 DESPAWN proj %u — player %u hit at (%.1f,%.1f) dmg=%.0f%s",
                              proj->id, wp->player_id, wp->x, wp->y, damage,
                              wp_killed ? " [KILLED]" : "");
-                    proj_consumed = true;
+                    if (!is_bar_shot) proj_consumed = true;
                 }
             }
 
@@ -14035,6 +14126,7 @@ void websocket_server_tick(float dt) {
             }
         }
         #undef BROADCAST_FIRE_EFFECT
+        #undef ENTITY_PROJ_ENTERED_HIT
     }
 
     // ===== TICK WORLD WIND =====

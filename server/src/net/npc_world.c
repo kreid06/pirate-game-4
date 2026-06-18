@@ -222,6 +222,8 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
         return;
     }
 
+    npc_clear_manual_order(npc);
+
     /* Dismount from current module before applying new role */
     dismount_npc(npc, ship);
 
@@ -268,10 +270,16 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
         npc->state = WORLD_NPC_STATE_MOVING;
 
     } else if (want_cannons) {
-        /* Become a gunner — sector system places at the closest cannon */
+        /* Become a gunner — sector system places at the closest NEEDED cannon */
         npc->role         = NPC_ROLE_GUNNER;
         npc->wants_cannon = true;
         update_npc_cannon_sector(ship, ship->active_aim_angle);
+        if (npc->assigned_weapon_id == 0) {
+            /* No cannon is NEEDED yet — stand by in place until one is */
+            npc->state          = WORLD_NPC_STATE_IDLE;
+            npc->target_local_x = npc->local_x;
+            npc->target_local_y = npc->local_y;
+        }
         // log_info("🔫 NPC %u (%s) → GUNNER, sector dispatch issued", npc->id, npc->name);
 
     } else if (want_repairs) {
@@ -413,55 +421,74 @@ uint32_t spawn_ship_crew(uint16_t ship_id) {
     npc->oxygen_accum       = 0.0f;
     npc->suffoc_accum       = 0.0f;
 
-    /* Stagger idle positions along ship centreline */
-    int slot_idx = (int)(npc->id % 9);
-    npc->local_x        = -200.0f + slot_idx * 50.0f;
-    npc->local_y        = 0.0f;
-    npc->idle_local_x   = npc->local_x;   /* remembered for life */
-    npc->idle_local_y   = npc->local_y;
-    npc->target_local_x = npc->local_x;
-    npc->target_local_y = npc->local_y;
-    ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-    log_info("🧑 Crew '%s' (id %u) on ship %u — idle", npc->name, npc->id, ship_id);
+    int slot_idx = npc_alloc_ship_idle_slot(ship_id, npc->id);
+    npc_assign_ship_idle_slot(npc, ship, slot_idx);
+    log_info("🧑 Crew '%s' (id %u) on ship %u — idle slot %d",
+             npc->name, npc->id, ship_id, slot_idx);
     return npc->id;
 }
 
 /* ============================================================================
- * UNCLAIMED NPC SPAWN
- * Spawns a free-floating, neutral NPC in the water at world position (wx, wy).
- * Called when a ghost ship is destroyed — 2-3 survivors wash up as recruitable.
- * index 0-2 produces a scatter offset so they don't all stack.
+ * GHOST SHIP SURVIVOR — swimming at the wreck, pre-assigned to the company
+ * that destroyed the ghost so they can be commanded aboard without recruiting.
  * ========================================================================= */
-uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
+static uint32_t find_ship_company_player(uint16_t ship_id, uint8_t company_id) {
+    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+        if (!players[pi].active) continue;
+        if (players[pi].parent_ship_id != ship_id) continue;
+        if (players[pi].company_id != company_id) continue;
+        return players[pi].player_id;
+    }
+    return 0;
+}
+
+static uint32_t spawn_swimming_npc_at(float wx, float wy, int scatter_index,
+                                      uint8_t company_id, uint32_t owner_player_id) {
     WorldNpc* npc = npc_alloc_slot();
     if (!npc) {
-        log_warn("spawn_unclaimed_npc: MAX_WORLD_NPCS reached");
+        log_warn("spawn_swimming_npc_at: MAX_WORLD_NPCS reached");
         return 0;
     }
-    /* Scatter: each survivor drifts slightly away from the wreck */
-    static const float OFFSETS_X[3] = {  20.0f, -30.0f,  10.0f };
-    static const float OFFSETS_Y[3] = { -20.0f,  10.0f,  40.0f };
-    float ox = OFFSETS_X[index < 3 ? index : 0];
-    float oy = OFFSETS_Y[index < 3 ? index : 0];
+
+    static const float OFFSETS_X[3] = {  30.0f, -40.0f,  15.0f };
+    static const float OFFSETS_Y[3] = { -25.0f,  20.0f,  45.0f };
+    int idx = scatter_index < 3 ? scatter_index : 0;
+    float px = wx + OFFSETS_X[idx];
+    float py = wy + OFFSETS_Y[idx];
 
     npc->id              = next_world_npc_id++;
     npc->active          = true;
     npc->role            = NPC_ROLE_NONE;
-    npc->ship_id         = 0;         /* free-standing — not on any ship */
-    npc->company_id      = 0;         /* unclaimed: COMPANY_NEUTRAL */
+    npc->ship_id         = 0;
+    npc->company_id      = company_id;
+    npc->owner_player_id = owner_player_id;
+    npc->wants_cannon    = false;
     npc->move_speed      = 60.0f;
-    npc->interact_radius = 60.0f;     /* larger — floating in the water */
+    npc->interact_radius = 60.0f;
     npc->state           = WORLD_NPC_STATE_IDLE;
+    npc->assigned_weapon_id = 0;
     npc->in_water        = true;
-    npc->x               = wx + ox;
-    npc->y               = wy + oy;
-    npc->local_x         = 0.0f;
-    npc->local_y         = 0.0f;
+    npc->deck_level      = 0;
+    /* Off-ship NPCs: local_x/y are the world coordinates (see tick_world_npcs). */
+    npc->local_x         = px;
+    npc->local_y         = py;
+    npc->x               = px;
+    npc->y               = py;
+    npc->idle_local_x    = px;
+    npc->idle_local_y    = py;
+    npc->target_local_x  = px;
+    npc->target_local_y  = py;
 
     generate_pirate_name(npc->id, npc->name, sizeof(npc->name));
-    strncpy(npc->dialogue, "Help me...", sizeof(npc->dialogue) - 1);
+    strncpy(npc->dialogue,
+            company_id == COMPANY_UNCLAIMED ? "Help me..." : "Aye, Captain!",
+            sizeof(npc->dialogue) - 1);
 
     npc->npc_level   = 1;
+    npc->stat_health = 0;
+    npc->stat_damage = 0;
+    npc->stat_stamina= 0;
+    npc->stat_weight = 0;
     npc->max_health  = 100;
     npc->health      = 100;
     npc->xp          = 0;
@@ -474,9 +501,272 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
     npc->oxygen_accum       = 0.0f;
     npc->suffoc_accum       = 0.0f;
 
-    log_info("👻 Unclaimed NPC '%s' (id %u) in water at (%.0f, %.0f)",
-             npc->name, npc->id, npc->x, npc->y);
+    log_info("👻 Ghost survivor '%s' (id %u) swimming at (%.0f, %.0f) company %u",
+             npc->name, npc->id, px, py, (unsigned)company_id);
     return npc->id;
+}
+
+int ghost_spawn_survivors(float wreck_x, float wreck_y, uint16_t killer_ship_id) {
+    uint8_t  company = COMPANY_UNCLAIMED;
+    uint32_t owner   = 0;
+    if (killer_ship_id != 0) {
+        SimpleShip* killer = find_ship(killer_ship_id);
+        if (killer && killer->company_id != COMPANY_GHOST
+                   && killer->company_id != COMPANY_UNCLAIMED) {
+            company = killer->company_id;
+            if (company == COMPANY_SOLO)
+                owner = find_ship_company_player(killer_ship_id, company);
+        }
+    }
+
+    int n = 1 + (int)(next_world_npc_id % 3); /* 1, 2, or 3 */
+    int spawned = 0;
+    for (int i = 0; i < n; i++) {
+        if (spawn_swimming_npc_at(wreck_x, wreck_y, i, company, owner) != 0)
+            spawned++;
+    }
+    if (spawned > 0)
+        g_npcs_dirty = true;
+    log_info("👻 Ghost wreck at (%.0f, %.0f): spawned %d/%d survivors (killer ship %u, company %u)",
+             wreck_x, wreck_y, spawned, n, (unsigned)killer_ship_id, (unsigned)company);
+    return spawned;
+}
+
+/* ============================================================================
+ * IDLE CREW SLOT GRID — sequential board positions on the upper deck.
+ * 10 columns × 5 rows = 50 slots; active count capped by ship crew level.
+ * ========================================================================= */
+#define NPC_IDLE_SLOTS_PER_ROW  10
+#define NPC_IDLE_SLOT_SPACING_X 50.0f
+#define NPC_IDLE_ROW_SPACING_Y  28.0f
+#define NPC_IDLE_ORIGIN_X      -225.0f
+#define NPC_IDLE_ORIGIN_Y       -56.0f
+
+void npc_idle_slot_pos(int slot_idx, float* lx, float* ly) {
+    if (slot_idx < 0) slot_idx = 0;
+    if (slot_idx >= NPC_IDLE_SLOT_MAX) slot_idx = NPC_IDLE_SLOT_MAX - 1;
+    int row = slot_idx / NPC_IDLE_SLOTS_PER_ROW;
+    int col = slot_idx % NPC_IDLE_SLOTS_PER_ROW;
+    *lx = NPC_IDLE_ORIGIN_X + (float)col * NPC_IDLE_SLOT_SPACING_X;
+    *ly = NPC_IDLE_ORIGIN_Y + (float)row * NPC_IDLE_ROW_SPACING_Y;
+}
+
+int npc_idle_slot_count_for_ship(uint16_t ship_id) {
+    int cap = NPC_IDLE_SLOT_MAX;
+    if (global_sim && ship_id != 0) {
+        struct Ship* sim = sim_get_ship(global_sim, (entity_id)ship_id);
+        if (sim) {
+            int crew_cap = (int)ship_level_max_crew(&sim->level_stats);
+            if (crew_cap < cap) cap = crew_cap;
+        }
+    }
+    return cap;
+}
+
+static bool npc_idle_slot_matches(float ix, float iy, int slot_idx) {
+    float sx, sy;
+    npc_idle_slot_pos(slot_idx, &sx, &sy);
+    float dx = ix - sx, dy = iy - sy;
+    return (dx * dx + dy * dy) < 36.0f; /* 6 px tolerance */
+}
+
+static bool npc_idle_slot_taken(uint16_t ship_id, int slot_idx, uint16_t ignore_npc_id) {
+    for (int i = 0; i < world_npc_count; i++) {
+        WorldNpc* n = &world_npcs[i];
+        if (!n->active || n->id == ignore_npc_id) continue;
+        bool on_ship    = (n->ship_id == ship_id);
+        bool boarding   = (n->boarding_ship_id == ship_id && n->ship_id == 0);
+        if (!on_ship && !boarding) continue;
+
+        float ix, iy;
+        if (boarding) {
+            ix = n->boarding_local_x;
+            iy = n->boarding_local_y;
+        } else {
+            ix = n->idle_local_x;
+            iy = n->idle_local_y;
+        }
+        if (npc_idle_slot_matches(ix, iy, slot_idx)) return true;
+    }
+    return false;
+}
+
+int npc_alloc_ship_idle_slot(uint16_t ship_id, uint16_t for_npc_id) {
+    int max_slots = npc_idle_slot_count_for_ship(ship_id);
+    for (int s = 0; s < max_slots; s++) {
+        if (!npc_idle_slot_taken(ship_id, s, for_npc_id))
+            return s;
+    }
+    /* All slots taken — stack on the last legal slot */
+    return max_slots > 0 ? max_slots - 1 : 0;
+}
+
+void npc_assign_ship_idle_slot(WorldNpc* npc, SimpleShip* ship, int slot_idx) {
+    if (!npc) return;
+    float lx, ly;
+    npc_idle_slot_pos(slot_idx, &lx, &ly);
+    npc->local_x        = lx;
+    npc->local_y        = ly;
+    npc->idle_local_x   = lx;
+    npc->idle_local_y   = ly;
+    npc->target_local_x = lx;
+    npc->target_local_y = ly;
+    if (ship && npc->ship_id == ship->ship_id)
+        ship_local_to_world(ship, lx, ly, &npc->x, &npc->y);
+}
+
+/* ============================================================================
+ * UNCLAIMED NPC SPAWN — neutral swimmer (fallback when killer company unknown).
+ * ========================================================================= */
+uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
+    return spawn_swimming_npc_at(wx, wy, index, COMPANY_UNCLAIMED, 0);
+}
+
+/* Max distance from the issuing player before a manual move order is cancelled. */
+#define NPC_COMMAND_RANGE 900.0f
+
+void npc_set_manual_order(WorldNpc* npc, uint32_t player_id) {
+    if (!npc) return;
+    npc->order_player_id = player_id;
+    npc->roam_wait_ms    = 0;
+}
+
+void npc_clear_manual_order(WorldNpc* npc) {
+    if (!npc) return;
+    npc->order_player_id = 0;
+}
+
+static bool npc_manual_order_out_of_range(const WorldNpc* npc) {
+    if (npc->order_player_id == 0) return false;
+    WebSocketPlayer* p = find_player(npc->order_player_id);
+    if (!p || !p->active) return true;
+    float dx = p->x - npc->x;
+    float dy = p->y - npc->y;
+    float range = npc->interact_radius + NPC_COMMAND_RANGE;
+    return (dx * dx + dy * dy) > range * range;
+}
+
+static void npc_cancel_manual_order(WorldNpc* npc, const char* reason) {
+    if (npc->order_player_id == 0) return;
+    log_info("🛑 NPC %u (%s) manual order cancelled — %s",
+             npc->id, npc->name, reason ? reason : "unknown");
+    npc_clear_manual_order(npc);
+    npc->boarding_ship_id  = 0;
+    npc->assigned_weapon_id = 0;
+    if (npc->ship_id != 0) {
+        npc->idle_local_x = npc->local_x;
+        npc->idle_local_y = npc->local_y;
+    }
+    npc->state = WORLD_NPC_STATE_IDLE;
+}
+
+/* ── Friendly boarding (same company; enemy ships need grapples — future) ── */
+
+#define NPC_HULL_TOUCH_RADIUS 18.0f  /* client px — ~NPC body radius */
+
+static bool npc_point_in_hull_client(float lx, float ly, const struct Ship* sim_ship) {
+    int n = sim_ship->hull_vertex_count;
+    bool inside = false;
+    for (int i = 0, j = n - 1; i < n; j = i++) {
+        float xi = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].x));
+        float yi = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].y));
+        float xj = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[j].x));
+        float yj = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[j].y));
+        if (((yi > ly) != (yj > ly)) &&
+            (lx < (xj - xi) * (ly - yi) / (yj - yi + 1e-12f) + xi))
+            inside = !inside;
+    }
+    return inside;
+}
+
+static float npc_dist_to_hull_edge_client(float lx, float ly, const struct Ship* sim_ship) {
+    float min_dist_sq = 1e20f;
+    int n = sim_ship->hull_vertex_count;
+    for (int i = 0; i < n; i++) {
+        int j = (i + 1) % n;
+        float ax = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].x));
+        float ay = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[i].y));
+        float bx = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[j].x));
+        float by = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->hull_vertices[j].y));
+        float edx = bx - ax, edy = by - ay;
+        float len_sq = edx * edx + edy * edy;
+        float t = 0.0f;
+        if (len_sq > 1e-10f) {
+            t = ((lx - ax) * edx + (ly - ay) * edy) / len_sq;
+            if (t < 0.0f) t = 0.0f;
+            if (t > 1.0f) t = 1.0f;
+        }
+        float cx = ax + t * edx, cy = ay + t * edy;
+        float ex = lx - cx, ey = ly - cy;
+        float d  = ex * ex + ey * ey;
+        if (d < min_dist_sq) min_dist_sq = d;
+    }
+    return sqrtf(min_dist_sq);
+}
+
+static bool npc_touching_hull(float wx, float wy,
+                              const SimpleShip* ship, const struct Ship* sim_ship) {
+    if (!ship || !sim_ship || sim_ship->hull_vertex_count < 3) return false;
+    float lx, ly;
+    ship_world_to_local(ship, wx, wy, &lx, &ly);
+    if (npc_point_in_hull_client(lx, ly, sim_ship)) return true;
+    return npc_dist_to_hull_edge_client(lx, ly, sim_ship) <= NPC_HULL_TOUCH_RADIUS;
+}
+
+/** True when an NPC may walk/swim aboard without grapples (same faction). */
+static bool npc_can_friendly_board(const WorldNpc* npc, const SimpleShip* ship) {
+    if (!npc || !ship) return false;
+    if (npc->company_id == COMPANY_UNCLAIMED) return false;
+    if (npc->company_id != ship->company_id) return false;
+    /* SOLO shares company_id across players — commander must be aboard the target. */
+    if (npc->company_id == COMPANY_SOLO) {
+        if (npc->order_player_id == 0) return false;
+        WebSocketPlayer* cmd = find_player(npc->order_player_id);
+        return cmd && cmd->active && cmd->parent_ship_id == ship->ship_id;
+    }
+    return true;
+}
+
+/** Snap a swimming NPC onto a friendly ship; returns true on success. */
+static bool npc_complete_boarding(WorldNpc* npc) {
+    if (npc->boarding_ship_id == 0 || npc->ship_id != 0) return false;
+
+    SimpleShip* bship = find_ship(npc->boarding_ship_id);
+    if (!bship || !bship->active) {
+        npc->boarding_ship_id = 0;
+        return false;
+    }
+    if (!npc_can_friendly_board(npc, bship)) return false;
+
+    float wx = npc->local_x;  /* world coords while ship_id == 0 */
+    float wy = npc->local_y;
+    float bcos = cosf(-bship->rotation);
+    float bsin = sinf(-bship->rotation);
+    float bdx  = wx - bship->x;
+    float bdy  = wy - bship->y;
+    npc->local_x           = bdx * bcos - bdy * bsin;
+    npc->local_y           = bdx * bsin + bdy * bcos;
+    npc->ship_id           = npc->boarding_ship_id;
+    npc->in_water          = false;
+    npc->deck_level        = 1;
+    npc->target_local_x    = npc->boarding_local_x;
+    npc->target_local_y    = npc->boarding_local_y;
+    npc->boarding_ship_id  = 0;
+    npc->state             = WORLD_NPC_STATE_MOVING;
+    npc->idle_local_x      = npc->boarding_local_x;
+    npc->idle_local_y      = npc->boarding_local_y;
+    ship_local_to_world(bship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+    log_info("\u2693 NPC %u (%s) boarded ship %u, walking to slot (%.0f, %.0f)",
+             npc->id, npc->name, npc->ship_id,
+             npc->target_local_x, npc->target_local_y);
+    return true;
+}
+
+static void npc_abort_foreign_boarding(WorldNpc* npc, uint16_t ship_id) {
+    npc->boarding_ship_id = 0;
+    npc->state            = WORLD_NPC_STATE_IDLE;
+    log_info("\U0001f6ab NPC %u (%s) reached ship %u hull but cannot board (different company)",
+             npc->id, npc->name, (unsigned)ship_id);
 }
 
 /**
@@ -513,8 +803,26 @@ void tick_world_npcs(float dt) {
         if (!npc->active) continue;
 
         if (npc->state == WORLD_NPC_STATE_MOVING) {
+            /* Player-issued move: cancel if the commander walked out of range. */
+            if (npc->order_player_id != 0 && npc_manual_order_out_of_range(npc)) {
+                npc_cancel_manual_order(npc, "commander out of range");
+                continue;
+            }
+
+            /* Swim-to-board: track a moving ship and keep the hull target updated. */
+            if (npc->ship_id == 0 && npc->boarding_ship_id != 0) {
+                SimpleShip* bship = find_ship(npc->boarding_ship_id);
+                if (!bship || !bship->active) {
+                    npc_cancel_manual_order(npc, "boarding target lost");
+                    continue;
+                }
+                npc->target_local_x = bship->x;
+                npc->target_local_y = bship->y;
+            }
+
             // ── Repairer walking home: interrupt if new damage appears ──────────
-            if (npc->role == NPC_ROLE_REPAIRER && npc->assigned_weapon_id == 0 && global_sim) {
+            if (npc->order_player_id == 0 &&
+                npc->role == NPC_ROLE_REPAIRER && npc->assigned_weapon_id == 0 && global_sim) {
                 struct Ship* intr_ship = find_sim_ship(npc->ship_id);
                 if (intr_ship) {
                     // Resolve ship_seq for MID-based module IDs
@@ -599,38 +907,31 @@ void tick_world_npcs(float dt) {
                 npc->local_x = npc->target_local_x;
                 npc->local_y = npc->target_local_y;
 
-                /* ── Boarding arrival: NPC swam to the hull entry point ── */
+                /* ── Boarding arrival: reached swim target on/near hull ── */
                 if (npc->boarding_ship_id != 0 && npc->ship_id == 0) {
-                    SimpleShip* bship = find_ship(npc->boarding_ship_id);
-                    if (bship) {
-                        /* Convert the hull entry world pos → ship-local coords */
-                        float bcos = cosf(-bship->rotation);
-                        float bsin = sinf(-bship->rotation);
-                        float bdx  = npc->local_x - bship->x;  /* local_x == world_x when ship_id==0 */
-                        float bdy  = npc->local_y - bship->y;
-                        npc->local_x           = bdx * bcos - bdy * bsin;
-                        npc->local_y           = bdx * bsin + bdy * bcos;
-                        npc->ship_id           = npc->boarding_ship_id;
-                        npc->in_water          = false;
-                        npc->target_local_x    = npc->boarding_local_x;
-                        npc->target_local_y    = npc->boarding_local_y;
-                        npc->boarding_ship_id  = 0;
-                        npc->state             = WORLD_NPC_STATE_MOVING;
-                        log_info("\u2693 NPC %u (%s) boarded ship %u, walking to (%.0f, %.0f)",
-                                 npc->id, npc->name, npc->ship_id,
-                                 npc->target_local_x, npc->target_local_y);
-                    } else {
-                        /* Ship disappeared — cancel boarding */
-                        npc->boarding_ship_id = 0;
-                        npc->state = WORLD_NPC_STATE_IDLE;
+                    uint16_t tgt_ship = npc->boarding_ship_id;
+                    if (npc_complete_boarding(npc)) {
+                        continue; /* re-evaluate on next tick */
                     }
-                    continue; /* re-evaluate on next tick */
+                    SimpleShip* tgt = find_ship(tgt_ship);
+                    if (tgt && tgt->active) {
+                        npc_abort_foreign_boarding(npc, tgt_ship);
+                    } else {
+                        npc->boarding_ship_id = 0;
+                        npc->state            = WORLD_NPC_STATE_IDLE;
+                    }
+                    continue;
                 }
                 if (npc->assigned_weapon_id != 0) {
                     /* Repair crew arrives at a damaged module; gunners/riggers arrive at a post */
                     npc->state = (npc->role == NPC_ROLE_REPAIRER)
                                ? WORLD_NPC_STATE_REPAIRING
                                : WORLD_NPC_STATE_AT_GUN;
+                    if (npc->order_player_id != 0 && npc->ship_id != 0) {
+                        npc->idle_local_x = npc->local_x;
+                        npc->idle_local_y = npc->local_y;
+                    }
+                    npc_clear_manual_order(npc);
 
                     /* Rigger just arrived at mast — immediately apply current sail angle/openness
                      * so the sail snaps to the correct position without waiting for the next
@@ -661,11 +962,33 @@ void tick_world_npcs(float dt) {
                     }
                 } else {
                     npc->state = WORLD_NPC_STATE_IDLE;
+                    if (npc->order_player_id != 0) {
+                        if (npc->ship_id != 0) {
+                            npc->idle_local_x = npc->local_x;
+                            npc->idle_local_y = npc->local_y;
+                        }
+                        npc_clear_manual_order(npc);
+                    }
                 }
             } else {
                 npc->local_x += (dx / dist) * step;
                 npc->local_y += (dy / dist) * step;
                 npc->rotation = atan2f(dy, dx); // Face direction of travel
+
+                /* Same-company hull contact: board immediately (skip swimming to centre). */
+                if (npc->ship_id == 0 && npc->boarding_ship_id != 0) {
+                    uint16_t tgt_ship = npc->boarding_ship_id;
+                    SimpleShip* bship = find_ship(tgt_ship);
+                    struct Ship* sim  = find_sim_ship(tgt_ship);
+                    if (bship && sim &&
+                        npc_touching_hull(npc->local_x, npc->local_y, bship, sim)) {
+                        if (npc_complete_boarding(npc)) {
+                            continue;
+                        }
+                        npc_abort_foreign_boarding(npc, tgt_ship);
+                        continue;
+                    }
+                }
             }
         }
 
@@ -1043,6 +1366,7 @@ void tick_world_npcs(float dt) {
             }
 
             // --- 3. Nothing to do: wander to a random ship module
+            if (npc->order_player_id != 0) continue;
             if (npc->state == WORLD_NPC_STATE_IDLE) {
                 float hdx = npc->target_local_x - npc->local_x;
                 float hdy = npc->target_local_y - npc->local_y;
