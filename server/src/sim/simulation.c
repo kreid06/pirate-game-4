@@ -384,11 +384,13 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
         //                cannon/swivel 1.0%/s.
         int planks_remaining = 0;
         int planks_leaking   = 0;
+        const bool is_ghost_ship = (ship->company_id == 99);
 
         for (uint8_t m = 0; m < ship->module_count; m++) {
             ShipModule* mod = &ship->modules[m];
 
             if (mod->type_id == MODULE_TYPE_PLANK) {
+                if (is_ghost_ship) continue; /* ghost hulls have no physical planks */
                 // Plank healing
                 if (mod->health > 0 && mod->health < (int32_t)mod->target_health) {
                     float heal = (float)mod->max_health * 0.035f * dt_secs;
@@ -446,7 +448,7 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
                 int32_t healed = ship->hull_health + (int32_t)(100.0f * dt_secs);
                 ship->hull_health = (healed > max_hp) ? max_hp : healed;
             }
-            /* Skip the normal plank-drain logic entirely for ghost ships. */
+            continue; /* skip plank-drain and Q16 hull paths entirely */
         } else if (missing == 0 && planks_leaking == 0) {
             // Full integrity: crew bails water — hull_health rises at 1 HP/s (capped at 100)
             float health = Q16_TO_FLOAT(ship->hull_health) + 1.0f * dt_secs;

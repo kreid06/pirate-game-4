@@ -384,6 +384,18 @@ export class RenderSystem {
   // Saves regenerating 10 random numbers per sail per frame.
   private _phantomSailTears: Map<number, { tearX: number[]; tearY: number[] }> = new Map();
 
+  // Combined static ghost ship sprite: hull + ropes + masts + phantom sails.
+  // Cannons, fog aura, animated deck rune/haze/crew, aggro glow, and health fade stay live.
+  // Key = "gcomb:<aggro>:<levelBucket>".
+  private _ghostCombinedSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
+
+  /** Fixed brigantine rigging baked into the ghost combined sprite — no server modules. */
+  private static readonly GHOST_PHANTOM_MASTS = [
+    { x: 165,  y: 0, sailWidth: 80, height: 100, radius: 15, tearId: 9001 },
+    { x: -35,  y: 0, sailWidth: 80, height: 100, radius: 15, tearId: 9002 },
+    { x: -235, y: 0, sailWidth: 80, height: 100, radius: 15, tearId: 9003 },
+  ] as const;
+
   // Per-frame memoization caches — cleared at the top of renderWorld() each frame.
   // computeSinkState() is called ~10× per visible ship per frame; caching cuts it to 1 compute per ship.
   private _sinkStateCache: Map<number, { waterFill: number; floodTint: number; phase1Alpha: number; phase2Alpha: number; phase3Alpha: number }> = new Map();
@@ -732,6 +744,242 @@ export class RenderSystem {
 
     this._ghostDeckSprites.set(bucket, { canvas, key, cx, cy });
     return { canvas, cx, cy };
+  }
+
+  /** Ship-local bounds for the full ghost static sprite (hull + phantom rigging). */
+  private _ghostCombinedBounds(ship: Ship): { minX: number; maxX: number; minY: number; maxY: number } | null {
+    if (ship.hull.length < 3) return null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    const extend = (x: number, y: number) => {
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    };
+    for (const p of ship.hull) extend(p.x, p.y);
+    for (const mast of RenderSystem.GHOST_PHANTOM_MASTS) {
+      const halfW = mast.sailWidth * 0.5;
+      extend(mast.x - halfW - 10, mast.y - mast.height * 1.4 - 10);
+      extend(mast.x + halfW + 10, mast.y + mast.height * 1.4 + 10);
+      extend(mast.x + mast.radius, mast.y + mast.radius);
+    }
+    const deckR = 55 + 14;
+    extend(-deckR, -deckR);
+    extend(deckR, deckR);
+    const PAD = 22;
+    return { minX: minX - PAD, maxX: maxX + PAD, minY: minY - PAD, maxY: maxY + PAD };
+  }
+
+  private _ghostCombinedCacheKey(ship: Ship, aggro: boolean): string {
+    const bucket = Math.ceil(Math.max(1, ship.npcLevel ?? 1) / 5);
+    return `gcomb:${aggro ? 1 : 0}:${bucket}`;
+  }
+
+  /**
+   * Build or retrieve the combined static ghost ship sprite.
+   * Bakes hull, rope rigging, phantom masts/sails, and the deck rune circle.
+   * Cannons and animated overlays (fog, crew, spectral edge) are drawn live.
+   */
+  private _getGhostCombinedSprite(
+    ship: Ship,
+    aggro: boolean,
+  ): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
+    const bounds = this._ghostCombinedBounds(ship);
+    if (!bounds) return null;
+
+    const key = this._ghostCombinedCacheKey(ship, aggro);
+    const existing = this._ghostCombinedSprites.get(ship.id);
+    if (existing && existing.key === key) return { canvas: existing.canvas, ox: existing.ox, oy: existing.oy };
+
+    const ox = Math.ceil(-bounds.minX);
+    const oy = Math.ceil(-bounds.minY);
+    const w  = Math.ceil(bounds.maxX - bounds.minX);
+    const h  = Math.ceil(bounds.maxY - bounds.minY);
+    if (w < 1 || h < 1) return null;
+
+    const canvas = new OffscreenCanvas(w, h);
+    const gctx   = canvas.getContext('2d')!;
+    gctx.translate(ox, oy);
+
+    // Hull fill + base outline
+    gctx.fillStyle   = aggro ? '#1a0000' : '#0f0f1a';
+    gctx.strokeStyle = '#0a0a16';
+    gctx.lineWidth   = 2;
+    gctx.beginPath();
+    gctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) gctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    gctx.closePath();
+    gctx.fill();
+    gctx.stroke();
+
+    this._bakeGhostRopesOnCtx(gctx);
+
+    for (const mast of RenderSystem.GHOST_PHANTOM_MASTS) {
+      this._bakePhantomMastOnCtx(gctx, mast.x, mast.y, mast.radius);
+      this._bakePhantomSailOnCtx(gctx, mast.x, mast.y, mast.sailWidth, mast.height, mast.tearId);
+    }
+
+    this._ghostCombinedSprites.set(ship.id, { canvas, key, ox, oy });
+    return { canvas, ox, oy };
+  }
+
+  /** Bake brig rope rigging for the fixed phantom mast layout (no ship modules). */
+  private _bakeGhostRopesOnCtx(
+    rctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+  ): void {
+    rctx.strokeStyle = '#8B7355';
+    rctx.lineWidth   = 1.2;
+    rctx.lineCap     = 'round';
+
+    for (const mast of RenderSystem.GHOST_PHANTOM_MASTS) {
+      const mx = mast.x;
+      const my = mast.y;
+      const halfBase = mast.sailWidth * 0.5;
+      const step = halfBase / 3;
+      const x0 = mx - halfBase, x1 = mx - step, x2 = mx + step, x3 = mx + halfBase;
+
+      for (const side of [1, -1] as const) {
+        const ry0 = my + this.hullRailY(x0, side);
+        const ry1 = my + this.hullRailY(x1, side);
+        const ry2 = my + this.hullRailY(x2, side);
+        const ry3 = my + this.hullRailY(x3, side);
+
+        rctx.beginPath();
+        rctx.moveTo(mx, my); rctx.lineTo(x0, ry0);
+        rctx.moveTo(mx, my); rctx.lineTo(x3, ry3);
+        rctx.moveTo(mx, my); rctx.lineTo(x1, ry1);
+        rctx.moveTo(mx, my); rctx.lineTo(x2, ry2);
+        for (const t of [1 / 3, 2 / 3]) {
+          rctx.moveTo(mx + (x0 - mx) * t, my + (ry0 - my) * t);
+          rctx.lineTo(mx + (x3 - mx) * t, my + (ry3 - my) * t);
+        }
+        rctx.moveTo(x0, ry0); rctx.lineTo(x1, ry1); rctx.lineTo(x2, ry2); rctx.lineTo(x3, ry3);
+        rctx.stroke();
+
+        for (const [cxA, cxB] of [[x0, x1], [x2, x3]] as [number, number][]) {
+          const cy     = (this.hullRailY(cxA, side) + this.hullRailY(cxB, side)) / 2 + my;
+          const angle  = Math.atan2(this.hullRailY(cxB, side) - this.hullRailY(cxA, side), cxB - cxA);
+          const ccx    = (cxA + cxB) / 2;
+          const bodyW  = Math.abs(cxB - cxA);
+          const bodyH  = bodyW * 0.20;
+          const hornW  = bodyH * 1.20;
+          const hornH  = bodyH * 1.30;
+          rctx.save();
+          rctx.translate(ccx, cy);
+          rctx.rotate(angle);
+          rctx.fillStyle   = '#4A3728';
+          rctx.strokeStyle = '#2C1F14';
+          rctx.lineWidth   = 0.9;
+          rctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+          rctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+          rctx.fillRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.strokeRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.fillRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.strokeRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.restore();
+        }
+      }
+    }
+  }
+
+  private _bakePhantomMastOnCtx(
+    target: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+    x: number, y: number, radius: number,
+  ): void {
+    target.shadowColor = '#00ccbb';
+    target.shadowBlur  = 8;
+    target.fillStyle   = '#0d1a18';
+    target.strokeStyle = 'rgba(0,200,185,0.55)';
+    target.lineWidth   = 1.5;
+    target.beginPath();
+    target.arc(x, y, radius, 0, Math.PI * 2);
+    target.fill();
+    target.stroke();
+    target.shadowBlur = 0;
+  }
+
+  private _bakePhantomSailOnCtx(
+    target: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D,
+    x: number, y: number, width: number, height: number, mastId: number,
+    billow = 0, pulse = 0.52, t = 0, phase = mastId * 2.17,
+  ): void {
+    const sailTopY = -height * 1.4;
+    const sailBotY = -sailTopY;
+    const halfW    = width * 0.5;
+
+    let tears = this._phantomSailTears.get(mastId);
+    if (!tears) {
+      let mseed = (mastId * 2654435761) >>> 0;
+      const mrand = () => { mseed = (mseed * 1664525 + 1013904223) >>> 0; return mseed / 0xFFFFFFFF; };
+      const tearCount = 9;
+      const tearX: number[] = [];
+      const tearY: number[] = [];
+      for (let i = 0; i <= tearCount; i++) {
+        tearX.push(-halfW + (i / tearCount) * width);
+        tearY.push(sailBotY - mrand() * 28 - 4);
+      }
+      tears = { tearX, tearY };
+      this._phantomSailTears.set(mastId, tears);
+    }
+    const { tearX, tearY } = tears;
+    const tearCount = tearX.length - 1;
+
+    target.save();
+    target.translate(x, y);
+
+    const buildPath = () => {
+      target.beginPath();
+      target.moveTo(-halfW, sailTopY);
+      target.lineTo(halfW, sailTopY);
+      target.quadraticCurveTo(halfW + billow * 0.7, 0, tearX[tearCount], tearY[tearCount]);
+      for (let i = tearCount - 1; i >= 0; i--) target.lineTo(tearX[i], tearY[i]);
+      target.quadraticCurveTo(-halfW + billow * 0.3, 0, -halfW, sailTopY);
+      target.closePath();
+    };
+
+    target.shadowColor = '#00ddcc';
+    target.shadowBlur  = 16;
+    buildPath();
+    target.strokeStyle = `rgba(0,210,200,${0.45 + 0.15 * Math.sin(t * 1.6 + phase)})`;
+    target.lineWidth   = 1.5;
+    target.stroke();
+    target.shadowBlur = 0;
+
+    const grad = target.createLinearGradient(-halfW, sailTopY, halfW, sailBotY);
+    grad.addColorStop(0,    `rgba(0, 55, 45, ${pulse})`);
+    grad.addColorStop(0.45, `rgba(0, 32, 26, ${pulse * 0.85})`);
+    grad.addColorStop(1,    `rgba(0, 14, 11, ${pulse * 0.65})`);
+    buildPath();
+    target.fillStyle = grad;
+    target.fill();
+
+    target.save();
+    buildPath();
+    target.clip();
+    const veinCount = 3;
+    for (let v = 0; v < veinCount; v++) {
+      const vx     = -halfW * 0.55 + v * (halfW * 0.55);
+      const vAlpha = 0.28 + 0.18 * Math.sin(t * 2.1 + v * 1.5 + phase);
+      target.shadowColor = '#00ffee';
+      target.shadowBlur  = 5;
+      target.strokeStyle = `rgba(0, 230, 215, ${vAlpha})`;
+      target.lineWidth   = 0.9;
+      target.beginPath();
+      target.moveTo(vx, sailTopY + 4);
+      target.quadraticCurveTo(vx + billow * 0.35, 0, vx + billow * 0.15, sailBotY - 18);
+      target.stroke();
+    }
+    target.restore();
+
+    target.shadowColor = '#00ccbb';
+    target.shadowBlur  = 6;
+    target.strokeStyle = '#1a4a40';
+    target.lineWidth   = 2.5;
+    target.beginPath();
+    target.moveTo(-halfW - 6, sailTopY);
+    target.lineTo(halfW + 6, sailTopY);
+    target.stroke();
+    target.shadowBlur = 0;
+
+    target.restore();
   }
 
   private _getScratch(name: string, w: number, h: number): OffscreenCanvas {
@@ -4251,6 +4499,8 @@ export class RenderSystem {
     const template = this.getPlankTemplate();
 
     for (const ship of worldState.ships) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue;
+
       // Collect all present (placed, health > 0) plank slots.
       // Slots with health = 0 are absent and should be hoverable for placement.
       const presentKeys = new Set<string>();
@@ -4356,6 +4606,8 @@ export class RenderSystem {
     
     // Check all ships
     for (const ship of worldState.ships) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue;
+
       // Transform mouse to ship-local coordinates
       const dx = this.mouseWorldPos.x - ship.position.x;
       const dy = this.mouseWorldPos.y - ship.position.y;
@@ -4658,6 +4910,9 @@ export class RenderSystem {
     }
     if (this._ghostHullSprites.size > _liveShipIds.size + 4) {
       for (const id of this._ghostHullSprites.keys()) if (!_liveShipIds.has(id)) this._ghostHullSprites.delete(id);
+    }
+    if (this._ghostCombinedSprites.size > _liveShipIds.size + 4) {
+      for (const id of this._ghostCombinedSprites.keys()) if (!_liveShipIds.has(id)) this._ghostCombinedSprites.delete(id);
     }
 
     // Cache local player and ships once per frame — shared by all detect* and draw* methods.
@@ -9860,7 +10115,9 @@ export class RenderSystem {
       this.queueRenderItem(6, `cannon-reload-${ship.id}`, _da(() => this.drawCannonReloadIndicators(ship, camera)));
       this.queueRenderItem(5, `steering-wheels-${ship.id}`, _da(() => this.drawShipSteeringWheels(ship, camera)));
       this.queueRenderItem(5, `ladders-${ship.id}`, _da(() => this.drawShipLadders(ship, camera)));
-      this.queueRenderItem(5, `sail-ropes-${ship.id}`, _da(() => this.drawShipSailRopes(ship, camera)));
+      if (ship.shipType !== SHIP_TYPE_GHOST) {
+        this.queueRenderItem(5, `sail-ropes-${ship.id}`, _da(() => this.drawShipSailRopes(ship, camera)));
+      }
     }
 
     // Island cannon trajectory guide (same layer as ship cannon aim guides)
@@ -9870,6 +10127,7 @@ export class RenderSystem {
     
     // Queue sail fibers (layer 6)
     for (const ship of renderShips) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue;
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       this.queueRenderItem(6, 'sail-fibers', _da(() => this.drawShipSailFibers(ship, camera)));
@@ -9882,6 +10140,7 @@ export class RenderSystem {
 
     // Queue sail masts (layer 7)
     for (const ship of renderShips) {
+      if (ship.shipType === SHIP_TYPE_GHOST) continue;
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
       this.queueRenderItem(7, 'sail-masts', _da(() => this.drawShipSailMasts(ship, camera)));
@@ -10069,15 +10328,9 @@ export class RenderSystem {
         const id = ghostCopy.id;
         this.queueRenderItem(1, `ghost-wake-${id}`,      () => this.drawShipWake(ghostCopy, camera), -2);
         this.queueRenderItem(1, `ghost-hull-${id}`,       () => this.drawShipHull(ghostCopy, camera));
-        this.queueRenderItem(3, `ghost-planks-${id}`,     () => this.drawShipPlanks(ghostCopy, camera));
+        this.queueRenderItem(1, `ghost-fog-${id}`,        () => this.drawGhostFogAura(ghostCopy, camera), -1);
+        this.queueRenderItem(3, `ghost-deck-${id}`,       () => this.drawGhostDeckEffects(ghostCopy, camera));
         this.queueRenderItem(4, `ghost-cannons-${id}`,    () => this.drawShipCannons(ghostCopy, camera));
-        this.queueRenderItem(4, `ghost-swivelguns-${id}`, () => this.drawShipSwivelGuns(ghostCopy, camera));
-        this.queueRenderItem(4, `ghost-rudder-${id}`,     () => this.drawShipRudder(ghostCopy, camera));
-        this.queueRenderItem(5, `ghost-wheels-${id}`,     () => this.drawShipSteeringWheels(ghostCopy, camera));
-        this.queueRenderItem(5, `ghost-ladders-${id}`,    () => this.drawShipLadders(ghostCopy, camera));
-        this.queueRenderItem(5, `ghost-ropes-${id}`,      () => this.drawShipSailRopes(ghostCopy, camera));
-        this.queueRenderItem(6, `ghost-fibers-${id}`,     () => this.drawShipSailFibers(ghostCopy, camera));
-        this.queueRenderItem(7, `ghost-masts-${id}`,      () => this.drawShipSailMasts(ghostCopy, camera));
       }
     }
   }
@@ -10684,10 +10937,10 @@ export class RenderSystem {
           this.ctx.drawImage(hullSprite.canvas, -hullSprite.ox, -hullSprite.oy);
         }
       } else {
-        // Ghost hull — blit pre-baked sprite (fill + base outline).
-        // Dynamic effects (shadowBlur glow, globalAlpha health fade, spectral edge
-        // stroke, mist overlay) are drawn on top after the blit.
-        const ghostSprite = this._getGhostHullSprite(ship, isGhostAggro);
+        // Ghost hull — blit combined static sprite (hull + rigging + masts/sails + rune).
+        // Dynamic effects (shadowBlur glow, health fade, spectral edge stroke, mist)
+        // are drawn on top after the blit. Cannons are a separate live draw pass.
+        const ghostSprite = this._getGhostCombinedSprite(ship, isGhostAggro);
         if (ghostSprite) {
           this.ctx.drawImage(ghostSprite.canvas, -ghostSprite.ox, -ghostSprite.oy);
         } else {
@@ -11134,6 +11387,7 @@ export class RenderSystem {
    * A brighter ghost is shown for the slot currently under the cursor.
    */
   private drawMissingPlankGhosts(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     // Build set of present plank slot keys — only slots with health > 0 are "placed".
@@ -16352,16 +16606,13 @@ export class RenderSystem {
     ctx.arc(0, 0, circleR * 1.4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Circle arc + 5 tick marks — blitted from pre-baked sprite; pulse applied via globalAlpha.
-    // The sprite is baked in the spectral color for this ship's npcLevel bucket,
-    // so re-baking only happens when the ship changes level (very rare).
+    // Circle arc + tick marks — blitted from pre-baked sprite; pulse applied via globalAlpha.
     const deckSprite = this._getGhostDeckSprite(ship.npcLevel ?? 1);
     if (deckSprite) {
       ctx.globalAlpha = pulse * 0.80;
       ctx.drawImage(deckSprite.canvas, -deckSprite.cx, -deckSprite.cy);
       ctx.globalAlpha = 1.0;
     } else {
-      // Fallback: draw circle + ticks procedurally
       ctx.strokeStyle = `rgba(0,220,255,${(pulse * 0.80).toFixed(3)})`;
       ctx.lineWidth   = 1.5;
       ctx.shadowColor = '#00eeff';
@@ -16497,6 +16748,7 @@ export class RenderSystem {
   }
 
   private drawShipRudder(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
@@ -16570,6 +16822,7 @@ export class RenderSystem {
    * 2 cleats: one spanning x0→x1, one spanning x2→x3
    */
   private drawShipSailRopes(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
 
     const { phase3Alpha } = this.computeSinkState(ship);
@@ -16707,6 +16960,7 @@ export class RenderSystem {
   }
 
   private drawShipSailFibers(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;
@@ -16772,100 +17026,9 @@ export class RenderSystem {
     const now   = Date.now();
     const t     = now * 0.001;
     const phase = mastId * 2.17;
-
-    // Gentle supernatural billow — no wind angle, slight side-to-side sway
     const billow = Math.sin(t * 0.85 + phase) * 10;
-
-    const sailTopY = -height * 1.4;
-    const sailBotY = -sailTopY;
-    const halfW    = width * 0.5;
-
-    // Torn bottom edge — deterministic from mastId so it never changes.
-    // Cache the computed tearX/tearY arrays to avoid regenerating 10 random
-    // numbers + the loop every frame.
-    let tears = this._phantomSailTears.get(mastId);
-    if (!tears) {
-      let mseed = (mastId * 2654435761) >>> 0;
-      const mrand = () => { mseed = (mseed * 1664525 + 1013904223) >>> 0; return mseed / 0xFFFFFFFF; };
-      const tearCount = 9;
-      const tearX: number[] = [];
-      const tearY: number[] = [];
-      for (let i = 0; i <= tearCount; i++) {
-        tearX.push(-halfW + (i / tearCount) * width);
-        tearY.push(sailBotY - mrand() * 28 - 4);
-      }
-      tears = { tearX, tearY };
-      this._phantomSailTears.set(mastId, tears);
-    }
-    const { tearX, tearY } = tears;
-    const tearCount = tearX.length - 1;
-
-    this.ctx.save();
-    this.ctx.translate(x, y);
-
-    // Build clip path (outline of sail)
-    const buildPath = () => {
-      this.ctx.beginPath();
-      this.ctx.moveTo(-halfW, sailTopY);
-      this.ctx.lineTo(halfW, sailTopY);
-      this.ctx.quadraticCurveTo(halfW + billow * 0.7, 0, tearX[tearCount], tearY[tearCount]);
-      for (let i = tearCount - 1; i >= 0; i--) {
-        this.ctx.lineTo(tearX[i], tearY[i]);
-      }
-      this.ctx.quadraticCurveTo(-halfW + billow * 0.3, 0, -halfW, sailTopY);
-      this.ctx.closePath();
-    };
-
-    // ── Outer glow pass ──
-    this.ctx.shadowColor = '#00ddcc';
-    this.ctx.shadowBlur  = 16;
-    buildPath();
-    this.ctx.strokeStyle = `rgba(0,210,200,${0.45 + 0.15 * Math.sin(t * 1.6 + phase)})`;
-    this.ctx.lineWidth   = 1.5;
-    this.ctx.stroke();
-    this.ctx.shadowBlur = 0;
-
-    // ── Cloth fill — dark void-teal gradient ──
     const pulse = 0.52 + 0.13 * Math.sin(t * 1.3 + phase);
-    const grad  = this.ctx.createLinearGradient(-halfW, sailTopY, halfW, sailBotY);
-    grad.addColorStop(0,   `rgba(0, 55, 45, ${pulse})`);
-    grad.addColorStop(0.45,`rgba(0, 32, 26, ${pulse * 0.85})`);
-    grad.addColorStop(1,   `rgba(0, 14, 11, ${pulse * 0.65})`);
-    buildPath();
-    this.ctx.fillStyle = grad;
-    this.ctx.fill();
-
-    // ── Spectral vein lines through the sail cloth ──
-    this.ctx.save();
-    buildPath();
-    this.ctx.clip();
-    const veinCount = 3;
-    for (let v = 0; v < veinCount; v++) {
-      const vx     = -halfW * 0.55 + v * (halfW * 0.55);
-      const vAlpha = 0.28 + 0.18 * Math.sin(t * 2.1 + v * 1.5 + phase);
-      this.ctx.shadowColor  = '#00ffee';
-      this.ctx.shadowBlur   = 5;
-      this.ctx.strokeStyle  = `rgba(0, 230, 215, ${vAlpha})`;
-      this.ctx.lineWidth    = 0.9;
-      this.ctx.beginPath();
-      this.ctx.moveTo(vx, sailTopY + 4);
-      this.ctx.quadraticCurveTo(vx + billow * 0.35, 0, vx + billow * 0.15, sailBotY - 18);
-      this.ctx.stroke();
-    }
-    this.ctx.restore();
-
-    // ── Yard (horizontal boom at top) ──
-    this.ctx.shadowColor = '#00ccbb';
-    this.ctx.shadowBlur  = 6;
-    this.ctx.strokeStyle = '#1a4a40';
-    this.ctx.lineWidth   = 2.5;
-    this.ctx.beginPath();
-    this.ctx.moveTo(-halfW - 6, sailTopY);
-    this.ctx.lineTo(halfW  + 6, sailTopY);
-    this.ctx.stroke();
-    this.ctx.shadowBlur = 0;
-
-    this.ctx.restore();
+    this._bakePhantomSailOnCtx(this.ctx, x, y, width, height, mastId, billow, pulse, t, phase);
   }
 
   private drawSailFiber(x: number, y: number, width: number, height: number, sailColor: string, openness: number, angle: number, healthRatio: number = 1, moduleId: number = 0, fireIntensity: number = 0): void {
@@ -17236,6 +17399,7 @@ export class RenderSystem {
   }
 
   private drawShipSailMasts(ship: Ship, camera: Camera): void {
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
     // Check if ship is visible
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) {
       return;

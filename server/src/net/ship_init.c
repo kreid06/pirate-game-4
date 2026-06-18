@@ -576,190 +576,176 @@ static void ghost_aim_cannon(SimpleShip* ship, ShipModule* cannon,
     }
 }
 
+/* True for ghost ship cannons kept in physics/sim: six broadside + two bow chasers.
+ * Everything else (masts, helm, ladder, deck, planks) is client-side visual only. */
+static bool ghost_is_physics_cannon(const ShipModule* m) {
+    if (m->type_id != MODULE_TYPE_CANNON) return false;
+    const float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(m->local_pos.x));
+    const float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(m->local_pos.y));
+    /* Broadside at y = ±75 */
+    if (fabsf(ly) > 70.0f && fabsf(ly) < 80.0f) return true;
+    /* Bow chasers at (210, ±22), local_rot = π/2 → fires forward */
+    if (lx > 200.0f && lx < 220.0f && fabsf(ly) > 15.0f && fabsf(ly) < 30.0f) return true;
+    return false;
+}
+
+static void ghost_init_bow_cannon_module(ShipModule* out, uint16_t mid, float y_client) {
+    memset(out, 0, sizeof(*out));
+    out->id          = mid;
+    out->type_id     = MODULE_TYPE_CANNON;
+    out->local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
+    out->local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(y_client));
+    out->local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
+    out->state_bits  = MODULE_STATE_ACTIVE;
+    out->data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
+    out->data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
+    out->data.cannon.gunport_snap_idx      = 0xFF;
+    out->data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
+    out->data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
+    out->deck_id                           = 1;
+}
+
+static bool ghost_has_bow_cannon_at(const SimpleShip* ship, float y_client) {
+    for (int m = 0; m < ship->module_count; m++) {
+        const ShipModule* c = &ship->modules[m];
+        if (c->type_id != MODULE_TYPE_CANNON) continue;
+        float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(c->local_pos.x));
+        float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(c->local_pos.y));
+        if (lx > 200.0f && lx < 220.0f && fabsf(ly - y_client) < 2.0f) return true;
+    }
+    return false;
+}
+
+/* Ensure the two forward-facing bow cannons exist on SimpleShip + sim ship. */
+static void ghost_ensure_bow_cannons(SimpleShip* ship) {
+    if (!ship || ship->ship_type != SHIP_TYPE_GHOST) return;
+
+    const uint16_t bow_port_mid = MID(ship->ship_seq, MODULE_OFFSET_DYNAMIC_BASE);
+    const uint16_t bow_stbd_mid = MID(ship->ship_seq, MODULE_OFFSET_DYNAMIC_BASE + 1u);
+    struct Ship* sim_ship = global_sim ? find_sim_ship(ship->ship_id) : NULL;
+
+    if (!ghost_has_bow_cannon_at(ship, 22.0f) && ship->module_count < MAX_MODULES_PER_SHIP) {
+        ghost_init_bow_cannon_module(&ship->modules[ship->module_count++], bow_port_mid, 22.0f);
+    }
+    if (!ghost_has_bow_cannon_at(ship, -22.0f) && ship->module_count < MAX_MODULES_PER_SHIP) {
+        ghost_init_bow_cannon_module(&ship->modules[ship->module_count++], bow_stbd_mid, -22.0f);
+    }
+
+    if (!sim_ship) return;
+    for (int pass = 0; pass < 2; pass++) {
+        const float y_client = (pass == 0) ? 22.0f : -22.0f;
+        const uint16_t mid   = (pass == 0) ? bow_port_mid : bow_stbd_mid;
+        bool found = false;
+        for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
+            if (sim_ship->modules[sm].id == mid) { found = true; break; }
+            if (sim_ship->modules[sm].type_id != MODULE_TYPE_CANNON) continue;
+            float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->modules[sm].local_pos.x));
+            float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(sim_ship->modules[sm].local_pos.y));
+            if (lx > 200.0f && lx < 220.0f && fabsf(ly - y_client) < 2.0f) { found = true; break; }
+        }
+        if (found || sim_ship->module_count >= MAX_MODULES_PER_SHIP) continue;
+        ShipModule bc;
+        ghost_init_bow_cannon_module(&bc, mid, y_client);
+        bc.health     = 100;
+        bc.max_health = 100;
+        sim_ship->modules[sim_ship->module_count++] = bc;
+    }
+}
+
+/* Strip stale modules from ghosts spawned before the hull+cannons-only rule.
+ * Safe to call every tick — no-op when the ship is already clean. */
+static void ghost_sanitize_modules(SimpleShip* ship) {
+    if (!ship || ship->ship_type != SHIP_TYPE_GHOST) return;
+
+    int write = 0;
+    for (int m = 0; m < ship->module_count; m++) {
+        if (ghost_is_physics_cannon(&ship->modules[m]))
+            ship->modules[write++] = ship->modules[m];
+    }
+    if (write != ship->module_count)
+        ship->module_count = write;
+
+    if (global_sim) {
+        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+            if (global_sim->ships[si].id != ship->ship_id) continue;
+            struct Ship* sim_ship = &global_sim->ships[si];
+            uint8_t sw = 0;
+            for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
+                if (ghost_is_physics_cannon(&sim_ship->modules[sm]))
+                    sim_ship->modules[sw++] = sim_ship->modules[sm];
+            }
+            if (sw != sim_ship->module_count)
+                sim_ship->module_count = sw;
+            sim_ship->initial_plank_count = 0;
+            sim_ship->desired_sail_openness = 0;
+            break;
+        }
+    }
+
+    ghost_ensure_bow_cannons(ship);
+}
+
 /* ============================================================================
  * PHANTOM BRIG SPAWN  (ship_type = SHIP_TYPE_GHOST = 99)
- * Creates a "Phantom Brig" brigantine at the given world position.  The ship
- * belongs to COMPANY_GHOST (99) and has its port/starboard cannon groups set to
- * TARGETFIRE from the start so tick_ghost_ships can auto-aim them.
- * Phantom Brigs deal hull-only damage — interior module breaches are filtered
- * out in the hit-event processing loop.
+ * Creates a "Phantom Brig" brigantine at the given world position.  Physics:
+ * hull + eight cannons (six broadside + two bow).  Masts, sails, rigging, helm,
+ * ladder, deck, and planks are rendered client-side from the combined ghost sprite.
+ * tick_ghost_ships() steers directly and auto-fires all ghost cannons.
  * ========================================================================= */
 uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
     if (level < 1)  level = 1;
     if (level > 60) level = 60;
-    uint16_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST, 0xFF);
+
+    const uint8_t ghost_modules = MODULE_CANNON_PORT | MODULE_CANNON_STBD;
+    uint16_t ship_id = websocket_server_create_ship(x, y, COMPANY_GHOST, ghost_modules);
     if (ship_id == 0) return 0;
 
     SimpleShip* ship = find_ship(ship_id);
     if (!ship) return ship_id;
 
-    /* Tag as ghost and store level */
     ship->ship_type = SHIP_TYPE_GHOST;
     ship->npc_level = level;
 
-    /* Ghost ships have no physical planks — hull damage is tracked directly via
-     * hull_health in simulation.c (7 HP per cannonball hit, heals 1 HP/s).
-     * Strip all plank modules from both SimpleShip and sim ship so the plank
-     * drain logic never runs and the hit path goes through the ghost entry point. */
+    /* Strip to hull + physics cannons on both SimpleShip and sim ship. */
     {
-        /* Strip planks, decks, and masts from SimpleShip — only cannons stay functional */
         int write = 0;
         for (int m = 0; m < ship->module_count; m++) {
-            if (ship->modules[m].type_id != MODULE_TYPE_PLANK
-                && ship->modules[m].type_id != MODULE_TYPE_DECK
-                && ship->modules[m].type_id != MODULE_TYPE_MAST)
+            if (ghost_is_physics_cannon(&ship->modules[m]))
                 ship->modules[write++] = ship->modules[m];
         }
         ship->module_count = write;
 
-        /* Strip planks and decks from sim ship — KEEP masts so the client
-         * receives them in GAME_STATE and renders the spectral phantom sails. */
         if (global_sim) {
             for (uint32_t si = 0; si < global_sim->ship_count; si++) {
                 if (global_sim->ships[si].id != ship_id) continue;
                 struct Ship* sim_ship = &global_sim->ships[si];
                 uint8_t sw = 0;
                 for (uint8_t sm = 0; sm < sim_ship->module_count; sm++) {
-                    if (sim_ship->modules[sm].type_id != MODULE_TYPE_PLANK
-                        && sim_ship->modules[sm].type_id != MODULE_TYPE_DECK)
+                    if (ghost_is_physics_cannon(&sim_ship->modules[sm]))
                         sim_ship->modules[sw++] = sim_ship->modules[sm];
                 }
                 sim_ship->module_count = sw;
-                /* Ghost masts are fully deployed visually — set openness to 100 so
-                 * the phantom sail renderer gets full-open geometry, and pin
-                 * desired_sail_openness so the gradual-adjust loop keeps them there. */
-                sim_ship->desired_sail_openness = 100;
-                for (uint8_t _gm = 0; _gm < sim_ship->module_count; _gm++) {
-                    if (sim_ship->modules[_gm].type_id == MODULE_TYPE_MAST)
-                        sim_ship->modules[_gm].data.mast.openness = 100;
-                }
-                /* initial_plank_count = 0 so the drain tick never fires */
                 sim_ship->initial_plank_count = 0;
-                /* Ghost hull HP scaled by level:
-                 * level  1 = 60 000 HP (1×), level 60 = 600 000 HP (10×)
-                 * formula: 60000 * (1 + (level-1) * 9/59) */
+                sim_ship->desired_sail_openness = 0;
                 float hp_mult = 1.0f + (level - 1) * 9.0f / 59.0f;
                 int32_t scaled_hp = (int32_t)(60000.0f * hp_mult);
                 sim_ship->ghost_max_hull_hp = scaled_hp;
                 sim_ship->hull_health = scaled_hp;
-                /* Mark sim ship as ghost company so the hull-drain/heal and
-                 * damage code paths use ghost-specific logic (company_id == 99). */
                 sim_ship->company_id = COMPANY_GHOST;
                 break;
             }
         }
     }
 
-    /* Ghost ships have infinite spectral ammo */
+    ghost_ensure_bow_cannons(ship);
+
     ship->infinite_ammo = 1;
 
-    /* Ghost ships do NOT use weapon groups — tick_ghost_ships() fires cannons
-     * directly with a custom 90° arc + oscillating sweep AI.
-     * Disable all weapon groups so tick_ship_weapon_groups() ignores this ship. */
     for (int co = 0; co < MAX_COMPANIES; co++) {
         for (int g = 0; g < MAX_WEAPON_GROUPS; g++) {
             ship->weapon_groups[co][g].mode = (uint8_t)WEAPON_GROUP_MODE_HALTFIRE;
             ship->weapon_groups[co][g].target_ship_id = 0;
         }
-    }
-
-    /* Add 2 bow-facing cannons at the front of the hull.
-     * local_rot = PI/2 → barrel_angle = local_rot - PI/2 = 0 (fires forward).
-     * IDs use MID(ship_seq, DYNAMIC_BASE) and MID(ship_seq, DYNAMIC_BASE+1) so
-     * each ghost ship gets unique cannon IDs — no collisions when many ghosts exist. */
-    uint16_t bow_port_mid = MID(ship->ship_seq, MODULE_OFFSET_DYNAMIC_BASE);
-    uint16_t bow_stbd_mid = MID(ship->ship_seq, MODULE_OFFSET_DYNAMIC_BASE + 1u);
-    if (ship->module_count + 2 <= MAX_MODULES_PER_SHIP) {
-        /* Bow port cannon */
-        ship->modules[ship->module_count].id          = bow_port_mid;
-        ship->modules[ship->module_count].type_id     = MODULE_TYPE_CANNON;
-        ship->modules[ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
-        ship->modules[ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(22.0f));
-        ship->modules[ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
-        ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
-        ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
-        ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
-        ship->modules[ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
-        ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
-        ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
-        ship->modules[ship->module_count].deck_id                           = 1; /* upper deck */
-        ship->module_count++;
-
-        /* Bow starboard cannon */
-        ship->modules[ship->module_count].id          = bow_stbd_mid;
-        ship->modules[ship->module_count].type_id     = MODULE_TYPE_CANNON;
-        ship->modules[ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
-        ship->modules[ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-22.0f));
-        ship->modules[ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
-        ship->modules[ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
-        ship->modules[ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
-        ship->modules[ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
-        ship->modules[ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
-        ship->modules[ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
-        ship->modules[ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
-        ship->modules[ship->module_count].deck_id                           = 1; /* upper deck */
-        ship->module_count++;
-    }
-
-    /* Mirror bow cannons into the sim ship so the game-state broadcast
-     * (which serialises sim_ship->modules[]) sends them to the client.
-     * Without this they would exist only in SimpleShip and never appear on screen. */
-    if (global_sim) {
-        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
-            if (global_sim->ships[si].id != ship_id) continue;
-            struct Ship* sim_ship = &global_sim->ships[si];
-            if (sim_ship->module_count + 2 <= MAX_MODULES_PER_SHIP) {
-                /* Bow port cannon */
-                sim_ship->modules[sim_ship->module_count].id          = bow_port_mid;
-                sim_ship->modules[sim_ship->module_count].type_id     = MODULE_TYPE_CANNON;
-                sim_ship->modules[sim_ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
-                sim_ship->modules[sim_ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(22.0f));
-                sim_ship->modules[sim_ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
-                sim_ship->modules[sim_ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
-                sim_ship->modules[sim_ship->module_count].health      = 100;
-                sim_ship->modules[sim_ship->module_count].max_health  = 100;
-                sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
-                sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
-                sim_ship->modules[sim_ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
-                sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
-                sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
-                sim_ship->modules[sim_ship->module_count].deck_id                           = 1; /* upper deck */
-                sim_ship->module_count++;
-
-                /* Bow starboard cannon */
-                sim_ship->modules[sim_ship->module_count].id          = bow_stbd_mid;
-                sim_ship->modules[sim_ship->module_count].type_id     = MODULE_TYPE_CANNON;
-                sim_ship->modules[sim_ship->module_count].local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(210.0f));
-                sim_ship->modules[sim_ship->module_count].local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(-22.0f));
-                sim_ship->modules[sim_ship->module_count].local_rot   = Q16_FROM_FLOAT((float)M_PI / 2.0f);
-                sim_ship->modules[sim_ship->module_count].state_bits  = MODULE_STATE_ACTIVE;
-                sim_ship->modules[sim_ship->module_count].health      = 100;
-                sim_ship->modules[sim_ship->module_count].max_health  = 100;
-                sim_ship->modules[sim_ship->module_count].data.cannon.aim_direction         = Q16_FROM_FLOAT(0.0f);
-                sim_ship->modules[sim_ship->module_count].data.cannon.desired_aim_direction = Q16_FROM_FLOAT(0.0f);
-                sim_ship->modules[sim_ship->module_count].data.cannon.gunport_snap_idx      = 0xFF; // not linked to a gunport
-                sim_ship->modules[sim_ship->module_count].data.cannon.reload_time           = CANNON_RELOAD_TIME_MS;
-                sim_ship->modules[sim_ship->module_count].data.cannon.time_since_fire       = CANNON_RELOAD_TIME_MS;
-                sim_ship->modules[sim_ship->module_count].deck_id                           = 1; /* upper deck */
-                sim_ship->module_count++;
-            }
-            break;
-        }
-    }
-
-    /* Spawn a helmsman NPC agent so the ship steers itself.
-     * The helmsman uses the MODULE_TYPE_HELM to turn. */
-    ShipModule* helm = NULL;
-    for (int m = 0; m < ship->module_count; m++) {
-        if (ship->modules[m].type_id == MODULE_TYPE_HELM ||
-            ship->modules[m].type_id == MODULE_TYPE_STEERING_WHEEL) {
-            helm = &ship->modules[m];
-            break;
-        }
-    }
-    if (helm) {
-        uint16_t npc_id = websocket_server_create_npc(ship_id, helm->id, NPC_ROLE_HELMSMAN);
-        (void)npc_id;  /* we don't need to track it separately */
     }
 
     return ship_id;
@@ -843,6 +829,9 @@ static int ghost_ship_level[MAX_SIMPLE_SHIPS];
 static int ghost_ship_spawn_idx[MAX_SIMPLE_SHIPS];
 static int ghost_ship_fleet_idx[MAX_SIMPLE_SHIPS];
 static int ghost_ship_fleet_role[MAX_SIMPLE_SHIPS];
+/* Follower catch-up state: true while steering back toward the lead after
+ * exceeding GHOST_FLEET_FOLLOW_TRIGGER.  Cleared within GHOST_FLEET_FOLLOW_RELEASE. */
+static bool ghost_fleet_catching_up[MAX_SIMPLE_SHIPS];
 
 /* ── Ghost fleet table ───────────────────────────────────────────────────── */
 #define MAX_GHOST_FLEETS 64
@@ -887,6 +876,10 @@ static int spawn_queue_len  = 0;
  *           [9]      ← 4 units behind, centred (rearguard)
  */
 #define GHOST_FLEET_SPACING 200.0f
+/* Fleet follower leash: pseudo-wander while within RELEASE of the lead;
+ * if drift exceeds TRIGGER, catch up to the lead until back within RELEASE. */
+#define GHOST_FLEET_FOLLOW_TRIGGER  3000.0f
+#define GHOST_FLEET_FOLLOW_RELEASE  1000.0f
 static const float fleet_form_lx[MAX_FLEET_SIZE] = { 0, -1, -1, -2, -2, -3, -3, -3, -3, -4 };
 static const float fleet_form_ly[MAX_FLEET_SIZE] = { 0,  1, -1,  2, -2,  1, -1,  3, -3,  0 };
 /* Keep spawned hulls this far inside the zone edge (client px). */
@@ -925,6 +918,7 @@ static void ghost_clear_aggro_state(int slot) {
     ghost_natural_target[slot]  = 0;
     ghost_in_combat[slot]       = false;
     ghost_last_combat_ms[slot]  = 0;
+    ghost_fleet_catching_up[slot] = false;
 }
 
 static bool ghost_position_spawn_clear(float x, float y) {
@@ -1154,6 +1148,8 @@ void tick_ghost_ships(float dt) {
         if (ship->ship_type != SHIP_TYPE_GHOST) continue;
         if (ship->is_sinking) continue;
 
+        ghost_sanitize_modules(ship);
+
         /* ── AI culling: skip processing when no player is within render range ──
          * Render distance is approximately 5000 client px; we add 2000 px buffer
          * so ghosts begin reacting before they enter the player's view. */
@@ -1370,41 +1366,48 @@ void tick_ghost_ships(float dt) {
                 }
             }
         } else {
-            /* Wander mode — fleet followers hold formation; lead ships wander. */
+            /* Wander mode — fleet followers pseudo-wander near the lead and only
+             * catch up when they drift beyond GHOST_FLEET_FOLLOW_TRIGGER. */
             int fi   = ghost_ship_fleet_idx[s];
             int role = ghost_ship_fleet_role[s];
-            bool in_formation = false;
+            bool follower_handled = false;
 
             if (fi >= 0 && role > 0 && ghost_fleets[fi].active) {
                 uint16_t lead_id   = ghost_fleets[fi].ship_ids[0];
                 int      lead_slot = find_ship_slot(lead_id);
                 if (lead_slot >= 0 && ships[lead_slot].active && !ships[lead_slot].is_sinking) {
                     SimpleShip *lead = &ships[lead_slot];
-                    int ri = (role < MAX_FLEET_SIZE) ? role : (MAX_FLEET_SIZE - 1);
-                    float local_fwd = fleet_form_lx[ri] * GHOST_FLEET_SPACING;
-                    float local_lat = fleet_form_ly[ri] * GHOST_FLEET_SPACING;
-                    float cos_h = cosf(lead->rotation);
-                    float sin_h = sinf(lead->rotation);
-                    float form_x = lead->x + local_fwd * cos_h - local_lat * sin_h;
-                    float form_y = lead->y + local_fwd * sin_h + local_lat * cos_h;
-                    float dx = form_x - ship->x;
-                    float dy = form_y - ship->y;
-                    float dist = sqrtf(dx * dx + dy * dy);
+                    float ldx = lead->x - ship->x;
+                    float ldy = lead->y - ship->y;
+                    float dist_to_lead = sqrtf(ldx * ldx + ldy * ldy);
                     float lvl_scale = 1.0f + (ghost_ship_level[s] - 1) * 0.10f;
-                    if (dist > GHOST_FLEET_SPACING * 0.4f) {
-                        desired_heading = atan2f(dy, dx);
-                        float catch_up  = 1.0f + dist / GHOST_FLEET_SPACING;
-                        move_speed = fminf(GHOST_WANDER_SPEED * lvl_scale * catch_up,
-                                           GHOST_CHASE_SPEED  * lvl_scale);
-                    } else {
-                        desired_heading = lead->rotation;
-                        move_speed = GHOST_WANDER_SPEED * lvl_scale;
+
+                    if (ghost_fleet_catching_up[s]) {
+                        if (dist_to_lead <= GHOST_FLEET_FOLLOW_RELEASE) {
+                            ghost_fleet_catching_up[s] = false;
+                        } else {
+                            desired_heading = atan2f(ldy, ldx);
+                            float catch_up  = 1.0f + dist_to_lead / GHOST_FLEET_FOLLOW_RELEASE;
+                            move_speed = fminf(GHOST_WANDER_SPEED * lvl_scale * catch_up,
+                                               GHOST_CHASE_SPEED  * lvl_scale);
+                            follower_handled = true;
+                        }
                     }
-                    in_formation = true;
+
+                    if (!follower_handled) {
+                        if (dist_to_lead > GHOST_FLEET_FOLLOW_TRIGGER) {
+                            ghost_fleet_catching_up[s] = true;
+                            desired_heading = atan2f(ldy, ldx);
+                            float catch_up  = 1.0f + dist_to_lead / GHOST_FLEET_FOLLOW_RELEASE;
+                            move_speed = fminf(GHOST_WANDER_SPEED * lvl_scale * catch_up,
+                                               GHOST_CHASE_SPEED  * lvl_scale);
+                            follower_handled = true;
+                        }
+                    }
                 }
             }
 
-            if (!in_formation) {
+            if (!follower_handled) {
                 ghost_wander_timer[s] -= dt;
                 if (ghost_wander_timer[s] <= 0.0f) {
                     static uint32_t wander_seed = 0x9e3779b9u;

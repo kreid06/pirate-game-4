@@ -8618,6 +8618,8 @@ int websocket_server_update(struct Sim* sim) {
                                         SimpleShip* simple_ship = find_ship(target_ship_id);
                                         if (!sim_ship || !simple_ship) {
                                             strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else if (simple_ship->ship_type == SHIP_TYPE_GHOST) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ghost_ship_no_planks\"}");
                                         } else {
                                             uint8_t ship_seq = simple_ship->ship_seq;
                                             // Determine which plank slots are already present using MID encoding
