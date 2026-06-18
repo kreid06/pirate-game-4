@@ -366,6 +366,24 @@ export class RenderSystem {
   // Replaces 3× 47-vertex hull polygon rebuilds per ship per frame with one drawImage() + optional flood fill.
   private _shipUpperDeckSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
 
+  // ── Ghost ship pseudo-sprite caches ────────────────────────────────────────
+  // Ghost hulls bypass the normal _shipHullSprites because their fill color and
+  // spectral edge are health-/aggro-driven.  We still bake the polygon fill + base
+  // stroke so the hull path is only rebuilt when the aggro state changes (at most
+  // once per ~220 ms sin cycle), not every frame.
+  // Key = "gh:<aggro>".
+  private _ghostHullSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
+
+  // Runic circle + 5 tick marks baked per npcLevel bucket (12 buckets across 60
+  // levels).  The pulse alpha and slow rotation are applied at draw-time via
+  // ctx.globalAlpha + ctx.rotate, so only geometry needs to be pre-baked.
+  // Key = "gd:<levelBucket>".
+  private _ghostDeckSprites: Map<number, { canvas: OffscreenCanvas; key: string; cx: number; cy: number }> = new Map();
+
+  // Per-mastId phantom-sail torn bottom edge (seeded-random, deterministic).
+  // Saves regenerating 10 random numbers per sail per frame.
+  private _phantomSailTears: Map<number, { tearX: number[]; tearY: number[] }> = new Map();
+
   // Per-frame memoization caches — cleared at the top of renderWorld() each frame.
   // computeSinkState() is called ~10× per visible ship per frame; caching cuts it to 1 compute per ship.
   private _sinkStateCache: Map<number, { waterFill: number; floodTint: number; phase1Alpha: number; phase2Alpha: number; phase3Alpha: number }> = new Map();
@@ -611,6 +629,109 @@ export class RenderSystem {
 
     this._shipHullSprites.set(ship.id, { canvas, key, ox, oy });
     return { canvas, ox, oy };
+  }
+
+  /**
+   * Build or retrieve the cached ghost hull sprite.
+   * Bakes the filled hull polygon + base outline stroke.
+   * Dynamic effects (shadowBlur, spectral edge stroke, health alpha, mist overlay)
+   * are applied at draw-time on the live canvas so the sprite only needs to be
+   * rebuilt when the aggro fill-colour state flips (≤1× per ~220 ms).
+   */
+  private _getGhostHullSprite(
+    ship: Ship,
+    aggro: boolean,
+  ): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
+    if (ship.hull.length < 3) return null;
+    const key = `gh:${aggro ? 1 : 0}`;
+    const existing = this._ghostHullSprites.get(ship.id);
+    if (existing && existing.key === key) return { canvas: existing.canvas, ox: existing.ox, oy: existing.oy };
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of ship.hull) {
+      if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    }
+    const PAD = 4;
+    const ox = Math.ceil(-minX) + PAD;
+    const oy = Math.ceil(-minY) + PAD;
+    const w  = Math.ceil(maxX - minX) + PAD * 2;
+    const h  = Math.ceil(maxY - minY) + PAD * 2;
+    if (w < 1 || h < 1) return null;
+
+    const canvas = new OffscreenCanvas(w, h);
+    const gctx   = canvas.getContext('2d')!;
+    gctx.translate(ox, oy);
+
+    gctx.fillStyle   = aggro ? '#1a0000' : '#0f0f1a';
+    gctx.strokeStyle = '#0a0a16';
+    gctx.lineWidth   = 2;
+
+    gctx.beginPath();
+    gctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) gctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    gctx.closePath();
+    gctx.fill();
+    gctx.stroke();
+
+    this._ghostHullSprites.set(ship.id, { canvas, key, ox, oy });
+    return { canvas, ox, oy };
+  }
+
+  /**
+   * Build or retrieve the cached ghost deck sprite — the runic circle arc and
+   * 5 evenly-spaced tick marks baked in the spectral colour for the given
+   * npcLevel bucket (12 buckets across levels 1–60).
+   * The pulse alpha oscillation and slow rotation are applied at draw-time via
+   * ctx.globalAlpha + ctx.rotate so the sprite is essentially permanent until
+   * npcLevel changes.
+   */
+  private _getGhostDeckSprite(npcLevel: number): { canvas: OffscreenCanvas; cx: number; cy: number } | null {
+    const bucket  = Math.ceil(Math.max(1, npcLevel) / 5); // 12 buckets (1-5, 6-10, … 56-60)
+    const key     = `gd:${bucket}`;
+    const existing = this._ghostDeckSprites.get(bucket);
+    if (existing && existing.key === key) return { canvas: existing.canvas, cx: existing.cx, cy: existing.cy };
+
+    const circleR = 55;
+    const PAD     = 10; // room for the 6px shadowBlur
+    const size    = Math.ceil((circleR + PAD) * 2);
+    const cx      = circleR + PAD;
+    const cy      = circleR + PAD;
+
+    // Representative level for this bucket (midpoint)
+    const repLvl  = (bucket - 1) * 5 + 3;
+    const t       = Math.max(0, Math.min(1, (repLvl - 1) / 59));
+    const r       = Math.round(t * 0);        // cyan→teal→red spectral range
+    const g       = Math.round(220 * (1 - t) + 30 * t);
+    const b       = Math.round(255 * (1 - t));
+    const clr     = `rgb(${r},${g},${b})`;
+
+    const canvas = new OffscreenCanvas(size, size);
+    const dctx   = canvas.getContext('2d')!;
+
+    // Circle arc
+    dctx.strokeStyle = clr;
+    dctx.lineWidth   = 1.5;
+    dctx.shadowColor = clr;
+    dctx.shadowBlur  = 6;
+    dctx.beginPath();
+    dctx.arc(cx, cy, circleR, 0, Math.PI * 2);
+    dctx.stroke();
+
+    // 5 tick marks
+    dctx.lineWidth = 1.0;
+    for (let i = 0; i < 5; i++) {
+      const angle = (i / 5) * Math.PI * 2;
+      const cos   = Math.cos(angle);
+      const sin   = Math.sin(angle);
+      dctx.beginPath();
+      dctx.moveTo(cx + cos * circleR,        cy + sin * circleR);
+      dctx.lineTo(cx + cos * (circleR - 12), cy + sin * (circleR - 12));
+      dctx.stroke();
+    }
+
+    this._ghostDeckSprites.set(bucket, { canvas, key, cx, cy });
+    return { canvas, cx, cy };
   }
 
   private _getScratch(name: string, w: number, h: number): OffscreenCanvas {
@@ -4534,6 +4655,9 @@ export class RenderSystem {
     }
     if (this._shipUpperDeckSprites.size > _liveShipIds.size + 4) {
       for (const id of this._shipUpperDeckSprites.keys()) if (!_liveShipIds.has(id)) this._shipUpperDeckSprites.delete(id);
+    }
+    if (this._ghostHullSprites.size > _liveShipIds.size + 4) {
+      for (const id of this._ghostHullSprites.keys()) if (!_liveShipIds.has(id)) this._ghostHullSprites.delete(id);
     }
 
     // Cache local player and ships once per frame — shared by all detect* and draw* methods.
@@ -10478,12 +10602,12 @@ export class RenderSystem {
 
     // Ghost ship: dark spectral hull with cyan edge glow
     const isGhost = ship.shipType === SHIP_TYPE_GHOST;
-    // Aggro: ghost has a non-ghost, non-sinking ship within attack range
-    const GHOST_ATTACK_RANGE_PX = 2400;
+    // Aggro glow: enemy within de-aggro radius (matches server GHOST_DEAGGRO_RANGE)
+    const GHOST_DEAGGRO_RANGE_PX = 4800;
     const isGhostAggro = isGhost && (this._cachedWorldShips ?? []).some(s =>
       s.id !== ship.id && s.shipType !== SHIP_TYPE_GHOST && s.hullHealth > 0 &&
       (s.position.x - ship.position.x) ** 2 + (s.position.y - ship.position.y) ** 2
-        < GHOST_ATTACK_RANGE_PX * GHOST_ATTACK_RANGE_PX
+        < GHOST_DEAGGRO_RANGE_PX * GHOST_DEAGGRO_RANGE_PX
     );
     // Pulse timer: 0-1 oscillation for the aggro glow
     const aggroPulse = isGhostAggro ? 0.65 + 0.35 * Math.sin(performance.now() / 220) : 1;
@@ -10560,13 +10684,21 @@ export class RenderSystem {
           this.ctx.drawImage(hullSprite.canvas, -hullSprite.ox, -hullSprite.oy);
         }
       } else {
-        // Ghost hull — procedural (fill/glow change with health / aggro pulse; not cacheable)
-        this.ctx.beginPath();
-        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-        this.ctx.closePath();
-        this.ctx.fill();
-        this.ctx.stroke();
+        // Ghost hull — blit pre-baked sprite (fill + base outline).
+        // Dynamic effects (shadowBlur glow, globalAlpha health fade, spectral edge
+        // stroke, mist overlay) are drawn on top after the blit.
+        const ghostSprite = this._getGhostHullSprite(ship, isGhostAggro);
+        if (ghostSprite) {
+          this.ctx.drawImage(ghostSprite.canvas, -ghostSprite.ox, -ghostSprite.oy);
+        } else {
+          // Fallback if hull geometry not ready
+          this.ctx.beginPath();
+          this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+          for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+          this.ctx.closePath();
+          this.ctx.fill();
+          this.ctx.stroke();
+        }
       }
 
       // Ghost ships: add a second thin edge stroke for the spectral glow outline (level-tinted)
@@ -16204,13 +16336,14 @@ export class RenderSystem {
     ctx.rotate(ship.rotation - cs.rotation);
 
     // ── Runic circle pulsing glow ─────────────────────────────────────────
-    const pulse  = 0.4 + 0.35 * Math.sin(t * 1.8);
-    const rotate = t * 0.22; // slow rotation
+    const pulse   = 0.4 + 0.35 * Math.sin(t * 1.8);
+    const rotate  = t * 0.22; // slow rotation
     const circleR = 55;
 
-    // Outer haze
     ctx.save();
     ctx.rotate(rotate);
+
+    // Outer haze — animated gradient, drawn fresh each frame
     const hazeGrd = ctx.createRadialGradient(0, 0, circleR * 0.55, 0, 0, circleR * 1.4);
     hazeGrd.addColorStop(0,   `rgba(0,230,255,${(pulse * 0.30).toFixed(3)})`);
     hazeGrd.addColorStop(1,   'rgba(0,100,160,0)');
@@ -16219,29 +16352,35 @@ export class RenderSystem {
     ctx.arc(0, 0, circleR * 1.4, 0, Math.PI * 2);
     ctx.fill();
 
-    // Circle stroke
-    ctx.strokeStyle = `rgba(0,220,255,${(pulse * 0.80).toFixed(3)})`;
-    ctx.lineWidth   = 1.5;
-    ctx.shadowColor = '#00eeff';
-    ctx.shadowBlur  = 6;
-    ctx.beginPath();
-    ctx.arc(0, 0, circleR, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // 5 rune tick marks around the ring
-    for (let i = 0; i < 5; i++) {
-      const angle = (i / 5) * Math.PI * 2;
-      const ix    = Math.cos(angle) * circleR;
-      const iy    = Math.sin(angle) * circleR;
-      const ox    = Math.cos(angle) * (circleR - 12);
-      const oy    = Math.sin(angle) * (circleR - 12);
-      ctx.strokeStyle = `rgba(0,200,255,${(pulse * 0.70).toFixed(3)})`;
-      ctx.lineWidth   = 1.0;
+    // Circle arc + 5 tick marks — blitted from pre-baked sprite; pulse applied via globalAlpha.
+    // The sprite is baked in the spectral color for this ship's npcLevel bucket,
+    // so re-baking only happens when the ship changes level (very rare).
+    const deckSprite = this._getGhostDeckSprite(ship.npcLevel ?? 1);
+    if (deckSprite) {
+      ctx.globalAlpha = pulse * 0.80;
+      ctx.drawImage(deckSprite.canvas, -deckSprite.cx, -deckSprite.cy);
+      ctx.globalAlpha = 1.0;
+    } else {
+      // Fallback: draw circle + ticks procedurally
+      ctx.strokeStyle = `rgba(0,220,255,${(pulse * 0.80).toFixed(3)})`;
+      ctx.lineWidth   = 1.5;
+      ctx.shadowColor = '#00eeff';
+      ctx.shadowBlur  = 6;
       ctx.beginPath();
-      ctx.moveTo(ix, iy);
-      ctx.lineTo(ox, oy);
+      ctx.arc(0, 0, circleR, 0, Math.PI * 2);
       ctx.stroke();
+      for (let i = 0; i < 5; i++) {
+        const angle = (i / 5) * Math.PI * 2;
+        ctx.strokeStyle = `rgba(0,200,255,${(pulse * 0.70).toFixed(3)})`;
+        ctx.lineWidth   = 1.0;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(angle) * circleR, Math.sin(angle) * circleR);
+        ctx.lineTo(Math.cos(angle) * (circleR - 12), Math.sin(angle) * (circleR - 12));
+        ctx.stroke();
+      }
+      ctx.shadowBlur = 0;
     }
+
     ctx.restore();
 
     // ── Ghost crew silhouettes ────────────────────────────────────────────
@@ -16641,16 +16780,25 @@ export class RenderSystem {
     const sailBotY = -sailTopY;
     const halfW    = width * 0.5;
 
-    // Build seeded-random torn bottom edge
-    let mseed = (mastId * 2654435761) >>> 0;
-    const mrand = () => { mseed = (mseed * 1664525 + 1013904223) >>> 0; return mseed / 0xFFFFFFFF; };
-    const tearCount = 9;
-    const tearX: number[] = [];
-    const tearY: number[] = [];
-    for (let i = 0; i <= tearCount; i++) {
-      tearX.push(-halfW + (i / tearCount) * width);
-      tearY.push(sailBotY - mrand() * 28 - 4);
+    // Torn bottom edge — deterministic from mastId so it never changes.
+    // Cache the computed tearX/tearY arrays to avoid regenerating 10 random
+    // numbers + the loop every frame.
+    let tears = this._phantomSailTears.get(mastId);
+    if (!tears) {
+      let mseed = (mastId * 2654435761) >>> 0;
+      const mrand = () => { mseed = (mseed * 1664525 + 1013904223) >>> 0; return mseed / 0xFFFFFFFF; };
+      const tearCount = 9;
+      const tearX: number[] = [];
+      const tearY: number[] = [];
+      for (let i = 0; i <= tearCount; i++) {
+        tearX.push(-halfW + (i / tearCount) * width);
+        tearY.push(sailBotY - mrand() * 28 - 4);
+      }
+      tears = { tearX, tearY };
+      this._phantomSailTears.set(mastId, tears);
     }
+    const { tearX, tearY } = tears;
+    const tearCount = tearX.length - 1;
 
     this.ctx.save();
     this.ctx.translate(x, y);

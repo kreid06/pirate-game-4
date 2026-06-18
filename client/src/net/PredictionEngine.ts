@@ -127,7 +127,7 @@ export class PredictionEngine {
   // Kept after the jitter hunt: this is the fastest way to re-diagnose any future
   // interpolation regression (interp vs hold counts, buffer cadence, clock-offset stability).
   // When false the only cost is one boolean check per frame.
-  public static DEBUG_INTERP = true;
+  public static DEBUG_INTERP = false;
   private _diag = {
     t0: 0, frames: 0, interp: 0, holdNew: 0, holdOld: 0, disabled: 0,
     shipMoved: 0, lastShipX: NaN, lastShipId: -1,

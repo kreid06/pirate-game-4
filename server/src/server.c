@@ -231,22 +231,28 @@ int server_run(struct ServerContext* ctx) {
         // Receive WebSocket messages and process player input for this tick.
         // NOTE: broadcast is intentionally NOT done here — it runs after physics
         // so clients always receive the freshest integrated positions.
+        uint64_t _t_net0 = get_time_us();
         websocket_server_update(&ctx->simulation);
 
         // HYBRID: Apply player movement states (rudder, wind, dock) to sim ships.
         // Must run AFTER websocket_server_update (inputs received) and
         // BEFORE step_simulation (so they are integrated this tick).
+        uint64_t _t_wstick0 = get_time_us();
         websocket_server_tick(TICK_DURATION_MS / 1000.0f);
 
         // Update admin server (process admin panel requests)
+        uint64_t _t_admin0 = get_time_us();
         admin_server_update(&ctx->admin_server, &ctx->simulation, NULL);
 
         // Run physics simulation step — integrates velocity/position for all ships.
+        uint64_t _t_sim0 = get_time_us();
         step_simulation(ctx);
 
         // Broadcast fresh GAME_STATE to all clients NOW that physics is complete.
         // This replaces the pre-physics send that was inside websocket_server_update.
+        uint64_t _t_send0 = get_time_us();
         websocket_server_send_game_state();
+        uint64_t _t_send1 = get_time_us();
 
         // Send UDP snapshots (placeholder — binary snapshot path)
         send_snapshots(ctx);
@@ -269,10 +275,16 @@ int server_run(struct ServerContext* ctx) {
         uint64_t tick_end      = get_time_us();
         uint64_t tick_duration = tick_end - tick_start;
 
-        // Log performance warning if tick took too long
+        // Log performance warning if tick took too long, with a per-section breakdown so we
+        // can see whether the overrun is in input, sim physics/collision, or send.
         if (tick_duration > TICK_DURATION_US) {
-            log_warn("Tick %u took %lu us (budget: %u us)",
-                     ctx->current_tick, tick_duration, TICK_DURATION_US);
+            log_warn("Tick %u took %lu us (budget: %u us) | net=%lu wstick=%lu admin=%lu sim=%lu send=%lu us",
+                     ctx->current_tick, tick_duration, TICK_DURATION_US,
+                     (unsigned long)(_t_wstick0 - _t_net0),
+                     (unsigned long)(_t_admin0  - _t_wstick0),
+                     (unsigned long)(_t_sim0    - _t_admin0),
+                     (unsigned long)(_t_send0   - _t_sim0),
+                     (unsigned long)(_t_send1   - _t_send0));
         }
 
         // Advance the next-tick target.

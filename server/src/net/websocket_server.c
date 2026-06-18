@@ -472,17 +472,24 @@ int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32
 // ship_seq is the module-ID namespace byte; ship_id is the routable address.
 // On a multi-server cluster ship_id will widen to (server_id<<8)|ship_seq;
 // ship_seq always remains extractable as ship_id & 0xFF.
-#define SHIP_ID_LOOKUP_SIZE 512
+/* entity_id is uint16_t (max 65535) and the counter is never reset between
+ * sessions.  After enough projectiles / players have been created the IDs for
+ * new ships exceed the old 512-entry table, making simple_ship NULL in the blob
+ * builder and causing ghost ships to be serialised as plain brigantines (wrong
+ * shipType, missing npcLevel).  Size the table to the full uint16_t range so
+ * every possible entity ID is always a valid index.  At 8 bytes per pointer
+ * this costs 512 KB in BSS — well within the server's budget. */
+#define SHIP_ID_LOOKUP_SIZE 65536
 static SimpleShip* g_ship_by_id[SHIP_ID_LOOKUP_SIZE]; // zero-initialised by C
 
 SimpleShip* find_ship(uint16_t ship_id) {
-    if (ship_id > 0 && ship_id < SHIP_ID_LOOKUP_SIZE) {
+    if (ship_id > 0) {
         SimpleShip* cached = g_ship_by_id[ship_id];
         if (cached && cached->active && cached->ship_id == ship_id) return cached;
     }
     for (int i = 0; i < ship_count; i++) {
         if (ships[i].active && ships[i].ship_id == ship_id) {
-            if (ship_id < SHIP_ID_LOOKUP_SIZE) g_ship_by_id[ship_id] = &ships[i];
+            if (ship_id > 0) g_ship_by_id[ship_id] = &ships[i];
             return &ships[i];
         }
     }
@@ -2167,8 +2174,11 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
 
     /* One-pass lookup table reused by tombstone and other ship-anchored loops.
      * Avoids per-tombstone O(ship_count) scans for the ship position+rotation
-     * needed to transform tombstone local coords to world coords. */
-    const SimpleShip* _tmb_ss_lut[SHIP_ID_LOOKUP_SIZE];
+     * needed to transform tombstone local coords to world coords.
+     * static: SHIP_ID_LOOKUP_SIZE is now 65536 × 8 B = 512 KB — too large for
+     * the stack.  Function-local static puts it in BSS (zero-init at load time)
+     * and we memset it at the start of each call to clear stale entries. */
+    static const SimpleShip* _tmb_ss_lut[SHIP_ID_LOOKUP_SIZE];
     memset(_tmb_ss_lut, 0, sizeof(_tmb_ss_lut));
     {
         int _lsc = snap->ship_count;
@@ -2176,8 +2186,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         if (_lsc > MAX_SIMPLE_SHIPS) _lsc = MAX_SIMPLE_SHIPS;
         for (int _li = 0; _li < _lsc; _li++) {
             if (snap->ships[_li].active) {
-                uint32_t _sid = snap->ships[_li].ship_id;
-                if (_sid > 0 && _sid < SHIP_ID_LOOKUP_SIZE)
+                uint16_t _sid = snap->ships[_li].ship_id;
+                if (_sid > 0)
                     _tmb_ss_lut[_sid] = &snap->ships[_li];
             }
         }
@@ -2538,7 +2548,8 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
      * Eliminates the O(ship_count) scan per sim-ship below, cutting worst-case
      * 200×200 = 40 000 comparisons per blob build down to a single 200-entry pass
      * plus MAX_SHIPS O(1) lookups. */
-    const SimpleShip* _ss_lut[SHIP_ID_LOOKUP_SIZE];
+    /* static: see comment in build_shared_blobs_from_snapshot — 512 KB, BSS. */
+    static const SimpleShip* _ss_lut[SHIP_ID_LOOKUP_SIZE];
     memset(_ss_lut, 0, sizeof(_ss_lut));
     {
         int _lsc = snap->ship_count;
@@ -2546,8 +2557,8 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
         if (_lsc > MAX_SIMPLE_SHIPS) _lsc = MAX_SIMPLE_SHIPS;
         for (int _li = 0; _li < _lsc; _li++) {
             if (snap->ships[_li].active) {
-                uint32_t _sid = snap->ships[_li].ship_id;
-                if (_sid > 0 && _sid < SHIP_ID_LOOKUP_SIZE)
+                uint16_t _sid = snap->ships[_li].ship_id;
+                if (_sid > 0)
                     _ss_lut[_sid] = &snap->ships[_li];
             }
         }
@@ -2577,8 +2588,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             float ang_vel = Q16_TO_FLOAT(ship->angular_velocity);
             float rudder_radians = ship->rudder_angle * (3.14159f / 180.0f);
 
-            const SimpleShip* simple_ship = (ship->id > 0 && ship->id < SHIP_ID_LOOKUP_SIZE)
-                ? _ss_lut[ship->id] : NULL;
+            const SimpleShip* simple_ship = ship->id > 0 ? _ss_lut[ship->id] : NULL;
 
             char ship_entry[16384];
             float hull_health_pct = (simple_ship && simple_ship->ship_type == SHIP_TYPE_GHOST)
