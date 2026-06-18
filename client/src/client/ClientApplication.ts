@@ -152,6 +152,8 @@ export class ClientApplication {
   private _lastRenderTime = 0;
   /** Single bound game-loop reference to avoid allocating a closure every frame. */
   private _boundGameLoop = (t: number) => this.gameLoop(t);
+  /** Most-recent schematic list from the server — cached for optimistic blueprint removal. */
+  private _cachedSchematics: import('../sim/Quality.js').SchematicEntry[] = [];
   private demoWorldState: WorldState | null = null;
   private camera!: Camera;
   private hasReceivedWorldState = false; // Track if we've received at least one world state
@@ -3048,6 +3050,19 @@ export class ClientApplication {
         this.networkManager.sendDropResources(kind, amount);
       };
 
+      // Drop a quality blueprint by dragging its schematic card outside the panel
+      this.uiManager.playerMenu.onDropSchematic = (bpIndex) => {
+        // Optimistically remove from both world-state caches so the UI updates instantly
+        const removeBlueprint = (items: import('../sim/Quality.js').SchematicEntry[]) =>
+          items.filter(bp => bp.index !== bpIndex);
+        if (this._cachedSchematics) {
+          this._cachedSchematics = removeBlueprint(this._cachedSchematics);
+          this.craftingMenu.setSchematics(this._cachedSchematics);
+          this.uiManager.playerMenu.setSchematics(this._cachedSchematics);
+        }
+        this.networkManager.sendDropSchematic(bpIndex);
+      };
+
       // Hand-craft from inventory (no workbench needed)
       this.uiManager.playerMenu.onCraftRequest = (outputItem) => {
         const recipeId = `craft_${outputItem.replace(/-/g, '_')}`;
@@ -3590,6 +3605,7 @@ export class ClientApplication {
 
       // Schematic (blueprint) list — populate the Schematics tab in both menus.
       this.networkManager.onSchematicList = (items) => {
+        this._cachedSchematics = items;
         this.craftingMenu.setSchematics(items);
         this.uiManager.playerMenu.setSchematics(items);
       };
@@ -4074,16 +4090,53 @@ export class ClientApplication {
       );
       
       // Camera follows the PREDICTED local player so the world scrolls at the full client
-      // tick rate (120 Hz). Following the interpolated state instead would re-introduce the
-      // 30 Hz server cadence into camera motion (perceived as choppy movement). updateCamera
-      // only reads the local player, so splicing it into the interpolated world is sufficient.
+      // tick rate (120 Hz). updateCamera only reads the local player, so splicing it in suffices.
+      //
+      // BOARDED CASE: when the player is on a ship, the prediction engine derives their world
+      // position from the *server-snapshot* ship position (updated at 30 Hz), so using the raw
+      // predicted position for camera follow would cause 30 Hz snapping even though the ship
+      // renders smoothly. We re-anchor the camera-follow position to the INTERPOLATED ship
+      // transform (the same 120 Hz linear-interpolated pose the renderer draws) so the camera
+      // tracks the ship's smooth position, not the player's 30 Hz-derived world position.
+      //
+      //   • MOUNTED (helm / seat): lock the camera to the interpolated ship CENTER. Anchoring to
+      //     the player's off-center deck spot makes the camera orbit-wobble as the ship rotates
+      //     (the offset sweeps through world space). Centering on the ship removes that wobble and
+      //     gives a stable, ship-tracking view while steering.
+      //   • FREE-WALKING the deck: anchor to the interpolated ship pose PLUS the player's deck
+      //     offset so the view still pans with the player — but the dominant sailing motion is
+      //     still 100% ship-interpolated (the offset is small and deck-local).
       if (this.predictedWorldState) {
         const _interp = this._frameInterpolatedState;
         const _assignedId = this.networkManager.getAssignedPlayerId();
+        const _mountKind = this.inputManager.getMountKind(); // 'helm' | 'seat' | 'none'
         let _cameraFollowState: WorldState = this.predictedWorldState;
         if (_interp && _assignedId !== null) {
-          const _predLocal = this.predictedWorldState.players.find(p => p.id === _assignedId);
+          let _predLocal = this.predictedWorldState.players.find(p => p.id === _assignedId);
           if (_predLocal) {
+            if (_predLocal.carrierId) {
+              const interpShip = _interp.ships.find(s => s.id === _predLocal!.carrierId);
+              if (interpShip) {
+                const _isMounted = _mountKind === 'helm' || _mountKind === 'seat';
+                let anchoredPos: Vec2;
+                if (_isMounted || !_predLocal.localPosition) {
+                  // Mounted (or no deck offset yet): track the interpolated ship center
+                  // directly — pure ship interpolation, no player-derived contribution.
+                  anchoredPos = Vec2.from(interpShip.position.x, interpShip.position.y);
+                } else {
+                  // Free-walking: interpolated ship pose + rotated deck-local offset so the
+                  // view follows the player across the deck while staying ship-anchored.
+                  const cosR = Math.cos(interpShip.rotation);
+                  const sinR = Math.sin(interpShip.rotation);
+                  const lp = _predLocal.localPosition;
+                  anchoredPos = Vec2.from(
+                    interpShip.position.x + lp.x * cosR - lp.y * sinR,
+                    interpShip.position.y + lp.x * sinR + lp.y * cosR,
+                  );
+                }
+                _predLocal = { ..._predLocal, position: anchoredPos };
+              }
+            }
             const _idx = _interp.players.findIndex(p => p.id === _assignedId);
             const _players = _interp.players.slice();
             if (_idx >= 0) _players[_idx] = _predLocal;
@@ -4093,7 +4146,7 @@ export class ClientApplication {
             _cameraFollowState = _interp;
           }
         }
-        this.updateCamera(_cameraFollowState, dt);
+        this.updateCamera(_cameraFollowState, dt, _mountKind);
         
         // Update input manager with current player position and velocity for hybrid protocol
         const assignedPlayerId = this.networkManager.getAssignedPlayerId();
@@ -4572,6 +4625,54 @@ export class ClientApplication {
       if (anyPending) worldToRender = { ...worldToRender, ships: overlaid };
     }
 
+    // Per-frame camera follow while ON A SHIP (mounted OR walking the deck). updateCamera()
+    // runs on the 120 Hz prediction tick, which can skip a render frame on high-refresh
+    // displays (e.g. 144 Hz → ~17% of frames run zero ticks) — the camera would then freeze
+    // for that frame while the ship/player still advance, producing a 1-frame wobble. Here we
+    // follow, every render frame with REAL frame dt, the EXACT pose the renderer is about to
+    // draw. An exponential follow toward a smooth target has a CONSTANT screen-space lag
+    // (≈ v·TAU) regardless of frame pacing, so there is no wobble; the small TAU also eases
+    // the mount↔walk target switch instead of popping.
+    //   • MOUNTED (helm/seat): follow the interpolated ship CENTER (no orbital wobble).
+    //   • WALKING the deck:     follow the player's already-composed RENDER position
+    //     (interpolated ship pose + sub-tick-lerped deck anchor) so the player tracks smoothly
+    //     while the ship and world scroll around them.
+    if (worldToRender && !this._freeCameraMode && assignedPlayerId !== null) {
+      const _mk = this.inputManager?.getMountKind();
+      const _lp = worldToRender.players.find(p => p.id === assignedPlayerId);
+      if (_lp?.carrierId) {
+        let _tx = _lp.position.x;
+        let _ty = _lp.position.y;
+        if (_mk === 'helm' || _mk === 'seat') {
+          const _cs = worldToRender.ships.find(s => s.id === _lp.carrierId);
+          if (_cs) { _tx = _cs.position.x; _ty = _cs.position.y; }
+        }
+
+        const _camPos = this.camera.getState().position;
+        const _dx = _tx - _camPos.x;
+        const _dy = _ty - _camPos.y;
+
+        // World-wrap seam (or any teleport): snap instead of scrolling across the map.
+        const _wrap = this.networkManager.mapWrap
+          && this.networkManager.mapWidth  > 0
+          && this.networkManager.mapHeight > 0
+          && (Math.abs(_dx) > this.networkManager.mapWidth  * 0.5
+           || Math.abs(_dy) > this.networkManager.mapHeight * 0.5);
+
+        if (_wrap) {
+          this.camera.setPosition(Vec2.from(_tx, _ty));
+        } else {
+          // Tight follow (~40 ms) — effectively locked in steady state, eases transitions.
+          const ONSHIP_TAU = 0.04;
+          const _k = _renderDt > 0 ? 1.0 - Math.exp(-_renderDt / ONSHIP_TAU) : 1.0;
+          this.camera.setPosition(Vec2.from(
+            _camPos.x + _dx * _k,
+            _camPos.y + _dy * _k,
+          ));
+        }
+      }
+    }
+
     if (!worldToRender) {
       // Render loading/connection screen
       this.renderSystem.renderLoadingScreen(this.state, this.camera);
@@ -5005,7 +5106,7 @@ export class ClientApplication {
     }
   }
 
-  private updateCamera(worldState: WorldState, dt: number): void {
+  private updateCamera(worldState: WorldState, dt: number, _mountKind: string = 'none'): void {
     // Find our player using the server-assigned player ID
     const assignedPlayerId = this.networkManager.getAssignedPlayerId();
     const player = assignedPlayerId !== null 
@@ -5022,7 +5123,13 @@ export class ClientApplication {
 
     // In free-camera mode the camera position is driven entirely by drag input.
     // Skip all player-following and AOI position logic, but still lerp zoom/rotation.
-    if (!this._freeCameraMode) {
+    //
+    // ON A SHIP (carrierId set): position-follow is owned by the per-frame on-ship follow in
+    // renderFrame (runs every render frame with real dt, so it stays jitter-free and
+    // tick-independent on high-refresh displays). We skip the tick-based follow here to avoid
+    // a competing second follower. Zoom/rotation/AOI below still run normally.
+    const _onShip = !!player.carrierId;
+    if (!this._freeCameraMode && !_onShip) {
       // Smooth camera follow with lerp for grid stability.
       // But when world-wrap teleports the player across a seam, snap immediately
       // so the camera doesn't scroll across the whole map.
@@ -5041,10 +5148,9 @@ export class ClientApplication {
       if (crossedWrapSeam) {
         this.camera.setPosition(player.position);
       } else {
-        // Frame-rate independent smoothing via an exponential time-constant.
-        // Now that the local player is predicted (already smooth), the camera can follow much
-        // more tightly than before — a ~50 ms constant keeps motion responsive without the
-        // old ~145 ms "swimmy" lag while still absorbing sub-tick boundaries.
+        // Frame-rate independent smoothing via an exponential time-constant. On foot the
+        // follow target is the predicted player position, which still carries sub-tick
+        // prediction jitter that benefits from a little easing.
         const CAMERA_FOLLOW_TAU = 0.05; // seconds
         const lerpFactor = 1.0 - Math.exp(-dt / CAMERA_FOLLOW_TAU);
         const smoothedX = currentPos.x + (player.position.x - currentPos.x) * lerpFactor;

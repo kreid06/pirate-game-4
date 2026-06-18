@@ -227,20 +227,28 @@ int server_run(struct ServerContext* ctx) {
         
         // Process incoming network packets
         process_network_input(ctx);
-        
-        // Update WebSocket server (process browser client connections)
+
+        // Receive WebSocket messages and process player input for this tick.
+        // NOTE: broadcast is intentionally NOT done here — it runs after physics
+        // so clients always receive the freshest integrated positions.
         websocket_server_update(&ctx->simulation);
-        
-        // HYBRID: Apply player movement states (30Hz tick)
+
+        // HYBRID: Apply player movement states (rudder, wind, dock) to sim ships.
+        // Must run AFTER websocket_server_update (inputs received) and
+        // BEFORE step_simulation (so they are integrated this tick).
         websocket_server_tick(TICK_DURATION_MS / 1000.0f);
-        
+
         // Update admin server (process admin panel requests)
         admin_server_update(&ctx->admin_server, &ctx->simulation, NULL);
-        
-        // Run physics simulation step
+
+        // Run physics simulation step — integrates velocity/position for all ships.
         step_simulation(ctx);
-        
-        // Send state updates to clients
+
+        // Broadcast fresh GAME_STATE to all clients NOW that physics is complete.
+        // This replaces the pre-physics send that was inside websocket_server_update.
+        websocket_server_send_game_state();
+
+        // Send UDP snapshots (placeholder — binary snapshot path)
         send_snapshots(ctx);
 
         /* ── Auto-save every 15 minutes ── */
@@ -257,20 +265,29 @@ int server_run(struct ServerContext* ctx) {
 
         // Update tick counter
         ctx->current_tick++;
-        
-        // Calculate next tick time
-        next_tick_time += TICK_DURATION_US;
-        
-        // Sleep until next tick
-        uint64_t tick_end = get_time_us();
+
+        uint64_t tick_end      = get_time_us();
         uint64_t tick_duration = tick_end - tick_start;
-        
+
         // Log performance warning if tick took too long
         if (tick_duration > TICK_DURATION_US) {
-            log_warn("Tick %u took %lu us (budget: %u us)", 
+            log_warn("Tick %u took %lu us (budget: %u us)",
                      ctx->current_tick, tick_duration, TICK_DURATION_US);
         }
-        
+
+        // Advance the next-tick target.
+        // If we finished on time: advance by exactly one tick interval so the
+        // nanosleep below drifts back in sync.
+        // If we overran (tick_end already past next_tick_time): skip the missed
+        // deadline and target the *next* interval from now, preventing a
+        // catch-up spin that would run 30+ ticks back-to-back with no sleep,
+        // maximising CPU and causing sustained ping spikes.
+        next_tick_time += TICK_DURATION_US;
+        if (next_tick_time < tick_end) {
+            // We are behind — reset to avoid spin-loop catch-up.
+            next_tick_time = tick_end + TICK_DURATION_US;
+        }
+
         // Check if shutdown was requested
         if (!ctx->should_run) {
             shutdown_countdown++;
@@ -283,7 +300,7 @@ int server_run(struct ServerContext* ctx) {
                 break;
             }
         }
-        
+
         // Sleep until next tick boundary
         sleep_until_time(next_tick_time);
     }

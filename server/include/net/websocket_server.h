@@ -789,6 +789,13 @@ void websocket_server_cleanup(void);
 int websocket_server_update(struct Sim* sim);
 
 /**
+ * Send GAME_STATE to all connected clients.
+ * Must be called AFTER step_simulation() so clients receive fresh physics state.
+ * Replaces the adaptive-rate send that was previously embedded in websocket_server_update().
+ */
+void websocket_server_send_game_state(void);
+
+/**
  * Apply movement state to all players (HYBRID approach)
  * Should be called every server tick (30Hz)
  * @param dt Delta time in seconds (typically 0.033)

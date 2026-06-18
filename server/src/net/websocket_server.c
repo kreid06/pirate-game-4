@@ -21,6 +21,7 @@
 #include <math.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
+#include <netinet/tcp.h>
 #include <openssl/sha.h>
 #include <openssl/evp.h>
 #include <openssl/bio.h>
@@ -324,6 +325,9 @@ typedef struct {
  */
 typedef struct {
     uint32_t current_time;
+    uint32_t tick;            /* global_sim->tick at snapshot time — keeps the GAME_STATE
+                               * tick label in lock-step with the positions in this snapshot
+                               * even though the worker output is consumed a frame later. */
     Tombstone tombstones[MAX_TOMBSTONES];
     DroppedItem dropped_items[MAX_DROPPED_ITEMS];
     DynamicCompany dynamic_companies[MAX_DYNAMIC_COMPANIES];
@@ -341,6 +345,10 @@ typedef struct {
 } SharedBlobSnapshot;
 
 typedef struct {
+    uint32_t tick;            /* tick of the snapshot these blobs were built from — the
+                               * GAME_STATE is stamped with THIS, not the live sim tick, so
+                               * client interpolation always pairs positions with the correct
+                               * server time (async worker latency no longer desyncs them). */
     char ships_json[2097152]; /* 2 MB — fits MAX_SHIPS (200) × ~10 KB each */
     int  ships_len;
     float    aoi_ship_px[MAX_SHIPS];
@@ -2154,6 +2162,7 @@ void detach_tombstones_from_ship(uint16_t ship_id) {
 }
 
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
+    out->tick = snap->tick;   /* keep positions and tick label paired through async handoff */
     build_ships_blob_from_snapshot(snap, out);
 
     /* One-pass lookup table reused by tombstone and other ship-anchored loops.
@@ -2576,9 +2585,9 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 ? (float)ship->hull_health
                 : Q16_TO_FLOAT(ship->hull_health);
             int offset = snprintf(ship_entry, sizeof(ship_entry),
-                    "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"rotation\":%.3f,"
-                    "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"angular_velocity\":%.3f,"
-                    "\"rudder_angle\":%.3f,"
+                    "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"rotation\":%.4f,"
+                    "\"velocity_x\":%.3f,\"velocity_y\":%.3f,\"angular_velocity\":%.4f,"
+                    "\"rudder_angle\":%.4f,"
                     "\"hullHealth\":%.2f,\"company\":%u,\"shipType\":%u,"
                     "\"npcLevel\":%u,"
                     /* Live mass (crew + cargo + modules, via recalc_ship_mass) — the client
@@ -2943,12 +2952,18 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (!g_blob_worker.started) return;
     pthread_mutex_lock(&g_blob_worker.mtx);
     g_blob_worker.job.current_time = current_time;
+    g_blob_worker.job.tick = global_sim ? global_sim->tick : 0;
     memcpy(g_blob_worker.job.tombstones, tombstones, sizeof(tombstones));
     memcpy(g_blob_worker.job.dropped_items, dropped_items, sizeof(dropped_items));
     memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies, sizeof(dynamic_companies));
     g_blob_worker.job.dynamic_company_count = dynamic_company_count;
+    /* Copy only active ship slots (not the full 200-entry array).
+     * SimpleShip is ~8-10 KB each; copying 200 entries even when 8 are active
+     * was wasting ~1.6 MB of memcpy bandwidth per tick on the hot path. */
     g_blob_worker.job.ship_count = ship_count;
-    memcpy(g_blob_worker.job.ships, ships, sizeof(ships));
+    if (ship_count > 0)
+        memcpy(g_blob_worker.job.ships, ships,
+               (size_t)ship_count * sizeof(ships[0]));
     for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++)
         copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
     g_blob_worker.job.sim_ship_count = 0;
@@ -2967,8 +2982,13 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
         memcpy(g_blob_worker.job.projectiles, global_sim->projectiles,
                (size_t)_pc * sizeof(struct Projectile));
     }
+    /* Copy only active NPC slots (not the full 512-entry array).
+     * WorldNpc is ~420 B each; copying all 512 even when 80 are active
+     * was wasting ~215 KB per tick. */
     g_blob_worker.job.world_npc_count = world_npc_count;
-    memcpy(g_blob_worker.job.world_npcs, world_npcs, sizeof(world_npcs));
+    if (world_npc_count > 0)
+        memcpy(g_blob_worker.job.world_npcs, world_npcs,
+               (size_t)world_npc_count * sizeof(world_npcs[0]));
     memcpy(g_blob_worker.job.claim_flags, claim_flags, sizeof(claim_flags));
     g_blob_worker.has_job = true;
     g_blob_worker.jobs_submitted++;
@@ -3503,6 +3523,40 @@ static void handle_drop_item(WebSocketPlayer* player,
     log_info("📦  Player %u dropped item %u qty %u at (%.1f,%.1f) id=%u",
              player->player_id, (unsigned)di->item_kind, (unsigned)di->quantity,
              (double)di->x, (double)di->y, di->id);
+}
+
+/* ── Drop a quality blueprint from the player's schematic list ──────────────
+ * Message: {"type":"drop_schematic","timestamp":N,"index":N}
+ * Clears the PlayerBlueprint slot at `index` from the player's schematics[].
+ * The server immediately re-sends the schematic list so the client stays in sync. */
+
+/* Forward declaration — crafting.h is included later in this translation unit. */
+void send_schematic_list(WebSocketPlayer* player, struct WebSocketClient* client);
+
+static void handle_drop_schematic(WebSocketPlayer* player,
+                                   struct WebSocketClient* client,
+                                   const char* payload)
+{
+    int index = -1;
+    const char* pi = strstr(payload, "\"index\":");
+    if (pi) sscanf(pi + 8, "%d", &index);
+
+    if (index < 0 || index >= MAX_PLAYER_SCHEMATICS) {
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"invalid_schematic_index\"}");
+        return;
+    }
+    if (player->schematics[index].item == 0) {
+        ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"empty_schematic_slot\"}");
+        return;
+    }
+
+    log_info("📜  Player %u dropped blueprint index %d (item %u)",
+             player->player_id, index, (unsigned)player->schematics[index].item);
+
+    memset(&player->schematics[index], 0, sizeof(PlayerBlueprint));
+
+    /* Re-send the updated schematic list so the client's UI refreshes. */
+    send_schematic_list(player, client);
 }
 
 /* ── Drop a resource stack from the player's resource pool ──────────────────
@@ -4880,6 +4934,16 @@ int websocket_server_update(struct Sim* sim) {
             int flags = fcntl(client_fd, F_GETFL, 0);
             if (flags != -1) {
                 fcntl(client_fd, F_SETFL, flags | O_NONBLOCK);
+            }
+            // Disable Nagle's algorithm: GAME_STATE frames are ~150 KB and don't
+            // benefit from coalescing; disabling Nagle eliminates the 40 ms wait
+            // that Nagle applies to smaller auxiliary messages (hits, fire, etc.)
+            // sent between GAME_STATE frames.
+            {
+                int nd = 1;
+                if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd)) < 0) {
+                    log_warn("Failed to set TCP_NODELAY on client fd %d: %s", client_fd, strerror(errno));
+                }
             }
             
             // Initialize client
@@ -7644,6 +7708,20 @@ int websocket_server_update(struct Sim* sim) {
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                                 }
+                            } else {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "drop_schematic") == 0) {
+                            // DROP BLUEPRINT: player dragged a schematic card outside the player menu
+                            // {"type":"drop_schematic","index":N}
+                            if (client->player_id != 0) {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (player)
+                                    handle_drop_schematic(player, client, payload);
+                                else
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                             } else {
                                 strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
                             }
@@ -12570,11 +12648,23 @@ int websocket_server_update(struct Sim* sim) {
             client->connected = false;
         }
     }
-    
-    // Adaptive game state updates - 20Hz base, 30Hz max
+
+    return 0;
+}
+
+/* =========================================================================
+ * GAME_STATE broadcast — called from server.c AFTER step_simulation() so
+ * clients always receive the freshest physics positions.
+ * ========================================================================= */
+void websocket_server_send_game_state(void) {
+    if (!ws_server.running) return;
+
+    // Locked to physics tick rate (30 Hz).  The adaptive 5–20 Hz fallback is
+    // kept for when no players are online so we don't waste CPU serialising
+    // state nobody is reading.
     static uint32_t last_game_state_time = 0;
     static uint32_t last_debug_time = 0;
-    static uint32_t current_update_rate = 20; // Start at 20 Hz
+    static uint32_t current_update_rate = 30; // default: lock to physics 30 Hz
     uint32_t current_time = get_time_ms();
     
     // Debug player state every 10 seconds
@@ -12594,8 +12684,18 @@ int websocket_server_update(struct Sim* sim) {
     
     // Calculate adaptive update interval (milliseconds)
     uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
-    
-    if (current_time - last_game_state_time > update_interval) {
+
+    // When players are online (rate locked to 30 Hz) send EVERY tick. The main loop is
+    // already paced to the physics tick rate, so an extra wall-clock throttle here only
+    // desynchronises sends from ticks: when a tick lands just under the 33 ms interval the
+    // send is skipped and two ticks get batched into the next packet, producing the irregular
+    // 33/67 ms inter-snapshot spacing the client sees. Sending once per tick yields uniform
+    // cadence. The wall-clock throttle is kept only for the idle (<30 Hz) path.
+    bool send_now = (current_update_rate >= 30)
+        ? true
+        : (current_time - last_game_state_time > update_interval);
+
+    if (send_now) {
         uint64_t _ship_build_t0_us = get_time_us();
         
         /* ── Pre-build shared blobs (players, projectiles, NPCs, tombstones,
@@ -12607,15 +12707,25 @@ int websocket_server_update(struct Sim* sim) {
         if (blob_worker_try_get_output(&shared_blob_cache)) {
             shared_blob_cache_valid = true;
         }
+        /* If the worker hasn't produced output yet (very first frame or still building),
+         * use the stale shared_blob_cache from the previous frame rather than doing a
+         * synchronous rebuild on the main thread.  A 1-tick (~33 ms) stale frame is
+         * completely imperceptible to players, while the sync fallback blocked the main
+         * loop for 2-5 ms and caused measurable ping spikes during heavy fleet fights.
+         * The fallback only triggers on the very first tick (shared_blob_cache_valid==false)
+         * when no prior frame exists yet — everything after that uses the worker output. */
         if (!shared_blob_cache_valid) {
+            /* First-ever tick: no stale frame available yet.  Only pay the sync cost once. */
             SharedBlobSnapshot _snap;
             _snap.current_time = current_time;
+            _snap.tick = global_sim ? global_sim->tick : 0;
             memcpy(_snap.tombstones, tombstones, sizeof(tombstones));
             memcpy(_snap.dropped_items, dropped_items, sizeof(dropped_items));
             memcpy(_snap.dynamic_companies, dynamic_companies, sizeof(dynamic_companies));
             _snap.dynamic_company_count = dynamic_company_count;
             _snap.ship_count = ship_count;
-            memcpy(_snap.ships, ships, sizeof(ships));
+            if (ship_count > 0)
+                memcpy(_snap.ships, ships, (size_t)ship_count * sizeof(ships[0]));
             for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++)
                 copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
             _snap.sim_ship_count = 0;
@@ -12635,7 +12745,9 @@ int websocket_server_update(struct Sim* sim) {
                        (size_t)_pc * sizeof(struct Projectile));
             }
             _snap.world_npc_count = world_npc_count;
-            memcpy(_snap.world_npcs, world_npcs, sizeof(world_npcs));
+            if (world_npc_count > 0)
+                memcpy(_snap.world_npcs, world_npcs,
+                       (size_t)world_npc_count * sizeof(world_npcs[0]));
             memcpy(_snap.claim_flags, claim_flags, sizeof(claim_flags));
             build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache);
             blob_worker_note_fallback_build();
@@ -12650,17 +12762,14 @@ int websocket_server_update(struct Sim* sim) {
 
         // Adaptive tick rate based on activity
         int active_count = shared_blob_cache.active_player_count;
-        bool has_recent_movement = (current_time - g_last_movement_time) < 2000; // Movement in last 2 seconds
 
-        // Determine optimal update rate
+        // Lock to physics tick rate (30 Hz) whenever any player is online.
+        // Dropping below 30 Hz creates inter-packet gaps larger than one physics tick,
+        // forcing the client to extrapolate and producing visible jitter.
         if (active_count == 0) {
-            current_update_rate = 5; // 5Hz when no players
-        } else if (has_recent_movement && active_count > 1) {
-            current_update_rate = 30; // 30Hz during multiplayer action
-        } else if (has_recent_movement) {
-            current_update_rate = 25; // 25Hz during single player movement
+            current_update_rate = 5;  // 5 Hz when server is idle — no one watching
         } else {
-            current_update_rate = 20; // 20Hz baseline
+            current_update_rate = 30; // always 30 Hz while players are online
         }
 
         // Cap at maximum rate
@@ -12744,8 +12853,17 @@ int websocket_server_update(struct Sim* sim) {
         if (_gs_n > 0) { _goff += _gs_n; if (_goff >= PER_GS_BUF) _goff = PER_GS_BUF - 1; } \
     } \
 } while(0)
+            /* Stamp the tick of the SNAPSHOT the cached ship/blob JSON was built from,
+             * NOT the live sim tick. The blob worker is async/double-buffered, so its
+             * output is typically one frame behind the live tick — using the live tick
+             * here would label stale positions with a newer time, and the skew varies
+             * whenever the worker misses a deadline. That position-vs-time desync is read
+             * by the client as a persistent ~30 Hz jitter no client interpolation can fix.
+             * Pairing positions with their own tick keeps interpolation exact. */
             _GS("{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
-                current_time / 33, current_time);
+                shared_blob_cache.tick ? shared_blob_cache.tick
+                                       : (global_sim ? global_sim->tick : (current_time / TICK_DURATION_MS)),
+                current_time);
 #define _MC1(buf, len) do { if (_goff + (len) < PER_GS_BUF - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
             _MC1(per_ship_json, _soff);
             /* Players: AOI-filtered per-client (skip players outside view radius). */
@@ -12905,8 +13023,6 @@ int websocket_server_update(struct Sim* sim) {
         }
         last_world_state_time = current_time;
     }
-    
-    return 0;
 }
 
 /* =========================================================================
@@ -13145,7 +13261,15 @@ void websocket_server_tick(float dt) {
     sync_simple_ships_from_simulation();
 
     // ===== BROADCAST HIT EVENTS FROM SIMULATION =====
+    // All hit-event frames for this tick are accumulated into a single buffer
+    // and flushed with ONE send() per client at the end.  Previously, each event
+    // triggered a per-client send() loop — at peak combat (24 balls × 8 ships)
+    // that produced 400+ individual send() calls per tick, fragmenting TCP segments
+    // and causing measurable ping spikes even with TCP_NODELAY.
     if (global_sim && global_sim->hit_event_count > 0) {
+        /* 64 events × ~530 B WS frame = ~34 KB; static avoids per-tick stack pressure */
+        static char hit_batch[65536];
+        size_t hit_batch_len = 0;
         char frame[512];
         for (uint8_t e = 0; e < global_sim->hit_event_count; e++) {
             const struct HitEvent* ev = &global_sim->hit_events[e];
@@ -13234,7 +13358,7 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
-                    log_info("📤 Broadcasting HULL_HIT: ship %u damage %.0f at (%.1f, %.1f)",
+                    log_debug("📤 Broadcasting HULL_HIT: ship %u damage %.0f at (%.1f, %.1f)",
                         ev->ship_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 } else
@@ -13425,7 +13549,7 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
-                    log_info("📤 Broadcasting MODULE_DAMAGED: ship %u module %u damage %.0f at (%.1f, %.1f)",
+                    log_debug("📤 Broadcasting MODULE_DAMAGED: ship %u module %u damage %.0f at (%.1f, %.1f)",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                     /* Wake up any idle repairers dwelling on this ship */
@@ -13527,7 +13651,7 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
-                    log_info("📤 Broadcasting PLANK_HIT: ship %u plank %u destroyed, %.0f dmg at (%.1f, %.1f)",
+                    log_debug("📤 Broadcasting PLANK_HIT: ship %u plank %u destroyed, %.0f dmg at (%.1f, %.1f)",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 } else {
@@ -13537,7 +13661,7 @@ void websocket_server_tick(float dt) {
                         "\"damage\":%.0f,\"x\":%.1f,\"y\":%.1f}",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
-                    log_info("📤 Broadcasting PLANK_DAMAGED: ship %u plank %u, %.0f dmg at (%.1f, %.1f)",
+                    log_debug("📤 Broadcasting PLANK_DAMAGED: ship %u plank %u, %.0f dmg at (%.1f, %.1f)",
                         ev->ship_id, ev->module_id, ev->damage_dealt,
                         SERVER_TO_CLIENT(ev->hit_x), SERVER_TO_CLIENT(ev->hit_y));
                 }
@@ -13556,12 +13680,10 @@ void websocket_server_tick(float dt) {
             }
 
             size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, msg, strlen(msg), frame, sizeof(frame));
-            if (frame_len > 0) {
-                for (int i = 0; i < WS_MAX_CLIENTS; i++) {
-                    struct WebSocketClient* client = &ws_server.clients[i];
-                    if (client->connected && client->handshake_complete)
-                        send(client->fd, frame, frame_len, 0);
-                }
+            if (frame_len > 0 && hit_batch_len + frame_len <= sizeof(hit_batch)) {
+                /* Append to batch — no per-event send() */
+                memcpy(hit_batch + hit_batch_len, frame, frame_len);
+                hit_batch_len += frame_len;
             }
 
             /* Damage aggro: ghost ship hit → force it to pursue the attacker */
@@ -13578,6 +13700,15 @@ void websocket_server_tick(float dt) {
             }
         }
         global_sim->hit_event_count = 0;
+
+        /* Flush accumulated hit frames — one send() per client replaces N_events × N_clients */
+        if (hit_batch_len > 0) {
+            for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+                struct WebSocketClient* client = &ws_server.clients[i];
+                if (client->connected && client->handshake_complete)
+                    send(client->fd, hit_batch, hit_batch_len, 0);
+            }
+        }
     }
 
     // ===== CANNONBALL / GRAPESHOT / LIQUID FLAME / CANISTER SHOT vs ENTITY HIT DETECTION =====
@@ -15927,41 +16058,27 @@ void websocket_server_tick(float dt) {
                                       * avg_sail_align;  /* sail-to-wind angular alignment */
             float target_speed = BASE_WIND_SPEED * wind_force_factor * mass_ratio;
             
-            // Get current ship speed (magnitude of velocity)
-            float vx = Q16_TO_FLOAT(ship->velocity.x);
-            float vy = Q16_TO_FLOAT(ship->velocity.y);
-            
-            // Apply forward force in ship's facing direction (ship_rot computed above)
-            float target_vx = cosf(ship_rot) * target_speed;
-            float target_vy = sinf(ship_rot) * target_speed;
-            
-            // Smoothly accelerate toward target velocity
-            // Using exponential smoothing: vel += (target - vel) * blend_factor
-            // Higher blend factor = faster acceleration (1.0 = instant, 0.0 = no change)
-            const float WIND_ACCEL_RATE = 2.0f; // How many seconds to reach 63% of target speed
-            float blend_factor = 1.0f - expf(-dt / WIND_ACCEL_RATE);
-            
-            vx += (target_vx - vx) * blend_factor;
-            vy += (target_vy - vy) * blend_factor;
+            /* ===== WIND PROPULSION =====
+             * Store the desired velocity target on the sim-ship so sim_step
+             * can apply the same exponential blend INSIDE the integrator.
+             * This keeps the broadcast velocity consistent with the physics
+             * path and eliminates the pre-physics velocity kink that previously
+             * caused Hermite tangent discontinuities on the client. */
+            const float WIND_ACCEL_RATE = 2.0f;
+            ship->wind_target_vx = cosf(ship_rot) * target_speed;
+            ship->wind_target_vy = sinf(ship_rot) * target_speed;
+            ship->wind_tau       = WIND_ACCEL_RATE;
 
             /* ===== REVERSE THRUST (S key) =====
-             * When the helmsman holds S, override the wind target with a slow
-             * backward velocity — 15% of BASE_WIND_SPEED in the stern direction.
-             * Also scaled by mass_ratio so a loaded ship reverses more slowly.
-             * Uses a faster blend (0.8s) so the ship brakes and reverses quickly.
+             * Override the forward target with a slow backward velocity.
              * Requires sails to be fully closed (avg_sail_openness == 0). */
             if (ws_ship && ws_ship->reverse_thrust && avg_sail_openness == 0.0f) {
                 const float REVERSE_SPEED = BASE_WIND_SPEED * 0.0375f * mass_ratio;
-                const float REVERSE_ACCEL = 0.8f; /* time-constant in seconds */
-                float rev_blen = 1.0f - expf(-dt / REVERSE_ACCEL);
-                float rev_vx = -cosf(ship_rot) * REVERSE_SPEED;
-                float rev_vy = -sinf(ship_rot) * REVERSE_SPEED;
-                vx += (rev_vx - vx) * rev_blen;
-                vy += (rev_vy - vy) * rev_blen;
+                const float REVERSE_ACCEL = 0.8f;
+                ship->wind_target_vx = -cosf(ship_rot) * REVERSE_SPEED;
+                ship->wind_target_vy = -sinf(ship_rot) * REVERSE_SPEED;
+                ship->wind_tau       = REVERSE_ACCEL;
             }
-
-            ship->velocity.x = Q16_FROM_FLOAT(vx);
-            ship->velocity.y = Q16_FROM_FLOAT(vy);
             
             // ===== APPLY RUDDER-BASED TURNING =====
             // Accumulate torque into net_torque; sim_step divides by moment_inertia

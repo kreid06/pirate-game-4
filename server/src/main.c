@@ -1,6 +1,7 @@
 // Pirate Game Server - Production Deployment
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <signal.h>
 #include <unistd.h>
 #include <errno.h>
@@ -32,7 +33,36 @@ void signal_handler(int sig) {
 
 int main(int argc, char *argv[]) {
     (void)argc;
-    
+
+    /* ── Security pre-flight: refuse the known-default JWT secret ────────────
+     * If an operator deployed without rotating the secret that is printed in
+     * setup-server.sh (prior to the auto-generation fix), any actor who can
+     * read the public repository can forge valid tokens.  Abort hard here so
+     * the misconfiguration is impossible to miss.                             */
+    {
+        const char *jwt_secret = getenv("JWT_SECRET");
+        if (!jwt_secret || strlen(jwt_secret) == 0) {
+            fprintf(stderr,
+                "FATAL: JWT_SECRET environment variable is not set.\n"
+                "  Set it in /opt/pirate-game/config/auth.env and restart.\n");
+            return EXIT_FAILURE;
+        }
+        if (strcmp(jwt_secret, "change-me-to-a-long-random-secret") == 0) {
+            fprintf(stderr,
+                "FATAL: JWT_SECRET is still the default placeholder value.\n"
+                "  Generate a fresh secret:  openssl rand -hex 32\n"
+                "  Write it to /opt/pirate-game/config/auth.env and restart.\n");
+            return EXIT_FAILURE;
+        }
+        if (strlen(jwt_secret) < 32) {
+            fprintf(stderr,
+                "FATAL: JWT_SECRET is too short (%zu chars, minimum 32).\n"
+                "  Generate a fresh secret:  openssl rand -hex 32\n",
+                strlen(jwt_secret));
+            return EXIT_FAILURE;
+        }
+    }
+
     printf("Pirate Game Server v1.0 - Deterministic 30Hz Physics Server\n");
     printf("Built: %s %s\n", __DATE__, __TIME__);
     

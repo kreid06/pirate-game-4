@@ -347,6 +347,272 @@ export class RenderSystem {
    * the canvas on each fetch so callers always see a fresh buffer.
    */
   private _scratchCanvases: Map<string, OffscreenCanvas> = new Map();
+
+  // ── Ship static-layer sprite caches ───────────────────────────────────────
+  // Ships are mostly static between frames (no animation on hull fill or rope
+  // rigging).  We rasterize these layers once into OffscreenCanvas bitmaps and
+  // blit them each frame.  Each entry stores the rendered canvas and the cache
+  // key that was used so we can detect when geometry has actually changed.
+  private _shipRopeSprites: Map<number, { canvas: OffscreenCanvas; key: string }> = new Map();
+  private _shipHullSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
+
+  // Per-ship plank layer OffscreenCanvas cache.
+  // Key = "<shipId>:<plankHealthBuckets>" — re-baked only when a plank's damage bucket changes.
+  // Replaces 48× fillRect/strokeRect per ship per frame with a single drawImage().
+  private _shipPlankSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
+
+  // Per-ship upper-deck-cover OffscreenCanvas cache (base layer without flood tint).
+  // Key = "<shipId>:<deckHealthBucket>" — re-baked only when deck damage bucket changes.
+  // Replaces 3× 47-vertex hull polygon rebuilds per ship per frame with one drawImage() + optional flood fill.
+  private _shipUpperDeckSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
+
+  // Per-frame memoization caches — cleared at the top of renderWorld() each frame.
+  // computeSinkState() is called ~10× per visible ship per frame; caching cuts it to 1 compute per ship.
+  private _sinkStateCache: Map<number, { waterFill: number; floodTint: number; phase1Alpha: number; phase2Alpha: number; phase3Alpha: number }> = new Map();
+  // darkenByDamage() allocates a new rgb() string on every call (~116/frame for a full brig).
+  // Key is "<hex>:<health_bucket>"; 21 buckets (0–20) × ~6 distinct hex colours → ≤126 entries.
+  private _darkenCache: Map<string, string> = new Map();
+
+  // Ladder sprites — 2 static variants (extended / retracted), baked once.
+  // Each ladder is 100% static so a single drawImage() replaces 7+ fill/stroke ops.
+  private _ladderSprites: { extended: OffscreenCanvas; retracted: OffscreenCanvas } | null = null;
+  private _getLadderSprites(): { extended: OffscreenCanvas; retracted: OffscreenCanvas } {
+    if (this._ladderSprites) return this._ladderSprites;
+
+    // Extended: 20×40 world units, padded by 2 on each side → 24×44 canvas
+    const ext = new OffscreenCanvas(24, 44);
+    const ec  = ext.getContext('2d')!;
+    ec.translate(12, 22); // centre at world origin
+    // Side rails
+    ec.fillStyle = '#5C3A1E';
+    ec.fillRect(-10, -20, 3, 40);  // left rail
+    ec.fillRect( 7,  -20, 3, 40);  // right rail
+    // Rungs
+    ec.fillStyle = '#8B5E3C';
+    const rungSpacing = 40 / 5; // lh / (rungCount + 1)
+    for (let i = 1; i <= 4; i++) {
+      const ry = -20 + i * rungSpacing - 1.5;
+      ec.fillRect(-7, ry, 14, 3);
+    }
+    // Outline
+    ec.strokeStyle = '#3A2010';
+    ec.lineWidth   = 1;
+    ec.strokeRect(-10, -20, 20, 40);
+
+    // Retracted: 20×12 world units, padded 2 each side → 24×16 canvas
+    const ret = new OffscreenCanvas(24, 16);
+    const rc  = ret.getContext('2d')!;
+    rc.translate(12, 8);
+    rc.fillStyle   = '#6B5040';
+    rc.fillRect(-10, -6, 20, 12);
+    rc.strokeStyle = '#3A2010';
+    rc.lineWidth   = 1;
+    rc.strokeRect(-10, -6, 20, 12);
+    rc.strokeStyle = '#4A3020';
+    rc.beginPath();
+    rc.moveTo(-7, -4); rc.lineTo( 7,  4);
+    rc.moveTo(-7,  4); rc.lineTo( 7, -4);
+    rc.stroke();
+
+    this._ladderSprites = { extended: ext, retracted: ret };
+    return this._ladderSprites;
+  }
+
+  // Ramp fill sprite — pre-baked 50×50 gradient fill so createLinearGradient is
+  // never called at draw time.  Opaque; callers composite via globalAlpha.
+  private _rampFillSprite: OffscreenCanvas | null = null;
+  private _getRampFillSprite(): OffscreenCanvas {
+    if (this._rampFillSprite) return this._rampFillSprite;
+    const c = new OffscreenCanvas(50, 50);
+    const cx = c.getContext('2d')!;
+    const grad = cx.createLinearGradient(0, 0, 50, 0);
+    grad.addColorStop(0, '#b07d42');
+    grad.addColorStop(1, '#2e1a08');
+    cx.fillStyle = grad;
+    cx.fillRect(0, 0, 50, 50);
+    this._rampFillSprite = c;
+    return c;
+  }
+
+  /** Build or retrieve the cached rope-rigging sprite for a ship.
+   *  The canvas is rasterized in ship-local world units (zoom=1).
+   *  Callers draw it via ctx.drawImage(canvas, -ox, -oy) after applying the
+   *  ship-local transform (translate + scale(zoom) + rotate). */
+  private _getShipRopeSprite(ship: Ship): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
+    const masts = ship.modules.filter(m => m.kind === 'mast');
+    if (masts.length === 0) return null;
+
+    // Cache key: encodes mast positions and sail widths — all static geometry
+    const mastSig = masts
+      .map(m => `${(m.localPos?.x ?? 0).toFixed(1)},${(m.localPos?.y ?? 0).toFixed(1)},${(m.moduleData as any)?.sailWidth ?? 80}`)
+      .join('|');
+    const key = `r:${mastSig}`;
+
+    const existing = this._shipRopeSprites.get(ship.id);
+    if (existing && existing.key === key) return { canvas: existing.canvas, ox: existing.canvas.width / 2 - 0, oy: existing.canvas.height / 2 - 0 };
+
+    // Compute bbox from hull to size the canvas (hull is wider than mast positions)
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of ship.hull) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    const pad = 12;
+    const ox = -(minX - pad);
+    const oy = -(minY - pad);
+    const w  = Math.max(4, Math.ceil(maxX - minX + 2 * pad));
+    const h  = Math.max(4, Math.ceil(maxY - minY + 2 * pad));
+
+    const canvas = new OffscreenCanvas(w, h);
+    const rctx = canvas.getContext('2d')!;
+    rctx.translate(ox, oy); // world 0,0 → canvas (ox, oy)
+
+    rctx.strokeStyle = '#8B7355';
+    rctx.lineWidth   = 1.2;
+    rctx.lineCap     = 'round';
+
+    for (const mast of masts) {
+      if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;
+      const mastData = mast.moduleData as any;
+      const mx = mast.localPos.x;
+      const my = mast.localPos.y;
+      const halfBase = (mastData.sailWidth ?? 80) * 0.5;
+      const step = halfBase / 3;
+      const x0 = mx - halfBase, x1 = mx - step, x2 = mx + step, x3 = mx + halfBase;
+
+      for (const side of [1, -1] as const) {
+        const ry0 = my + this.hullRailY(x0, side);
+        const ry1 = my + this.hullRailY(x1, side);
+        const ry2 = my + this.hullRailY(x2, side);
+        const ry3 = my + this.hullRailY(x3, side);
+
+        // All 7 ropes in one batched path per side
+        rctx.beginPath();
+        rctx.moveTo(mx, my); rctx.lineTo(x0, ry0);
+        rctx.moveTo(mx, my); rctx.lineTo(x3, ry3);
+        rctx.moveTo(mx, my); rctx.lineTo(x1, ry1);
+        rctx.moveTo(mx, my); rctx.lineTo(x2, ry2);
+        // cross-ropes
+        for (const t of [1 / 3, 2 / 3]) {
+          rctx.moveTo(mx + (x0 - mx) * t, my + (ry0 - my) * t);
+          rctx.lineTo(mx + (x3 - mx) * t, my + (ry3 - my) * t);
+        }
+        // rail rope
+        rctx.moveTo(x0, ry0); rctx.lineTo(x1, ry1); rctx.lineTo(x2, ry2); rctx.lineTo(x3, ry3);
+        rctx.stroke();
+
+        // Cleats (rect-based — keep as rects in sprite)
+        for (const [cxA, cxB] of [[x0, x1], [x2, x3]] as [number, number][]) {
+          const cy     = (this.hullRailY(cxA, side) + this.hullRailY(cxB, side)) / 2 + my;
+          const angle  = Math.atan2(this.hullRailY(cxB, side) - this.hullRailY(cxA, side), cxB - cxA);
+          const ccx    = (cxA + cxB) / 2;
+          const bodyW  = Math.abs(cxB - cxA);
+          const bodyH  = bodyW * 0.20;
+          const hornW  = bodyH * 1.20;
+          const hornH  = bodyH * 1.30;
+          rctx.save();
+          rctx.translate(ccx, cy);
+          rctx.rotate(angle);
+          rctx.fillStyle   = '#4A3728';
+          rctx.strokeStyle = '#2C1F14';
+          rctx.lineWidth   = 0.9;
+          rctx.fillRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+          rctx.strokeRect(-bodyW / 2, -bodyH / 2, bodyW, bodyH);
+          rctx.fillRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.strokeRect(-bodyW / 2, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.fillRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.strokeRect(bodyW / 2 - hornW, -bodyH / 2 - hornH, hornW, hornH * 2 + bodyH);
+          rctx.restore();
+        }
+      }
+    }
+
+    this._shipRopeSprites.set(ship.id, { canvas, key });
+    return { canvas, ox, oy };
+  }
+
+  /** Build or retrieve the cached hull-fill + grain sprite for a ship.
+   *  Rasterized in ship-local world units (zoom=1); blitted after ship transform.
+   *  Does NOT include animated layers: flood tint, ghost glow, sink alpha, enemy tint. */
+  private _getShipHullSprite(
+    ship: Ship,
+    hasUpperDeck: boolean,
+    hasDeck: boolean,
+    fillColor: string,
+  ): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
+    if (ship.hull.length < 3) return null;
+
+    // Cache key: structural shape + color (health-quantized already in fillColor's darkenByDamage)
+    const key = `h:${hasUpperDeck ? 1 : 0}:${hasDeck ? 1 : 0}:${fillColor}`;
+    const existing = this._shipHullSprites.get(ship.id);
+    if (existing && existing.key === key) return { canvas: existing.canvas, ox: existing.ox, oy: existing.oy };
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of ship.hull) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    const pad = 8;
+    const ox  = -(minX - pad);
+    const oy  = -(minY - pad);
+    const w   = Math.max(4, Math.ceil(maxX - minX + 2 * pad));
+    const h   = Math.max(4, Math.ceil(maxY - minY + 2 * pad));
+
+    const canvas = new OffscreenCanvas(w, h);
+    const rctx   = canvas.getContext('2d')!;
+    rctx.translate(ox, oy);
+
+    // Hull fill — punch transparent holes at ramp/hatch positions when upper deck present
+    rctx.beginPath();
+    rctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) rctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    rctx.closePath();
+    if (hasUpperDeck) {
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        rctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+    }
+    rctx.fillStyle = fillColor;
+    rctx.fill(hasUpperDeck ? 'evenodd' : 'nonzero');
+
+    // Grain lines (batched into one stroke call, clipped to hull)
+    if (hasDeck) {
+      rctx.save();
+      rctx.beginPath();
+      rctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+      for (let i = 1; i < ship.hull.length; i++) rctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+      rctx.closePath();
+      if (hasUpperDeck) {
+        for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+          rctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+        }
+        rctx.clip('evenodd');
+      } else {
+        rctx.clip();
+      }
+      rctx.strokeStyle = hasUpperDeck ? '#b8824a' : '#7a4f28';
+      rctx.lineWidth   = 1;
+      rctx.beginPath();
+      for (let y = minY + 12; y < maxY; y += 12) {
+        rctx.moveTo(minX, y); rctx.lineTo(maxX, y);
+      }
+      rctx.stroke();
+      rctx.restore();
+    }
+
+    // Hull outline stroke (rebuild hull-only path so hole rects are not outlined)
+    rctx.beginPath();
+    rctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) rctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    rctx.closePath();
+    rctx.strokeStyle = '#8B4513';
+    rctx.lineWidth   = 2;
+    rctx.stroke();
+
+    this._shipHullSprites.set(ship.id, { canvas, key, ox, oy });
+    return { canvas, ox, oy };
+  }
+
   private _getScratch(name: string, w: number, h: number): OffscreenCanvas {
     let c = this._scratchCanvases.get(name);
     if (!c || c.width !== w || c.height !== h) {
@@ -1132,14 +1398,21 @@ export class RenderSystem {
   /** Trail colour override per projectile — future customisation hook. */
   public trailColor: string = 'rgba(180,180,180,{a})';
   private readonly TRAIL_DURATION_MS = 680;  // how long each crumb lives
-  private readonly TRAIL_SPACING_MS  = 10;   // min ms between crumbs
+  private readonly TRAIL_SPACING_MS  = 25;   // min ms between crumbs (was 10 → 68 crumbs; now ~28)
   /** Timestamp of last crumb per ball — prevents over-sampling. */
   private trailLastEmit: Map<number, number> = new Map();
   /**
    * Combined wake history: ship id -> sampled {ship-center x/y, rotation r, timestamp t}.
    * Both the stern wash and bow V-lines are derived from this single trail at render time.
    */
-  private shipWakeTrails: Map<number, Array<{ x: number; y: number; r: number; t: number }>> = new Map();
+  // cr/sr (cos/sin of r) are computed once at emit time and reused every frame,
+  // eliminating 2 trig calls per trail point per render frame.
+  private shipWakeTrails: Map<number, Array<{ x: number; y: number; r: number; t: number; cr: number; sr: number }>> = new Map();
+
+  // Per-ship reusable Float32Array slab — avoids 9 small allocations per frame
+  // per moving ship.  Sliced into logical sub-arrays; reallocated only when N grows.
+  private _wakeBuffers: Map<number, { buf: Float32Array; cap: number }> = new Map();
+  private static readonly _WAKE_BUF_STRIDE = 11; // arrays per point: ssx,ssy,bsx,bsy,fade,bCos,bSin,perpX,perpY,cumDist,segLen
   /** Last wake sample time per ship to avoid oversampling history. */
   private shipWakeLastEmit: Map<number, number> = new Map();
   private readonly SHIP_WAKE_TRAIL_DURATION_MS = 10000;
@@ -1428,7 +1701,12 @@ export class RenderSystem {
   }
 
   /** Draw an animated fire overlay (flicker ring) centred at (cx, cy) in screen space. */
-  private drawFireOverlay(cx: number, cy: number, radius: number): void {
+  private drawFireOverlay(_cx: number, _cy: number, _radius: number): void {
+    // All gradient stops are currently alpha=0 (disabled for debugging).
+    // Skip the ~20 createRadialGradient+fill calls per fire point until re-enabled.
+    return;
+    /* eslint-disable no-unreachable */
+    const cx = _cx, cy = _cy, radius = _radius;
     const ctx = this.ctx;
     const t = performance.now() / 1000;
 
@@ -1845,7 +2123,7 @@ export class RenderSystem {
         const r = Math.max(2, 3.5 * zoom);
         ctx.save();
         ctx.shadowColor = col;
-        ctx.shadowBlur = Math.max(3, 6 * zoom);
+        ctx.shadowBlur = Math.min(20, Math.max(3, 6 * zoom));
         ctx.fillStyle = col;
         ctx.strokeStyle = 'rgba(0,0,0,0.6)';
         ctx.lineWidth = Math.max(0.5, 1 * zoom);
@@ -4097,11 +4375,19 @@ export class RenderSystem {
    * healthRatio 1.0 = full health (original colour), 0.0 = destroyed (black).
    */
   private darkenByDamage(hex: string, healthRatio: number): string {
-    const t = Math.max(0, Math.min(1, healthRatio));
+    // Quantise to 21 buckets (0 … 20 = 0% … 100%) to keep the LUT small.
+    // Full health (bucket 20) still costs the same; the savings are at intermediate damage.
+    const bucket = Math.round(Math.max(0, Math.min(1, healthRatio)) * 20);
+    const key = `${hex}:${bucket}`;
+    const cached = this._darkenCache.get(key);
+    if (cached) return cached;
+    const t = bucket / 20;
     const r = parseInt(hex.slice(1, 3), 16);
     const g = parseInt(hex.slice(3, 5), 16);
     const b = parseInt(hex.slice(5, 7), 16);
-    return `rgb(${Math.round(r * t)},${Math.round(g * t)},${Math.round(b * t)})`;
+    const result = `rgb(${Math.round(r * t)},${Math.round(g * t)},${Math.round(b * t)})`;
+    this._darkenCache.set(key, result);
+    return result;
   }
 
   /**
@@ -4129,6 +4415,10 @@ export class RenderSystem {
     phase2Alpha: number;
     phase3Alpha: number;
   } {
+    // Memoize within a single frame — this function is called ~10× per visible ship.
+    const cached = this._sinkStateCache.get(ship.id);
+    if (cached) return cached;
+
     const isGhostShipForHP = ship.shipType === SHIP_TYPE_GHOST;
     const ghostNpcLevel = isGhostShipForHP && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
     const maxHullHP = isGhostShipForHP
@@ -4156,7 +4446,9 @@ export class RenderSystem {
       phase2Alpha = Math.max(0, 1 - Math.max(0, elapsed - 2) / 4);        // 2–6 s
       phase3Alpha = Math.max(0, 1 - Math.max(0, elapsed - 4) / 4);        // 4–8 s
     }
-    return { waterFill, floodTint, phase1Alpha, phase2Alpha, phase3Alpha };
+    const result = { waterFill, floodTint, phase1Alpha, phase2Alpha, phase3Alpha };
+    this._sinkStateCache.set(ship.id, result);
+    return result;
   }
 
   private isPointInCurvedPlank(
@@ -4227,6 +4519,23 @@ export class RenderSystem {
     // Clear canvas
     this.clearCanvas();
 
+    // Flush per-frame memoization caches so stale entries don't linger across frames.
+    this._sinkStateCache.clear();
+    this._darkenCache.clear();
+
+    // Prune persistent OffscreenCanvas sprite caches for ships that have left.
+    // Only run when the map size diverges from ship count to avoid work every frame.
+    const _liveShipIds = new Set(worldState.ships.map(s => s.id));
+    if (this._shipHullSprites.size > _liveShipIds.size + 4) {
+      for (const id of this._shipHullSprites.keys()) if (!_liveShipIds.has(id)) this._shipHullSprites.delete(id);
+    }
+    if (this._shipPlankSprites.size > _liveShipIds.size + 4) {
+      for (const id of this._shipPlankSprites.keys()) if (!_liveShipIds.has(id)) this._shipPlankSprites.delete(id);
+    }
+    if (this._shipUpperDeckSprites.size > _liveShipIds.size + 4) {
+      for (const id of this._shipUpperDeckSprites.keys()) if (!_liveShipIds.has(id)) this._shipUpperDeckSprites.delete(id);
+    }
+
     // Cache local player and ships once per frame — shared by all detect* and draw* methods.
     this._cachedLocalPlayer = this.localPlayerId != null
       ? worldState.players.find(p => p.id === this.localPlayerId) ?? null
@@ -4247,7 +4556,12 @@ export class RenderSystem {
       this._lastRenderMs = nowMs;
       // Close 10× the remaining angular gap per second (time constant ≈ 100 ms).
       const alpha = frameDt > 0 ? Math.min(1.0, 10.0 * frameDt) : 1.0;
+      const _smoothCarrierId = this._cachedLocalPlayer?.carrierId ?? 0;
       for (const ship of worldState.ships) {
+        // Skip smoothing entirely for ships that are outside the fog boundary.
+        // The carrier ship (player's own ship) is always smoothed so local cannon/sail
+        // angles stay continuous even near the fog edge.
+        if (ship.id !== _smoothCarrierId && !this.fogVisibleAt(ship.position.x, ship.position.y, this._hullRadius(ship))) continue;
         // Rudder angle
         {
           const target = ship.rudderAngle || 0;
@@ -4689,8 +5003,15 @@ export class RenderSystem {
     // Skip the expensive blur(48px) redraw when nothing has changed.
     // The fog rays update at ~30 Hz (worker cadence); the render loop runs at
     // 60-120 Hz, so most frames can just re-blit the cached fog canvas.
+    //
+    // Zoom dead-zone: ignore sub-3% zoom changes when scrolling.  Without this,
+    // every frame of a smooth pinch/scroll triggers a full fog re-rasterise
+    // (the blur(48px) filter pass) which is the single most expensive canvas
+    // operation in the renderer.  A 3% zoom delta is imperceptible in fog shape.
+    const FOG_ZOOM_EPSILON = 0.03;
+    const zoomChanged = Math.abs(camZoom - this._fogLastZoom) > FOG_ZOOM_EPSILON * Math.max(camZoom, this._fogLastZoom);
     const camMoved = cx   !== this._fogLastCamX || cy   !== this._fogLastCamY
-                  || camZoom !== this._fogLastZoom  || camRot  !== this._fogLastRot;
+                  || zoomChanged || camRot  !== this._fogLastRot;
     const raysDirty = this.fogRayVersion !== this._fogLastRayVersion;
 
     if (!raysDirty && !camMoved) {
@@ -5190,20 +5511,31 @@ export class RenderSystem {
             // Multiple passes produce a sandy→teal→blue gradient by edge distance.
             ctx.fillStyle = 'rgba(220, 195, 130, 1)'; // opaque fill required to cast shadow
 
-            // Pass 1 — sandy, tight near-edge halo
-            ctx.shadowBlur  = Math.max(1, shallowW * 0.30);
+            // Cap blur so high zoom values don't trigger enormous GPU compositing passes.
+            // Each pass is O(pixels × blurRadius²) on most browsers, so uncapped blur at
+            // zoom 3+ collapses frame rate.  40px is visually indistinguishable from larger.
+            const MAX_SHALLOW_BLUR = 40;
+            // At high zoom only one pass is needed — the detail is already visible.
+            const shallowPasses = zoom > 2.0 ? 1 : zoom > 1.2 ? 2 : 3;
+
+            // Pass 1 — sandy, tight near-edge halo (always drawn)
+            ctx.shadowBlur  = Math.min(MAX_SHALLOW_BLUR, Math.max(1, shallowW * 0.30));
             ctx.shadowColor = 'rgba(220, 195, 130, 0.95)';
             drawSandPath(); ctx.fill();
 
-            // Pass 2 — teal mid-zone
-            ctx.shadowBlur  = Math.max(1, shallowW * 0.62);
-            ctx.shadowColor = 'rgba(100, 205, 195, 0.80)';
-            drawSandPath(); ctx.fill();
+            if (shallowPasses >= 2) {
+              // Pass 2 — teal mid-zone
+              ctx.shadowBlur  = Math.min(MAX_SHALLOW_BLUR, Math.max(1, shallowW * 0.62));
+              ctx.shadowColor = 'rgba(100, 205, 195, 0.80)';
+              drawSandPath(); ctx.fill();
+            }
 
-            // Pass 3 — blue outer fade
-            ctx.shadowBlur  = Math.max(1, shallowW);
-            ctx.shadowColor = 'rgba(60, 170, 205, 0.50)';
-            drawSandPath(); ctx.fill();
+            if (shallowPasses >= 3) {
+              // Pass 3 — blue outer fade
+              ctx.shadowBlur  = Math.min(MAX_SHALLOW_BLUR, Math.max(1, shallowW));
+              ctx.shadowColor = 'rgba(60, 170, 205, 0.50)';
+              drawSandPath(); ctx.fill();
+            }
           }
         } else {
           const SHALLOW_DEPTH = preset.beachRadius * SHALLOW_SCALE;
@@ -6561,7 +6893,7 @@ export class RenderSystem {
             // Higher tiers get a soft halo to draw the eye.
             ctx.save();
             ctx.shadowColor = glintColor;
-            ctx.shadowBlur = Math.max(6, 10 * zoom);
+            ctx.shadowBlur = Math.min(20, Math.max(6, 10 * zoom));
             ctx.fillStyle = glintColor;
             ctx.beginPath();
             ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
@@ -7249,7 +7581,7 @@ export class RenderSystem {
       const gy = gsp.y - gsz * 0.5 - r * 1.5;
       ctx.save();
       ctx.shadowColor = col;
-      ctx.shadowBlur = Math.max(4, 7 * zoom);
+      ctx.shadowBlur = Math.min(20, Math.max(4, 7 * zoom));
       ctx.fillStyle = col;
       ctx.strokeStyle = 'rgba(0,0,0,0.6)';
       ctx.lineWidth = Math.max(0.5, 1 * zoom);
@@ -7308,7 +7640,7 @@ export class RenderSystem {
       ctx.save();
       ctx.strokeStyle = _sOutline;
       ctx.shadowColor = _sOutline;
-      ctx.shadowBlur  = 8 * zoom;
+      ctx.shadowBlur  = Math.min(20, 8 * zoom);
       ctx.lineWidth   = Math.max(1, 3 * zoom);
       ctx.translate(ssp.x, ssp.y);
       ctx.rotate(rotRad - camRot);
@@ -9003,8 +9335,10 @@ export class RenderSystem {
       const prev = trail.length > 0 ? trail[trail.length - 1] : null;
       const movedEnough = !prev || Math.hypot(ship.position.x - prev.x, ship.position.y - prev.y) >= this.SHIP_WAKE_TRAIL_MIN_DIST;
       if (movedEnough) {
-        // Store ship center + rotation; both wash and bow V-lines are derived from this.
-        trail.push({ x: ship.position.x, y: ship.position.y, r: ship.rotation, t: wakeNow });
+        // Store ship center + rotation; cr/sr pre-computed once so the render
+        // loop never calls Math.cos(r) / Math.sin(r) again for this point.
+        trail.push({ x: ship.position.x, y: ship.position.y, r: ship.rotation, t: wakeNow,
+                     cr: Math.cos(ship.rotation), sr: Math.sin(ship.rotation) });
         this.shipWakeLastEmit.set(ship.id, wakeNow);
       }
 
@@ -9890,9 +10224,11 @@ export class RenderSystem {
     // so leadSign is intentionally inverted.
     const leadSign = signedForwardSpeed >= 0 ? -1 : 1;
 
-    const bowLocalX = ship.hull.length > 0
-      ? Math.max(...ship.hull.map(v => v.x))
-      : 150;
+    let bowLocalX = 150;
+    for (let _hi = 0; _hi < ship.hull.length; _hi++) {
+      const hx = ship.hull[_hi].x;
+      if (hx > bowLocalX) bowLocalX = hx;
+    }
     const leadX = (bowLocalX - 80) * -leadSign;
     const bowGlow = ctx.createRadialGradient(leadX, 0, 12, leadX, 0, 170 + wakeFactor * 65);
     bowGlow.addColorStop(0, `rgba(248,252,255,${(wakeAlpha * (1.0 + 0.25 * pulse)).toFixed(3)})`);  
@@ -9935,20 +10271,36 @@ export class RenderSystem {
     const camRot = cameraState.rotation;
     const kelvinTan = 0.35355; // 1/√8
 
-    // Pre-compute per-point data in one pass (no repeated worldToScreen calls).
+    // Pre-compute per-point data in one pass.
     // ssx/ssy = stern screen x/y; bsx/bsy = bow screen x/y.
-    // We store these in flat arrays to avoid object allocation.
+    //
+    // Persistent slab: reuse the Float32Array pool from a previous frame when N
+    // hasn't grown.  Eliminates 9 per-frame small-array allocations (and their GC).
     const N = trail.length;
-    const ssx = new Float32Array(N);
-    const ssy = new Float32Array(N);
-    const bsx = new Float32Array(N);
-    const bsy = new Float32Array(N);
-    const fades = new Float32Array(N);
-    // Also compute perpendicular unit vector per point for Kelvin lines.
-    const perpX = new Float32Array(N);
-    const perpY = new Float32Array(N);
-    // Cumulative stern-path distance (for Kelvin offset).
-    const cumDist = new Float32Array(N);
+    const STRIDE = RenderSystem._WAKE_BUF_STRIDE;
+    let wbEntry = this._wakeBuffers.get(ship.id);
+    if (!wbEntry || wbEntry.cap < N) {
+      const newCap = Math.max(N, 128); // over-allocate so single-point growth is rare
+      wbEntry = { buf: new Float32Array(newCap * STRIDE), cap: newCap };
+      this._wakeBuffers.set(ship.id, wbEntry);
+    }
+    const _b = wbEntry.buf;
+    // Slice offsets within the slab (layout: 11 arrays × N elements)
+    const O_SSX    = 0 * N, O_SSY    = 1 * N, O_BSX    = 2 * N, O_BSY    = 3 * N;
+    const O_FADE   = 4 * N, O_BCOS   = 5 * N, O_BSIN   = 6 * N;
+    const O_PERPX  = 7 * N, O_PERPY  = 8 * N, O_CUMD   = 9 * N, O_SEGL   = 10 * N;
+
+    // Typed-array views into the slab (zero-copy)
+    const ssx       = _b.subarray(O_SSX,  O_SSX  + N);
+    const ssy       = _b.subarray(O_SSY,  O_SSY  + N);
+    const bsx       = _b.subarray(O_BSX,  O_BSX  + N);
+    const bsy       = _b.subarray(O_BSY,  O_BSY  + N);
+    const fades     = _b.subarray(O_FADE, O_FADE + N);
+    const bowCosArr = _b.subarray(O_BCOS, O_BCOS + N);
+    const bowSinArr = _b.subarray(O_BSIN, O_BSIN + N);
+    const perpX     = _b.subarray(O_PERPX, O_PERPX + N);
+    const perpY     = _b.subarray(O_PERPY, O_PERPY + N);
+    const cumDist   = _b.subarray(O_CUMD, O_CUMD  + N);
 
     // Shift to anchor trail to current stern world pos.
     const newest = trail[N - 1];
@@ -9958,49 +10310,70 @@ export class RenderSystem {
     const shiftX = curSternX - newest.x;
     const shiftY = curSternY - newest.y;
 
-    // Camera transform constants for worldToScreen inline.
-    const camState = cameraState;
-    // We'll call camera.worldToScreen since it handles any camera projection.
-    // But we compute bow+stern in one shot per point.
+    // Inline worldToScreen constants — avoids ~2 Vec2 heap allocations per point
+    // (Vec2.from + intermediate objects inside worldToScreen).
+    // Formula: screen = rotate(-camRot, (world - camPos) * zoom) + (halfW, halfH)
+    const _camPos   = cameraState.position;
+    const _camZoom  = cameraState.zoom;
+    const _camCosNR = Math.cos(-cameraState.rotation);
+    const _camSinNR = Math.sin(-cameraState.rotation);
+    const _halfW    = camera.getViewport().width  / 2;
+    const _halfH    = camera.getViewport().height / 2;
+
+    // camRot cos/sin for bow-wave rotation (computed once, reused per point)
+    const _camCosR = Math.cos(camRot), _camSinR = Math.sin(camRot);
+
     for (let i = 0; i < N; i++) {
       const pt = trail[i];
       const age = (nowMs - pt.t) / DUR;
       fades[i] = age >= 0 && age <= 1 ? 1 - age : 0;
       if (fades[i] <= 0) continue;
 
-      const cosPR = Math.cos(pt.r), sinPR = Math.sin(pt.r);
-      // Stern: just shift the stored ship-center position — shiftX already anchors
-      // newest.x → curSternX, so adding sternLX here would double-offset.
-      const sp = camera.worldToScreen(Vec2.from(pt.x + shiftX, pt.y + shiftY));
-      ssx[i] = sp.x; ssy[i] = sp.y;
+      // Use pre-baked cr/sr (stored at emit time) — eliminates Math.cos(pt.r) per frame
+      const cosPR = pt.cr, sinPR = pt.sr;
 
-      // Bow world pos derived from historical rotation (no shift — bow is absolute).
+      // Inline stern screen position (zero allocations)
+      const stx = (pt.x + shiftX - _camPos.x) * _camZoom;
+      const sty = (pt.y + shiftY - _camPos.y) * _camZoom;
+      ssx[i] = stx * _camCosNR - sty * _camSinNR + _halfW;
+      ssy[i] = stx * _camSinNR + sty * _camCosNR + _halfH;
+
+      // Inline bow screen position (zero allocations)
       const bwx = pt.x + cosPR * bowLX;
       const bwy = pt.y + sinPR * bowLX;
-      const bp  = camera.worldToScreen(Vec2.from(bwx, bwy));
-      bsx[i] = bp.x; bsy[i] = bp.y;
+      const btx = (bwx - _camPos.x) * _camZoom;
+      const bty = (bwy - _camPos.y) * _camZoom;
+      bsx[i] = btx * _camCosNR - bty * _camSinNR + _halfW;
+      bsy[i] = btx * _camSinNR + bty * _camCosNR + _halfH;
+
+      // Bow-wave trig via identity: cos(r-c) = cr*cc + sr*sc (no extra trig calls)
+      bowCosArr[i] = cosPR * _camCosR + sinPR * _camSinR;
+      bowSinArr[i] = sinPR * _camCosR - cosPR * _camSinR;
     }
 
-    // Cumulative stern-path distances for Kelvin angle.
-    for (let i = N - 2; i >= 0; i--) {
-      const dx = ssx[i + 1] - ssx[i], dy = ssy[i + 1] - ssy[i];
-      cumDist[i] = cumDist[i + 1] + Math.hypot(dx, dy);
-    }
-
-    // Perpendicular to stern segment direction (screen space).
+    // Merged perpendicular + cumulative-distance pass.
+    // Both need the same per-segment (dx, dy, len) — compute once, use twice.
+    // segLen[i] = screen-space length of segment (i-1 → i).
+    const segLen = _b.subarray(O_SEGL, O_SEGL + N);
+    perpX[0] = 0; perpY[0] = 1; segLen[0] = 0; cumDist[N - 1] = 0;
     for (let i = 1; i < N; i++) {
       const dx = ssx[i] - ssx[i - 1], dy = ssy[i] - ssy[i - 1];
-      const len = Math.hypot(dx, dy);
+      const len = Math.sqrt(dx * dx + dy * dy);
+      segLen[i] = len;
       if (len > 0.5) { perpX[i] = -dy / len; perpY[i] = dx / len; }
       else           { perpX[i] = perpX[i - 1]; perpY[i] = perpY[i - 1]; }
     }
     perpX[0] = perpX[1]; perpY[0] = perpY[1];
+    cumDist[N - 1] = 0;
+    for (let i = N - 2; i >= 0; i--) cumDist[i] = cumDist[i + 1] + segLen[i + 1];
 
     ctx.save();
     ctx.lineCap  = 'round';
     ctx.lineJoin = 'round';
 
     // Pass A – Wash (core foam stripe, 4 fade buckets).
+    // Sub-pixel culling: skip segments whose screen-space extent is < 1 px —
+    // they contribute no visible pixels but still cost path operations.
     const washBaseW = Math.min(100, Math.max(3, (34 + wakeFactor * 28) * z));
     for (let b = 0; b < 4; b++) {
       const fadeMin = b / 4, fadeMax = (b + 1) / 4, fadeMid = (fadeMin + fadeMax) / 2;
@@ -10013,6 +10386,8 @@ export class RenderSystem {
       for (let i = 1; i < N; i++) {
         const fade = fades[i];
         if (fade <= 0 || fade < fadeMin || fade >= fadeMax) continue;
+        const dx = ssx[i] - ssx[i - 1], dy = ssy[i] - ssy[i - 1];
+        if (dx * dx + dy * dy < 1) continue; // sub-pixel — skip
         ctx.moveTo(ssx[i - 1], ssy[i - 1]);
         ctx.lineTo(ssx[i],     ssy[i]);
         drew = true;
@@ -10029,6 +10404,8 @@ export class RenderSystem {
       if (fade <= 0) continue;
       const alpha = wakeAlpha * 1.1 * fade;
       if (alpha <= 0.01) continue;
+      // Sub-pixel cull: skip if the stern segment covers < 1px on screen
+      { const dx = ssx[i] - ssx[i-1], dy = ssy[i] - ssy[i-1]; if (dx*dx + dy*dy < 1) continue; }
       const qa = Math.round(alpha / 0.05) * 0.05;
       if (qa !== lastAlpha) {
         if (lastAlpha >= 0) ctx.stroke();
@@ -10045,27 +10422,27 @@ export class RenderSystem {
       ctx.moveTo(ssx[i-1] - perpX[i] * offA, ssy[i-1] - perpY[i] * offA);
       ctx.lineTo(ssx[i]   - perpX[i] * offB, ssy[i]   - perpY[i] * offB);
 
-      // Bow wave V-shape at this historical bow position.
-      // Rotate fan vectors using stored rotation pt.r.
-      const pt  = trail[i];
-      const cosS = Math.cos(pt.r - camRot), sinS = Math.sin(pt.r - camRot);
-      // localToScreen offset: (lx, ly) -> (cosS*lx - sinS*ly, sinS*lx + cosS*ly) * z
-      const spread = (88 + wakeFactor * 34) * fade;
-      const tip    = spread * 1.36;
-      const f140x = (-cosS * 140) * z, f140y = (-sinS * 140) * z;
-      const f370x = (-cosS * 370) * z, f370y = (-sinS * 370) * z;
-      const tpx = (-sinS *  spread) * z, tpy = ( cosS *  spread) * z;
-      const bpx = (-sinS * -spread) * z, bpy = ( cosS * -spread) * z;
-      const tipx = (-sinS *  tip) * z,   tipy = ( cosS *  tip) * z;
-      const btipx = (-sinS * -tip) * z,  btipy = ( cosS * -tip) * z;
-      // Top arm
-      ctx.moveTo(bsx[i], bsy[i]);
-      ctx.quadraticCurveTo(bsx[i] + f140x + tpx,  bsy[i] + f140y + tpy,
-                           bsx[i] + f370x + tipx,  bsy[i] + f370y + tipy);
-      // Bottom arm
-      ctx.moveTo(bsx[i], bsy[i]);
-      ctx.quadraticCurveTo(bsx[i] + f140x + bpx,  bsy[i] + f140y + bpy,
-                           bsx[i] + f370x + btipx, bsy[i] + f370y + btipy);
+      // Bow wave V-shapes — only for the newest ~50% of the trail.
+      // Old segments (fade < 0.5, i.e. > half the trail lifetime) are too faded
+      // to see the fine bow detail; skipping 2 quadraticCurveTo calls per point
+      // roughly halves the path operations in Pass B without visible change.
+      if (fade >= 0.5) {
+        const cosS = bowCosArr[i], sinS = bowSinArr[i];
+        const spread = (88 + wakeFactor * 34) * fade;
+        const tip    = spread * 1.36;
+        const f140x = (-cosS * 140) * z, f140y = (-sinS * 140) * z;
+        const f370x = (-cosS * 370) * z, f370y = (-sinS * 370) * z;
+        const tpx = (-sinS *  spread) * z, tpy = ( cosS *  spread) * z;
+        const bpx = (-sinS * -spread) * z, bpy = ( cosS * -spread) * z;
+        const tipx = (-sinS *  tip) * z,   tipy = ( cosS *  tip) * z;
+        const btipx = (-sinS * -tip) * z,  btipy = ( cosS * -tip) * z;
+        ctx.moveTo(bsx[i], bsy[i]);
+        ctx.quadraticCurveTo(bsx[i] + f140x + tpx,  bsy[i] + f140y + tpy,
+                             bsx[i] + f370x + tipx,  bsy[i] + f370y + tipy);
+        ctx.moveTo(bsx[i], bsy[i]);
+        ctx.quadraticCurveTo(bsx[i] + f140x + bpx,  bsy[i] + f140y + bpy,
+                             bsx[i] + f370x + btipx, bsy[i] + f370y + btipy);
+      }
     }
     if (lastAlpha >= 0) ctx.stroke();
 
@@ -10166,67 +10543,30 @@ export class RenderSystem {
         this.ctx.globalAlpha = phase1Alpha * healthFade;
       }
 
-      // Darken hull fill colour to reflect deck damage (mirrors plank darkenByDamage).
       if (!isGhost && hasDeck) {
+        // ── Sprite-cached path: hull fill + grain + outline (static) ──────────
+        // Compute fill colour (health-bucketed by darkenByDamage so cache is stable
+        // over small HP fluctuations that don't cross a colour bucket boundary).
         const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
                      ?? ship.modules.find(m => m.kind === 'deck');
         const baseHullColor = hasUpperDeck ? '#DEB887' : '#A87040';
         const dmd = topDeck?.moduleData as any;
+        let fillColor = baseHullColor;
         if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
-          const deckHealthRatio = Math.max(0, dmd.health / dmd.maxHealth);
-          this.ctx.fillStyle = this.darkenByDamage(baseHullColor, deckHealthRatio);
+          fillColor = this.darkenByDamage(baseHullColor, Math.max(0, dmd.health / dmd.maxHealth));
         }
-      }
-
-      // Hull fill — punch real transparent holes at deck openings when upper deck present
-      this.ctx.beginPath();
-      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-      this.ctx.closePath();
-      if (!isGhost && hasUpperDeck) {
-        // Add hole sub-paths; evenodd rule makes overlapping areas transparent
-        for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
-          this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+        const hullSprite = this._getShipHullSprite(ship, hasUpperDeck, hasDeck, fillColor);
+        if (hullSprite) {
+          this.ctx.drawImage(hullSprite.canvas, -hullSprite.ox, -hullSprite.oy);
         }
-        this.ctx.fill('evenodd');
-        // Re-build hull-only path for stroke so hole rects aren't outlined
-        this.ctx.beginPath();
-        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-        this.ctx.closePath();
       } else {
-        this.ctx.fill();
-      }
-      this.ctx.stroke();
-
-      // Plank-line grain on the upper deck — mirrors the lower-deck design, retains BurlyWood colour
-      if (!isGhost && hasDeck) {
-        this.ctx.save();
+        // Ghost hull — procedural (fill/glow change with health / aggro pulse; not cacheable)
         this.ctx.beginPath();
         this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
         for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
         this.ctx.closePath();
-        if (hasUpperDeck) {
-          for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
-            this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
-          }
-          this.ctx.clip('evenodd');
-        } else {
-          this.ctx.clip();
-        }
-        let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-        for (const v of ship.hull) {
-          if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
-          if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
-        }
-        this.ctx.strokeStyle = hasUpperDeck ? '#b8824a' : '#7a4f28';
-        this.ctx.lineWidth = 1 / cameraState.zoom;
-        for (let y = minY + 12; y < maxY; y += 12) {
-          this.ctx.beginPath();
-          this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
-          this.ctx.stroke();
-        }
-        this.ctx.restore();
+        this.ctx.fill();
+        this.ctx.stroke();
       }
 
       // Ghost ships: add a second thin edge stroke for the spectral glow outline (level-tinted)
@@ -10391,9 +10731,10 @@ export class RenderSystem {
     
     const screenPos = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
+    const zoom = cameraState.zoom;
     
     this.ctx.translate(screenPos.x, screenPos.y);
-    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.scale(zoom, zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     // Find all plank modules
     const planks = ship.modules.filter(m => m.kind === 'plank');
@@ -10451,73 +10792,55 @@ export class RenderSystem {
       return;
     }
 
-    // ── Normal mode (has deck): draw wood-textured planks
-    for (const plank of planks) {
-      if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
-      
-      const plankData = plank.moduleData;
-      const pos = plank.localPos;
-      const rot = plank.localRot;
-      const length = plankData.length;
-      const width = plankData.width;
-      const health = plankData.health;
-      const isCurved = plankData.isCurved || false;
-
-      if (health <= 0) continue;
-      
-      // Smoothly darken toward black as health decreases
-      const maxHealth = plankData.maxHealth || 10000;
-      const healthRatio = Math.max(0, health / maxHealth);
-      // Ghost planks: dark semi-transparent with cyan tinge; pulsed by health
-      const fillColor   = isGhostShip
-        ? this.darkenByDamage('#1a2a3a', healthRatio)
-        : this.darkenByDamage(plankBaseColor, healthRatio);
-      const strokeColor = isGhostShip
-        ? this.darkenByDamage('#003055', healthRatio)
-        : this.darkenByDamage(plankStrokeBase, healthRatio);
-
-      if (isGhostShip) {
-        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1);
-        this.ctx.shadowBlur  = 3;
+    // ── Normal mode (has deck): blit pre-baked plank sprite for main fill pass.
+    // Re-baked only when a plank's health bucket changes (once per damage event, not per frame).
+    // Falls back to direct drawing at zoom > 3 (close-up view, usually ≤2 ships visible).
+    if (zoom <= 3) {
+      const sprite = this._getShipPlankSprite(ship, planks, plankBaseColor, plankStrokeBase, isGhostShip);
+      if (sprite) {
+        this.ctx.drawImage(sprite.canvas, -sprite.ox, -sprite.oy);
       }
-      this.ctx.fillStyle = fillColor;
-      this.ctx.strokeStyle = strokeColor;
-      this.ctx.lineWidth = 1;
-      
-      if (isCurved && plankData.curveData) {
-        // For curved planks, draw directly in ship-local coordinates
-        // The curve shape already defines the correct position and orientation
-        this.ctx.save();
-        this.drawCurvedPlank(plankData.curveData, width, fillColor, strokeColor);
-        this.ctx.restore();
-      } else {
-        // For straight planks, use position and rotation
-        this.ctx.save();
-        this.ctx.translate(pos.x, pos.y);
-        this.ctx.rotate(rot);
-        
-        const halfLength = length / 2;
-        const halfWidth = width / 2;
-        
-        this.ctx.fillRect(-halfLength, -halfWidth, length, width);
-        this.ctx.strokeRect(-halfLength, -halfWidth, length, width);
-        
-        // Add wood grain effect (parallel lines)
+    } else {
+      // High zoom fall-back: direct draw for crisp detail
+      for (const plank of planks) {
+        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+        const plankData = plank.moduleData;
+        if ((plankData.health ?? 0) <= 0) continue;
+        const maxHealth  = plankData.maxHealth || 10000;
+        const healthRatio = Math.max(0, plankData.health / maxHealth);
+        const fillColor   = isGhostShip
+          ? this.darkenByDamage('#1a2a3a', healthRatio)
+          : this.darkenByDamage(plankBaseColor, healthRatio);
+        const strokeColor = isGhostShip
+          ? this.darkenByDamage('#003055', healthRatio)
+          : this.darkenByDamage(plankStrokeBase, healthRatio);
+        if (isGhostShip) { this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1); this.ctx.shadowBlur = 3; }
+        this.ctx.fillStyle = fillColor;
         this.ctx.strokeStyle = strokeColor;
-        this.ctx.lineWidth = 0.5;
-        this.ctx.globalAlpha = 0.3;
-        
-        const grainCount = Math.floor(length / 10);
-        for (let i = 1; i < grainCount; i++) {
-          const x = -halfLength + (i * length / grainCount);
-          this.ctx.beginPath();
-          this.ctx.moveTo(x, -halfWidth);
-          this.ctx.lineTo(x, halfWidth);
-          this.ctx.stroke();
+        this.ctx.lineWidth = 1;
+        if (plankData.isCurved && plankData.curveData) {
+          this.ctx.save();
+          this.drawCurvedPlank(plankData.curveData, plankData.width, fillColor, strokeColor);
+          this.ctx.restore();
+        } else {
+          this.ctx.save();
+          this.ctx.translate(plank.localPos.x, plank.localPos.y);
+          this.ctx.rotate(plank.localRot);
+          const hl = plankData.length / 2, hw = plankData.width / 2;
+          this.ctx.fillRect(-hl, -hw, plankData.length, plankData.width);
+          this.ctx.strokeRect(-hl, -hw, plankData.length, plankData.width);
+          const grainCount = Math.max(1, Math.floor(plankData.length / (10 * zoom)));
+          if (grainCount > 1) {
+            this.ctx.strokeStyle = strokeColor; this.ctx.lineWidth = 0.5; this.ctx.globalAlpha = 0.3;
+            this.ctx.beginPath();
+            for (let i = 1; i < grainCount; i++) {
+              const x = -hl + (i * plankData.length / grainCount);
+              this.ctx.moveTo(x, -hw); this.ctx.lineTo(x, hw);
+            }
+            this.ctx.stroke(); this.ctx.globalAlpha = 1.0;
+          }
+          this.ctx.restore();
         }
-        
-        this.ctx.globalAlpha = 1.0;
-        this.ctx.restore();
       }
     }
 
@@ -11300,24 +11623,19 @@ export class RenderSystem {
     curveData: { start: any; control: any; end: any; t1: number; t2: number },
     width: number,
     fillColor: string,
-    strokeColor: string
+    strokeColor: string,
+    ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D = this.ctx
   ): void {
     const { start, control, end, t1, t2 } = curveData;
     const halfWidth = width / 2;
     
-    // Sample points along the curve segment
-    const segments = 10; // Number of subdivisions for smooth curve
+    const segments = 10;
     const points: Array<{x: number, y: number}> = [];
-    
     for (let i = 0; i <= segments; i++) {
       const t = t1 + (t2 - t1) * (i / segments);
-      const pt = this.getQuadraticPoint(start, control, end, t);
-      points.push(pt);
+      points.push(this.getQuadraticPoint(start, control, end, t));
     }
     
-    // Points are already in ship-local coordinates, no transformation needed
-    
-    // Calculate perpendicular offsets for the plank width
     const innerPoints: Array<{x: number, y: number}> = [];
     const outerPoints: Array<{x: number, y: number}> = [];
     
@@ -11336,32 +11654,107 @@ export class RenderSystem {
       const len = Math.sqrt(tangent.x * tangent.x + tangent.y * tangent.y);
       tangent.x /= len;
       tangent.y /= len;
-      
-      // Perpendicular vector (rotated 90 degrees)
       const perp = { x: -tangent.y, y: tangent.x };
       
-      innerPoints.push({
-        x: curr.x + perp.x * halfWidth,
-        y: curr.y + perp.y * halfWidth
-      });
-      outerPoints.push({
-        x: curr.x - perp.x * halfWidth,
-        y: curr.y - perp.y * halfWidth
-      });
+      innerPoints.push({ x: curr.x + perp.x * halfWidth, y: curr.y + perp.y * halfWidth });
+      outerPoints.push({ x: curr.x - perp.x * halfWidth, y: curr.y - perp.y * halfWidth });
     }
     
-    // Draw filled curved plank
-    this.ctx.beginPath();
-    this.ctx.moveTo(innerPoints[0].x, innerPoints[0].y);
-    for (let i = 1; i < innerPoints.length; i++) {
-      this.ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
+    ctx.beginPath();
+    ctx.moveTo(innerPoints[0].x, innerPoints[0].y);
+    for (let i = 1; i < innerPoints.length; i++) ctx.lineTo(innerPoints[i].x, innerPoints[i].y);
+    for (let i = outerPoints.length - 1; i >= 0; i--) ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  /**
+   * Bake all straight+curved planks for a ship into an OffscreenCanvas in ship-local coords.
+   * Re-bakes only when plank health buckets change (normally once per damage event, not every frame).
+   * The sprite avoids per-frame save/restore + translate + rotate + fillRect × N planks.
+   */
+  private _getShipPlankSprite(
+    ship: Ship,
+    planks: Ship['modules'],
+    plankBaseColor: string,
+    plankStrokeBase: string,
+    isGhostShip: boolean
+  ): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
+    // Build cache key: baseColor + ghost flag + per-plank health bucket
+    let key = `${plankBaseColor}:${isGhostShip ? 1 : 0}`;
+    let hasAny = false;
+    for (const plank of planks) {
+      if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+      const h  = plank.moduleData.health ?? 0;
+      const mx = plank.moduleData.maxHealth || 10000;
+      const bucket = h <= 0 ? -1 : Math.floor((h / mx) * 20);
+      key += `:${bucket}`;
+      if (h > 0) hasAny = true;
     }
-    for (let i = outerPoints.length - 1; i >= 0; i--) {
-      this.ctx.lineTo(outerPoints[i].x, outerPoints[i].y);
+    if (!hasAny) return null;
+
+    const cached = this._shipPlankSprites.get(ship.id);
+    if (cached && cached.key === key) return cached;
+
+    // Hull spans roughly sternTip(-345) to bowTip(415) × -100 to +100, pad by 15.
+    const W = 790, H = 230;
+    const ox = 360, oy = 115;
+
+    const canvas = new OffscreenCanvas(W, H);
+    const sctx = canvas.getContext('2d')!;
+    sctx.translate(ox, oy);
+
+    for (const plank of planks) {
+      if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+      const plankData = plank.moduleData;
+      if ((plankData.health ?? 0) <= 0) continue;
+
+      const maxHealth  = plankData.maxHealth || 10000;
+      const healthRatio = Math.max(0, plankData.health / maxHealth);
+      const fillColor   = isGhostShip
+        ? this.darkenByDamage('#1a2a3a', healthRatio)
+        : this.darkenByDamage(plankBaseColor, healthRatio);
+      const strokeColor = isGhostShip
+        ? this.darkenByDamage('#003055', healthRatio)
+        : this.darkenByDamage(plankStrokeBase, healthRatio);
+
+      sctx.fillStyle   = fillColor;
+      sctx.strokeStyle = strokeColor;
+      sctx.lineWidth   = 1;
+
+      if (plankData.isCurved && plankData.curveData) {
+        this.drawCurvedPlank(plankData.curveData, plankData.width, fillColor, strokeColor, sctx);
+      } else {
+        sctx.save();
+        sctx.translate(plank.localPos.x, plank.localPos.y);
+        sctx.rotate(plank.localRot);
+        const hl = plankData.length / 2;
+        const hw = plankData.width  / 2;
+        sctx.fillRect(-hl, -hw, plankData.length, plankData.width);
+        sctx.strokeRect(-hl, -hw, plankData.length, plankData.width);
+        // Grain lines baked at zoom=1 detail
+        const grainCount = Math.max(1, Math.floor(plankData.length / 10));
+        if (grainCount > 1) {
+          sctx.strokeStyle  = strokeColor;
+          sctx.lineWidth    = 0.5;
+          sctx.globalAlpha  = 0.3;
+          sctx.beginPath();
+          for (let i = 1; i < grainCount; i++) {
+            const x = -hl + (i * plankData.length / grainCount);
+            sctx.moveTo(x, -hw);
+            sctx.lineTo(x,  hw);
+          }
+          sctx.stroke();
+          sctx.globalAlpha = 1;
+        }
+        sctx.restore();
+      }
     }
-    this.ctx.closePath();
-    this.ctx.fill();
-    this.ctx.stroke();
+
+    const entry = { canvas, key, ox, oy };
+    this._shipPlankSprites.set(ship.id, entry);
+    return entry;
   }
   
   private getQuadraticPoint(
@@ -12145,11 +12538,12 @@ export class RenderSystem {
         }
         this.ctx.strokeStyle = '#3d2610';
         this.ctx.lineWidth = lw;
+        // Batch all grain lines into one path → one GPU stroke() call instead of N
+        this.ctx.beginPath();
         for (let y = minY + 12; y < maxY; y += 12) {
-          this.ctx.beginPath();
           this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
-          this.ctx.stroke();
         }
+        this.ctx.stroke();
       } else {
         this.ctx.fillStyle = '#1a0e06';
         this.ctx.fill();
@@ -12210,6 +12604,69 @@ export class RenderSystem {
   }
 
   /**
+   * Bake the upper-deck cover (hull polygon fill + grain) into an OffscreenCanvas.
+   * Re-baked only when deck health bucket changes.  Flood tint is still drawn dynamically.
+   */
+  private _getShipUpperDeckSprite(ship: Ship): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
+    if (ship.hull.length < 3) return null;
+
+    const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                 ?? ship.modules.find(m => m.kind === 'deck');
+    const dmd = topDeck?.moduleData as any;
+    let fillColor = '#DEB887';
+    if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+      fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
+    }
+    const key = fillColor;
+
+    const cached = this._shipUpperDeckSprites.get(ship.id);
+    if (cached && cached.key === key) return cached;
+
+    const W = 790, H = 230, ox = 360, oy = 115;
+    const canvas = new OffscreenCanvas(W, H);
+    const sctx = canvas.getContext('2d')!;
+    sctx.translate(ox, oy);
+
+    sctx.fillStyle = fillColor;
+    sctx.beginPath();
+    sctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) sctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    sctx.closePath();
+    for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+      sctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+    }
+    sctx.fill('evenodd');
+
+    // Grain lines (baked at zoom=1 lineWidth)
+    sctx.save();
+    sctx.beginPath();
+    sctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) sctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    sctx.closePath();
+    for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+      sctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+    }
+    sctx.clip('evenodd');
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of ship.hull) {
+      if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
+      if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
+    }
+    sctx.strokeStyle = '#b8824a';
+    sctx.lineWidth = 1;
+    sctx.beginPath();
+    for (let y = minY + 12; y < maxY; y += 12) {
+      sctx.moveTo(minX, y); sctx.lineTo(maxX, y);
+    }
+    sctx.stroke();
+    sctx.restore();
+
+    const entry = { canvas, key, ox, oy };
+    this._shipUpperDeckSprites.set(ship.id, entry);
+    return entry;
+  }
+
+  /**
    * Solid upper-deck cover drawn at layer 2.
    * Fills the hull polygon (with ramp/hatch holes) with the deck surface colour so that
    * lower-deck cannons, gunports, and other layer-1 content are fully hidden when the
@@ -12231,53 +12688,28 @@ export class RenderSystem {
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    // Match the deck-damage-darkened hull colour used in drawShipHull
-    let fillColor = '#DEB887'; // BurlyWood — upper deck
-    const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
-                 ?? ship.modules.find(m => m.kind === 'deck');
-    const dmd = topDeck?.moduleData as any;
-    if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
-      fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
-    }
-    this.ctx.fillStyle = fillColor;
-
-    // Fill hull polygon, punching transparent holes at ramp/hatch snap points
-    this.ctx.beginPath();
-    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-    for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-    this.ctx.closePath();
-    for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
-      this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
-    }
-    this.ctx.fill('evenodd');
-
-    // Plank-line grain — mirrors drawShipHull, retains BurlyWood colour
-    {
-      this.ctx.save();
+    // Blit the pre-baked hull polygon + grain (replaces 3× hull polygon rebuilds).
+    const sprite = this._getShipUpperDeckSprite(ship);
+    if (sprite) {
+      this.ctx.drawImage(sprite.canvas, -sprite.ox, -sprite.oy);
+    } else {
+      // Fallback for very short hull arrays
+      const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                   ?? ship.modules.find(m => m.kind === 'deck');
+      const dmd = topDeck?.moduleData as any;
+      let fillColor = '#DEB887';
+      if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+        fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
+      }
+      this.ctx.fillStyle = fillColor;
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
       this.ctx.closePath();
-      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
-        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
-      }
-      this.ctx.clip('evenodd');
-      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const v of ship.hull) {
-        if (v.x < minX) minX = v.x; if (v.x > maxX) maxX = v.x;
-        if (v.y < minY) minY = v.y; if (v.y > maxY) maxY = v.y;
-      }
-      this.ctx.strokeStyle = '#b8824a';
-      this.ctx.lineWidth = 1 / cameraState.zoom;
-      for (let y = minY + 12; y < maxY; y += 12) {
-        this.ctx.beginPath();
-        this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
-        this.ctx.stroke();
-      }
-      this.ctx.restore();
+      this.ctx.fill();
     }
 
-    // Flood tint overlay (mirrors drawShipHull)
+    // Flood tint overlay — dynamic, drawn directly (cannot be cached)
     if (floodTint > 0) {
       this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
       this.ctx.fillStyle = '#1a6eb5';
@@ -12380,24 +12812,22 @@ export class RenderSystem {
     this.ctx.rotate(localRot);
     if (alpha !== 1.0) this.ctx.globalAlpha *= alpha;
 
-    const grad = this.ctx.createLinearGradient(-25, 0, 25, 0);
-    grad.addColorStop(0, '#b07d42');
-    grad.addColorStop(1, '#2e1a08');
-    this.ctx.fillStyle = grad;
-    this.ctx.fillRect(-25, -25, 50, 50);
+    // Gradient fill — blitted from a pre-baked sprite (eliminates createLinearGradient per frame)
+    this.ctx.drawImage(this._getRampFillSprite(), -25, -25);
 
+    // Step lines — all 6 batched into one path + one stroke() call (same strokeStyle)
+    this.ctx.strokeStyle = 'rgba(0,0,0,0.55)'; // ~mid-gradient darkness
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.beginPath();
     const numSteps = 6;
     for (let s = 0; s < numSteps; s++) {
-      const t  = (s + 0.5) / numSteps;
-      const sx = -25 + t * 50;
-      this.ctx.strokeStyle = `rgba(0,0,0,${(0.30 + t * 0.40).toFixed(2)})`;
-      this.ctx.lineWidth   = lw * 1.5;
-      this.ctx.beginPath();
+      const sx = -25 + ((s + 0.5) / numSteps) * 50;
       this.ctx.moveTo(sx, -25);
       this.ctx.lineTo(sx, 25);
-      this.ctx.stroke();
     }
+    this.ctx.stroke();
 
+    // Border and left-edge highlight (different styles — kept separate)
     this.ctx.strokeStyle = '#5a3210';
     this.ctx.lineWidth   = lw * 2;
     this.ctx.strokeRect(-25, -25, 50, 50);
@@ -12429,23 +12859,23 @@ export class RenderSystem {
     this.ctx.fillStyle = '#7a5230';
     this.ctx.fillRect(-25, -25, 50, 50);
 
-    // Horizontal plank lines
+    // Horizontal plank lines — batched into one path + one stroke()
     this.ctx.strokeStyle = 'rgba(0,0,0,0.28)';
     this.ctx.lineWidth   = lw * 1.2;
+    this.ctx.beginPath();
     for (let p = 1; p < 5; p++) {
       const yy = -25 + (p / 5) * 50;
-      this.ctx.beginPath();
       this.ctx.moveTo(-25, yy);
       this.ctx.lineTo(25, yy);
-      this.ctx.stroke();
     }
+    this.ctx.stroke();
 
     // Border — slightly lighter to differentiate from regular floor
     this.ctx.strokeStyle = '#c89050';
     this.ctx.lineWidth   = lw * 2.5;
     this.ctx.strokeRect(-25, -25, 50, 50);
 
-    // Small "X" latch indicator in the centre
+    // Small "X" latch indicator in the centre (2 lines, already one path)
     this.ctx.strokeStyle = 'rgba(200,140,60,0.80)';
     this.ctx.lineWidth   = lw * 1.5;
     this.ctx.beginPath();
@@ -12682,6 +13112,16 @@ export class RenderSystem {
     
     const isPhantomBrig = ship.shipType === SHIP_TYPE_GHOST;
 
+    // Hoist ghost-cannon constants outside the per-cannon loop.
+    // ghostSpectralColor builds rgba strings; computing RGB once and reusing
+    // eliminates 5 string-building calls per cannon per frame.
+    const _ghostCannonT = isPhantomBrig ? performance.now() / 1000 : 0;
+    const _ghostRGB: [number, number, number] = isPhantomBrig ? (() => {
+      const nLvl = ship.npcLevel ?? 1;
+      const lt   = Math.max(0, Math.min(1, (nLvl - 1) / 59));
+      return [Math.round(lt * 255), Math.round(238 * (1 - lt) + 40 * lt), Math.round(255 * (1 - lt))];
+    })() : [0, 0, 0];
+
     for (const cannon of cannons) {
       if (!cannon.moduleData || cannon.moduleData.kind !== 'cannon') continue;
       
@@ -12729,16 +13169,21 @@ export class RenderSystem {
 
       if (isPhantomBrig) {
         // ── Phantom Brig spectral cannon (level-tinted) ────────────────────
-        const t = performance.now() / 1000;
-        const pulse = 0.55 + 0.45 * Math.sin(t * 2.2 + x * 0.05 + y * 0.05);
+        // Per-cannon pulse uses a position-based phase so each cannon shimmers
+        // independently, but t and the RGB channel values are ship-wide constants
+        // hoisted above the loop (see _ghostCannonT / _ghostCannonRGB).
+        const pulse = 0.55 + 0.45 * Math.sin(_ghostCannonT * 2.2 + x * 0.05 + y * 0.05);
         const glowAlpha = 0.5 + 0.5 * pulse;
-        const cannonGlowClr = ghostSpectralColor(ship.npcLevel ?? 1);
+        const [gr, gg, gb] = _ghostRGB;
+        const shadowClr  = `rgba(${gr},${gg},${gb},${(glowAlpha * 0.9).toFixed(3)})`;
+        const strokeClr  = `rgba(${gr},${gg},${gb},${glowAlpha.toFixed(3)})`;
+        const muzzleClr  = `rgba(${gr},${gg},${gb},${(glowAlpha * 0.6).toFixed(3)})`;
 
-        // Void-dark base with level-tinted glow
-        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha * 0.9);
-        this.ctx.shadowBlur = 10 / cameraState.zoom;
+        // Void-dark base with level-tinted outline — no shadowBlur (removed: was
+        // 3× shadowBlur per cannon × 8+ cannons × 4+ ghost ships = 96 blur passes).
+        // The pulsing stroke colour provides sufficient visual spectral quality.
         this.ctx.fillStyle = '#060f0d';
-        this.ctx.strokeStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
+        this.ctx.strokeStyle = strokeClr;
         this.ctx.lineWidth = lineWidth * 1.5;
         this.ctx.fillRect(-11, -7.5, 22, 15);
         this.ctx.strokeRect(-11, -7.5, 22, 15);
@@ -12746,10 +13191,8 @@ export class RenderSystem {
         // Spectral barrel
         this.ctx.save();
         this.ctx.rotate(turretAngle);
-        this.ctx.shadowColor = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
-        this.ctx.shadowBlur = 8 / cameraState.zoom;
-        this.ctx.fillStyle = `rgba(0,30,25,${0.85 + 0.15 * pulse})`;
-        this.ctx.strokeStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha);
+        this.ctx.fillStyle = `rgba(0,30,25,${(0.85 + 0.15 * pulse).toFixed(3)})`;
+        this.ctx.strokeStyle = strokeClr;
         this.ctx.lineWidth = lineWidth * 1.5;
         this.ctx.beginPath();
         this.ctx.moveTo(-6, 0);
@@ -12759,17 +13202,12 @@ export class RenderSystem {
         this.ctx.closePath();
         this.ctx.fill();
         this.ctx.stroke();
-        // Muzzle glow ring
+        // Muzzle glow ring — flat colour, no shadow
         this.ctx.beginPath();
         this.ctx.arc(0, -42, 5, 0, Math.PI * 2);
-        this.ctx.fillStyle = ghostSpectralColor(ship.npcLevel ?? 1, glowAlpha * 0.6);
-        this.ctx.shadowBlur = 12 / cameraState.zoom;
+        this.ctx.fillStyle = muzzleClr;
         this.ctx.fill();
-        void cannonGlowClr; // suppress unused-var lint
         this.ctx.restore();
-
-        this.ctx.shadowColor = 'transparent';
-        this.ctx.shadowBlur = 0;
       } else {
       // Draw cannon base (doesn't rotate with turret)
       this.ctx.fillStyle = this.darkenByDamage('#8B4513', cannonHealthRatio);
@@ -15717,55 +16155,23 @@ export class RenderSystem {
     // Find all ladder modules
     const ladders = ship.modules.filter(m => m.kind === 'ladder');
     
+    const ladderSpr = this._getLadderSprites();
+
     for (const ladder of ladders) {
       const x = ladder.localPos.x;
       const y = ladder.localPos.y;
       const rot = ladder.localRot || 0;
-      const isExtended = (ladder.moduleData as any)?.extended !== false; // default to extended if unknown
+      const isExtended = (ladder.moduleData as any)?.extended !== false;
 
       this.ctx.save();
       this.ctx.translate(x, y);
       this.ctx.rotate(rot);
 
+      // Single drawImage() replaces 7+ fill/stroke calls — sprite is 100% static
       if (isExtended) {
-        // --- Extended ladder: wooden frame with rungs ---
-        const lw = 20; // total width
-        const lh = 40; // total height
-        const railW = 3;
-        const rungCount = 4;
-
-        // Side rails (dark brown)
-        this.ctx.fillStyle = '#5C3A1E';
-        this.ctx.fillRect(-lw / 2, -lh / 2, railW, lh);           // left rail
-        this.ctx.fillRect(lw / 2 - railW, -lh / 2, railW, lh);    // right rail
-
-        // Rungs (lighter tan wood)
-        this.ctx.fillStyle = '#8B5E3C';
-        const rungH = 3;
-        const rungSpacing = lh / (rungCount + 1);
-        for (let i = 1; i <= rungCount; i++) {
-          const ry = -lh / 2 + i * rungSpacing - rungH / 2;
-          this.ctx.fillRect(-lw / 2 + railW, ry, lw - railW * 2, rungH);
-        }
-
-        // Thin outline
-        this.ctx.strokeStyle = '#3A2010';
-        this.ctx.lineWidth = 1;
-        this.ctx.strokeRect(-lw / 2, -lh / 2, lw, lh);
+        this.ctx.drawImage(ladderSpr.extended,  -12, -22); // canvas origin offset
       } else {
-        // --- Retracted ladder: flat stowed plank, grey-brown, narrow ---
-        this.ctx.fillStyle = '#6B5040';
-        this.ctx.fillRect(-10, -6, 20, 12);
-        this.ctx.strokeStyle = '#3A2010';
-        this.ctx.lineWidth = 1;
-        this.ctx.strokeRect(-10, -6, 20, 12);
-        // Small diagonal lines to suggest folded/stowed state
-        this.ctx.strokeStyle = '#4A3020';
-        this.ctx.lineWidth = 1;
-        this.ctx.beginPath();
-        this.ctx.moveTo(-7, -4); this.ctx.lineTo( 7,  4);
-        this.ctx.moveTo(-7,  4); this.ctx.lineTo( 7, -4);
-        this.ctx.stroke();
+        this.ctx.drawImage(ladderSpr.retracted, -12,  -8);
       }
 
       this.ctx.restore();
@@ -16030,96 +16436,21 @@ export class RenderSystem {
     const { phase3Alpha } = this.computeSinkState(ship);
     if (phase3Alpha <= 0) return;
 
+    const sprite = this._getShipRopeSprite(ship);
+    if (!sprite) return;
+
     this.ctx.save();
     if (phase3Alpha < 1) this.ctx.globalAlpha = phase3Alpha;
 
-    const screenPos = camera.worldToScreen(ship.position);
+    const screenPos  = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
 
     this.ctx.translate(screenPos.x, screenPos.y);
     this.ctx.scale(cameraState.zoom, cameraState.zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
 
-    const masts = ship.modules.filter(m => m.kind === 'mast');
-
-    for (const mast of masts) {
-      if (!mast.moduleData || mast.moduleData.kind !== 'mast') continue;
-
-      const mastData = mast.moduleData;
-      const mx = mast.localPos.x;
-      const my = mast.localPos.y;
-
-      // Half-base = half sail width → triangle base spans full sail width
-      const halfBase = mastData.sailWidth * 0.5;
-      // 4 rope X-positions evenly across the base: x0, x1, x2, x3
-      const step = halfBase / 3;
-      const x0 = mx - halfBase;       // aft outer
-      const x1 = mx - step;           // aft inner
-      const x2 = mx + step;           // fore inner
-      const x3 = mx + halfBase;       // fore outer
-
-      // Rope style — hemp tan
-      this.ctx.strokeStyle = '#8B7355';
-      this.ctx.lineWidth = 1.2;
-      this.ctx.lineCap = 'round';
-
-      for (const side of [1, -1] as const) { // +1 = port, -1 = stbd
-        // Each rope column gets its own rail Y — follows the hull curve at bow/stern
-        const ry0 = my + this.hullRailY(x0, side);
-        const ry1 = my + this.hullRailY(x1, side);
-        const ry2 = my + this.hullRailY(x2, side);
-        const ry3 = my + this.hullRailY(x3, side);
-
-        // ── Outer diagonal braces: apex → x0 and apex → x3 ──
-        this.ctx.beginPath();
-        this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x0, ry0);
-        this.ctx.stroke();
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x3, ry3);
-        this.ctx.stroke();
-
-        // ── 2 inner shrouds: from mast apex down to x1 and x2 on the rail ──
-        this.ctx.beginPath();
-        this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x1, ry1);
-        this.ctx.stroke();
-
-        this.ctx.beginPath();
-        this.ctx.moveTo(mx, my);
-        this.ctx.lineTo(x2, ry2);
-        this.ctx.stroke();
-
-        // ── 2 horizontal cross-ropes at t = 1/3 and 2/3 along the outer diagonals ──
-        for (const t of [1 / 3, 2 / 3]) {
-          // Interpolate along the outer diagonals to get cross-rope endpoints
-          const crossXL = mx + (x0 - mx) * t;
-          const crossYL = my + (ry0 - my) * t;
-          const crossXR = mx + (x3 - mx) * t;
-          const crossYR = my + (ry3 - my) * t;
-          this.ctx.beginPath();
-          this.ctx.moveTo(crossXL, crossYL);
-          this.ctx.lineTo(crossXR, crossYR);
-          this.ctx.stroke();
-        }
-
-        // ── Base rail-rope following the hull edge through all 4 rope endpoints ──
-        this.ctx.beginPath();
-        this.ctx.moveTo(x0, ry0);
-        this.ctx.lineTo(x1, ry1);
-        this.ctx.lineTo(x2, ry2);
-        this.ctx.lineTo(x3, ry3);
-        this.ctx.stroke();
-
-        // ── 2 elongated cleats: aft pair (x0→x1) and fore pair (x2→x3) ──
-        // Angle is derived directly from the two endpoint positions so the cleat
-        // naturally follows the hull tangent on both straight and curved sections.
-        this.drawSailRopeCleat(x0, x1, (ry0 + ry1) / 2, Math.atan2(ry1 - ry0, x1 - x0));
-        this.drawSailRopeCleat(x2, x3, (ry2 + ry3) / 2, Math.atan2(ry3 - ry2, x3 - x2));
-      }
-    }
+    // Single blit replaces ~114 individual draw calls per ship
+    this.ctx.drawImage(sprite.canvas, -sprite.ox, -sprite.oy);
 
     this.ctx.restore();
   }
@@ -16688,7 +17019,7 @@ export class RenderSystem {
     // Glow behind pole when contested
     if (cf.contested) {
       this.ctx.shadowColor = `rgba(255,60,60,${0.4 * pulse})`;
-      this.ctx.shadowBlur  = 14 * zoom;
+      this.ctx.shadowBlur  = Math.min(20, 14 * zoom);
     }
 
     // Pole
@@ -17143,36 +17474,77 @@ export class RenderSystem {
     const ghostProjLevel = firedFromGhost ? (firingShip?.npcLevel ?? 1) : 1;
 
     // ── Smoke trail (cannonball & bar shot only) ───────────────────────────
+    // Batched per opacity bucket: instead of one arc+fill per crumb (68×/ball),
+    // group crumbs into 5 alpha buckets and issue one path per bucket.
+    // This reduces draw calls from ~28/ball to ~5/ball (5× improvement per ball,
+    // 24 balls × 5 = 120 calls vs 24 × 28 = 672).
     if (cannonball.ammoType === 0 || cannonball.ammoType === 1) {
       const isBarShot = cannonball.ammoType === 1;
       const trail = this.cannonballTrails.get(cannonball.id);
       if (trail && trail.length > 1) {
-        this.ctx.save();
+        const ALPHA_BUCKETS = 5;
+        const smokeColor = firedFromGhost ? ghostSpectralColor(ghostProjLevel) : '#c8c8c8';
+        const coreColor  = firedFromGhost ? ghostSpectralColor(ghostProjLevel, 0.85) : '#3a3a3a';
+        const maxAlpha   = isBarShot ? 0.32 : 0.72;
+
+        // Pre-classify crumbs into alpha buckets (smoke) and core bucket (fresh only)
+        const buckets: { alpha: number; paths: Array<[number, number, number]> }[] =
+          Array.from({ length: ALPHA_BUCKETS }, (_, b) => ({
+            alpha: ((b + 0.5) / ALPHA_BUCKETS) * maxAlpha,
+            paths: [],
+          }));
+        const corePaths: Array<[number, number, number]> = [];
+
+        const camState = camera.getState();
+        const cosR = Math.cos(-camState.rotation);
+        const sinR = Math.sin(-camState.rotation);
+        const ox = camState.position.x, oy = camState.position.y, z = camState.zoom;
+        const hw = this.ctx.canvas.width  / 2;
+        const hh = this.ctx.canvas.height / 2;
+
         for (let i = 0; i < trail.length; i++) {
           const crumb = trail[i];
-          const age   = (now - crumb.t) / this.TRAIL_DURATION_MS; // 0=fresh … 1=gone
+          const age = (now - crumb.t) / this.TRAIL_DURATION_MS;
           if (age >= 1) continue;
-          const ease   = 1 - age * age; // quadratic — stays full longer, drops off at end
-          // Bar shot: thinner, more transparent, no dark core
-          const alpha  = ease * (isBarShot ? 0.32 : 0.72);
-          const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * zoom);
-          const sp     = camera.worldToScreen(Vec2.from(crumb.x, crumb.y));
-          // Ghost: spectral level-tinted trail; normal: light grey smoke
-          this.ctx.globalAlpha = alpha;
-          this.ctx.fillStyle   = firedFromGhost ? ghostSpectralColor(ghostProjLevel) : '#c8c8c8';
-          this.ctx.beginPath();
-          this.ctx.arc(sp.x, sp.y, radius, 0, Math.PI * 2);
-          this.ctx.fill();
-          // Ghost: glowing core; normal: black powder dark core (cannonball only, fresh crumbs)
+          const ease   = 1 - age * age;
+          const alpha  = ease * maxAlpha;
+          const radius = Math.max(1, ease * (isBarShot ? 4.5 : 9) * z);
+
+          // Inline worldToScreen to avoid Vec2.from allocation per crumb
+          const dx = crumb.x - ox, dy = crumb.y - oy;
+          const sx = (dx * cosR - dy * sinR) * z + hw;
+          const sy = (dx * sinR + dy * cosR) * z + hh;
+
+          const b = Math.min(ALPHA_BUCKETS - 1, Math.floor(alpha / maxAlpha * ALPHA_BUCKETS));
+          buckets[b].paths.push([sx, sy, radius]);
+
           if (!isBarShot && age < 0.35) {
             const coreAlpha  = (0.35 - age) / 0.35 * 0.55;
-            const coreRadius = radius * 0.45;
-            this.ctx.globalAlpha = coreAlpha;
-            this.ctx.fillStyle   = firedFromGhost ? ghostSpectralColor(ghostProjLevel, 0.85) : '#3a3a3a';
-            this.ctx.beginPath();
-            this.ctx.arc(sp.x, sp.y, coreRadius, 0, Math.PI * 2);
-            this.ctx.fill();
+            corePaths.push([sx, sy, radius * 0.45 * (coreAlpha / 0.55)]);
           }
+        }
+
+        this.ctx.save();
+        this.ctx.fillStyle = smokeColor;
+        for (const bucket of buckets) {
+          if (bucket.paths.length === 0) continue;
+          this.ctx.globalAlpha = bucket.alpha;
+          this.ctx.beginPath();
+          for (const [sx, sy, r] of bucket.paths) {
+            this.ctx.moveTo(sx + r, sy);
+            this.ctx.arc(sx, sy, r, 0, Math.PI * 2);
+          }
+          this.ctx.fill();
+        }
+        if (corePaths.length > 0) {
+          this.ctx.fillStyle = coreColor;
+          this.ctx.globalAlpha = 0.55;
+          this.ctx.beginPath();
+          for (const [sx, sy, r] of corePaths) {
+            this.ctx.moveTo(sx + r, sy);
+            this.ctx.arc(sx, sy, r, 0, Math.PI * 2);
+          }
+          this.ctx.fill();
         }
         this.ctx.globalAlpha = 1.0;
         this.ctx.restore();

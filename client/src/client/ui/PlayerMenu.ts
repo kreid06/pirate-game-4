@@ -320,6 +320,13 @@ export class PlayerMenu {
   /** Called when the player confirms a resource drop. */
   public onDropResources: ((kind: keyof PlayerResources, amount: number) => void) | null = null;
 
+  /**
+   * Called when the player drags a schematic card outside the player menu panel.
+   * Argument is the blueprint index of the quality variant that was selected for
+   * that kind.  Only fires when a quality variant (not Standard) is active.
+   */
+  public onDropSchematic: ((bpIndex: number) => void) | null = null;
+
   // ── Resource chip drag / drop-slider state ────────────────────────────
   /** Hit regions for the 4 resource chips — set each render frame. */
   private _resChipHits: Array<{
@@ -799,17 +806,35 @@ export class PlayerMenu {
       return false;
     }
 
-    // Schematic drag: drop onto a hotbar slot to assign (or clear if already there)
+    // Schematic drag: drop onto a hotbar slot to assign, or outside the panel to drop
     if (this._schemDragKind !== null) {
       const kind = this._schemDragKind;
       this._schemDragKind = null;
-      for (const hit of this._schematicsHotbarHits) {
-        if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
-          const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
-          const newKind = currentHotbar[hit.slot] === kind ? null : kind;
-          if (this._schematicsSubTab === 'LAND') this.onSetLandHotbarSlot?.(hit.slot, newKind);
-          else this.onSetShipHotbarSlot?.(hit.slot, newKind);
-          this._schematicsSelectedSlot = -1;
+
+      // Only act when the ghost was visually active (cursor left the source card)
+      if (this._schemDragActive) {
+        // Check hotbar slot drop first
+        for (const hit of this._schematicsHotbarHits) {
+          if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+            const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
+            const newKind = currentHotbar[hit.slot] === kind ? null : kind;
+            if (this._schematicsSubTab === 'LAND') this.onSetLandHotbarSlot?.(hit.slot, newKind);
+            else this.onSetShipHotbarSlot?.(hit.slot, newKind);
+            this._schematicsSelectedSlot = -1;
+            return true;
+          }
+        }
+
+        // Dropped outside the panel — drop the selected quality variant blueprint
+        const px2 = this._panelX, py2 = this._panelY;
+        const outsidePanel = x < px2 || x > px2 + PANEL_W || y < py2 || y > py2 + PANEL_H;
+        if (outsidePanel) {
+          const bp = this.getVariantSchematic(kind);
+          if (bp != null) {
+            // Clear the variant selection for this kind so the next craft uses Standard
+            this.setVariantForKind(kind, null);
+            this.onDropSchematic?.(bp.index);
+          }
           return true;
         }
       }
