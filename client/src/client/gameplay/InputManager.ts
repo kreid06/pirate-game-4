@@ -1017,6 +1017,8 @@ export class InputManager {
     this.canvas.addEventListener('mousemove', this.boundOnMouseMove);
     this.canvas.addEventListener('mousedown', this.boundOnMouseDown);
     this.canvas.addEventListener('mouseup', this.boundOnMouseUp);
+    // Catch releases outside the canvas (canvas-only mouseup would leave aim stuck).
+    window.addEventListener('mouseup', this.boundOnMouseUp);
     this.canvas.addEventListener('wheel', this.boundOnMouseWheel);
     this.canvas.addEventListener('contextmenu', this.boundOnContextMenu);
     
@@ -1039,6 +1041,7 @@ export class InputManager {
     this.canvas.removeEventListener('mousemove', this.boundOnMouseMove);
     this.canvas.removeEventListener('mousedown', this.boundOnMouseDown);
     this.canvas.removeEventListener('mouseup', this.boundOnMouseUp);
+    window.removeEventListener('mouseup', this.boundOnMouseUp);
     this.canvas.removeEventListener('wheel', this.boundOnMouseWheel);
     this.canvas.removeEventListener('contextmenu', this.boundOnContextMenu);
     window.removeEventListener('blur', this.boundOnBlur);
@@ -1047,8 +1050,16 @@ export class InputManager {
     window.removeEventListener('gamepaddisconnected', this.boundOnGamepadDisconnected);
   }
 
+  /** End right-click aim hold (weapon groups / cannon aiming). Safe to call repeatedly. */
+  private endRightMouseAim(): void {
+    this.inputState.rightMouseReleased = true;
+    this.inputState.rightMouseDown = false;
+    if (this.onAimEnd) this.onAimEnd();
+  }
+
   /** Clear all pressed keys and send a stop — called on blur/visibility-hidden. */
   private clearAllInput(): void {
+    this.endRightMouseAim();
     this.inputState.pressedKeys.clear();
     this.inputState.leftMouseDown = false;
     this.inputState.rightMouseDown = false;
@@ -1749,12 +1760,7 @@ export class InputManager {
         this._middleShiftDown = false;
       }
     } else if (event.button === 2) { // Right mouse button
-      // Always record a release, even when the original down was consumed by onBeforeRightClick.
-      this.inputState.rightMouseReleased = true;
-      if (this.inputState.rightMouseDown) {
-        this.inputState.rightMouseDown = false;
-        if (this.onAimEnd) this.onAimEnd();
-      }
+      this.endRightMouseAim();
     }
   }
   

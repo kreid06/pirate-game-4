@@ -248,6 +248,8 @@ export class RenderSystem {
   public playerInteractInfo: { worldPos: Vec2; localPos: Vec2 | null; carrierId: number | null } | null = null;
   /** Weapon control groups — set by ClientApplication each frame. Null when not on helm. */
   public controlGroups: Map<number, { cannonIds: number[]; mode: string }> | null = null;
+  /** Groups showing the temporary RMB-hold AIM tag (for cannon overlay mode dots). */
+  public rmbAimingGroups: Set<number> = new Set();
   /** When true, draws group membership badges on all cannons (while Shift is held). */
   public showGroupOverlay: boolean = false;
   /** Currently selected weapon group indices — cannons in these groups are always highlighted. */
@@ -15566,7 +15568,8 @@ export class RenderSystem {
     // Build cannonId → { group index, mode } lookup
     const cannonGroupMap = new Map<number, { g: number; mode: string }>();
     this.controlGroups.forEach((state, g) => {
-      for (const id of state.cannonIds) cannonGroupMap.set(id, { g, mode: state.mode });
+      const mode = this.rmbAimingGroups.has(g) ? 'aiming' : state.mode;
+      for (const id of state.cannonIds) cannonGroupMap.set(id, { g, mode });
     });
 
     const screenPos = camera.worldToScreen(ship.position);

@@ -253,8 +253,10 @@ export class ClientApplication {
    * Cleared once the group state has been applied or when carrierId catches up.
    */
   private pendingGroupShipId: number = 0;
-  /** Maps group index → previous mode, saved while right-click-hold temporarily switches all selected groups to 'aiming'. */
-  private _aimOverrideGroups: Map<number, WeaponGroupMode> | null = null;
+  /** Groups showing the temporary RMB-hold AIM tag (does not change stored controlGroups.mode). */
+  private _rmbAimingGroups: Set<number> = new Set();
+  /** Stored mode to restore when RMB is released (groups that were not already in permanent 'aiming'). */
+  private _rmbAimingRestore: Map<number, WeaponGroupMode> = new Map();
   // Optimistic modules placed locally, keyed by ship ID, with expiry timestamp.
   // Overlaid on top of worldToRender every frame so they appear in online mode.
   private localPendingModules = new Map<number, { module: ShipModule; expiry: number }[]>();
@@ -945,8 +947,13 @@ export class ClientApplication {
         if (shipId === this.pendingGroupShipId) this.pendingGroupShipId = 0;
 
         for (const g of groups) {
+          // Collapse stale server 'aiming' (from old RMB-hold sync) back to haltfire when not holding RMB.
+          let mode = g.mode as WeaponGroupMode;
+          if (mode === 'aiming' && !this._rmbAimingGroups.has(g.index)) {
+            mode = 'haltfire';
+          }
           this.controlGroups.set(g.index, {
-            mode: g.mode as WeaponGroupMode,
+            mode,
             cannonIds: g.cannonIds,
             targetId: g.targetShipId,
             gunportsOpen: g.gunportsOpen ?? false,
@@ -954,19 +961,15 @@ export class ClientApplication {
           });
         }
 
-        // If an aim override is currently active (player is holding right-click),
-        // re-apply the temporary 'aiming' mode for any group that was overridden.
-        // Without this, a partial echo from the server (sent after processing the
-        // first group-config message but before the second) would reset the second
-        // group back to its previous mode, causing only the first group to aim.
-        if (this._aimOverrideGroups) {
-          for (const [g] of this._aimOverrideGroups) {
-            const state = this.controlGroups.get(g);
-            if (state) state.mode = 'aiming';
-          }
+        // While RMB is held, keep the stored mode for temporarily-aiming groups so a server
+        // echo cannot overwrite it before release clears the AIM tag.
+        for (const g of this._rmbAimingRestore.keys()) {
+          const baseline = this._rmbAimingRestore.get(g);
+          const state = this.controlGroups.get(g);
+          if (baseline && state) state.mode = baseline;
         }
 
-        // Sync InputManager's activeGroupMode to the primary selected group
+        // Sync InputManager's activeGroupMode to the primary selected group (stored mode, not AIM tag)
         if (this.inputManager) {
           const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
           if (primaryState) this.inputManager.activeGroupMode = primaryState.mode;
@@ -2624,34 +2627,26 @@ export class ClientApplication {
         this.inputManager.activeGroupMode = state?.mode ?? 'haltfire';
       };
 
-      // Right-click hold → temporarily enter 'aiming' mode so cannons track the mouse.
-      // Applies to all currently selected groups whose mode isn't targetfire/aiming.
+      // Right-click hold → show temporary AIM tag on selected groups (local UI only).
+      // Stored mode stays haltfire/freefire; server aim uses active_groups on cannon_aim messages.
       this.inputManager.onAimStart = () => {
+        this._endRmbAiming(false);
         const groups = this.inputManager.activeWeaponGroups;
         if (groups.size === 0) return;
-        this._aimOverrideGroups = new Map();
         for (const g of groups) {
           const state = this.controlGroups.get(g);
-          if (!state || state.mode === 'targetfire' || state.mode === 'aiming') continue;
-          this._aimOverrideGroups.set(g, state.mode);
-          state.mode = 'aiming';
-          this.networkManager.sendCannonGroupConfig(g, 'aiming', state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+          if (!state || state.mode === 'targetfire') continue;
+          this._rmbAimingGroups.add(g);
+          // Treat stale server/local 'aiming' as haltfire so release clears the AIM tag.
+          const stored = state.mode === 'aiming' ? 'haltfire' as WeaponGroupMode : state.mode;
+          if (stored !== 'aiming') {
+            state.mode = stored;
+            this._rmbAimingRestore.set(g, stored);
+          }
         }
-        // Update primary group mode for right-click routing
-        const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
-        this.inputManager.activeGroupMode = primaryState?.mode ?? 'aiming';
       };
       this.inputManager.onAimEnd = () => {
-        if (!this._aimOverrideGroups) return;
-        for (const [g, prevMode] of this._aimOverrideGroups) {
-          const state = this.controlGroups.get(g);
-          if (!state) continue;
-          state.mode = prevMode;
-          this.networkManager.sendCannonGroupConfig(g, prevMode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
-        }
-        this._aimOverrideGroups = null;
-        const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
-        this.inputManager.activeGroupMode = primaryState?.mode ?? 'haltfire';
+        this._endRmbAiming(true);
       };
 
       // Right-click on world while on helm = lock target for all selected targetfire groups
@@ -4045,6 +4040,27 @@ export class ClientApplication {
   }
   
   /**
+   * Clear the temporary RMB-hold AIM tag from weapon groups and optionally resync server mode.
+   */
+  private _endRmbAiming(syncServer: boolean): void {
+    if (this._rmbAimingGroups.size === 0 && this._rmbAimingRestore.size === 0) return;
+    for (const [g, prevMode] of this._rmbAimingRestore) {
+      const state = this.controlGroups.get(g);
+      if (!state) continue;
+      state.mode = prevMode;
+      if (syncServer) {
+        this.networkManager.sendCannonGroupConfig(g, prevMode, state.cannonIds, state.targetId > 0 ? state.targetId : 0);
+      }
+    }
+    this._rmbAimingGroups.clear();
+    this._rmbAimingRestore.clear();
+    if (this.inputManager) {
+      const primaryState = this.controlGroups.get(this.inputManager.activeWeaponGroup);
+      this.inputManager.activeGroupMode = primaryState?.mode ?? 'haltfire';
+    }
+  }
+
+  /**
    * Fixed timestep client updates (120Hz prediction)
    */
   private updateClient(deltaTime: number): void {
@@ -4687,6 +4703,7 @@ export class ClientApplication {
       this.renderSystem.selectedAmmoType = this.inputManager?.getLoadedAmmoType() ?? 0;
       this.renderSystem.npcTaskMap = this.uiManager.getNpcTaskMap();
       this.renderSystem.controlGroups = this.controlGroups as Map<number, { cannonIds: number[]; mode: string }>;
+      this.renderSystem.rmbAimingGroups = this._rmbAimingGroups;
       this.renderSystem.showGroupOverlay = this.inputManager?.isCtrlHeld() ?? false;
       this.renderSystem.activeWeaponGroups = this.inputManager?.activeWeaponGroups ?? new Set();
       this.renderSystem.npcIgnoreSet = this._npcIgnoreSet;
@@ -4853,6 +4870,7 @@ export class ClientApplication {
         activeWeaponGroups: this.inputManager?.activeWeaponGroups,
         playerShip,
         controlGroups: this.controlGroups,
+        rmbAimingGroups: this._rmbAimingGroups,
         windAngle: this.networkManager.windAngle,
         debugMode: this.uiManager.isDebugMode,
         combatMode: this.combatMode,

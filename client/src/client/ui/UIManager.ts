@@ -52,6 +52,8 @@ export interface UIRenderContext {
   playerShip?: Ship | null;
   /** User-defined weapon control groups — set while on helm. */
   controlGroups?: Map<number, WeaponGroupState>;
+  /** Groups showing the temporary RMB-hold AIM tag. */
+  rmbAimingGroups?: Set<number>;
   /** Active ammo group on helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 2-4). */
   activeAmmoGroup?: 'cannon' | 'swivel';
   /** Current world wind direction (radians, 0=North, clockwise). */
@@ -746,7 +748,7 @@ export class UIManager {
         const groupIdx = i; // slot 0→G0 (Port), slot 1→G1 (Starboard), …, slot 9→G9
         const state = this._cachedControlGroups.get(groupIdx);
         if (!state) return false;
-        const CYCLE: WeaponGroupMode[] = ['aiming', 'freefire', 'haltfire', 'targetfire'];
+        const CYCLE: WeaponGroupMode[] = ['freefire', 'haltfire', 'targetfire'];
         const next = CYCLE[(CYCLE.indexOf(state.mode) + 1) % CYCLE.length];
         if (this.onGroupModeChange) this.onGroupModeChange(groupIdx, next);
         return true;
@@ -3663,7 +3665,7 @@ class HUDElement implements UIElement {
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     // In ship build mode, show the build schematic hotbar instead
     const helmMode = context.mountKind === 'helm'
-      ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
+      ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups, rmbAimingGroups: context.rmbAimingGroups }
       : undefined;
     if (this.inLandBuildMode) {
       this.renderLandBuildHotbar(ctx, ctx.canvas, player.inventory.slots);
@@ -4208,7 +4210,7 @@ class HUDElement implements UIElement {
     canvas: HTMLCanvasElement,
     slots: { item: ItemKind; quantity: number }[],
     activeSlot: number,
-    weaponMode?: { activeGroup: number; activeGroups: Set<number>; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState> },
+    weaponMode?: { activeGroup: number; activeGroups: Set<number>; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState>; rmbAimingGroups?: Set<number> },
   ): void {
     const SLOT_SIZE = 48;
     const SLOT_GAP = 4;
@@ -4266,7 +4268,8 @@ class HUDElement implements UIElement {
         const cgroups  = weaponMode.controlGroups ?? new Map<number, WeaponGroupState>();
         const state    = cgroups.get(groupIdx);
         const count    = state?.cannonIds.length ?? 0;
-        const mode     = state?.mode ?? 'haltfire';
+        const rmbAim   = weaponMode.rmbAimingGroups?.has(groupIdx) ?? false;
+        const mode     = rmbAim ? 'aiming' : (state?.mode ?? 'haltfire');
         const modeCol  = MODE_COLORS[mode] ?? '#555';
         const modeLbl  = MODE_LABELS[mode] ?? mode;
         const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
