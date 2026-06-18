@@ -71,7 +71,10 @@ void tick_sinking_ships(void) {
             _enpc->in_water = true;
             _enpc->fire_timer_ms = 0;
             /* Reset stamina/oxygen so the NPC has a fair chance to survive
-             * and swim to a ship rather than drowning instantly. */
+             * and swim to a ship rather than drowning instantly.
+             * Guard against saves that pre-date stamina/oxygen fields (max = 0). */
+            if (_enpc->max_stamina == 0) _enpc->max_stamina = 100;
+            if (_enpc->max_oxygen  == 0) _enpc->max_oxygen  = 100;
             _enpc->stamina  = _enpc->max_stamina;
             _enpc->oxygen   = _enpc->max_oxygen;
         }

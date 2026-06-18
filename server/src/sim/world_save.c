@@ -988,6 +988,15 @@ int world_load(const char *path) {
                 n->owner_player_id    = owner_player_id;
                 n->active     = true;
 
+                /* stamina/oxygen fields were added after the initial save format and
+                 * are not yet persisted.  Back-fill base values (100) so NPCs loaded
+                 * from any save can survive entering water without immediately
+                 * suffocating.  Without this guard, save-loaded NPCs have max_stamina
+                 * and max_oxygen both = 0, causing them to drown the moment their ship
+                 * sinks or they are ordered to swim between vessels. */
+                if (n->max_stamina == 0) { n->max_stamina = 100; n->stamina = 100; }
+                if (n->max_oxygen  == 0) { n->max_oxygen  = 100; n->oxygen  = 100; }
+
                 /* Remap ship_id from the saved entity ID to the newly
                  * allocated one (ships get fresh IDs on every load).     */
                 if (n->ship_id != 0) {

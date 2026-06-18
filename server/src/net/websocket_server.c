@@ -10160,6 +10160,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 /* Detach from old ship (if any) and swim to the hull */
                                                 float wx = tp_npc->x;  /* world pos before detach */
                                                 float wy = tp_npc->y;
+                                                /* Guard against saves pre-dating stamina/oxygen fields */
+                                                if (tp_npc->max_stamina == 0) { tp_npc->max_stamina = 100; tp_npc->stamina = 100; }
+                                                if (tp_npc->max_oxygen  == 0) { tp_npc->max_oxygen  = 100; tp_npc->oxygen  = 100; }
                                                 tp_npc->ship_id          = 0;
                                                 tp_npc->in_water         = true;
                                                 tp_npc->local_x          = wx;
@@ -10182,6 +10185,9 @@ int websocket_server_update(struct Sim* sim) {
                                     } else {
                                         /* World walk / disembark */
                                         /* Use current world pos as local origin for path continuity */
+                                        /* Guard against saves pre-dating stamina/oxygen fields */
+                                        if (tp_npc->max_stamina == 0) { tp_npc->max_stamina = 100; tp_npc->stamina = 100; }
+                                        if (tp_npc->max_oxygen  == 0) { tp_npc->max_oxygen  = 100; tp_npc->oxygen  = 100; }
                                         tp_npc->local_x          = tp_npc->x;
                                         tp_npc->local_y          = tp_npc->y;
                                         tp_npc->ship_id          = 0;
@@ -13191,6 +13197,9 @@ void websocket_server_tick(float dt) {
                     for (int ni = 0; ni < world_npc_count; ni++) {
                         if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
                         dismount_npc(&world_npcs[ni], sinking_ship);
+                        /* Guard against saves pre-dating stamina/oxygen fields (max = 0) */
+                        if (world_npcs[ni].max_stamina == 0) { world_npcs[ni].max_stamina = 100; world_npcs[ni].stamina = 100; }
+                        if (world_npcs[ni].max_oxygen  == 0) { world_npcs[ni].max_oxygen  = 100; world_npcs[ni].oxygen  = 100; }
                         world_npcs[ni].in_water = true;
                         /* Extinguish any burning NPCs that hit the water */
                         world_npcs[ni].fire_timer_ms = 0;
