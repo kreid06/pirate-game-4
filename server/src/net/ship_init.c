@@ -16,6 +16,7 @@
 #include "sim/ship_level.h"
 #include "net/quality.h"
 #include "core/rng.h"
+#include "sim/island.h"
 
 /* RNG used for fleet-size and level rolls in the ghost spawn system. */
 static struct RNGState ghost_spawn_rng;
@@ -783,10 +784,14 @@ uint32_t websocket_server_create_ghost_ship(float x, float y, uint8_t level) {
 /* Forward declaration — defined in the spawn-point section below. */
 static int find_ship_slot(uint16_t ship_id);
 
-/* Maximum distance (client pixels) to scan for an enemy.
- * ~800 px ≈ 4-5 ship lengths — about half a screen width at normal zoom. */
+/* Maximum distance (client pixels) to scan for a new enemy target. */
 #define GHOST_ATTACK_RANGE      2400.0f
-#define GHOST_WAKE_RADIUS       6000.0f  /* non-ghost must be closer than this to wake ghost AI */
+/* Once aggroed (proximity), keep chasing until the target exceeds this radius.
+ * Larger than GHOST_ATTACK_RANGE so ghosts don't flicker aggro at the edge. */
+#define GHOST_DEAGGRO_RANGE     4800.0f
+/* Minimum distance from any player ship (or swimming player) to a ghost respawn
+ * point — prevents fleets materialising on top of nearby players. */
+#define GHOST_SPAWN_PLAYER_CLEARANCE  3500.0f
 /* Wander: new random heading every N seconds */
 #define GHOST_WANDER_INTERVAL_S 5.0f
 
@@ -795,6 +800,10 @@ static int find_ship_slot(uint16_t ship_id);
 #define GHOST_MAX_POPULATION       150
 /* Minimum distance from any island edge (client px) for a valid spawn point */
 #define GHOST_MIN_ISLAND_DIST      2500.0f
+/* Drop non-combat aggro when the target is this close to any island shoreline
+ * (includes shallow-water / dock approach zones).  Combat-locked ghosts ignore
+ * this — damage re-engages via ghost_in_combat. */
+#define GHOST_ISLAND_DEAGGRO_DIST  2500.0f
 /* AI skipped if no player is within this distance. */
 #define GHOST_AI_PLAYER_RANGE      7000.0f
 /* Spawner fires at most once per this interval (seconds) */
@@ -810,11 +819,16 @@ static float ghost_sway_phase[MAX_SIMPLE_SHIPS] = {0};
 static float ghost_angular_vel[MAX_SIMPLE_SHIPS] = {0};
 /* Forced aggro target (ship_id) set by damage events or pack-alert; 0 = none */
 static uint32_t ghost_forced_target[MAX_SIMPLE_SHIPS] = {0};
+/* Proximity aggro target — kept until target exceeds GHOST_DEAGGRO_RANGE. */
+static uint32_t ghost_natural_target[MAX_SIMPLE_SHIPS] = {0};
+/* True once this ghost has dealt or received damage — enables timer-based de-aggro
+ * instead of immediate distance de-aggro when the target leaves GHOST_DEAGGRO_RANGE. */
+static bool ghost_in_combat[MAX_SIMPLE_SHIPS] = {0};
 /* Timestamp (ms) of the last combat event (damage dealt or received) for each ghost slot.
- * Used to de-aggro a forced target that has left range with no combat for 30 s. */
+ * Used to de-aggro a combat-locked target that has left GHOST_DEAGGRO_RANGE. */
 static uint32_t ghost_last_combat_ms[MAX_SIMPLE_SHIPS] = {0};
-/* De-aggro timeout: forced target is cleared if target has been out of GHOST_ATTACK_RANGE
- * for longer than this with no damage exchanged. */
+/* De-aggro timeout: combat-locked target is cleared if target has been out of
+ * GHOST_DEAGGRO_RANGE for longer than this with no damage exchanged. */
 #define GHOST_DEAGGRO_MS  30000u
 
 /* Radius within which an alerted ghost propagates its target to idle fleet-mates */
@@ -875,6 +889,10 @@ static int spawn_queue_len  = 0;
 #define GHOST_FLEET_SPACING 200.0f
 static const float fleet_form_lx[MAX_FLEET_SIZE] = { 0, -1, -1, -2, -2, -3, -3, -3, -3, -4 };
 static const float fleet_form_ly[MAX_FLEET_SIZE] = { 0,  1, -1,  2, -2,  1, -1,  3, -3,  0 };
+/* Keep spawned hulls this far inside the zone edge (client px). */
+#define GHOST_SPAWN_ZONE_MARGIN   250.0f
+/* Random layout attempts before deferring spawn to the next tick. */
+#define GHOST_SPAWN_LAYOUT_TRIES  12
 
 /* ── Ghost spawn-point table ─────────────────────────────────────────────── */
 #define MAX_GHOST_SPAWNS 64
@@ -900,6 +918,222 @@ static int ghost_spawn_count = 0;
 static bool ghost_spawns_enabled = false;
 /* Global cap: maximum total ghost ships across ALL zones (0 = unlimited). */
 static int ghost_global_max_cap = 0;
+
+static void ghost_clear_aggro_state(int slot) {
+    if (slot < 0 || slot >= MAX_SIMPLE_SHIPS) return;
+    ghost_forced_target[slot]   = 0;
+    ghost_natural_target[slot]  = 0;
+    ghost_in_combat[slot]       = false;
+    ghost_last_combat_ms[slot]  = 0;
+}
+
+static bool ghost_position_spawn_clear(float x, float y) {
+    const float clear2 = GHOST_SPAWN_PLAYER_CLEARANCE * GHOST_SPAWN_PLAYER_CLEARANCE;
+
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip *c = &ships[s];
+        if (!c->active || c->is_sinking) continue;
+        if (c->ship_type == SHIP_TYPE_GHOST) continue;
+        float dx = c->x - x, dy = c->y - y;
+        if (dx * dx + dy * dy < clear2) return false;
+    }
+
+    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+        if (!players[pi].active) continue;
+        float px, py;
+        if (players[pi].parent_ship_id != 0) {
+            SimpleShip *ps = find_ship(players[pi].parent_ship_id);
+            if (ps)
+                ship_local_to_world(ps, players[pi].local_x, players[pi].local_y, &px, &py);
+            else {
+                px = players[pi].x;
+                py = players[pi].y;
+            }
+        } else {
+            px = players[pi].x;
+            py = players[pi].y;
+        }
+        float dx = px - x, dy = py - y;
+        if (dx * dx + dy * dy < clear2) return false;
+    }
+    return true;
+}
+
+static float ghost_fleet_max_extent(int fleet_size) {
+    if (fleet_size < 1) fleet_size = 1;
+    if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
+    float max_form = 0.0f;
+    for (int i = 0; i < fleet_size; i++) {
+        float fd  = fleet_form_lx[i] * GHOST_FLEET_SPACING;
+        float lat = fleet_form_ly[i] * GHOST_FLEET_SPACING;
+        float d   = sqrtf(fd * fd + lat * lat);
+        if (d > max_form) max_form = d;
+    }
+    return max_form;
+}
+
+static bool ghost_point_in_spawn_zone(const GhostSpawnPoint *spn, float x, float y) {
+    float dx = x - spn->x;
+    float dy = y - spn->y;
+    float max_r = spn->radius - GHOST_SPAWN_ZONE_MARGIN;
+    if (max_r < 0.0f) max_r = 0.0f;
+    return dx * dx + dy * dy <= max_r * max_r;
+}
+
+/* Roll a random fleet lead position (uniform in the zone disc) and heading,
+ * then place the wedge formation.  Returns false when no valid layout found. */
+static bool ghost_pick_fleet_layout(
+    const GhostSpawnPoint *spn, int fleet_size,
+    float *out_lead_x, float *out_lead_y, float *out_heading,
+    float ship_x[MAX_FLEET_SIZE], float ship_y[MAX_FLEET_SIZE])
+{
+    if (fleet_size < 1) fleet_size = 1;
+    if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
+
+    const float max_form  = ghost_fleet_max_extent(fleet_size);
+    float max_lead_r      = spn->radius - max_form - GHOST_SPAWN_ZONE_MARGIN;
+    if (max_lead_r < 50.0f) max_lead_r = 50.0f;
+
+    for (int attempt = 0; attempt < GHOST_SPAWN_LAYOUT_TRIES; attempt++) {
+        const float heading = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
+        const float cos_h   = cosf(heading);
+        const float sin_h   = sinf(heading);
+
+        /* Uniform random point in disc: r = R * sqrt(u) */
+        const float lead_r  = max_lead_r * sqrtf(rng_float(&ghost_spawn_rng));
+        const float lead_a  = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
+        const float lead_x  = spn->x + cosf(lead_a) * lead_r;
+        const float lead_y  = spn->y + sinf(lead_a) * lead_r;
+
+        bool ok = true;
+        for (int i = 0; i < fleet_size; i++) {
+            const float local_fwd = fleet_form_lx[i] * GHOST_FLEET_SPACING;
+            const float local_lat = fleet_form_ly[i] * GHOST_FLEET_SPACING;
+            ship_x[i] = lead_x + local_fwd * cos_h - local_lat * sin_h;
+            ship_y[i] = lead_y + local_fwd * sin_h + local_lat * cos_h;
+            if (!ghost_point_in_spawn_zone(spn, ship_x[i], ship_y[i])
+                || !ghost_position_spawn_clear(ship_x[i], ship_y[i])) {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok) continue;
+
+        *out_lead_x   = lead_x;
+        *out_lead_y   = lead_y;
+        *out_heading  = heading;
+        return true;
+    }
+    return false;
+}
+
+static void ghost_apply_ship_pose(uint16_t ship_id, float rotation) {
+    SimpleShip *ss = find_ship(ship_id);
+    if (ss) ss->rotation = rotation;
+    struct Ship *sim = find_sim_ship(ship_id);
+    if (sim) sim->rotation = Q16_FROM_FLOAT(rotation);
+}
+
+/* Quick pre-check from zone centre before rolling random fleet layout. */
+static bool ghost_zone_spawn_clear(const GhostSpawnPoint *spn, int fleet_size) {
+    if (fleet_size < 1) fleet_size = 1;
+    if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
+
+    /* Block while any player/ship is inside the spawn zone (full radius). */
+    const float block_r  = spn->radius + GHOST_SPAWN_PLAYER_CLEARANCE;
+    const float block_r2 = block_r * block_r;
+
+    for (int s = 0; s < ship_count; s++) {
+        SimpleShip *c = &ships[s];
+        if (!c->active || c->is_sinking) continue;
+        if (c->ship_type == SHIP_TYPE_GHOST) continue;
+        float dx = c->x - spn->x, dy = c->y - spn->y;
+        if (dx * dx + dy * dy < block_r2) return false;
+    }
+
+    for (int pi = 0; pi < WS_MAX_CLIENTS; pi++) {
+        if (!players[pi].active) continue;
+        float px, py;
+        if (players[pi].parent_ship_id != 0) {
+            SimpleShip *ps = find_ship(players[pi].parent_ship_id);
+            if (ps)
+                ship_local_to_world(ps, players[pi].local_x, players[pi].local_y, &px, &py);
+            else {
+                px = players[pi].x;
+                py = players[pi].y;
+            }
+        } else {
+            px = players[pi].x;
+            py = players[pi].y;
+        }
+        float dx = px - spn->x, dy = py - spn->y;
+        if (dx * dx + dy * dy < block_r2) return false;
+    }
+    return true;
+}
+
+static bool ghost_target_valid(SimpleShip *ghost, SimpleShip *cand) {
+    return cand && cand->active && !cand->is_sinking
+        && !is_allied(ghost->company_id, cand->company_id);
+}
+
+static float ghost_dist2_to(SimpleShip *from, SimpleShip *to) {
+    float dx = to->x - from->x;
+    float dy = to->y - from->y;
+    return dx * dx + dy * dy;
+}
+
+/* Shortest distance (client px) from (px,py) to the nearest island beach edge.
+ * Returns 0 when the point is on or inside the island polygon / beach disc. */
+static float ghost_nearest_island_edge_dist(float px, float py) {
+    float best = 1e30f;
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        float dx = px - isl->x;
+        float dy = py - isl->y;
+        float edge_dist;
+
+        if (isl->vertex_count > 0) {
+            if (island_poly_contains(isl, px, py)) {
+                edge_dist = 0.0f;
+            } else {
+                edge_dist = island_poly_edge_dist(isl, px, py);
+            }
+        } else {
+            float angle   = atan2f(dy, dx);
+            float beach_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+            float center  = sqrtf(dx * dx + dy * dy);
+            edge_dist     = center - beach_r;
+            if (edge_dist < 0.0f) edge_dist = 0.0f;
+        }
+
+        if (edge_dist < best) best = edge_dist;
+    }
+    return best;
+}
+
+/* True when the ship is in an island safe zone (shallow water, on-island, or
+ * within GHOST_ISLAND_DEAGGRO_DIST of the beach edge). */
+static bool ghost_target_has_island_protection(SimpleShip *target) {
+    if (!target) return false;
+    const float px = target->x;
+    const float py = target->y;
+
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (island_in_shallow_water(isl, px, py)) return true;
+        if (isl->vertex_count > 0 && island_poly_contains(isl, px, py)) return true;
+    }
+
+    return ghost_nearest_island_edge_dist(px, py) <= GHOST_ISLAND_DEAGGRO_DIST;
+}
+
+/* Combat-locked ghosts (dealt/received damage) bypass island safe-zone de-aggro. */
+static bool ghost_keep_target(int slot, SimpleShip *target) {
+    if (!target) return false;
+    if (ghost_in_combat[slot]) return true;
+    return !ghost_target_has_island_protection(target);
+}
 
 void tick_ghost_ships(float dt) {
     /* ── Global fast-path: skip all AI when no non-ghost ships are alive.
@@ -948,54 +1182,93 @@ void tick_ghost_ships(float dt) {
             }
         }
 
-        /* ── 1. Resolve target (forced aggro takes priority over range scan) ── */
+        /* ── 1. Resolve target ─────────────────────────────────────────────
+         * Priority: forced (damage/pack) > natural (proximity hysteresis) > scan.
+         * De-aggro rules:
+         *   • Natural proximity aggro: drop immediately beyond GHOST_DEAGGRO_RANGE.
+         *   • Forced without combat (pack alert): same distance de-aggro.
+         *   • Combat-locked (dealt/received damage): ignore distance + island de-aggro;
+         *     drop only after GHOST_DEAGGRO_MS with no combat while beyond range.
+         *   • Island safe zone: drop non-combat aggro when target is near/on an island;
+         *     re-engaging after a hit uses combat lock (ghost_notify_damaged). */
         SimpleShip* target = NULL;
+        const float attack_r2  = GHOST_ATTACK_RANGE  * GHOST_ATTACK_RANGE;
+        const float deaggro_r2 = GHOST_DEAGGRO_RANGE * GHOST_DEAGGRO_RANGE;
 
-        /* Forced target: set by damage events or pack-alert.  Pursue regardless
-         * of normal attack range; clear once the target is gone or de-aggro fires. */
         if (ghost_forced_target[s] != 0) {
             SimpleShip* ft = find_ship(ghost_forced_target[s]);
-            if (ft && ft->active && !ft->is_sinking && !is_allied(ship->company_id, ft->company_id)) {
-                float ftdx = ft->x - ship->x, ftdy = ft->y - ship->y;
-                float ft_dist2 = ftdx * ftdx + ftdy * ftdy;
-                float ar2 = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+            if (ghost_target_valid(ship, ft)) {
+                float ft_dist2 = ghost_dist2_to(ship, ft);
 
-                if (ft_dist2 <= ar2) {
-                    /* Target is in range — keep aggro and refresh combat timer */
-                    ghost_last_combat_ms[s] = get_time_ms();
+                if (ghost_in_combat[s]) {
+                    if (ft_dist2 <= deaggro_r2) {
+                        target = ft;
+                    } else {
+                        uint32_t now = get_time_ms();
+                        if (ghost_last_combat_ms[s] == 0)
+                            ghost_last_combat_ms[s] = now;
+                        if (now - ghost_last_combat_ms[s] >= GHOST_DEAGGRO_MS) {
+                            ghost_clear_aggro_state(s);
+                        } else {
+                            target = ft;
+                        }
+                    }
+                } else if (ft_dist2 <= deaggro_r2) {
                     target = ft;
                 } else {
-                    /* Target out of range — check de-aggro timeout */
-                    uint32_t now = get_time_ms();
-                    if (ghost_last_combat_ms[s] == 0)
-                        ghost_last_combat_ms[s] = now; /* first tick out of range */
-                    if (now - ghost_last_combat_ms[s] >= GHOST_DEAGGRO_MS) {
-                        /* 30 s out of range with no combat — drop aggro */
-                        ghost_forced_target[s]  = 0;
-                        ghost_last_combat_ms[s] = 0;
-                    } else {
-                        target = ft; /* still chasing, haven't timed out yet */
-                    }
+                    ghost_forced_target[s] = 0;
                 }
             } else {
-                ghost_forced_target[s]  = 0; /* target gone — fall through to range scan */
-                ghost_last_combat_ms[s] = 0;
+                ghost_clear_aggro_state(s);
             }
         }
 
-        /* Normal attack-range scan (only if no forced target) */
+        if (!target && ghost_natural_target[s] != 0) {
+            SimpleShip* nt = find_ship(ghost_natural_target[s]);
+            if (ghost_target_valid(ship, nt)) {
+                float nt_dist2 = ghost_dist2_to(ship, nt);
+                if (nt_dist2 <= deaggro_r2) {
+                    target = nt;
+                } else if (ghost_in_combat[s]) {
+                    uint32_t now = get_time_ms();
+                    if (ghost_last_combat_ms[s] == 0)
+                        ghost_last_combat_ms[s] = now;
+                    if (now - ghost_last_combat_ms[s] >= GHOST_DEAGGRO_MS) {
+                        ghost_natural_target[s] = 0;
+                        ghost_in_combat[s]      = false;
+                        ghost_last_combat_ms[s] = 0;
+                    } else {
+                        target = nt;
+                    }
+                } else {
+                    ghost_natural_target[s] = 0;
+                }
+            } else {
+                ghost_natural_target[s] = 0;
+            }
+        }
+
         if (!target) {
-            float best_dist2 = GHOST_ATTACK_RANGE * GHOST_ATTACK_RANGE;
+            float best_dist2 = attack_r2;
             for (int t = 0; t < ship_count; t++) {
                 if (t == s) continue;
                 SimpleShip* cand = &ships[t];
-                if (!cand->active || cand->is_sinking) continue;
-                if (is_allied(ship->company_id, cand->company_id)) continue;
-                float dx = cand->x - ship->x;
-                float dy = cand->y - ship->y;
-                float d2 = dx * dx + dy * dy;
+                if (!ghost_target_valid(ship, cand)) continue;
+                if (!ghost_in_combat[s] && ghost_target_has_island_protection(cand)) continue;
+                float d2 = ghost_dist2_to(ship, cand);
                 if (d2 < best_dist2) { best_dist2 = d2; target = cand; }
             }
+            if (target)
+                ghost_natural_target[s] = target->ship_id;
+        }
+
+        /* Island safe-zone de-aggro (skipped while combat-locked). */
+        if (target && !ghost_keep_target(s, target)) {
+            if (ghost_forced_target[s] == target->ship_id)
+                ghost_forced_target[s] = 0;
+            if (ghost_natural_target[s] == target->ship_id)
+                ghost_natural_target[s] = 0;
+            target = NULL;
         }
 
         /* ── Pack aggro: if this ghost has a target, alert nearby idle ghosts ── */
@@ -1227,7 +1500,9 @@ void ghost_notify_damaged(uint32_t victim_ship_id, uint32_t attacker_ship_id) {
         if (ships[s].active && ships[s].ship_id == victim_ship_id &&
             ships[s].ship_type == SHIP_TYPE_GHOST) {
             ghost_forced_target[s]  = attacker_ship_id;
-            ghost_last_combat_ms[s] = get_time_ms(); /* damage received — reset de-aggro clock */
+            ghost_natural_target[s] = 0;
+            ghost_in_combat[s]      = true;
+            ghost_last_combat_ms[s] = get_time_ms();
             return;
         }
     }
@@ -1240,6 +1515,7 @@ void ghost_notify_dealt_damage(uint32_t attacker_ship_id) {
     for (int s = 0; s < ship_count; s++) {
         if (ships[s].active && ships[s].ship_id == attacker_ship_id &&
             ships[s].ship_type == SHIP_TYPE_GHOST) {
+            ghost_in_combat[s]      = true;
             ghost_last_combat_ms[s] = get_time_ms();
             return;
         }
@@ -1376,6 +1652,7 @@ void load_ghost_spawns(const char *path) {
         ghost_ship_spawn_idx[i] = -1;
         ghost_ship_fleet_idx[i] = -1;
         ghost_ship_fleet_role[i] = 0;
+        ghost_clear_aggro_state(i);
     }
     /* Initialise fleet table */
     memset(ghost_fleets, 0, sizeof(ghost_fleets));
@@ -1529,14 +1806,23 @@ void ghost_ship_sunk(uint16_t ship_id) {
     ghost_ship_fleet_idx[slot]  = -1;
     ghost_ship_fleet_role[slot] = 0;
     ghost_ship_level[slot]      = 1;
+    ghost_clear_aggro_state(slot);
 }
 
 /* spawn_ghost_fleet — create a full fleet at once in a wedge formation.
- * fleet_size ships are spawned; the lead ship is placed at the zone centre
- * (with slight scatter) and followers are offset in the wedge pattern.
- * All ships share the same level and fleet slot. */
-static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
+ * Returns false when any planned ship position is too close to a player ship
+ * or player (spawn is deferred — queue entry is kept for retry). */
+static bool spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
     GhostSpawnPoint *spn = &ghost_spawns[spawn_idx];
+
+    if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
+    if (fleet_size < 1)              fleet_size = 1;
+
+    float lead_x, lead_y, heading;
+    float ship_x[MAX_FLEET_SIZE];
+    float ship_y[MAX_FLEET_SIZE];
+    if (!ghost_pick_fleet_layout(spn, fleet_size, &lead_x, &lead_y, &heading, ship_x, ship_y))
+        return false;
 
     /* Find a free fleet slot */
     int fi = -1;
@@ -1544,12 +1830,8 @@ static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
         if (!ghost_fleets[i].active) { fi = i; break; }
     }
     if (fi < 0) {
-        if (ghost_fleet_count >= MAX_GHOST_FLEETS) {
-            /* Should not happen — callers check for a free slot first.
-             * Re-enqueue so the spawn retries when a slot frees up. */
-            enqueue_spawn(spawn_idx, fleet_size, level);
-            return;
-        }
+        if (ghost_fleet_count >= MAX_GHOST_FLEETS)
+            return false;
         fi = ghost_fleet_count++;
     }
 
@@ -1559,30 +1841,13 @@ static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
     fleet->level      = level;
     fleet->active     = true;
 
-    if (fleet_size > MAX_FLEET_SIZE) fleet_size = MAX_FLEET_SIZE;
-    if (fleet_size < 1)              fleet_size = 1;
-
-    /* Fleet initial heading — random direction */
-    float heading = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
-    float cos_h   = cosf(heading);
-    float sin_h   = sinf(heading);
-
-    /* Lead position: zone centre + small scatter */
-    float scatter = spn->radius * 0.25f;
-    float angle   = rng_float(&ghost_spawn_rng) * 2.0f * (float)M_PI;
-    float lead_x  = spn->x + cosf(angle) * scatter;
-    float lead_y  = spn->y + sinf(angle) * scatter;
-
     for (int i = 0; i < fleet_size; i++) {
-        float local_fwd = fleet_form_lx[i] * GHOST_FLEET_SPACING;
-        float local_lat = fleet_form_ly[i] * GHOST_FLEET_SPACING;
-        float sx = lead_x + local_fwd * cos_h - local_lat * sin_h;
-        float sy = lead_y + local_fwd * sin_h + local_lat * cos_h;
-
-        uint32_t ship_id = websocket_server_create_ghost_ship_level(sx, sy, level, spawn_idx);
+        uint32_t ship_id = websocket_server_create_ghost_ship_level(
+            ship_x[i], ship_y[i], level, spawn_idx);
         if (!ship_id) {
             log_warn("spawn_ghost_fleet: failed to create ship %d/%d", i + 1, fleet_size);
-            break;
+            fleet->active = false;
+            return false;
         }
 
         fleet->ship_ids[fleet->ship_count] = (uint16_t)ship_id;
@@ -1590,17 +1855,20 @@ static void spawn_ghost_fleet(int spawn_idx, int fleet_size, int level) {
         int slot = find_ship_slot((uint16_t)ship_id);
         if (slot >= 0) {
             ghost_ship_fleet_idx[slot]  = fi;
-            ghost_ship_fleet_role[slot] = fleet->ship_count; /* 0 = lead */
-            /* Initialise wander heading to the fleet heading */
+            ghost_ship_fleet_role[slot] = fleet->ship_count;
+            ghost_clear_aggro_state(slot);
             ghost_desired_heading[slot] = heading;
         }
+        ghost_apply_ship_pose((uint16_t)ship_id, heading);
 
         fleet->ship_count++;
         spn->active_count++;
     }
 
-    log_info("👻 Spawn zone %d (%s): fleet %d — %d×Lv%d ghost ship(s) in wedge at (%.0f,%.0f)",
-             spn->id, spn->label, fi, fleet->ship_count, level, lead_x, lead_y);
+    log_info("👻 Spawn zone %d (%s): fleet %d — %d×Lv%d ghost ship(s) at (%.0f,%.0f) heading %.0f°",
+             spn->id, spn->label, fi, fleet->ship_count, level, lead_x, lead_y,
+             heading * 180.0f / (float)M_PI);
+    return true;
 }
 
 /* ── Spawn queue helpers ─────────────────────────────────────────────────── */
@@ -1654,15 +1922,11 @@ static bool try_drain_spawn_queue(void) {
         GhostSpawnPoint *_zsp = &ghost_spawns[e.spawn_idx];
         int zone_hard_cap = _zsp->zone_cap > 0 ? _zsp->zone_cap : _zsp->count_max;
         if (_zsp->active_count >= zone_hard_cap) {
-            /* Zone is at hard cap — discard this queued entry */
             spawn_queue_head = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
             spawn_queue_len--;
             return false;
         }
     }
-
-    spawn_queue_head  = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
-    spawn_queue_len--;
 
     int fleet_size = e.fleet_size;
     if (ghost_global_max_cap > 0) {
@@ -1670,7 +1934,6 @@ static bool try_drain_spawn_queue(void) {
         if (headroom <= 0) return false;
         if (fleet_size > headroom) fleet_size = headroom;
     }
-    /* Clamp fleet to zone hard cap headroom */
     if (e.spawn_idx >= 0 && e.spawn_idx < ghost_spawn_count) {
         GhostSpawnPoint *_zsp = &ghost_spawns[e.spawn_idx];
         int zone_hard_cap = _zsp->zone_cap > 0 ? _zsp->zone_cap : _zsp->count_max;
@@ -1679,7 +1942,18 @@ static bool try_drain_spawn_queue(void) {
         if (fleet_size > zone_headroom) fleet_size = zone_headroom;
     }
 
-    spawn_ghost_fleet(e.spawn_idx, fleet_size, e.level);
+    /* Fast reject + keep queue entry when players/ships are still in the zone. */
+    if (e.spawn_idx >= 0 && e.spawn_idx < ghost_spawn_count) {
+        if (!ghost_zone_spawn_clear(&ghost_spawns[e.spawn_idx], fleet_size))
+            return false;
+    }
+
+    /* Authoritative check uses the actual random wedge positions. */
+    if (!spawn_ghost_fleet(e.spawn_idx, fleet_size, e.level))
+        return false;
+
+    spawn_queue_head = (spawn_queue_head + 1) % MAX_SPAWN_QUEUE;
+    spawn_queue_len--;
     return true;
 }
 
@@ -1753,6 +2027,10 @@ void tick_ghost_spawn_points(float dt) {
             if (zone_headroom <= 0) continue;
             if (fleet_size > zone_headroom) fleet_size = zone_headroom;
         }
+
+        /* Don't queue a respawn while players/ships are still in the zone. */
+        if (!ghost_zone_spawn_clear(spn, fleet_size))
+            continue;
 
         global_active += fleet_size; /* optimistic accounting for subsequent zones */
         enqueue_spawn(sp, fleet_size, lvl);
