@@ -18,6 +18,14 @@ import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
+import {
+  StructureSpriteCache,
+  blitStructureSprite,
+  getStructureBaseSprite,
+  getCannonBarrelSprite,
+  getWoodCeilingSprite,
+  structureCompanyColor as structureCompanyStripColor,
+} from './StructureSprites.js';
 import { tierColor, tierName, statMultLabel, computeCannonHullDamage, computeCannonEntityDamage, CANNON_HULL_BASE_DAMAGE, CANNON_ENTITY_BASE_DAMAGE, BAR_SHOT_ENTITY_BASE_DAMAGE, itemDisplayName } from '../../sim/Quality.js';
 import { SHIP_ATTR_DAMAGE } from '../../sim/Types.js';
 
@@ -359,6 +367,7 @@ export class RenderSystem {
   // blit them each frame.  Each entry stores the rendered canvas and the cache
   // key that was used so we can detect when geometry has actually changed.
   private _shipRopeSprites: Map<number, { canvas: OffscreenCanvas; key: string }> = new Map();
+  private _structureSpriteCache = new StructureSpriteCache();
   private _shipHullSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
 
   // Per-ship plank layer OffscreenCanvas cache.
@@ -1156,11 +1165,33 @@ export class RenderSystem {
 
   // ── Island data (server-driven via ISLANDS message; falls back to default) ──
 
-  /** Returns a CSS color for a structure's owning company (0=neutral grey, 1=pirate orange, 2=navy blue). */
+  /** Returns a CSS color for a structure's owning company strip. */
   private static structureCompanyColor(companyId: number): string {
-    if (companyId === 1) return 'rgba(255, 100, 50, 0.85)';  // Pirates
-    if (companyId === 2) return 'rgba(50, 130, 255, 0.85)';  // Navy
-    return 'rgba(160, 160, 160, 0.60)';                       // Neutral
+    return structureCompanyStripColor(companyId);
+  }
+
+  /** Blit cached base sprite for a placed structure; returns draw rotation used. */
+  private _blitStructureBase(
+    s: PlacedStructure,
+    ssp: { x: number; y: number },
+    zoom: number,
+    camRot: number,
+    isHovered: boolean,
+    isBlocker: boolean,
+    wallRotRad?: number,
+  ): number | null {
+    const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+    const resolved = getStructureBaseSprite(this._structureSpriteCache, s, {
+      hovered: isHovered,
+      blocker: isBlocker,
+      companyId: s.companyId,
+      hpFrac,
+      wallRotRad,
+    });
+    if (!resolved) return null;
+    const alpha = s.type === 'wreck' ? (isHovered ? 1.0 : 0.88) : 1;
+    blitStructureSprite(this.ctx, resolved.sprite, ssp.x, ssp.y, zoom, resolved.rotRad, camRot, alpha);
+    return resolved.rotRad;
   }
 
   /** Preset visual parameters keyed by preset name. */
@@ -6783,44 +6814,16 @@ export class RenderSystem {
         const floorTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
         const floorIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
-        const baseColor = isBlocker ? '#cc3322' : isHovered ? '#d09a3a' : '#b8832b';
-        ctx.save();
-        const floorRotRad = (s.rotation ?? 0) * Math.PI / 180;
-        if (floorRotRad !== 0 || camRot !== 0) {
-          ctx.translate(ssp.x, ssp.y);
-          ctx.rotate(floorRotRad - camRot);
-          ctx.translate(-ssp.x, -ssp.y);
-        }
-        ctx.fillStyle   = baseColor;
-        ctx.strokeStyle = '#7a5520';
-        ctx.lineWidth   = Math.max(1, 2 * zoom);
-        ctx.beginPath();
-        ctx.rect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-        ctx.fill();
-        ctx.stroke();
-        // Damage darkening overlay
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
-        }
-        // Plank lines
-        ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        const third = sz / 3;
-        for (let li = 1; li < 3; li++) {
-          ctx.beginPath();
-          ctx.moveTo(ssp.x - sz / 2, ssp.y - sz / 2 + li * third);
-          ctx.lineTo(ssp.x + sz / 2, ssp.y - sz / 2 + li * third);
-          ctx.stroke();
-        }
-        // Company ownership strip along the top edge
-        const floorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const stripH = Math.max(2, 3 * zoom);
-        ctx.fillStyle = floorCompanyColor;
-        ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, stripH);
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
         // Schematic overlay + progress bar when hammer equipped
         if (this.hammerEquipped && floorIsSchematic) {
+          ctx.save();
+          const floorRotRad = (s.rotation ?? 0) * Math.PI / 180;
+          if (floorRotRad !== 0 || camRot !== 0) {
+            ctx.translate(ssp.x, ssp.y);
+            ctx.rotate(floorRotRad - camRot);
+            ctx.translate(-ssp.x, -ssp.y);
+          }
           ctx.fillStyle = 'rgba(120,200,255,0.22)';
           ctx.fillRect(ssp.x - sz / 2, ssp.y - sz / 2, sz, sz);
           const flBuildFrac = Math.max(0, Math.min(1, floorTargetHp > 0 ? s.hp / floorTargetHp : 0));
@@ -6832,6 +6835,7 @@ export class RenderSystem {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', ssp.x, flBarY - 2);
+          ctx.restore();
         }
         // Repair icon when hammer equipped and floor is actually damaged (not schematic)
         if (this.hammerEquipped && !floorIsSchematic && hpFrac < 0.999) {
@@ -6841,94 +6845,24 @@ export class RenderSystem {
           ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
-        ctx.restore();
       } else if (s.type === 'workbench') {
-        // Top-down view: wide rectangular bench filling most of the floor tile
-        const bw = sz * 0.88;   // bench width
-        const bh = sz * 0.62;   // bench depth
+        const bw = sz * 0.88;
+        const bh = sz * 0.62;
         const bx = ssp.x - bw / 2;
         const by = ssp.y - bh / 2;
-        ctx.save();
-        const wbRotRad = (s.rotation ?? 0) * Math.PI / 180;
-        if (wbRotRad !== 0 || camRot !== 0) {
-          ctx.translate(ssp.x, ssp.y);
-          ctx.rotate(wbRotRad - camRot);
-          ctx.translate(-ssp.x, -ssp.y);
-        }
-        const frameColor  = isHovered ? '#5a3010' : '#4a2408';
-        ctx.fillStyle   = frameColor;
-        ctx.strokeStyle = '#2a1204';
-        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.rect(bx, by, bw, bh);
-        ctx.fill();
-        ctx.stroke();
-
-        // Inner work surface (inset by frame thickness)
-        const ft = Math.max(2, 4 * zoom); // frame thickness
-        const sx2 = bx + ft, sy2 = by + ft;
-        const sw  = bw - ft * 2, sh = bh - ft * 2;
-        ctx.fillStyle = isHovered ? '#c07838' : '#a86428';
-        ctx.beginPath();
-        ctx.rect(sx2, sy2, sw, sh);
-        ctx.fill();
-
-        // Plank grain lines along the length
-        ctx.strokeStyle = 'rgba(60, 30, 8, 0.35)';
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        const grainCount = 3;
-        for (let gi = 1; gi < grainCount; gi++) {
-          const gy = sy2 + sh * (gi / grainCount);
-          ctx.beginPath();
-          ctx.moveTo(sx2, gy);
-          ctx.lineTo(sx2 + sw, gy);
-          ctx.stroke();
-        }
-
-        // Vise block on the right side
-        const vw = Math.max(2, 5 * zoom);
-        const vh = Math.max(2, sh * 0.45);
-        const vx = sx2 + sw - vw;
-        const vy = sy2 + (sh - vh) / 2;
-        ctx.fillStyle   = isHovered ? '#888' : '#6a6a6a';
-        ctx.strokeStyle = '#3a3a3a';
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        ctx.beginPath();
-        ctx.rect(vx, vy, vw, vh);
-        ctx.fill();
-        ctx.stroke();
-
-        // Corner leg indicators (small dark squares at each corner)
-        const legSz = Math.max(2, 3.5 * zoom);
-        ctx.fillStyle = '#2a1204';
-        for (const [lx, ly] of [[bx, by], [bx + bw - legSz, by],
-                                 [bx, by + bh - legSz], [bx + bw - legSz, by + bh - legSz]]) {
-          ctx.fillRect(lx, ly, legSz, legSz);
-        }
-
-        // ⚒ icon centred on the work surface
-        ctx.font         = `${Math.max(7, Math.round(10 * zoom))}px Georgia, serif`;
-        ctx.textAlign    = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillStyle    = 'rgba(255, 210, 100, 0.9)';
-        ctx.fillText('\u2692', ssp.x - vw / 2, ssp.y);
-
-        // Company ownership strip along the top edge
-        const wbCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const wbStripH = Math.max(2, 3 * zoom);
-        ctx.fillStyle = wbCompanyColor;
-        ctx.fillRect(bx, by, bw, wbStripH);
-        // Damage darkening overlay
-        const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const wbTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
         const wbIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const wbHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const wbDmgDarken = Math.max(0, 1 - wbHpFrac) * 0.75;
-        if (wbDmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${wbDmgDarken.toFixed(2)})`;
-          ctx.fillRect(bx, by, bw, bh);
-        }
-        // Schematic overlay + progress bar when hammer equipped
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
         if (this.hammerEquipped && wbIsSchematic) {
+          ctx.save();
+          const wbRotRad = (s.rotation ?? 0) * Math.PI / 180;
+          if (wbRotRad !== 0 || camRot !== 0) {
+            ctx.translate(ssp.x, ssp.y);
+            ctx.rotate(wbRotRad - camRot);
+            ctx.translate(-ssp.x, -ssp.y);
+          }
           ctx.fillStyle = 'rgba(120,200,255,0.22)';
           ctx.fillRect(bx, by, bw, bh);
           const wbBuildFrac = Math.max(0, Math.min(1, wbTargetHp > 0 ? s.hp / wbTargetHp : 0));
@@ -6940,62 +6874,35 @@ export class RenderSystem {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', ssp.x, wbBarY - 2);
+          ctx.restore();
         }
-        // Repair icon for non-schematic damaged workbench when hammer equipped
         if (this.hammerEquipped && !wbIsSchematic && wbDmgDarken > 0.01) {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
-
-        ctx.restore();
       } else if (s.type === 'wall') {
-        // Derive wall rotation from the nearest floor (floor-centre → wall-midpoint vector + 90°)
         const nearWallFloor = this.placedStructures.find(f =>
           f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
         const wallRotRad = nearWallFloor
           ? Math.atan2(s.y - nearWallFloor.y, s.x - nearWallFloor.x) + Math.PI / 2
           : 0;
-        const THICK = 0.18; // ratio of tile (50px * 0.18 = 9px)
-        const ww = sz;          // long axis (rotated by wallRotRad)
+        const THICK = 0.18;
+        const ww = sz;
         const wh = sz * THICK;
-        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        // Schematic/repair state detection
         const targetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
         const isSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
-
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(wallRotRad - camRot);
-        ctx.translate(-ssp.x, -ssp.y);
-        // Main wall fill
-        ctx.fillStyle   = isHovered ? '#7a5030' : '#5c3a1a';
-        ctx.strokeStyle = '#2e1a08';
-        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-        ctx.fill();
-        ctx.stroke();
-        // Plank grain lines (verticals in wall-local space)
-        ctx.strokeStyle = 'rgba(40, 20, 5, 0.4)';
-        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
-        for (let li = 1; li < 3; li++) {
-          const gx = ssp.x - ww / 2 + ww * (li / 3);
-          ctx.beginPath(); ctx.moveTo(gx, ssp.y - wh / 2); ctx.lineTo(gx, ssp.y + wh / 2); ctx.stroke();
-        }
-        // Company color strip
-        const wallCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const stripSz = Math.max(1, 2 * zoom);
-        ctx.fillStyle = wallCompanyColor;
-        ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, stripSz);
-        // Schematic/repair overlay and progress bar — only visible when hammer is equipped
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker, wallRotRad);
         if (this.hammerEquipped && isSchematic) {
-          // Ghost overlay
+          ctx.save();
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(wallRotRad - camRot);
+          ctx.translate(-ssp.x, -ssp.y);
           ctx.fillStyle = 'rgba(120,200,255,0.22)';
           ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-          // Progress bar (shows build/repair progress)
           const barW = ww * 0.7;
           const barH = Math.max(2, 4 * zoom);
           const barX = ssp.x - barW / 2;
@@ -7006,14 +6913,13 @@ export class RenderSystem {
           ctx.strokeRect(barX, barY, barW, barH);
           ctx.fillStyle = '#55ddff';
           ctx.fillRect(barX, barY, barW * buildFrac, barH);
-          // Repair icon
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center';
           ctx.textBaseline = 'bottom';
           ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', ssp.x, barY - 2);
+          ctx.restore();
         }
-        // Repair icon for non-schematic damaged walls when hammer equipped
         if (this.hammerEquipped && !isSchematic && dmgDarken > 0.01) {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center';
@@ -7021,62 +6927,25 @@ export class RenderSystem {
           ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
-        // Damage darkening
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-        }
-        ctx.restore();
       } else if (s.type === 'door_frame') {
-        // Door Frame: two posts at the ends with an open gap in the centre
         const nearDFFloor = this.placedStructures.find(f =>
           f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
         const dfRotRad = nearDFFloor
           ? Math.atan2(s.y - nearDFFloor.y, s.x - nearDFFloor.x) + Math.PI / 2
           : 0;
-        const THICK = 0.18;
-        const ww = sz;          // long axis
-        const wh = sz * THICK;
-        const POST = sz * 0.14; // post square size
+        const ww = sz;
+        const POST = sz * 0.14;
         const dfTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
         const dfIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
-
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(dfRotRad - camRot);
-        ctx.translate(-ssp.x, -ssp.y);
-        ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
-        ctx.strokeStyle = '#3e200c';
-        ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-        // Two posts at left and right ends (in wall-local horizontal space)
-        ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-        ctx.strokeRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-        ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-        ctx.strokeRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-        // Dashed lintel lines
-        ctx.strokeStyle = 'rgba(120, 70, 30, 0.45)';
-        ctx.lineWidth = Math.max(0.5, 1 * zoom);
-        ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
-        ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y - wh / 2);
-        ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y - wh / 2); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(ssp.x - ww / 2 + POST, ssp.y + wh / 2);
-        ctx.lineTo(ssp.x + ww / 2 - POST, ssp.y + wh / 2); ctx.stroke();
-        ctx.setLineDash([]);
-        // Company color strip
-        const dfCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const dfStripSz = Math.max(1, 2 * zoom);
-        ctx.fillStyle = dfCompanyColor;
-        ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, dfStripSz);
-        if (!dfIsSchematic && dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, POST, POST);
-          ctx.fillRect(ssp.x + ww / 2 - POST, ssp.y - POST / 2, POST, POST);
-        }
-        // Schematic overlay + progress bar when hammer equipped
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker, dfRotRad);
         if (this.hammerEquipped && dfIsSchematic) {
+          ctx.save();
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(dfRotRad - camRot);
+          ctx.translate(-ssp.x, -ssp.y);
           ctx.fillStyle = 'rgba(120,200,255,0.22)';
           ctx.fillRect(ssp.x - ww / 2, ssp.y - POST / 2, ww, POST);
           const dfBuildFrac = Math.max(0, Math.min(1, dfTargetHp > 0 ? s.hp / dfTargetHp : 0));
@@ -7088,23 +6957,20 @@ export class RenderSystem {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', ssp.x, dfBarY - 2);
+          ctx.restore();
         }
-        // Repair icon for non-schematic damaged door frames when hammer equipped
         if (this.hammerEquipped && !dfIsSchematic && dmgDarken > 0.01) {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
-        ctx.restore();
       } else if (s.type === 'door') {
-        // Door: derive rotation from nearest floor (same as wall/door_frame)
         const nearDoorFloor = this.placedStructures.find(f =>
           f.type === 'wooden_floor' && Math.hypot(f.x - s.x, f.y - s.y) < 30
         );
         const doorRotRad = nearDoorFloor
           ? Math.atan2(s.y - nearDoorFloor.y, s.x - nearDoorFloor.x) + Math.PI / 2
           : 0;
-        // Always draw in horizontal local space; rotation is applied via ctx transform
         const THICK = 0.18;
         const ww = sz;
         const wh = sz * THICK;
@@ -7112,54 +6978,12 @@ export class RenderSystem {
         const doorIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
-        const isOpen = s.doorOpen === true;
-
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(doorRotRad - camRot);
-        ctx.translate(-ssp.x, -ssp.y);
-        if (!isOpen) {
-          // Closed door: filled planks
-          ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
-          ctx.strokeStyle = '#3e200c';
-          ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-          ctx.beginPath();
-          ctx.rect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-          ctx.fill();
-          ctx.stroke();
-          // Center dividing line (vertical in local space = across the width)
-          ctx.strokeStyle = 'rgba(30, 12, 4, 0.5)';
-          ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-          ctx.beginPath(); ctx.moveTo(ssp.x, ssp.y - wh / 2); ctx.lineTo(ssp.x, ssp.y + wh / 2); ctx.stroke();
-        } else {
-          // Open door: two short end-posts, gap in middle
-          const postSz = sz * 0.15;
-          ctx.fillStyle   = isHovered ? '#9a6040' : '#7a4820';
-          ctx.strokeStyle = '#3e200c';
-          ctx.lineWidth   = Math.max(0.5, 1.5 * zoom);
-          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
-          ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, postSz, wh);
-          ctx.fillRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
-          ctx.strokeRect(ssp.x + ww / 2 - postSz, ssp.y - wh / 2, postSz, wh);
-          // Dashed outline showing door extent
-          ctx.strokeStyle = 'rgba(150, 100, 60, 0.35)';
-          ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-          ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 3 * zoom)]);
-          ctx.strokeRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-          ctx.setLineDash([]);
-        }
-        // Company color strip
-        const doorCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const doorStripSz = Math.max(1, 2 * zoom);
-        ctx.fillStyle = doorCompanyColor;
-        ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, doorStripSz);
-        // Damage darkening (skip for schematics)
-        if (!isOpen && !doorIsSchematic && dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
-        }
-        // Schematic overlay + progress bar when hammer equipped
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker, doorRotRad);
         if (this.hammerEquipped && doorIsSchematic) {
+          ctx.save();
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(doorRotRad - camRot);
+          ctx.translate(-ssp.x, -ssp.y);
           ctx.fillStyle = 'rgba(120,200,255,0.22)';
           ctx.fillRect(ssp.x - ww / 2, ssp.y - wh / 2, ww, wh);
           const doorBuildFrac = Math.max(0, Math.min(1, doorTargetHp > 0 ? s.hp / doorTargetHp : 0));
@@ -7171,141 +6995,31 @@ export class RenderSystem {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', ssp.x, doorBarY - 2);
+          ctx.restore();
         }
-        // Repair icon for non-schematic damaged doors when hammer equipped
         if (this.hammerEquipped && !doorIsSchematic && dmgDarken > 0.01) {
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
-        ctx.restore();
       } else if (s.type === 'shipyard') {
-        // ── U-shaped dry dock sized to fit the Brigantine (760×180 world px) ──
-        const ARM_T  = sz * 1.00;   // pier arm thickness
-        const INT_W  = sz * 4.80;   // interior bay width  (brigantine beam 180 + margins)
-        const ARM_L  = sz * 16.80;  // arm length / bay depth (brigantine length 760 + margins)
-        const BACK_T = sz * 1.00;   // back wall thickness
-        const totalW = ARM_T + INT_W + ARM_T;   // sz * 6.8
-        const totalH = BACK_T + ARM_L;          // sz * 17.8
+        const ARM_T  = sz * 1.00;
+        const INT_W  = sz * 4.80;
+        const ARM_L  = sz * 16.80;
+        const BACK_T = sz * 1.00;
+        const totalW = ARM_T + INT_W + ARM_T;
+        const totalH = BACK_T + ARM_L;
         const hw = totalW / 2, hh = totalH / 2;
         const cx = ssp.x, cy = ssp.y;
-        const hpFrac    = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const shipyardTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
-        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
-        ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate((s.rotation ?? 0) * Math.PI / 180 - camRot);
-        ctx.translate(-cx, -cy);
-        // U-path: clockwise outer polygon with gap at +y (mouth / open end)
-        const uPath = () => {
-          ctx.beginPath();
-          ctx.moveTo(cx - hw,         cy - hh);
-          ctx.lineTo(cx + hw,         cy - hh);
-          ctx.lineTo(cx + hw,         cy + hh);
-          ctx.lineTo(cx + hw - ARM_T, cy + hh);
-          ctx.lineTo(cx + hw - ARM_T, cy - hh + BACK_T);
-          ctx.lineTo(cx - hw + ARM_T, cy - hh + BACK_T);
-          ctx.lineTo(cx - hw + ARM_T, cy + hh);
-          ctx.lineTo(cx - hw,         cy + hh);
-          ctx.closePath();
-        };
-        // ── Dock body (weathered timber) ──────────────────────────────────────
-        ctx.fillStyle   = isHovered ? '#4a6852' : '#2e4a36';
-        ctx.strokeStyle = '#1a2a1e';
-        ctx.lineWidth   = Math.max(1, 2 * zoom);
-        uPath();
-        ctx.fill();
-        ctx.stroke();
-        // ── Plank grain on arms and back wall ─────────────────────────────────
-        ctx.strokeStyle = 'rgba(10, 20, 10, 0.28)';
-        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
-        const plankStep = ARM_T / 2.5;
-        for (let p = plankStep; p < totalH; p += plankStep) {
-          const py = cy - hh + p;
-          ctx.beginPath(); ctx.moveTo(cx - hw,         py); ctx.lineTo(cx - hw + ARM_T, py); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, py); ctx.lineTo(cx + hw,         py); ctx.stroke();
-        }
-        for (let p = plankStep; p < INT_W; p += plankStep) {
-          const px = cx - hw + ARM_T + p;
-          ctx.beginPath(); ctx.moveTo(px, cy - hh); ctx.lineTo(px, cy - hh + BACK_T); ctx.stroke();
-        }
-
-        // ── Dark seafloor inside the bay ──────────────────────────────────────
-        ctx.fillStyle = 'rgba(10, 40, 65, 0.72)';
-        ctx.fillRect(cx - hw + ARM_T, cy - hh + BACK_T, INT_W, ARM_L);
-        // ── Brigantine hull silhouette (only shown while a ship is under construction) ─
+        const shipyardRot = (s.rotation ?? 0) * Math.PI / 180;
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
+        // Pulsing stair markers (animated — not baked into sprite)
         if (s.construction?.phase === 'building') {
-          const shpHW  = INT_W * 0.36;
-          const shpTop = cy - hh + BACK_T + ARM_L * 0.05;
-          const shpBot = cy + hh          - ARM_L * 0.05;
-          const shpLen = shpBot - shpTop;
-          ctx.fillStyle   = 'rgba(68, 46, 20, 0.30)';
-          ctx.strokeStyle = 'rgba(155, 115, 60, 0.55)';
-          ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-          ctx.beginPath();
-          ctx.moveTo(cx, shpTop);
-          ctx.bezierCurveTo(cx + shpHW * 0.5, shpTop + shpLen * 0.07,
-                            cx + shpHW,       shpTop + shpLen * 0.22,
-                            cx + shpHW,       shpTop + shpLen * 0.65);
-          ctx.bezierCurveTo(cx + shpHW,       shpTop + shpLen * 0.85,
-                            cx + shpHW * 0.5, shpBot,
-                            cx,               shpBot);
-          ctx.bezierCurveTo(cx - shpHW * 0.5, shpBot,
-                            cx - shpHW,       shpTop + shpLen * 0.85,
-                            cx - shpHW,       shpTop + shpLen * 0.65);
-          ctx.bezierCurveTo(cx - shpHW,       shpTop + shpLen * 0.22,
-                            cx - shpHW * 0.5, shpTop + shpLen * 0.07,
-                            cx,               shpTop);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-        }
-        // ── Scaffolding bay planks (shown while a ship is under construction) ─
-        if (s.construction?.phase === 'building') {
-          const bayX0 = cx - hw + ARM_T;
-          const bayX1 = cx + hw - ARM_T;
-          const bayY0 = cy - hh + BACK_T;
+          ctx.save();
+          ctx.translate(cx, cy);
+          ctx.rotate(shipyardRot - camRot);
+          ctx.translate(-cx, -cy);
           const bayY1 = cy + hh;
-          const bayW  = bayX1 - bayX0;
-          const bayH  = bayY1 - bayY0;
-          ctx.fillStyle = 'rgba(110, 75, 30, 0.72)';
-          ctx.fillRect(bayX0, bayY0, bayW, bayH);
-          ctx.strokeStyle = 'rgba(65, 42, 14, 0.50)';
-          ctx.lineWidth   = Math.max(0.4, 0.9 * zoom);
-          const boardSpacing = ARM_T * 0.55;
-          for (let oy = boardSpacing; oy < bayH; oy += boardSpacing) {
-            const py = bayY0 + oy;
-            ctx.beginPath(); ctx.moveTo(bayX0, py); ctx.lineTo(bayX1, py); ctx.stroke();
-          }
-          ctx.strokeStyle = 'rgba(75, 50, 18, 0.28)';
-          const grainCount = 4;
-          const grainSpacing = bayW / (grainCount + 1);
-          for (let gi = 1; gi <= grainCount; gi++) {
-            const px = bayX0 + grainSpacing * gi;
-            ctx.beginPath(); ctx.moveTo(px, bayY0); ctx.lineTo(px, bayY1); ctx.stroke();
-          }
-          ctx.strokeStyle = 'rgba(145, 105, 50, 0.70)';
-          ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
-          ctx.strokeRect(bayX0, bayY0, bayW, bayH);
-          // Guard-rail posts and rope at the dock mouth edge only
-          const postHeight = ARM_T * 1.4;
-          const postY0     = bayY1 - ARM_T;
-          ctx.strokeStyle = 'rgba(190, 150, 85, 0.90)';
-          ctx.lineWidth   = Math.max(1.5, 2.5 * zoom);
-          for (const px of [bayX0, cx, bayX1]) {
-            ctx.beginPath();
-            ctx.moveTo(px, postY0 + ARM_T * 0.1);
-            ctx.lineTo(px, postY0 - postHeight * 0.4);
-            ctx.stroke();
-          }
-          ctx.strokeStyle = 'rgba(200, 160, 80, 0.70)';
-          ctx.lineWidth   = Math.max(0.8, 1.2 * zoom);
-          ctx.setLineDash([Math.max(3, 5 * zoom), Math.max(2, 3 * zoom)]);
-          ctx.beginPath();
-          ctx.moveTo(bayX0, postY0 - postHeight * 0.4);
-          ctx.lineTo(bayX1, postY0 - postHeight * 0.4);
-          ctx.stroke();
-          ctx.setLineDash([]);
           const stairPulse = 0.5 + 0.3 * Math.sin(performance.now() * 0.002);
           ctx.fillStyle = `rgba(220, 200, 100, ${stairPulse.toFixed(2)})`;
           ctx.font = `bold ${Math.max(8, Math.round(10 * zoom))}px Georgia, serif`;
@@ -7313,120 +7027,11 @@ export class RenderSystem {
           ctx.textBaseline = 'middle';
           ctx.fillText('▲', cx - hw + ARM_T * 0.5, bayY1 - ARM_T * 0.5);
           ctx.fillText('▲', cx + hw - ARM_T * 0.5, bayY1 - ARM_T * 0.5);
+          ctx.restore();
         }
-        // Mast yard-arm crosses and interior scaffolding (only while building)
-        if (s.construction?.phase === 'building') {
-        ctx.strokeStyle = 'rgba(155, 115, 60, 0.65)';
-        ctx.lineWidth   = Math.max(1, 2 * zoom);
-        for (const mf of [0.28, 0.60]) {
-          const mpy = cy - hh + BACK_T + ARM_L * mf;
-          const mhw = INT_W * 0.36;
-          ctx.beginPath(); ctx.moveTo(cx,             mpy - ARM_T * 0.25); ctx.lineTo(cx,             mpy + ARM_T * 0.25); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx - mhw * 0.4, mpy);               ctx.lineTo(cx + mhw * 0.4, mpy);               ctx.stroke();
-        }
-        // ── Scaffolding cross-beams and diagonal arm bracing ──────────────────
-        ctx.strokeStyle = 'rgba(190, 150, 85, 0.85)';
-        ctx.lineWidth   = Math.max(1, 1.8 * zoom);
-        for (const frac of [0.25, 0.50, 0.75]) {
-          const bpy = cy - hh + BACK_T + ARM_L * frac;
-          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, bpy); ctx.lineTo(cx + hw - ARM_T, bpy); ctx.stroke();
-          const pLen = ARM_T * 0.30;
-          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, bpy - pLen); ctx.lineTo(cx - hw + ARM_T, bpy + pLen); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, bpy - pLen); ctx.lineTo(cx + hw - ARM_T, bpy + pLen); ctx.stroke();
-        }
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        ctx.strokeStyle = 'rgba(160, 120, 60, 0.45)';
-        const bFracs = [0, 0.25, 0.50, 0.75, 1.0];
-        for (let bi = 0; bi < bFracs.length - 1; bi++) {
-          const y0 = cy - hh + BACK_T + ARM_L * bFracs[bi];
-          const y1 = cy - hh + BACK_T + ARM_L * bFracs[bi + 1];
-          ctx.beginPath(); ctx.moveTo(cx - hw,         y0); ctx.lineTo(cx - hw + ARM_T, y1); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx - hw + ARM_T, y0); ctx.lineTo(cx - hw,         y1); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx + hw - ARM_T, y0); ctx.lineTo(cx + hw,         y1); ctx.stroke();
-          ctx.beginPath(); ctx.moveTo(cx + hw,         y0); ctx.lineTo(cx + hw - ARM_T, y1); ctx.stroke();
-        }
-        } // end if building
-        // ── Mooring bollards at the mouth ──────────────────────────────────────
-        ctx.fillStyle = 'rgba(190, 150, 85, 0.95)';
-        const bollardR = Math.max(2, 3.5 * zoom);
-        ctx.beginPath(); ctx.arc(cx - hw + ARM_T * 0.5, cy + hh - ARM_T * 0.4, bollardR, 0, Math.PI * 2); ctx.fill();
-        ctx.beginPath(); ctx.arc(cx + hw - ARM_T * 0.5, cy + hh - ARM_T * 0.4, bollardR, 0, Math.PI * 2); ctx.fill();
-        // ── Company color strip along back wall ────────────────────────────────
-        const syStripH = Math.max(2, 3 * zoom);
-        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
-        ctx.fillRect(cx - hw, cy - hh, totalW, syStripH);
-        // ── Damage darkening overlay ────────────────────────────────────────────
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          uPath();
-          ctx.fill();
-        }
-        ctx.restore();
       } else if (s.type === 'wreck') {
-        // ── Shipwreck — broken hull timbers at sea ──────────────────────────
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
         const wrsz = Math.max(6, 60 * zoom);
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-        // Tilted broken planks (cross shape, rotated 35°)
-        ctx.rotate(0.61 - camRot);
-        const alpha = isHovered ? 1.0 : 0.88;
-        ctx.globalAlpha = alpha;
-        // Hull outline (irregular pentagon for a battered ship)
-        ctx.fillStyle = '#5a3a18';
-        ctx.strokeStyle = '#2e1a08';
-        ctx.lineWidth = Math.max(1, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(-wrsz * 0.55, -wrsz * 0.25);
-        ctx.lineTo( wrsz * 0.50, -wrsz * 0.30);
-        ctx.lineTo( wrsz * 0.65,  wrsz * 0.10);
-        ctx.lineTo( wrsz * 0.20,  wrsz * 0.35);
-        ctx.lineTo(-wrsz * 0.60,  wrsz * 0.25);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        // Broken plank lines
-        ctx.strokeStyle = '#2e1a08';
-        ctx.lineWidth = Math.max(0.5, 1 * zoom);
-        for (let i = -1; i <= 1; i++) {
-          ctx.beginPath();
-          ctx.moveTo(-wrsz * 0.5, i * wrsz * 0.12);
-          ctx.lineTo( wrsz * 0.5, i * wrsz * 0.12);
-          ctx.stroke();
-        }
-        // Mast stub
-        ctx.strokeStyle = '#7a5520';
-        ctx.lineWidth = Math.max(1.5, 2.5 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(-wrsz * 0.1, -wrsz * 0.05);
-        ctx.lineTo(-wrsz * 0.1 + wrsz * 0.05, -wrsz * 0.5);
-        ctx.stroke();
-        // Salvage indicator: small glint if hp > 0. Colored by the best loot
-        // tier inside the wreck (blueprint quality); falls back to gold.
-        if (s.hp > 0) {
-          const glintColor = typeof s.wreckTier === 'number' && s.wreckTier >= 0
-            ? tierColor(s.wreckTier)
-            : 'rgba(255, 220, 80, 0.85)';
-          const glintRadius = Math.max(3, 5 * zoom);
-          if (typeof s.wreckTier === 'number' && s.wreckTier >= 1) {
-            // Higher tiers get a soft halo to draw the eye.
-            ctx.save();
-            ctx.shadowColor = glintColor;
-            ctx.shadowBlur = Math.min(20, Math.max(6, 10 * zoom));
-            ctx.fillStyle = glintColor;
-            ctx.beginPath();
-            ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.restore();
-          } else {
-            ctx.fillStyle = glintColor;
-            ctx.beginPath();
-            ctx.arc(0, 0, glintRadius, 0, Math.PI * 2);
-            ctx.fill();
-          }
-        }
-        ctx.globalAlpha = 1;
-        ctx.restore();
-        // Label "WRECK" when hovered
         if (isHovered) {
           ctx.save();
           ctx.font = `bold ${Math.max(10, 12 * zoom)}px Georgia, serif`;
@@ -7442,16 +7047,8 @@ export class RenderSystem {
         // in renderWorld so roofs cover bush sprites placed under the building.
         this._pendingCeilings.push({ s, ssp, sz, isHovered });
       } else if (s.type === 'cannon') {
-        // ── Placed island cannon — same visual as ship cannon ──
         const rotRad = (s.rotation ?? 0) * Math.PI / 180;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const cannonTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
-        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
-        const lw = Math.max(0.5, 1.5 * zoom);
-
-        // If locally mounted, use the live aim angle for the barrel; otherwise match base rotation.
-        // barrelRot: canvas ctx.rotate angle so barrel (pointing local −y) faces world aim direction.
-        // aimAngle = atan2(dy_screen, dx_screen) → barrelRot = aimAngle + π/2
         const hasLiveAim = this.islandCannonId === s.id && this.islandCannonAimAngle !== null;
         const hasServerAim = typeof s.cannonAimAngle === 'number';
         const barrelRot  = hasLiveAim
@@ -7459,92 +7056,21 @@ export class RenderSystem {
           : hasServerAim
             ? (s.cannonAimAngle! + Math.PI / 2)
             : rotRad;
-
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-
-        // Base (brown rectangle) at placement rotation — stays fixed
-        ctx.save();
-        ctx.rotate(rotRad - camRot);
-        ctx.fillStyle   = isHovered ? '#b06030' : '#8B4513';
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth   = lw;
-        ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
-        ctx.strokeRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
-        // Company color strip (on base)
-        ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
-        ctx.fillRect(-8 * zoom, -4 * zoom, 16 * zoom, Math.max(1.5, 2.5 * zoom));
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(-15 * zoom, -10 * zoom, 30 * zoom, 20 * zoom);
-        }
-        ctx.restore();
-
-        // Barrel — rotates to live aim angle when mounted
-        ctx.save();
-        ctx.rotate(barrelRot - camRot);
-        ctx.fillStyle   = isHovered ? '#aaaaaa' : '#333333';
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth   = lw;
-        ctx.beginPath();
-        ctx.moveTo(-8 * zoom,    0);
-        ctx.lineTo(-8 * zoom, -40 * zoom);
-        ctx.lineTo( 8 * zoom, -40 * zoom);
-        ctx.lineTo( 8 * zoom,    0);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(-8 * zoom, -40 * zoom, 16 * zoom, 40 * zoom);
-        }
-        ctx.restore();
-
-        ctx.restore();
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
+        const barrelSprite = getCannonBarrelSprite(this._structureSpriteCache, {
+          hovered: isHovered,
+          companyId: s.companyId,
+          hpFrac,
+        });
+        blitStructureSprite(this.ctx, barrelSprite, ssp.x, ssp.y, zoom, barrelRot, camRot);
       } else if (s.type === 'flag_fort') {
-        // ── Flag Fort — stone tower (claim radius is drawn by drawTerritoryOverlay) ──
-        const companyColor = this._companyColor(s.companyId);
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
         const ts = Math.max(10, 44 * zoom);
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(-camRot);
-
-        // Tower base (stone)
-        const stoneR = Math.round(hpFrac * 120 + 60);
-        const stoneG = Math.round(hpFrac * 100 + 50);
-        const stoneB = Math.round(hpFrac * 80 + 40);
-        ctx.fillStyle = isHovered ? '#c8a860' : `rgb(${stoneR},${stoneG},${stoneB})`;
-        ctx.strokeStyle = '#2a1a0a';
-        ctx.lineWidth = Math.max(1, 1.5 * zoom);
-        ctx.fillRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
-        ctx.strokeRect(-ts * 0.45, -ts * 0.45, ts * 0.9, ts * 0.9);
-
-        // Battlements — 3 merlons along top edge
-        ctx.fillStyle = isHovered ? '#ddb870' : `rgb(${Math.min(255, stoneR+15)},${Math.min(255, stoneG+10)},${Math.min(255, stoneB+8)})`;
-        const mw = ts * 0.22, mh = ts * 0.2;
-        for (let m = -1; m <= 1; m++) {
-          ctx.fillRect(m * ts * 0.3 - mw / 2, -ts * 0.45 - mh, mw, mh);
-          ctx.strokeRect(m * ts * 0.3 - mw / 2, -ts * 0.45 - mh, mw, mh);
-        }
-
-        // Flag pole
-        ctx.strokeStyle = '#555';
-        ctx.lineWidth = Math.max(1, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(ts * 0.08, -ts * 0.45);
-        ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.75);
-        ctx.stroke();
-
-        // Flag (triangular pennant)
-        ctx.fillStyle = companyColor;
-        ctx.beginPath();
-        ctx.moveTo(ts * 0.08, -ts * 0.45 - ts * 0.75);
-        ctx.lineTo(ts * 0.08 + ts * 0.4, -ts * 0.45 - ts * 0.55);
-        ctx.lineTo(ts * 0.08, -ts * 0.45 - ts * 0.35);
-        ctx.closePath();
-        ctx.fill();
 
         // ── Contested tint (any state) ───────────────────────────────
         const flagFortActive = s.fortressComplete !== false; // default-active for legacy data
@@ -7752,68 +7278,20 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'company_fortress') {
-        // ── Company Fortress — grand fortification (claim radius drawn by drawTerritoryOverlay) ──
         const companyColor = this._companyColor(s.companyId);
         const complete = s.fortressComplete ?? false;
-        const progress = (s.fortressBuildProgress ?? 0) / 900000; // 0→1
+        const progress = (s.fortressBuildProgress ?? 0) / 900000;
         const contested = s.fortressContested ?? false;
         const FORT_RADIUS_PX = 600;
         const fortRadiusScreen = FORT_RADIUS_PX * zoom;
         const ts = Math.max(14, 60 * zoom);
-        const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
         ctx.rotate(-camRot);
 
-        // Stone walls (larger than flag_fort)
-        const stoneR = Math.round(hpFrac * 110 + 60);
-        const stoneG = Math.round(hpFrac * 90  + 45);
-        const stoneB = Math.round(hpFrac * 70  + 35);
-        const wallColor = complete
-          ? (isHovered ? '#c8a860' : `rgb(${stoneR},${stoneG},${stoneB})`)
-          : '#887766';
-        ctx.fillStyle = wallColor;
-        ctx.strokeStyle = '#2a1a0a';
-        ctx.lineWidth = Math.max(1.5, 2 * zoom);
-        ctx.fillRect(-ts * 0.5, -ts * 0.5, ts, ts);
-        ctx.strokeRect(-ts * 0.5, -ts * 0.5, ts, ts);
-
-        // Corner towers (4 small squares)
-        const ctw = ts * 0.22;
-        for (const [cx2, cy2] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as [number,number][]) {
-          ctx.fillRect(cx2 * ts * 0.5 - ctw * (cx2 > 0 ? 0 : 1),
-                       cy2 * ts * 0.5 - ctw * (cy2 > 0 ? 0 : 1),
-                       ctw, ctw);
-          ctx.strokeRect(cx2 * ts * 0.5 - ctw * (cx2 > 0 ? 0 : 1),
-                         cy2 * ts * 0.5 - ctw * (cy2 > 0 ? 0 : 1),
-                         ctw, ctw);
-        }
-
-        if (complete) {
-          // Flag pole + large pennant
-          ctx.strokeStyle = '#555';
-          ctx.lineWidth = Math.max(1, 2 * zoom);
-          ctx.beginPath();
-          ctx.moveTo(0, -ts * 0.5);
-          ctx.lineTo(0, -ts * 0.5 - ts * 1.0);
-          ctx.stroke();
-          ctx.fillStyle = companyColor;
-          ctx.beginPath();
-          ctx.moveTo(0,           -ts * 0.5 - ts * 1.0);
-          ctx.lineTo(ts * 0.55,  -ts * 0.5 - ts * 0.7);
-          ctx.lineTo(0,           -ts * 0.5 - ts * 0.4);
-          ctx.closePath();
-          ctx.fill();
-        } else {
-          // Scaffold overlay
-          ctx.strokeStyle = '#b8a060cc';
-          ctx.lineWidth = Math.max(0.5, 1 * zoom);
-          ctx.beginPath();
-          ctx.moveTo(-ts * 0.5, -ts * 0.5); ctx.lineTo(ts * 0.5, ts * 0.5);
-          ctx.moveTo(ts * 0.5, -ts * 0.5);  ctx.lineTo(-ts * 0.5, ts * 0.5);
-          ctx.stroke();
-
+        if (!complete) {
           // Build progress bar below the structure
           const barW = ts * 1.2, barH = Math.max(3, 6 * zoom);
           const barX = -barW * 0.5, barY = ts * 0.55;
@@ -7839,22 +7317,19 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'claim_flag') {
-        // ── Claiming Flag — progress ring + pole ──
-        // Server protocol: claimProgress counts DOWN from FLAG_CLAIM_DURATION_MS (300000) to 0.
-        // claimState: 0=CONTEST, 1=CLAIMING_GRACE, 2=CLAIMING, 3=REVERSING_GRACE, 4=REVERSING.
         const TOTAL_MS = 300000;
-        const progress = 1 - Math.max(0, Math.min(1, (s.claimProgress ?? TOTAL_MS) / TOTAL_MS)); // 0→1 toward capture
+        const progress = 1 - Math.max(0, Math.min(1, (s.claimProgress ?? TOTAL_MS) / TOTAL_MS));
         const state = s.claimState ?? (s.claimContested ? 0 : 2);
         const ringR = Math.max(10, 18 * zoom);
         const companyColor = this._companyColor(s.companyId);
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
 
-        // Colour by state
         let arcColor = companyColor;
-        if (state === 0)      arcColor = '#888888';            // CONTEST   = grey (stalled)
-        else if (state === 1) arcColor = '#ffd24a';            // CLAIMING_GRACE  = warm yellow
-        else if (state === 2) arcColor = companyColor;         // CLAIMING        = company colour
-        else if (state === 3) arcColor = '#ff9966';            // REVERSING_GRACE = orange
-        else if (state === 4) arcColor = '#ff3030';            // REVERSING       = red
+        if (state === 0)      arcColor = '#888888';
+        else if (state === 1) arcColor = '#ffd24a';
+        else if (state === 2) arcColor = companyColor;
+        else if (state === 3) arcColor = '#ff9966';
+        else if (state === 4) arcColor = '#ff3030';
 
         ctx.save();
         ctx.translate(ssp.x, ssp.y);
@@ -7891,23 +7366,6 @@ export class RenderSystem {
             ctx.stroke();
           }
         }
-
-        // Flag pole
-        ctx.strokeStyle = '#444';
-        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(0, ringR * 0.6);
-        ctx.lineTo(0, -ringR - 14 * zoom);
-        ctx.stroke();
-
-        // Flag pennant
-        ctx.fillStyle = companyColor;
-        ctx.beginPath();
-        ctx.moveTo(0,           -ringR - 14 * zoom);
-        ctx.lineTo(13 * zoom,   -ringR - 5 * zoom);
-        ctx.lineTo(0,           -ringR + 4 * zoom);
-        ctx.closePath();
-        ctx.fill();
 
         // Timer text — show time remaining / reversing / stalled
         {
@@ -7994,93 +7452,34 @@ export class RenderSystem {
 
         ctx.restore();
       } else if (s.type === 'chest') {
-        // ── Land chest — top-down view: rectangular body with lid strip and latch ──
-        const cw = sz * 0.72;   // chest width
-        const ch = sz * 0.52;   // chest depth
+        const cw = sz * 0.72;
+        const ch = sz * 0.52;
         const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-        const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
         const chestTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
         const chestIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
-
-        ctx.save();
-        ctx.translate(ssp.x, ssp.y);
-        ctx.rotate(-camRot);
-        const cx2 = -cw / 2;
-        const cy2 = -ch / 2;
-
-        // Body (bottom half of chest, darker brown)
-        ctx.fillStyle   = isHovered ? '#7a4820' : '#5c3210';
-        ctx.strokeStyle = '#2a1204';
-        ctx.lineWidth   = Math.max(1, 1.5 * zoom);
-        ctx.beginPath();
-        ctx.rect(cx2, cy2, cw, ch);
-        ctx.fill();
-        ctx.stroke();
-
-        // Lid strip (top ~35% of the box, lighter tan)
-        const lidH = ch * 0.35;
-        ctx.fillStyle = isHovered ? '#c0813a' : '#a06428';
-        ctx.beginPath();
-        ctx.rect(cx2, cy2, cw, lidH);
-        ctx.fill();
-        // Lid border
-        ctx.strokeStyle = '#2a1204';
-        ctx.lineWidth   = Math.max(0.5, 1 * zoom);
-        ctx.strokeRect(cx2, cy2, cw, lidH);
-
-        // Latch — small rectangle centred on the lid/body seam
-        const ltW = Math.max(2, cw * 0.12);
-        const ltH = Math.max(2, ch * 0.20);
-        const ltX = -ltW / 2;
-        const ltY = cy2 + lidH - ltH / 2;
-        ctx.fillStyle   = '#d4a040';
-        ctx.strokeStyle = '#7a5010';
-        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
-        ctx.fillRect(ltX, ltY, ltW, ltH);
-        ctx.strokeRect(ltX, ltY, ltW, ltH);
-
-        // Corner band lines (horizontal stripe across full width, at lid seam)
-        ctx.strokeStyle = 'rgba(40, 20, 8, 0.55)';
-        ctx.lineWidth   = Math.max(0.5, 0.8 * zoom);
-        const seamY = cy2 + lidH;
-        ctx.beginPath();
-        ctx.moveTo(cx2, seamY);
-        ctx.lineTo(cx2 + cw, seamY);
-        ctx.stroke();
-
-        // Company color strip along the top edge
-        const chestCompanyColor = RenderSystem.structureCompanyColor(s.companyId);
-        const stripH = Math.max(2, 2.5 * zoom);
-        ctx.fillStyle = chestCompanyColor;
-        ctx.fillRect(cx2, cy2, cw, stripH);
-
-        // Damage darkening
-        if (dmgDarken > 0.01) {
-          ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-          ctx.fillRect(cx2, cy2, cw, ch);
-        }
-        // Schematic overlay + progress bar when hammer equipped
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
         if (this.hammerEquipped && chestIsSchematic) {
+          ctx.save();
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(-camRot);
           ctx.fillStyle = 'rgba(120,200,255,0.22)';
-          ctx.fillRect(cx2, cy2, cw, ch);
+          ctx.fillRect(-cw / 2, -ch / 2, cw, ch);
           const chBuildFrac = Math.max(0, Math.min(1, chestTargetHp > 0 ? s.hp / chestTargetHp : 0));
           const chBarW = cw * 0.7; const chBarH = Math.max(2, 4 * zoom);
-          const chBarX = -chBarW / 2; const chBarY = cy2 - chBarH - 2;
+          const chBarX = -chBarW / 2; const chBarY = -ch / 2 - chBarH - 2;
           ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
           ctx.strokeRect(chBarX, chBarY, chBarW, chBarH);
           ctx.fillStyle = '#55ddff'; ctx.fillRect(chBarX, chBarY, chBarW * chBuildFrac, chBarH);
           ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', 0, chBarY - 2);
+          ctx.restore();
         }
-        // Repair icon when hammer equipped and chest is damaged (not schematic)
         if (this.hammerEquipped && !chestIsSchematic && hpFrac < 0.999) {
           ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
-          ctx.fillText('\u2692', 0, 0);
+          ctx.fillText('\u2692', ssp.x, ssp.y);
         }
-
-        ctx.restore();
       }
     } // end for sorted
 
@@ -8489,34 +7888,19 @@ export class RenderSystem {
       const targetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
       const isSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
       const hpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
-      const dmgDarken = Math.max(0, 1 - hpFrac) * 0.75;
       const half = sz / 2;
-      const fillCol  = isHovered ? '#c8924a' : '#96642a';
-      const stripCol = RenderSystem.structureCompanyColor(s.companyId);
-      const stripH   = Math.max(1, 2 * zoom);
+      const ceilSprite = getWoodCeilingSprite(this._structureSpriteCache, {
+        hovered: isHovered,
+        companyId: s.companyId,
+        hpFrac,
+      });
+      const ceilSw = ceilSprite.w * zoom;
+      const ceilSh = ceilSprite.h * zoom;
 
       const drawCeilContent = (alphaFactor: number): void => {
         ctx.globalAlpha = alphaFactor;
-        ctx.fillStyle = fillCol;
-        ctx.fillRect(-half, -half, sz, sz);
-
-        ctx.strokeStyle = 'rgba(50, 25, 5, 0.5)';
-        ctx.lineWidth = Math.max(0.5, 0.9 * zoom);
-        ctx.beginPath();
-        ctx.moveTo(-half, -half); ctx.lineTo(half, half);
-        ctx.moveTo(half, -half);  ctx.lineTo(-half, half);
-        ctx.moveTo(-half, 0);     ctx.lineTo(half, 0);
-        ctx.stroke();
-
-        ctx.globalAlpha = 0.8 * alphaFactor;
-        ctx.fillStyle = stripCol;
-        ctx.fillRect(-half, -half, sz, stripH);
-
-        if (dmgDarken > 0.01) {
-          ctx.globalAlpha = dmgDarken * alphaFactor;
-          ctx.fillStyle = 'rgba(0,0,0,1)';
-          ctx.fillRect(-half, -half, sz, sz);
-        }
+        ctx.drawImage(ceilSprite.canvas as unknown as CanvasImageSource, -ceilSw / 2, -ceilSh / 2, ceilSw, ceilSh);
+        ctx.globalAlpha = 1;
       };
 
       ctx.save();
@@ -8588,7 +7972,7 @@ export class RenderSystem {
           ctx.fillStyle = '#b0e0ff';
           ctx.fillText('\u2692', 0, barY - 2);
         }
-      } else if (this.hammerEquipped && dmgDarken > 0.01) {
+      } else if (this.hammerEquipped && hpFrac < 0.999) {
         // Repair icon for damaged ceilings when hammer equipped
         ctx.globalAlpha = 1;
         ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
