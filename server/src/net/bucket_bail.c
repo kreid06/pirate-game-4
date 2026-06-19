@@ -72,6 +72,8 @@ bool bucket_near_well(const struct Ship* ship, float local_x, float local_y) {
 
 bool bucket_can_fill_at(WebSocketPlayer* player, struct Ship* ship,
                           uint8_t deck_level, bool at_well) {
+    (void)deck_level;
+    (void)at_well;
     if (!player || !ship || player->parent_ship_id == 0) return false;
     if (!bucket_player_has_equipped(player)) return false;
     if (player->bucket_fill > 0) return false;
@@ -83,16 +85,18 @@ bool bucket_can_fill_at(WebSocketPlayer* player, struct Ship* ship,
     float fill = water_fill(ship);
     if (fill <= 0.0f) return false;
 
-    bool near_well = at_well || (deck_level == 0
+    /* Server-authoritative: deck and well proximity come from player state only. */
+    uint8_t auth_deck = player->deck_level;
+    bool near_well = (auth_deck == 0
         && bucket_near_well(ship, player->local_x, player->local_y));
 
-    if (deck_level == 0) {
+    if (auth_deck == 0) {
         if (near_well)
             return fill_meets_threshold(fill, BUCKET_WELL_SCOOP_FILL);
         return fill_meets_threshold(fill, BUCKET_LOWER_SCOOP_FILL);
     }
 
-    if (deck_level == 1) {
+    if (auth_deck == 1) {
         return fill_meets_threshold(fill, BUCKET_UPPER_SCOOP_FILL);
     }
 
@@ -212,13 +216,9 @@ bool bucket_apply_fill(WebSocketPlayer* player, struct Ship* ship, bool success,
         return true;
     }
 
-    /* Prefer the deck level the client used when starting the minigame; fall back to
-     * the server's deck_level if the client omitted it or the request deck fails. */
-    bool can = bucket_can_fill_at(player, ship, req_deck, req_at_well);
-    if (!can && req_deck != player->deck_level) {
-        can = bucket_can_fill_at(player, ship, player->deck_level, req_at_well);
-    }
-    if (!can) {
+    (void)req_deck;
+    (void)req_at_well;
+    if (!bucket_can_fill(player, ship)) {
         strcpy(response, "{\"type\":\"message_ack\",\"status\":\"bucket_no_water_source\"}");
         return true;
     }

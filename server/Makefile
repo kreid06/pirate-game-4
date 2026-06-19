@@ -58,7 +58,10 @@ install-deps:
 	sudo apt-get update
 	sudo apt-get install -y build-essential libwebsockets-dev libjson-c-dev
 
-.PHONY: all clean install-deps test-integration demo-simple
+.PHONY: all clean install-deps test-integration test-bucket-bail demo-simple
+
+test-bucket-bail: obj/net/bucket_bail.o obj/util/time.o
+	gcc -Wall -Wextra -std=c99 -O2 -g -Iinclude -o bin/test_bucket_bail tests/test_bucket_bail.c obj/net/bucket_bail.o obj/util/time.o -lm
 
 # Full integration test for Week 3-4 systems
 test-integration: obj/core/rewind_buffer.o obj/core/input_validation.o obj/core/math.o obj/core/rng.o
