@@ -17,6 +17,7 @@ import {
   COMPANY_NAVY,
 } from '../../sim/Types.js';
 import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, INVENTORY_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight, PlayerResources } from '../../sim/Inventory.js';
+import { computePlayerCarriedKg, playerCarryCapacityKg } from '../../sim/Grapple.js';
 import { SchematicEntry, tierColor, tierName, statMultLabel, QUALITY_STAT_NAMES, qualityCostMult, MAX_PLAYER_SCHEMATICS } from '../../sim/Quality.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
@@ -1707,9 +1708,8 @@ export class PlayerMenu {
       sty += 5;
 
       const weightLvl     = (player.statWeight ?? 0) as number;
-      const BASE_CAPACITY = 300;
-      const capacity      = Math.round(BASE_CAPACITY * (1 + weightLvl * 0.1));
-      const carried       = computeInventoryWeight(player.inventory);
+      const capacity      = Math.round(playerCarryCapacityKg(weightLvl));
+      const carried       = Math.round(computePlayerCarriedKg(player, _worldState.players));
       const pct           = Math.min(carried / capacity, 1);
 
       // Warn colours: normal → green, >75% → amber, >95% → red

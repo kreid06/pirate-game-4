@@ -11,6 +11,7 @@ import { GhostPlacement, GhostModuleKind } from '../../sim/Types.js';
 import { Camera } from '../gfx/Camera.js';
 import { NetworkStats } from '../../net/NetworkManager.js';
 import { ITEM_DEFS, INVENTORY_SLOTS, HOTBAR_SLOTS, ItemKind, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight } from '../../sim/Inventory.js';
+import { computePlayerCarriedKg, playerCarryCapacityKg } from '../../sim/Grapple.js';
 import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
@@ -3742,11 +3743,11 @@ class HUDElement implements UIElement {
     }
 
     // Vital bars (weight / food / water) — right of hotbar
-    const BASE_CARRY = 300;
-    const carryCapacity = BASE_CARRY * (1 + ((player.statWeight ?? 0) as number) * 0.1);
+    const carryCapacity = playerCarryCapacityKg((player.statWeight ?? 0) as number);
+    const carriedKg = computePlayerCarriedKg(player, context.worldState.players);
     this.renderVitalBars(
       ctx, ctx.canvas,
-      computeInventoryWeight(player.inventory), carryCapacity,
+      carriedKg, carryCapacity,
       player.hunger ?? 100,
       player.thirst ?? 100,
     );

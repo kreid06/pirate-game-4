@@ -66,7 +66,7 @@ import { AudioManager } from './audio/AudioManager.js';
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN, SHIP_TYPE_GHOST } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS, computeInventoryWeight } from '../sim/Inventory.js';
-import { isGrappleEncumbered, playerCarryCapacityKg, computeGrappleExtraCarryKg } from '../sim/Grapple.js';
+import { isGrappleEncumbered, playerCarryCapacityKg, computePlayerCarriedKg } from '../sim/Grapple.js';
 import { tierName, tierColor, itemDisplayName, qualityCostMult } from '../sim/Quality.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
@@ -4592,8 +4592,7 @@ export class ClientApplication {
           // Mirror server's carry-weight gate for sprint (block at ≥ 85 % capacity).
           {
             const carryCap = playerCarryCapacityKg(player.statWeight ?? 0);
-            const carryKg  = (player.inventory ? computeInventoryWeight(player.inventory) : 0)
-              + computeGrappleExtraCarryKg(player, this.predictedWorldState?.players ?? []);
+            const carryKg  = computePlayerCarriedKg(player, this.predictedWorldState?.players ?? []);
             this.inputManager.setPlayerCarryRatio(carryCap > 0 ? carryKg / carryCap : 0);
           }
           this.renderSystem.playerInteractInfo = {

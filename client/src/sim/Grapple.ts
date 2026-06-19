@@ -33,12 +33,16 @@ export function playerCarryCapacityKg(statWeight = 0): number {
   return 300 * (1 + statWeight * 0.1);
 }
 
+/** Inventory weight plus grappled entity load (body + target inventory). */
+export function computePlayerCarriedKg(player: Player, allPlayers: Player[]): number {
+  return (player.inventory ? computeInventoryWeight(player.inventory) : 0)
+    + computeGrappleExtraCarryKg(player, allPlayers);
+}
+
 export function playerEffectiveCarryRatio(player: Player, allPlayers: Player[]): number {
   const cap = playerCarryCapacityKg(player.statWeight ?? 0);
   if (cap <= 0) return 0;
-  const kg = (player.inventory ? computeInventoryWeight(player.inventory) : 0)
-    + computeGrappleExtraCarryKg(player, allPlayers);
-  return kg / cap;
+  return computePlayerCarriedKg(player, allPlayers) / cap;
 }
 
 export function isGrappleEncumbered(player: Player, allPlayers: Player[]): boolean {
