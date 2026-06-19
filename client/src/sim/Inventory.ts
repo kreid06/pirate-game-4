@@ -56,7 +56,8 @@ export type ItemKind =
   | 'metal_axe'
   | 'metal_pickaxe'
   | 'metal_sickle'
-  | 'grapple_hook';
+  | 'grapple_hook'
+  | 'bucket';
 
 // ── Category groups ─────────────────────────────────────────────────────────
 export type ItemCategory = 'none' | 'building' | 'repair' | 'ammo' | 'weapon' | 'tool' | 'armor' | 'shield' | 'resource' | 'utility';
@@ -126,6 +127,7 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   metal_pickaxe: { kind: 'metal_pickaxe', name: 'Metal Pickaxe', category: 'tool',     maxStack: 1,  color: '#6a8aa0', borderColor: '#3a5868', symbol: '\u26cf',       description: 'A sturdy metal pickaxe. Mines 1.5× faster with proportionally more ore per swing.',           weight: 4   },
   metal_sickle:  { kind: 'metal_sickle',  name: 'Metal Sickle',  category: 'tool',     maxStack: 1,  color: '#6a9a70', borderColor: '#3a6848', symbol: '\uD83C\uDF3E', description: 'A sharp metal sickle. Clears fiber bushes 2.5× faster with proportionally more fiber per swing.', weight: 2.5 },
   grapple_hook:  { kind: 'grapple_hook',  name: 'Grapple Hook',  category: 'tool',     maxStack: 1,  color: '#808080', borderColor: '#505050', symbol: '\u2693',       description: 'A metal grappling hook. Craft at a workbench.',                                                 weight: 2   },
+  bucket:        { kind: 'bucket',        name: 'Bucket',        category: 'tool',     maxStack: 1,  color: '#6a8ab0', borderColor: '#3a5878', symbol: 'Bk', description: 'Left-click to scoop floodwater; right-click to dump overboard or through a gunport.', weight: 1   },
 };
 
 /**
@@ -178,6 +180,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   41: 'metal_pickaxe',
   42: 'grapple_hook',
   43: 'metal_sickle',
+  44: 'bucket',
 };
 
 /**
@@ -296,6 +299,7 @@ export const STRUCTURE_COSTS: Record<string, PlayerResources> = {
   gunport:     { wood: 6,  fiber: 0,  metal: 2,  stone: 0 },
   workbench:   { wood: 12, fiber: 0,  metal: 0,  stone: 0 },
   chest:       { wood: 12, fiber: 0,  metal: 0,  stone: 0 },
+  well:        { wood: 8,  fiber: 4,  metal: 0,  stone: 0 },
 };
 
 export interface PlayerInventory {

@@ -348,6 +348,7 @@ typedef enum {
     ITEM_METAL_PICKAXE = 41,  /* Metal pickaxe — better yield/damage than stone one    */
     ITEM_GRAPPLE_HOOK  = 42,  /* Grapple hook — workbench-crafted utility tool         */
     ITEM_METAL_SICKLE  = 43,  /* Metal sickle — faster fiber harvest than bare hands   */
+    ITEM_BUCKET        = 44,  /* Bucket — bail floodwater from a ship                  */
 
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
@@ -757,6 +758,10 @@ typedef struct WebSocketPlayer {
     float    respawn_ship_lx;
     float    respawn_ship_ly;
     uint32_t bed_last_use_ms;
+
+    /* Bucket bail state — 0=empty, 1=half, 2=full */
+    uint8_t  bucket_fill;
+    uint32_t bucket_cooldown_until_ms;
 } WebSocketPlayer;
 
 struct WebSocketStats {

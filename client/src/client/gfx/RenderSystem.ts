@@ -12,7 +12,8 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company, LandGhostPlacement } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, DeckModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
+import { BUCKET_LOWER_SCOOP_FILL, BUCKET_UPPER_SCOOP_FILL, computeDeckFloodTint } from '../../sim/BucketBail.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
@@ -218,6 +219,8 @@ export class RenderSystem {
   private chestBuildMode: boolean = false;
   /** Whether bed placement build mode is active (bed ghost selected). */
   private bedBuildMode: boolean = false;
+  /** Whether bilge well placement build mode is active (well ghost selected). */
+  private wellBuildMode: boolean = false;
   /** Whether ship workbench placement build mode is active (workbench ghost selected). */
   private workbenchBuildMode: boolean = false;
   /** The gunport snap index currently hovered in gunport build mode. */
@@ -243,6 +246,13 @@ export class RenderSystem {
   public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
   /** Read-only access to the current player deck level for placement decisions. */
   public get playerDeckLevel(): number { return this._playerDeckLevel; }
+  /** Bucket bail UI — true while local player holds water and can dump. */
+  private _bucketDumpHintActive = false;
+  private _bucketDumpHintValid = false;
+  public setBucketDumpHint(active: boolean, valid: boolean): void {
+    this._bucketDumpHintActive = active;
+    this._bucketDumpHintValid = valid;
+  }
   /**
    * Timestamp (performance.now) of the most recent boarding event.
    * Ramp fall-through detection is suppressed for 500 ms after boarding so a
@@ -424,7 +434,15 @@ export class RenderSystem {
 
   // Per-frame memoization caches — cleared at the top of renderWorld() each frame.
   // computeSinkState() is called ~10× per visible ship per frame; caching cuts it to 1 compute per ship.
-  private _sinkStateCache: Map<number, { waterFill: number; floodTint: number; phase1Alpha: number; phase2Alpha: number; phase3Alpha: number }> = new Map();
+  private _sinkStateCache: Map<number, {
+    waterFill: number;
+    lowerDeckFloodTint: number;
+    upperDeckFloodTint: number;
+    floodTint: number;
+    phase1Alpha: number;
+    phase2Alpha: number;
+    phase3Alpha: number;
+  }> = new Map();
   // darkenByDamage() allocates a new rgb() string on every call (~116/frame for a full brig).
   // Key is "<hex>:<health_bucket>"; 21 buckets (0–20) × ~6 distinct hex colours → ≤126 entries.
   private _darkenCache: Map<string, string> = new Map();
@@ -2235,6 +2253,22 @@ export class RenderSystem {
     this.effectRenderer.createAnnouncement(text, kind, duration);
   }
 
+  /** Green/red ring around the local player when holding bucket water. */
+  private drawBucketDumpHint(camera: Camera): void {
+    if (!this._bucketDumpHintActive) return;
+    const player = this._cachedLocalPlayer;
+    if (!player) return;
+    const sp = camera.worldToScreen(player.position);
+    const r = 22 * camera.getState().zoom;
+    this.ctx.save();
+    this.ctx.strokeStyle = this._bucketDumpHintValid ? 'rgba(80, 220, 120, 0.9)' : 'rgba(220, 80, 80, 0.75)';
+    this.ctx.lineWidth = 2.5;
+    this.ctx.beginPath();
+    this.ctx.arc(sp.x, sp.y, r, 0, Math.PI * 2);
+    this.ctx.stroke();
+    this.ctx.restore();
+  }
+
   /** Returns the ship ID of the last ship that fired a cannonball near shipId, or null. */
   getLastAttackerOf(shipId: number): number | null {
     return this.lastAttackerOf.get(shipId) ?? null;
@@ -3267,6 +3301,14 @@ export class RenderSystem {
   /** Whether bed build mode is currently active */
   isInBedBuildMode(): boolean {
     return this.bedBuildMode;
+  }
+
+  setWellBuildMode(active: boolean): void {
+    this.wellBuildMode = active;
+  }
+
+  isInWellBuildMode(): boolean {
+    return this.wellBuildMode;
   }
 
   /** Activate or deactivate ship workbench placement build mode. */
@@ -4938,6 +4980,9 @@ export class RenderSystem {
         } else if (moduleKind === 'bed') {
           width = 44;
           height = 24;
+        } else if (moduleKind === 'well') {
+          width = 32;
+          height = 32;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -4985,8 +5030,10 @@ export class RenderSystem {
 
   /**
    * Returns sinking-related render state for a ship.
-   *  waterFill    0–1 : fraction of hull filled with water (1 - hullHealth/100)
-   *  floodTint    0–1 : how blue the deck is (ramps up from waterFill=0.75 → 1.0)
+   *  waterFill           0–1 : fraction of hull filled with water (1 - hullHealth/100)
+   *  lowerDeckFloodTint  0–1 : lower deck blue overlay (ramps from 25% flood → full)
+   *  upperDeckFloodTint  0–1 : upper deck blue overlay (ramps from 75% flood → full)
+   *  floodTint           alias for upperDeckFloodTint (legacy call sites)
    *  phase1Alpha  1–0 : hull / deck / planks fade (0–4 s after despawn)
    *  phase2Alpha  1–0 : cannons fade (2–6 s after despawn)
    *  phase3Alpha  1–0 : sail fibers & masts fade (4–8 s after despawn)
@@ -5003,6 +5050,8 @@ export class RenderSystem {
 
   private computeSinkState(ship: Ship): {
     waterFill: number;
+    lowerDeckFloodTint: number;
+    upperDeckFloodTint: number;
     floodTint: number;
     phase1Alpha: number;
     phase2Alpha: number;
@@ -5021,7 +5070,9 @@ export class RenderSystem {
     const rawHullPct = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
     const hullPct = this.sinkTimestamps.has(ship.id) ? 0 : rawHullPct;
     const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
-    const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
+    const lowerDeckFloodTint = computeDeckFloodTint(waterFill, BUCKET_LOWER_SCOOP_FILL);
+    const upperDeckFloodTint = computeDeckFloodTint(waterFill, BUCKET_UPPER_SCOOP_FILL);
+    const floodTint = upperDeckFloodTint;
 
     // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late).
     // Ghost ships rely exclusively on the explicit markShipSinking() call from the SHIP_SINKING server
@@ -5039,9 +5090,102 @@ export class RenderSystem {
       phase2Alpha = Math.max(0, 1 - Math.max(0, elapsed - 2) / 4);        // 2–6 s
       phase3Alpha = Math.max(0, 1 - Math.max(0, elapsed - 4) / 4);        // 4–8 s
     }
-    const result = { waterFill, floodTint, phase1Alpha, phase2Alpha, phase3Alpha };
+    const result = {
+      waterFill,
+      lowerDeckFloodTint,
+      upperDeckFloodTint,
+      floodTint,
+      phase1Alpha,
+      phase2Alpha,
+      phase3Alpha,
+    };
     this._sinkStateCache.set(ship.id, result);
     return result;
+  }
+
+  /**
+   * Build a canvas path for a deck's walkable surface (module area polygon, or hull fallback).
+   * Upper deck (1) subtracts ramp/hatch holes via even-odd fill.
+   */
+  private _buildDeckSurfacePath(ship: Ship, deckLevel: number, deckMod?: ShipModule): 'fill' | 'evenodd' | null {
+    const area = deckMod?.moduleData?.kind === 'deck'
+      ? (deckMod.moduleData as DeckModuleData).area
+      : undefined;
+    if (area && area.length >= 3) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(area[0].x, area[0].y);
+      for (let i = 1; i < area.length; i++) this.ctx.lineTo(area[i].x, area[i].y);
+      this.ctx.closePath();
+      return 'fill';
+    }
+    if (ship.hull.length < 3) return null;
+    this.ctx.beginPath();
+    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    this.ctx.closePath();
+    if (deckLevel === 1) {
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+      return 'evenodd';
+    }
+    return 'fill';
+  }
+
+  /** Blue flood tint clipped to a single deck's walkable surface. */
+  private _drawDeckFloodFill(
+    ship: Ship,
+    deckLevel: number,
+    floodTint: number,
+    phase1Alpha: number,
+    deckMod?: ShipModule,
+  ): void {
+    if (floodTint <= 0) return;
+    const mod = deckMod ?? ship.modules.find(m => m.kind === 'deck' && m.deckId === deckLevel);
+    const fillMode = this._buildDeckSurfacePath(ship, deckLevel, mod);
+    if (!fillMode) return;
+    this.ctx.save();
+    this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+    this.ctx.fillStyle = '#1a6eb5';
+    if (fillMode === 'evenodd') this.ctx.fill('evenodd');
+    else this.ctx.fill();
+    this.ctx.restore();
+  }
+
+  /**
+   * Per-deck-index flood overlays on walkable deck surfaces (layer 3).
+   * Lower deck on two-deck ships is handled in drawLowerDeckFloor (hatches / below-deck view).
+   */
+  private drawShipDeckFloodOverlays(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
+
+    const { lowerDeckFloodTint, upperDeckFloodTint, phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    const playerBelow = this._lowerDeckShipId === ship.id;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'deck') continue;
+      const deckLevel = mod.deckId;
+      if (deckLevel === 0) {
+        if (hasUpperDeck) continue;
+        this._drawDeckFloodFill(ship, 0, lowerDeckFloodTint, phase1Alpha, mod);
+      } else if (deckLevel === 1) {
+        if (playerBelow) continue;
+        this._drawDeckFloodFill(ship, 1, upperDeckFloodTint, phase1Alpha, mod);
+      }
+    }
+
+    this.ctx.restore();
   }
 
   private isPointInCurvedPlank(
@@ -5382,6 +5526,7 @@ export class RenderSystem {
     this.drawGrapeshotTracers(camera);
     // Directional fog mask (after world geometry and effects, before HUD)
     this.drawFogMask(camera);
+    this.drawBucketDumpHint(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
@@ -9635,6 +9780,7 @@ export class RenderSystem {
     for (const ship of renderShips) {
       if (ship.shipType !== SHIP_TYPE_GHOST) {
         this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+        this.queueRenderItem(3, `deck-flood-${ship.id}`, () => this.drawShipDeckFloodOverlays(ship, camera), 2);
       }
       // Ghost deck effects (runic circle + crew silhouettes) drawn above planks
       if (ship.shipType === SHIP_TYPE_GHOST) {
@@ -9731,6 +9877,12 @@ export class RenderSystem {
       }
     }
 
+    if (this.wellBuildMode && this.mouseWorldPos && this._playerDeckLevel === 0) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `well-ghost-${ship.id}`, () => this.drawWellGhostOnShip(ship, camera), 0);
+      }
+    }
+
     // In workbench build mode, overlay a ghost workbench at the cursor position on each ship (layer 4)
     if (this.workbenchBuildMode && this.mouseWorldPos) {
       for (const ship of worldState.ships) {
@@ -9747,6 +9899,7 @@ export class RenderSystem {
       this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
       this.queueRenderItem(1, `chests-lower-${ship.id}`,   () => this.drawShipChests(ship, camera, 0), 3);
       this.queueRenderItem(1, `beds-lower-${ship.id}`,     () => this.drawShipBeds(ship, camera, 0), 3);
+      this.queueRenderItem(1, `wells-lower-${ship.id}`,    () => this.drawShipWells(ship, camera, 0), 3);
       this.queueRenderItem(1, `workbenches-lower-${ship.id}`, () => this.drawShipWorkbenches(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
       this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
@@ -10487,7 +10640,7 @@ export class RenderSystem {
     
     if (ship.hull.length === 0) return;
 
-    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return; // fully faded — nothing to draw
     
     this.ctx.save();
@@ -10625,29 +10778,24 @@ export class RenderSystem {
         this.ctx.stroke();
       }
 
-      // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
-      // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-      const ghostNpcLvl3 = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
-      const ghostLvlMaxHP3 = isGhost ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl3 - 1) * 9 / 59)) : GHOST_MAX_HULL_HP;
-      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / ghostLvlMaxHP3) - 0.25) / 0.75 : 0;
-      if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
-        if (isGhost) {
-          // Ghost dissolve: level-tinted mist, starts from 75% HP
+      // Ghost dissolve mist (not per-deck flood — spectral hull effect only)
+      if (isGhost) {
+        const ghostNpcLvl3 = ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+        const ghostLvlMaxHP3 = Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl3 - 1) * 9 / 59));
+        const ghostMistAlpha = Math.max(0, (1 - ship.hullHealth / ghostLvlMaxHP3) - 0.25) / 0.75;
+        if (ghostMistAlpha > 0) {
           const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
           const ghostMistClr = ghostSpectralColor(ship.npcLevel ?? 1);
           this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
           this.ctx.fillStyle = ghostMistClr;
           this.ctx.shadowColor = ghostMistClr;
           this.ctx.shadowBlur  = 16 / cameraState.zoom;
-        } else {
-          this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-          this.ctx.fillStyle = '#1a6eb5';
+          this.ctx.beginPath();
+          this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+          for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+          this.ctx.closePath();
+          this.ctx.fill();
         }
-        this.ctx.beginPath();
-        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-        this.ctx.closePath();
-        this.ctx.fill();
       }
     }
 
@@ -10755,11 +10903,10 @@ export class RenderSystem {
       return;
     }
 
-    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
 
     const isGhostShip = ship.shipType === SHIP_TYPE_GHOST;
-    
     this.ctx.save();
     // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
     const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
@@ -10947,41 +11094,6 @@ export class RenderSystem {
           }
         }
 
-        this.ctx.restore();
-      }
-    }
-
-    // Water flood tint: blue overlay painted on top of each plank
-    if (floodTint > 0) {
-      const tintAlpha = floodTint * 0.50 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      for (const plank of planks) {
-        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
-        if ((plank.moduleData.health ?? 1) <= 0) continue;
-        this.ctx.save();
-        this.ctx.globalAlpha = tintAlpha;
-        this.ctx.fillStyle = '#1a6eb5';
-        if (plank.moduleData.isCurved && plank.moduleData.curveData) {
-          // Approximate the curved plank outline using the bezier start/end points
-          const cd = plank.moduleData.curveData;
-          const w = plank.moduleData.width;
-          const s = cd.start, e = cd.end;
-          const nx = -(e.y - s.y), ny = (e.x - s.x);
-          const nlen = Math.hypot(nx, ny) || 1;
-          const ox = (nx / nlen) * w * 0.5, oy = (ny / nlen) * w * 0.5;
-          this.ctx.beginPath();
-          this.ctx.moveTo(s.x - ox, s.y - oy);
-          this.ctx.lineTo(s.x + ox, s.y + oy);
-          this.ctx.lineTo(e.x + ox, e.y + oy);
-          this.ctx.lineTo(e.x - ox, e.y - oy);
-          this.ctx.closePath();
-          this.ctx.fill();
-        } else {
-          this.ctx.translate(plank.localPos.x, plank.localPos.y);
-          this.ctx.rotate(plank.localRot);
-          const hl = plank.moduleData.length / 2;
-          const hw = plank.moduleData.width / 2;
-          this.ctx.fillRect(-hl, -hw, plank.moduleData.length, plank.moduleData.width);
-        }
         this.ctx.restore();
       }
     }
@@ -12544,6 +12656,8 @@ export class RenderSystem {
         ? Math.max(0, lowerDeckData.health / lowerDeckData.maxHealth)
         : 1;
     const lowerDeckFloorColor = this.darkenByDamage('#5c3d1e', lowerDeckHealthRatio);
+    const { lowerDeckFloodTint, phase1Alpha } = this.computeSinkState(ship);
+    const lowerFloodAlpha = lowerDeckFloodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
 
     this.ctx.save();
     const screenPos   = camera.worldToScreen(ship.position);
@@ -12586,6 +12700,7 @@ export class RenderSystem {
           this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
         }
         this.ctx.stroke();
+        this._drawDeckFloodFill(ship, 0, lowerDeckFloodTint, phase1Alpha, lowerDeckMod);
       } else {
         this.ctx.fillStyle = '#1a0e06';
         this.ctx.fill();
@@ -12629,6 +12744,15 @@ export class RenderSystem {
           this.ctx.strokeStyle = '#3d2608';
           this.ctx.lineWidth = lw * 2;
           this.ctx.strokeRect(rx, ry, 50, 50);
+          if (lowerDeckFloodTint > 0) {
+            this.ctx.save();
+            this.ctx.globalAlpha = lowerFloodAlpha;
+            this.ctx.fillStyle = '#1a6eb5';
+            this.ctx.fillRect(rx, ry, 50, 50);
+            this.ctx.fillStyle = 'rgba(170,230,255,0.45)';
+            this.ctx.fillRect(rx + 2, ry + 2, 46, 3);
+            this.ctx.restore();
+          }
         } else {
           const grad = this.ctx.createLinearGradient(rx, ry, rx, ry + 50);
           grad.addColorStop(0, '#1a0e06');
@@ -12647,7 +12771,7 @@ export class RenderSystem {
 
   /**
    * Bake the upper-deck cover (hull polygon fill + grain) into an OffscreenCanvas.
-   * Re-baked only when deck health bucket changes.  Flood tint is still drawn dynamically.
+   * Re-baked only when deck health bucket changes.
    */
   private _getShipUpperDeckSprite(ship: Ship): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
     if (ship.hull.length < 3) return null;
@@ -12718,7 +12842,7 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     if (ship.hull.length < 3) return;
 
-    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
 
     const screenPos   = camera.worldToScreen(ship.position);
@@ -12744,17 +12868,6 @@ export class RenderSystem {
         fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
       }
       this.ctx.fillStyle = fillColor;
-      this.ctx.beginPath();
-      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-      this.ctx.closePath();
-      this.ctx.fill();
-    }
-
-    // Flood tint overlay — dynamic, drawn directly (cannot be cached)
-    if (floodTint > 0) {
-      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      this.ctx.fillStyle = '#1a6eb5';
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
@@ -16100,6 +16213,94 @@ export class RenderSystem {
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'bottom';
     this.ctx.fillText('[Click] Place Bed', 0, -16);
+    this.ctx.restore();
+  }
+
+  private _drawWellShape(lw: number, alpha: number, isHovered: boolean): void {
+    const r = 16;
+    this.ctx.globalAlpha *= alpha;
+    this.ctx.fillStyle = isHovered ? '#3a6898' : '#2a4868';
+    this.ctx.strokeStyle = isHovered ? '#88bbee' : '#5a8ac0';
+    this.ctx.lineWidth = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, r, 0, Math.PI * 2);
+    this.ctx.fill();
+    this.ctx.stroke();
+    this.ctx.fillStyle = 'rgba(100, 180, 255, 0.45)';
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2);
+    this.ctx.fill();
+  }
+
+  /** Draw placed bilge well modules (lower deck only). */
+  private drawShipWells(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
+    const wells = ship.modules.filter(m => m.kind === 'well' && (
+      deckFilter === undefined ? true : m.deckId === deckFilter
+    ));
+    if (wells.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const well of wells) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === well.id;
+      this.ctx.save();
+      this.ctx.translate(well.localPos.x, well.localPos.y);
+      this._drawWellShape(lw, 1.0, isHovered);
+      if (isHovered) {
+        this.ctx.fillStyle = '#c8e8ff';
+        this.ctx.font = `bold ${9 / zoom}px Georgia, serif`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('Bilge Well', 0, -18);
+      }
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /** Draw a ghost well when placing from the build menu (lower deck only). */
+  private drawWellGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos || ship.modules.some(m => m.kind === 'well')) return;
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this._drawWellShape(lw, alpha, false);
+    this.ctx.fillStyle = '#88ccff';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Well', 0, -22);
     this.ctx.restore();
   }
 
@@ -19850,7 +20051,7 @@ export class RenderSystem {
     const { kind, rotDeg } = this.pendingGhostState;
 
     // Dedicated ship-local ghost drawers handle these kinds (with rotation).
-    if (kind === 'workbench' || kind === 'chest' || kind === 'bed') return;
+    if (kind === 'workbench' || kind === 'chest' || kind === 'bed' || kind === 'well') return;
 
     // Hide the following cursor ghost when the cannon is already snapping to a gunport —
     // the slot ghost itself acts as the placement indicator.

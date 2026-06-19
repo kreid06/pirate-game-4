@@ -2,6 +2,7 @@ import { Vec2 } from '../common/Vec2.js';
 import { ShipModule } from './modules.js';
 import { CarrierDetectionState } from './CarrierDetection.js';
 import { PlayerInventory } from './Inventory.js';
+import type { BucketFillLevel } from './BucketBail.js';
 
 /**
  * Player input frame for deterministic simulation
@@ -143,6 +144,9 @@ export interface Player {
   grappleY?: number;          // current world Y of the hook tip
   grappleRopeLength?: number; // current max rope length in px (from server grapple_rope)
   grappleTargetType?: number; // 0=none 1=item 2=ship 3=player 4=npc (only set when ATTACHED)
+
+  /** Bucket bail — 0=empty, 1=half, 2=full (server-authoritative). */
+  bucketFill?: BucketFillLevel;
 }
 
 /**
@@ -529,7 +533,7 @@ export const PhysicsConfig = {
  * Module kinds that can be ghost-placed as planning markers.
  * Subset of ModuleKind — only buildable module types.
  */
-export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'workbench' | 'chest' | 'bed';
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'workbench' | 'chest' | 'bed' | 'well';
 
 /**
  * A client-local "ghost" placement — a translucent planning marker showing

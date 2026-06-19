@@ -19,6 +19,7 @@ export type ModuleKind =
   | 'workbench'      // Workbench - crafting station on ship deck
   | 'chest'          // Resource chest - stores raw resources for auto-repair and land supply
   | 'bed'            // Bed - sets ship respawn point for crewmates
+  | 'well'           // Bilge well - scoop floodwater on lower deck
   | 'custom';        // User-defined module types
 
 /**
@@ -41,6 +42,7 @@ export enum ModuleTypeId {
   WORKBENCH = 12,    // Workbench — crafting station on ship deck
   CHEST = 13,        // Resource chest — stores raw resources for auto-repair and land supply
   BED = 14,          // Bed — sets ship respawn point for crewmates
+  WELL = 15,         // Bilge well — scoop floodwater on lower deck
   CUSTOM = 255  // Use high value for custom types
 }
 
@@ -65,6 +67,7 @@ export const MODULE_TYPE_MAP = {
       case 'workbench': return ModuleTypeId.WORKBENCH;
       case 'chest': return ModuleTypeId.CHEST;
       case 'bed': return ModuleTypeId.BED;
+      case 'well': return ModuleTypeId.WELL;
       case 'custom': return ModuleTypeId.CUSTOM;
     }
   },
@@ -85,6 +88,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.WORKBENCH: return 'workbench';
       case ModuleTypeId.CHEST: return 'chest';
       case ModuleTypeId.BED: return 'bed';
+      case ModuleTypeId.WELL: return 'well';
       case ModuleTypeId.CUSTOM: return 'custom';
       default: return 'custom';
     }
@@ -313,6 +317,10 @@ export interface CustomModuleData {
  */
 export interface BedModuleData {
   kind: 'bed';
+}
+
+export interface WellModuleData {
+  kind: 'well';
 }
 
 /**
@@ -994,6 +1002,7 @@ export function getModuleFootprint(kind: ModuleKind): ModuleFootprint {
     case 'workbench':      return { kind: 'box', hw: 22, hh: 15.5 };
     case 'chest':          return { kind: 'box', hw: 22, hh: 16 };
     case 'bed':            return { kind: 'box', hw: 22, hh: 12 };
+    case 'well':           return { kind: 'circle', radius: 16 };
     default:               return { kind: 'circle', radius: 10 };
   }
 }

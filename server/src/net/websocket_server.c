@@ -2,6 +2,7 @@
 #include "net/websocket_server_internal.h"
 #include "net/ship_chest_resources.h"
 #include "net/ship_plank_wreckage.h"
+#include "net/bucket_bail.h"
 #include "sim/ship_level.h"
 #include "sim/island.h"
 #include "sim/world_save.h"
@@ -326,6 +327,8 @@ typedef struct {
     uint8_t          stat_health, stat_damage, stat_stamina, stat_weight;
     PlayerInventory  inventory;
     uint16_t         res_wood, res_fiber, res_metal, res_stone;
+    uint8_t          bucket_fill;
+    uint32_t         bucket_cooldown_until_ms;
 } BlobPlayer;
 
 /* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
@@ -1211,6 +1214,7 @@ static float module_placement_radius(ModuleTypeId type) {
         case MODULE_TYPE_WORKBENCH:      return 22.0f;
         case MODULE_TYPE_RAMP:           return 20.0f;
         case MODULE_TYPE_BED:            return 22.0f;
+        case MODULE_TYPE_WELL:           return 18.0f;
         default:                         return 0.0f;   /* plank/deck/seat/ladder/hatch — passable */
     }
 }
@@ -1924,6 +1928,7 @@ static const float ITEM_WEIGHT_KG[64] = {
     [41] = 4.0f,  // ITEM_METAL_PICKAXE
     [42] = 2.0f,  // ITEM_GRAPPLE_HOOK
     [43] = 2.5f,  // ITEM_METAL_SICKLE
+    [44] = 1.0f,  // ITEM_BUCKET
 };
 
 /** Body mass assumed for every player aboard (kg). */
@@ -1991,6 +1996,8 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
     _dst->res_fiber            = _src->res_fiber;
     _dst->res_metal            = _src->res_metal;
     _dst->res_stone            = _src->res_stone;
+    _dst->bucket_fill          = _src->bucket_fill;
+    _dst->bucket_cooldown_until_ms = _src->bucket_cooldown_until_ms;
 }
 
 /* Same calculation over a BlobPlayer (slim snapshot copy used by the blob worker). */
@@ -2724,7 +2731,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 "\"player_level\":%u,\"player_xp\":%u,"
                 "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
                 "\"stat_points\":%u,"
-                "\"speed_mult\":%.4f,\"can_sprint\":%s"
+                "\"speed_mult\":%.4f,\"can_sprint\":%s,"
+                "\"bucket_fill\":%u"
                 "%s}",
                 snap->players[p].player_id, snap->players[p].name[0] ? snap->players[p].name : "Player",
                 snap->players[p].x, snap->players[p].y, snap->players[p].rotation,
@@ -2754,6 +2762,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                          + snap->players[p].stat_stamina + snap->players[p].stat_weight)
                     : 0),
                 _snap_spd_mult, _snap_can_sprint ? "true" : "false",
+                (unsigned)snap->players[p].bucket_fill,
                 inv_buf);
         /* Append active grapple state so the client can render the rope.
          * Only included when the hook is in flight or attached. */
@@ -5066,7 +5075,11 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             players[i].inventory.slots[5].quantity = 2;
             players[i].inventory.slots[6].item     = ITEM_SHIPYARD;
             players[i].inventory.slots[6].quantity = 1;
-            // slots 7-9 remain empty (zeroed by memset)
+            players[i].inventory.slots[7].item     = ITEM_BUCKET;
+            players[i].inventory.slots[7].quantity = 1;
+            players[i].bucket_fill = 0;
+            players[i].bucket_cooldown_until_ms = 0;
+            // slots 8-9 remain empty (zeroed by memset)
 
             return &players[i];
         }
@@ -9354,6 +9367,87 @@ int websocket_server_update(struct Sim* sim) {
                             }
                             handled = true;
 
+                        } else if (strcmp(msg_type, "bucket_fill") == 0) {
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else if (!global_sim) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                } else {
+                                    struct Ship* sim_ship = NULL;
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id == player->parent_ship_id) {
+                                            sim_ship = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                    if (!sim_ship) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else {
+                                        bool success = false;
+                                        const char* p_ok = strstr(payload, "\"success\":");
+                                        if (p_ok) {
+                                            p_ok += 10;
+                                            while (*p_ok == ' ') p_ok++;
+                                            success = (strncmp(p_ok, "true", 4) == 0);
+                                        }
+                                        uint8_t req_deck = player->deck_level;
+                                        bool req_at_well = false;
+                                        const char* p_deck = strstr(payload, "\"deckLevel\":");
+                                        if (p_deck) {
+                                            int dl = -1;
+                                            if (sscanf(p_deck + 12, "%d", &dl) == 1 && (dl == 0 || dl == 1))
+                                                req_deck = (uint8_t)dl;
+                                        }
+                                        const char* p_well = strstr(payload, "\"atWell\":");
+                                        if (p_well) {
+                                            p_well += 9;
+                                            while (*p_well == ' ') p_well++;
+                                            req_at_well = (strncmp(p_well, "true", 4) == 0);
+                                        }
+                                        bucket_apply_fill(player, sim_ship, success,
+                                                          req_deck, req_at_well,
+                                                          response, sizeof(response));
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "bucket_dump") == 0) {
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else if (!global_sim) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                } else {
+                                    struct Ship* sim_ship = NULL;
+                                    for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                        if (global_sim->ships[si].id == player->parent_ship_id) {
+                                            sim_ship = &global_sim->ships[si]; break;
+                                        }
+                                    }
+                                    if (!sim_ship) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                    } else {
+                                        uint8_t req_deck = player->deck_level;
+                                        const char* p_deck = strstr(payload, "\"deckLevel\":");
+                                        if (p_deck) {
+                                            int dl = -1;
+                                            if (sscanf(p_deck + 12, "%d", &dl) == 1 && (dl == 0 || dl == 1))
+                                                req_deck = (uint8_t)dl;
+                                        }
+                                        bucket_apply_dump(player, sim_ship, req_deck,
+                                                          response, sizeof(response));
+                                    }
+                                }
+                            }
+                            handled = true;
+
                         } else if (strcmp(msg_type, "repair_sail") == 0) {
                             // REPAIR SAIL FIBERS: restore openness (+50, cap 100) and wind_efficiency
                             // (+0.5, cap 1.0) on a specific mast. Consumes 1 ITEM_REPAIR_KIT.
@@ -10442,6 +10536,104 @@ int websocket_server_update(struct Sim* sim) {
                                             snprintf(response, sizeof(response),
                                                 "{\"type\":\"message_ack\",\"status\":\"bed_placed\",\"bed_id\":%u}",
                                                 new_id);
+                                        }
+                                    }
+                                }
+                            }
+                            handled = true;
+
+                        } else if (strcmp(msg_type, "place_well_at") == 0) {
+                            /* PLACE WELL: bilge well on lower deck only (one per ship). */
+                            if (client->player_id == 0) {
+                                strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
+                            } else {
+                                WebSocketPlayer* player = find_player(client->player_id);
+                                if (!player || player->parent_ship_id == 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
+                                } else if (player->deck_level != 0) {
+                                    strcpy(response, "{\"type\":\"error\",\"message\":\"wrong_deck\"}");
+                                } else {
+                                    bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
+                                    bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
+                                    SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_WELL, ITEM_NONE);
+                                    if (!_res_ok) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
+                                    } else if (!global_sim) {
+                                        strcpy(response, "{\"type\":\"error\",\"message\":\"no_simulation\"}");
+                                    } else {
+                                        uint16_t target_ship_id = player->parent_ship_id;
+                                        float local_x = 0.0f, local_y = 0.0f, local_rot = 0.0f;
+                                        const char* p_sid = strstr(payload, "\"shipId\":");
+                                        const char* p_lx  = strstr(payload, "\"localX\":");
+                                        const char* p_ly  = strstr(payload, "\"localY\":");
+                                        const char* p_lr  = strstr(payload, "\"rotation\":");
+                                        if (p_sid) { uint32_t sid = 0; sscanf(p_sid + 9, "%u", &sid); if (sid) target_ship_id = (uint16_t)sid; }
+                                        if (p_lx)  sscanf(p_lx + 9, "%f", &local_x);
+                                        if (p_ly)  sscanf(p_ly + 9, "%f", &local_y);
+                                        if (p_lr)  sscanf(p_lr + 11, "%f", &local_rot);
+                                        const uint8_t req_deck_id = 0;
+
+                                        struct Ship* wl_sim = NULL;
+                                        for (uint32_t si = 0; si < global_sim->ship_count; si++) {
+                                            if (global_sim->ships[si].id == target_ship_id) {
+                                                wl_sim = &global_sim->ships[si]; break;
+                                            }
+                                        }
+                                        SimpleShip* wl_simple = find_ship(target_ship_id);
+                                        if (!wl_sim || !wl_simple) {
+                                            strcpy(response, "{\"type\":\"error\",\"message\":\"ship_not_found\"}");
+                                        } else {
+                                            bool has_well = false;
+                                            for (uint8_t wm = 0; wm < wl_simple->module_count; wm++) {
+                                                if (wl_simple->modules[wm].type_id == MODULE_TYPE_WELL) {
+                                                    has_well = true; break;
+                                                }
+                                            }
+                                            if (has_well) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"well_already_placed\"}");
+                                            } else if (wl_sim->module_count >= MAX_MODULES_PER_SHIP ||
+                                                       wl_simple->module_count >= MAX_MODULES_PER_SHIP) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"ship_full\"}");
+                                            } else if (modules_overlap_at(wl_simple, MODULE_TYPE_WELL, local_x, local_y, req_deck_id)) {
+                                                strcpy(response, "{\"type\":\"error\",\"message\":\"placement_overlap\"}");
+                                            } else {
+                                                uint16_t max_id = 0;
+                                                for (uint8_t m = 0; m < wl_sim->module_count; m++)
+                                                    if (wl_sim->modules[m].id > max_id) max_id = wl_sim->modules[m].id;
+                                                for (uint8_t m = 0; m < wl_simple->module_count; m++)
+                                                    if (wl_simple->modules[m].id > max_id) max_id = wl_simple->modules[m].id;
+                                                uint16_t new_id = max_id + 1;
+
+                                                ShipModule nwl;
+                                                memset(&nwl, 0, sizeof(ShipModule));
+                                                nwl.id          = new_id;
+                                                nwl.type_id     = MODULE_TYPE_WELL;
+                                                nwl.local_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_x));
+                                                nwl.local_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(local_y));
+                                                nwl.local_rot   = Q16_FROM_FLOAT(local_rot);
+                                                nwl.state_bits  = MODULE_STATE_ACTIVE;
+                                                nwl.health      = 5000;
+                                                nwl.max_health  = 5000;
+                                                nwl.target_health = 5000;
+                                                nwl.deck_id     = req_deck_id;
+
+                                                wl_sim->modules[wl_sim->module_count++]       = nwl;
+                                                wl_simple->modules[wl_simple->module_count++] = nwl;
+
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_WELL, ITEM_NONE);
+
+                                                log_info("🪣 Player %u placed well %u at (%.1f,%.1f) on ship %u",
+                                                         player->player_id, new_id, local_x, local_y, wl_sim->id);
+                                                snprintf(response, sizeof(response),
+                                                    "{\"type\":\"message_ack\",\"status\":\"well_placed\",\"well_id\":%u}",
+                                                    new_id);
+                                            }
                                         }
                                     }
                                 }

@@ -77,6 +77,8 @@ export enum MessageType {
   REPAIR_PLANK = 'repair_plank',
   REPAIR_SAIL = 'repair_sail',
   USE_HAMMER = 'use_hammer',
+  BUCKET_FILL = 'bucket_fill',
+  BUCKET_DUMP = 'bucket_dump',
   PLACE_CANNON = 'place_cannon',
   PLACE_CANNON_AT = 'place_cannon_at',
   PLACE_MAST = 'place_mast',
@@ -107,6 +109,7 @@ export enum MessageType {
   PLACE_SWIVEL_AT = 'place_swivel_at',
   PLACE_CHEST_AT = 'place_chest_at',
   PLACE_BED_AT = 'place_bed_at',
+  PLACE_WELL_AT = 'place_well_at',
   PLACE_WORKBENCH_AT = 'place_workbench_at',
   BED_TRAVEL = 'bed_travel',
   CHEST_TRANSFER = 'chest_transfer',
@@ -408,6 +411,20 @@ interface UseHammerMessage extends NetworkMessage {
   moduleId: number;
 }
 
+interface BucketFillMessage extends NetworkMessage {
+  type: MessageType.BUCKET_FILL;
+  timestamp: number;
+  success: boolean;
+  deckLevel?: number;
+  atWell?: boolean;
+}
+
+interface BucketDumpMessage extends NetworkMessage {
+  type: MessageType.BUCKET_DUMP;
+  timestamp: number;
+  deckLevel?: number;
+}
+
 interface PlacePlankMessage extends NetworkMessage {
   type: MessageType.PLACE_PLANK;
   timestamp: number;
@@ -618,7 +635,7 @@ interface ChatMessageOut extends NetworkMessage {
   text: string;
 }
 
-type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | DropSchematicMessage | DropResourcesMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage | LandChestTransferMessage | LandChestDropMessage;
+type GameMessage = HandshakeMessage | InputMessage | MovementStateMessage | RotationUpdateMessage | ActionEventMessage | ModuleInteractMessage | ModuleInteractSuccessMessage | ModuleInteractFailureMessage | ShipSailControlMessage | ShipRudderControlMessage | ShipSailAngleControlMessage | CannonAimMessage | CannonFireMessage | CannonGroupConfigMessage | PingPongMessage | WorldStateMessage | AckMessage | SlotSelectMessage | UnequipMessage | GiveItemMessage | PlacePlankMessage | PlaceCannonMessage | PlaceCannonAtMessage | PlaceMastMessage | PlaceMastAtMessage | ReplaceHelmMessage | PlaceDeckMessage | RepairPlankMessage | RepairSailMessage | UseHammerMessage | BucketFillMessage | BucketDumpMessage | CrewAssignMessage | PlaceSwivelAtMessage | SwivelAimMessage | HarvestResourceMessage | PlaceStructureMessage | StructureInteractMessage | InvSwapMessage | DropItemMessage | DropSchematicMessage | DropResourcesMessage | PickupItemMessage | ChatMessageOut | PlaceRampMessage | PlaceHatchCoverMessage | PlaceGunportMessage | ToggleGunportMessage | PlayerSetDeckMessage | PlaceChestAtMessage | ChestTransferMessage | LandChestTransferMessage | LandChestDropMessage;
 
 /**
  * Main network manager class
@@ -732,6 +749,8 @@ export class NetworkManager {
   public onStructureReload: ((structureId: number, reloadMs: number, loadedAmmo: number) => void) | null = null;
   /** Fired when the player tries to fire an island cannon but has no cannonballs. */
   public onNoAmmo: (() => void) | null = null;
+  /** Fired when the server acks a bucket fill or dump action. */
+  public onBucketAck: ((status: string, extra?: { amount?: number; bucketFill?: number; remainingMs?: number }) => void) | null = null;
   /** Fired when the server echoes the authoritative deck level after a player_set_deck request.
    *  deckLevel is the server's current value — may differ from what was requested if the
    *  validation was rejected, in which case the client should roll back its local state. */
@@ -989,6 +1008,7 @@ export class NetworkManager {
       12: { name:'workbench',      posRequired:true,  deck_allow:[0,1,255]                                                               },
       13: { name:'chest',          posRequired:true,  deck_allow:[0,1,255]                                                               },
       14: { name:'bed',            posRequired:true,  deck_allow:[0,1,255]                                                               },
+      15: { name:'well',           posRequired:true,  deck_must:0,         singleton:true                                      },
     };
 
     // ── 4. Ships ─────────────────────────────────────────────────────────────
@@ -2024,6 +2044,28 @@ export class NetworkManager {
     this.sendMessage({ type: MessageType.USE_HAMMER, timestamp: Date.now(), shipId, moduleId });
   }
 
+  /** Send bucket fill result after the scoop minigame completes. */
+  sendBucketFill(success: boolean, deckLevel?: number, atWell?: boolean): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({
+      type: MessageType.BUCKET_FILL,
+      timestamp: Date.now(),
+      success,
+      deckLevel,
+      atWell,
+    });
+  }
+
+  /** Dump water from the bucket (right-click while holding water). */
+  sendBucketDump(deckLevel?: number): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    this.sendMessage({
+      type: MessageType.BUCKET_DUMP,
+      timestamp: Date.now(),
+      deckLevel,
+    });
+  }
+
   /**
    * Request the server to repair torn sail fibers on a specific mast.
    * Consumes 1 ITEM_REPAIR_KIT from the player's inventory.
@@ -2110,6 +2152,28 @@ export class NetworkManager {
     const msg: any = { type: MessageType.PLACE_BED_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
     if (shipId !== null) msg.shipId = shipId;
     if (deckId !== undefined) msg.deckId = deckId;
+    this.sendMessage(msg);
+  }
+
+  sendPlaceWellAt(
+    shipId: number,
+    localX: number,
+    localY: number,
+    rotation: number,
+    deckId: number = 0,
+    resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto',
+  ): void {
+    if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
+    const msg: any = {
+      type: MessageType.PLACE_WELL_AT,
+      timestamp: Date.now(),
+      shipId,
+      localX,
+      localY,
+      rotation,
+      deckId,
+      resource_source: resourceSource,
+    };
     this.sendMessage(msg);
   }
 
@@ -2959,6 +3023,9 @@ export class NetworkManager {
             grappleY: typeof player.grapple_y === 'number' ? player.grapple_y : undefined,
             grappleRopeLength: typeof player.grapple_rope === 'number' ? player.grapple_rope : undefined,
             grappleTargetType: typeof player.grapple_target === 'number' ? player.grapple_target : undefined,
+            bucketFill: typeof player.bucket_fill === 'number'
+              ? (Math.max(0, Math.min(2, player.bucket_fill)) as 0 | 1 | 2)
+              : undefined,
           })),
           cannonballs: (message.projectiles || []).map((ball: any) => ({
             id: ball.id || 0,
@@ -4176,6 +4243,13 @@ export class NetworkManager {
         }
         if (message.status === 'no_ammo') {
           this.onNoAmmo?.();
+        }
+        if (typeof message.status === 'string' && message.status.startsWith('bucket_')) {
+          this.onBucketAck?.(message.status, {
+            amount: typeof message.amount === 'number' ? message.amount : undefined,
+            bucketFill: typeof message.bucketFill === 'number' ? message.bucketFill : undefined,
+            remainingMs: typeof message.remainingMs === 'number' ? message.remainingMs : undefined,
+          });
         }
         break;
 

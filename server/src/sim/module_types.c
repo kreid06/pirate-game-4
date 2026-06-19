@@ -191,6 +191,7 @@ const char* module_type_name(ModuleTypeId type) {
         case MODULE_TYPE_LADDER: return "ladder";
         case MODULE_TYPE_PLANK: return "plank";
         case MODULE_TYPE_DECK: return "deck";
+        case MODULE_TYPE_WELL: return "well";
         case MODULE_TYPE_CUSTOM: return "custom";
         default: return "unknown";
     }

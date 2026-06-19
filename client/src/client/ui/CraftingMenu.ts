@@ -253,6 +253,19 @@ const RECIPES: Recipe[] = [
     ],
   },
   {
+    id: 'craft_bucket',
+    category: 'Tools',
+    outputName: 'Bucket',
+    outputCount: 1,
+    symbol: 'Bk',
+    color: '#6a8ab0',
+    borderColor: '#3a5878',
+    ingredients: [
+      { label: 'Wood',  count: 8 },
+      { label: 'Fiber', count: 4 },
+    ],
+  },
+  {
     id: 'craft_claim_flag',
     category: 'Tools',
     outputName: 'Claiming Flag',
@@ -1115,6 +1128,7 @@ export class CraftingMenu {
           craft_workbench:   'workbench',
           craft_shipyard:    'shipyard',
           craft_hammer:      'hammer',
+          craft_bucket:      'bucket',
           craft_stone_axe:   'axe',
           craft_stone_pickaxe:'pickaxe',
         };

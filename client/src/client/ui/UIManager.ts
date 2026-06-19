@@ -274,6 +274,7 @@ export class UIManager {
     { kind: 'workbench',   label: 'Workbench',       symbol: '⚒', color: '#9a6a28', borderColor: '#5a4010', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'bed',         label: 'Bed',             symbol: '🛏', color: '#4a3060', borderColor: '#2a1840', cost: { wood: 10, fiber: 5,  metal: 0, stone: 0 } },
+    { kind: 'well',        label: 'Bilge Well',      symbol: '⛲', color: '#4a7ab0', borderColor: '#2a4878', cost: { wood: 8,  fiber: 4,  metal: 0, stone: 0 } },
   ];
 
   /** Plan Menu entries — same as BUILD_PANEL_ENTRIES but without plank/deck (placed via schematics). */
@@ -285,9 +286,10 @@ export class UIManager {
   private static readonly BUILD_PANEL_ENTRY_H = 54;
   private static readonly BUILD_PANEL_HEADER_H = 32;
 
-  // ── Hammer minigame state ──────────────────────────────────────────────────
+  // ── Hammer / bucket timing minigame state ─────────────────────────────────
   private hammerGame: {
     active:          boolean;
+    theme:           'hammer' | 'bucket';
     startTime:       number;   // performance.now() when minigame began
     duration:        number;   // ms for cursor to travel full track
     sweetspotStart:  number;   // 0..1 — left edge of green zone
@@ -296,7 +298,7 @@ export class UIManager {
     resultTime:      number;   // performance.now() when player struck; -1 = not yet
     won:             boolean | null;
   } = {
-    active: false, startTime: 0, duration: 1250,
+    active: false, theme: 'hammer', startTime: 0, duration: 1250,
     sweetspotStart: 0, sweetspotWidth: 0,
     callback: null, resultTime: -1, won: null,
   };
@@ -429,9 +431,25 @@ export class UIManager {
     if (this.hammerGame.active) return;
     this.hammerGame = {
       active: true,
+      theme: 'hammer',
       startTime: performance.now(),
       duration: 1250,
-      // Random zone in the middle 55% of the track so it's challenging but fair
+      sweetspotStart: 0.20 + Math.random() * 0.50,
+      sweetspotWidth: 0.16,
+      callback,
+      resultTime: -1,
+      won: null,
+    };
+  }
+
+  /** Bucket scoop uses the same timing minigame with bucket-themed UI. */
+  startBucketMinigame(callback: (won: boolean) => void): void {
+    if (this.hammerGame.active) return;
+    this.hammerGame = {
+      active: true,
+      theme: 'bucket',
+      startTime: performance.now(),
+      duration: 1250,
       sweetspotStart: 0.20 + Math.random() * 0.50,
       sweetspotWidth: 0.16,
       callback,
@@ -3002,8 +3020,10 @@ export class UIManager {
     const px = (cw - pw) / 2;
     const py = (ch - ph) / 2;
 
+    const isBucket = this.hammerGame.theme === 'bucket';
+
     ctx.fillStyle   = '#16162a';
-    ctx.strokeStyle = '#8b6520';
+    ctx.strokeStyle = isBucket ? '#2a6a9a' : '#8b6520';
     ctx.lineWidth   = 2.5;
     ctx.beginPath();
     ctx.roundRect?.(px, py, pw, ph, 12);
@@ -3011,11 +3031,11 @@ export class UIManager {
     ctx.stroke();
 
     // Title
-    ctx.fillStyle     = '#f0c060';
+    ctx.fillStyle     = isBucket ? '#7ec8f0' : '#f0c060';
     ctx.font          = 'bold 21px Georgia, serif';
     ctx.textAlign     = 'center';
     ctx.textBaseline  = 'top';
-    ctx.fillText('\uD83D\uDD28  HAMMER REPAIR', cw / 2, py + 16);
+    ctx.fillText(isBucket ? '\uD83E\uDEA3  BUCKET SCOOP' : '\uD83D\uDD28  HAMMER REPAIR', cw / 2, py + 16);
 
     // ── Track bar ────────────────────────────────────────────────────────
     const trackW = 430;
@@ -3070,12 +3090,18 @@ export class UIManager {
     ctx.textBaseline = 'top';
     if (resultElapsed >= 0) {
       ctx.font      = 'bold 28px Georgia, serif';
-      ctx.fillStyle = this.hammerGame.won ? '#33ff88' : '#ff5555';
-      ctx.fillText(this.hammerGame.won ? 'CRACK! \u2192 +10 000 HP' : 'MISSED!', cw / 2, py + 128);
+      ctx.fillStyle = this.hammerGame.won ? '#33ff88' : (isBucket ? '#ffaa44' : '#ff5555');
+      const resultText = isBucket
+        ? (this.hammerGame.won ? 'FULL BUCKET!' : 'HALF BUCKET')
+        : (this.hammerGame.won ? 'CRACK! \u2192 +10 000 HP' : 'MISSED!');
+      ctx.fillText(resultText, cw / 2, py + 128);
     } else {
       ctx.font      = '14px Georgia, serif';
       ctx.fillStyle = '#aaaacc';
-      ctx.fillText('Press [SPACE] or click when the cursor enters the green zone', cw / 2, py + 128);
+      const hint = isBucket
+        ? 'Press [SPACE] or click in the green zone for a full scoop'
+        : 'Press [SPACE] or click when the cursor enters the green zone';
+      ctx.fillText(hint, cw / 2, py + 128);
       // Countdown ticks along the bottom of the track as tiny tick marks
       const pct = elapsed / this.hammerGame.duration;
       ctx.fillStyle = pct > 0.75 ? '#ff8800' : '#555577';
@@ -3712,7 +3738,7 @@ class HUDElement implements UIElement {
     } else if (this.inShipBuildMode) {
       this.renderBuildHotbar(ctx, ctx.canvas);
     } else {
-      this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode);
+      this.renderHotbar(ctx, ctx.canvas, player.inventory.slots, player.inventory.activeSlot, helmMode, player.bucketFill ?? 0);
     }
 
     // Vital bars (weight / food / water) — right of hotbar
@@ -4251,6 +4277,7 @@ class HUDElement implements UIElement {
     slots: { item: ItemKind; quantity: number }[],
     activeSlot: number,
     weaponMode?: { activeGroup: number; activeGroups: Set<number>; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState>; rmbAimingGroups?: Set<number> },
+    bucketFill = 0,
   ): void {
     const SLOT_SIZE = 48;
     const SLOT_GAP = 4;
@@ -4381,6 +4408,11 @@ class HUDElement implements UIElement {
           else if (slot.item === 'sword') drawSwordIcon(ctx, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2, SLOT_SIZE);
           else ctx.fillText(def.symbol, sx + SLOT_SIZE / 2, sy + SLOT_SIZE / 2);
 
+          // Bucket water level — vertical bar on the left edge of the slot
+          if (slot.item === 'bucket') {
+            this.renderBucketWaterBar(ctx, sx, sy, SLOT_SIZE, bucketFill);
+          }
+
           // Stack count (bottom-right, only for stackables > 1)
           if (slot.quantity > 1) {
             ctx.fillStyle = '#ffee88';
@@ -4409,12 +4441,52 @@ class HUDElement implements UIElement {
         this.mouseY >= sy && this.mouseY <= sy + SLOT_SIZE
       ) {
         if (this._ttHit(`hotbar-${i}`)) {
-          this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy);
+          this.renderHotbarTooltip(ctx, canvas, slots, i, sx, sy, bucketFill);
         }
         break;
       }
     }
 
+    ctx.restore();
+  }
+
+  /** Vertical water fill indicator for the bucket hotbar slot (0 / half / full). */
+  private renderBucketWaterBar(
+    ctx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    slotSize: number,
+    bucketFill: number,
+  ): void {
+    const fill = Math.max(0, Math.min(2, bucketFill));
+    const fillFrac = fill >= 2 ? 1 : fill >= 1 ? 0.5 : 0;
+    const pad = 4;
+    const barW = 6;
+    const barX = sx + 3;
+    const barY = sy + pad;
+    const barH = slotSize - pad * 2;
+    const innerH = Math.round(barH * fillFrac);
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(12, 28, 48, 0.92)';
+    ctx.strokeStyle = 'rgba(80, 140, 200, 0.85)';
+    ctx.lineWidth = 1;
+    this.roundRect(ctx, barX, barY, barW, barH, 2);
+    ctx.fill();
+    ctx.stroke();
+
+    if (innerH > 0) {
+      const waterY = barY + barH - innerH;
+      const grad = ctx.createLinearGradient(0, waterY, 0, barY + barH);
+      grad.addColorStop(0, '#6ec8ff');
+      grad.addColorStop(1, '#1a6aa8');
+      ctx.fillStyle = grad;
+      this.roundRect(ctx, barX + 1, waterY, barW - 2, innerH - 1, 1);
+      ctx.fill();
+      // Water surface shimmer at top of fill
+      ctx.fillStyle = 'rgba(180, 230, 255, 0.55)';
+      ctx.fillRect(barX + 1, waterY, barW - 2, Math.min(3, innerH));
+    }
     ctx.restore();
   }
 
@@ -4701,6 +4773,7 @@ class HUDElement implements UIElement {
     hoveredIndex: number,
     slotX: number,
     slotY: number,
+    bucketFill = 0,
   ): void {
     const SLOT_SIZE = 48;
     const slot = slots[hoveredIndex] ?? { item: 'none' as ItemKind, quantity: 0 };
@@ -4708,13 +4781,17 @@ class HUDElement implements UIElement {
 
     const def    = ITEM_DEFS[slot.item] ?? ITEM_DEFS['none'];
     const itemId = ITEM_KIND_ID[slot.item] ?? 0;
+    const bucketExtra = slot.item === 'bucket'
+      ? (bucketFill >= 2 ? 'Water: Full bucket (4 HP taken from ship)' : bucketFill >= 1 ? 'Water: Half bucket (2 HP taken from ship)' : 'Water: Empty')
+      : null;
 
     const PAD   = 10;
     const W     = 220;
     const LINE  = 16;
     const nameH = 18;
     const descLines = this.wrapText(ctx, def.description, W - PAD * 2, '12px Georgia, serif');
-    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + LINE + PAD;
+    const extraLines = bucketExtra ? 1 : 0;
+    const totalH = PAD + nameH + 4 + LINE + 4 + descLines.length * LINE + (extraLines ? LINE : 0) + LINE + PAD;
 
     // Position: centred above the slot, clamped to canvas
     let tx = slotX + SLOT_SIZE / 2 - W / 2;
@@ -4761,6 +4838,13 @@ class HUDElement implements UIElement {
     ctx.font      = '12px Georgia, serif';
     for (const line of descLines) {
       ctx.fillText(line, tx + PAD + 4, cy);
+      cy += LINE;
+    }
+
+    if (bucketExtra) {
+      ctx.fillStyle = bucketFill >= 2 ? '#6ec8ff' : bucketFill >= 1 ? '#4a9fd4' : '#888';
+      ctx.font      = '12px Georgia, serif';
+      ctx.fillText(bucketExtra, tx + PAD + 4, cy);
       cy += LINE;
     }
 

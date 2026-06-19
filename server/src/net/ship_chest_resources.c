@@ -19,6 +19,7 @@ const ShipModuleResourceCost MODULE_RES_COST[] = {
     [MODULE_TYPE_WORKBENCH]   = { 12,  0,  0,  0 },
     [MODULE_TYPE_CHEST]       = { 12,  0,  0,  0 },
     [MODULE_TYPE_BED]         = { 10,  5,  0,  0 },
+    [MODULE_TYPE_WELL]        = {  8,  4,  0,  0 },
 };
 
 #define MODULE_RES_COST_COUNT ((int)(sizeof(MODULE_RES_COST) / sizeof(MODULE_RES_COST[0])))
