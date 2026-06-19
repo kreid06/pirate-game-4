@@ -306,8 +306,12 @@ function updatePlayerWithDetection(
   
   // Apply physics based on carrier status
   const carrierShip = ships.find(ship => ship.id === newCarrierId);
-  
-  if (carrierShip && player.onDeck) {
+  /* Grappling a different ship while aboard: use world-space swim physics so the
+   * reel can pull the player off the current deck instead of fighting local-anchor
+   * deck movement + hull containment. */
+  const grapplingOtherShip = isGrapplingOtherShip(player, ships);
+
+  if (carrierShip && player.onDeck && !grapplingOtherShip) {
     updatePlayerOnDeck(player, carrierShip, inputFrame, dt);
   } else if ((player.onIslandId ?? 0) > 0) {
     // On land the server uses DIRECT-position walking (no acceleration/drag), not swim
@@ -365,7 +369,6 @@ function updatePlayerWithDetection(
       player.grappleTargetType === GRAPPLE_TARGET_SHIP_TYPE &&
       player.grappleX !== undefined && player.grappleY !== undefined) {
     const GRAPPLE_REEL_PULL = 90.0;  // px/s — must match server GRAPPLE_REEL_PULL
-    const GRAPPLE_ROPE_MIN  = 30.0;  // px   — must match server GRAPPLE_ROPE_MIN
 
     const gx = player.grappleX;
     const gy = player.grappleY;
@@ -382,7 +385,7 @@ function updatePlayerWithDetection(
       if (inputFrame.grappleReelIn) {
         // Mode A: LMB held — actively pull player toward hook (mirrors server)
         const step    = GRAPPLE_REEL_PULL * dt;
-        const newDist = Math.max(tdist - step, GRAPPLE_ROPE_MIN);
+        const newDist = Math.max(tdist - step, 0);
         const moved   = tdist - newDist;
         if (moved > 0) {
           player.position = new Vec2(
@@ -396,9 +399,15 @@ function updatePlayerWithDetection(
           }
         }
       } else if (!inputFrame.grappleReelOut) {
-        // Mode B: idle — hard rope constraint (player cannot drift past rope_length)
-        const rope = player.grappleRopeLength;
-        if (rope !== undefined && tdist > rope) {
+        // Mode B: idle — hard rope constraint (player cannot drift past rope_length).
+        // Skip until rope length is known — server sends 0 on the attach frame before
+        // init; treating 0 as rope length would snap the player to the hook instantly.
+        let rope = player.grappleRopeLength;
+        if (rope === undefined || rope <= 0) {
+          rope = tdist;
+          player.grappleRopeLength = tdist;
+        }
+        if (tdist > rope) {
           const over = tdist - rope;
           player.position = new Vec2(
             player.position.x - nx * over,
@@ -413,21 +422,58 @@ function updatePlayerWithDetection(
       }
       // Mode C: RMB held (grappleReelOut) — rope is extending, no constraint applied
 
-      // If player is on a ship deck, recompute localPosition from the constrained world pos
+      // Keep ship-local anchor in sync as reel moves the player in world space.
       if (carrierShip) {
-        const cosR = Math.cos(carrierShip.rotation);
-        const sinR = Math.sin(carrierShip.rotation);
-        const dxW  = player.position.x - carrierShip.position.x;
-        const dyW  = player.position.y - carrierShip.position.y;
-        player.localPosition = new Vec2(
-          dxW * cosR + dyW * sinR,
-          -dxW * sinR + dyW * cosR,
-        );
+        player.localPosition = worldPosToShipLocal(player.position, carrierShip);
       }
     }
   }
 
+  if (grapplingOtherShip && carrierShip) {
+    maybeDismountFromGrappleTransfer(player, carrierShip, detectionState);
+  }
+
   return events;
+}
+
+/** True when the grapple hook is attached to a ship other than the one the player is aboard. */
+function isGrapplingOtherShip(player: Player, ships: Ship[]): boolean {
+  const GRAPPLE_TARGET_SHIP = 2;
+  if (player.grappleState !== 2 || player.grappleTargetType !== GRAPPLE_TARGET_SHIP) return false;
+  if ((player.carrierId ?? 0) === 0) return false;
+  if (player.grappleX === undefined || player.grappleY === undefined) return false;
+  const target = findGrappledShip(player.grappleX, player.grappleY, ships);
+  return target !== null && target.id !== (player.carrierId ?? 0);
+}
+
+/** Mirrors server is_outside_deck — player left the hull polygon in ship-local space. */
+function isOutsideShipDeck(localX: number, localY: number, ship: Ship): boolean {
+  const hull = ship.hull;
+  if (hull.length < 3) return true;
+  let inside = false;
+  for (let i = 0, j = hull.length - 1; i < hull.length; j = i++) {
+    const ax = hull[j].x, ay = hull[j].y;
+    const bx = hull[i].x, by = hull[i].y;
+    if ((ay > localY) !== (by > localY)) {
+      const xi = ax + (localY - ay) * (bx - ax) / (by - ay);
+      if (localX < xi) inside = !inside;
+    }
+  }
+  return !inside;
+}
+
+/** Prediction mirror of server dismount when grapple reel pulls the player off deck. */
+function maybeDismountFromGrappleTransfer(
+  player: Player,
+  carrierShip: Ship,
+  detectionState: CarrierDetectionState,
+): void {
+  const local = worldPosToShipLocal(player.position, carrierShip);
+  if (!isOutsideShipDeck(local.x, local.y, carrierShip)) return;
+  player.carrierId = 0;
+  player.onDeck = false;
+  player.localPosition = undefined;
+  detectionState.currentCarrierId = null;
 }
 
 /**
@@ -594,6 +640,7 @@ const SHIP_MODULE_RADII: Partial<Record<ModuleKind, number>> = {
   'cannon':         13,
   'swivel':         10,
   'chest':          12,
+  'workbench':      22,
 };
 
 // Matches server: PLAYER_RADIUS + PLANK_THICKNESS = 8 + 10
@@ -1525,6 +1572,82 @@ function resolveSwimmerHullCollision(
     px * cosW - py * sinW + ship.position.x,
     px * sinW + py * cosW + ship.position.y,
   );
+}
+
+/** Ship-local coordinates for a world-space point. */
+function worldPosToShipLocal(worldPos: Vec2, ship: Ship): Vec2 {
+  const cosL = Math.cos(-ship.rotation), sinL = Math.sin(-ship.rotation);
+  const dx = worldPos.x - ship.position.x;
+  const dy = worldPos.y - ship.position.y;
+  return Vec2.from(dx * cosL - dy * sinL, dx * sinL + dy * cosL);
+}
+
+/** World position from ship-local coordinates (mirrors server ship_local_to_world). */
+export function shipLocalToWorld(ship: Ship, local: Vec2): Vec2 {
+  const cosR = Math.cos(ship.rotation);
+  const sinR = Math.sin(ship.rotation);
+  return Vec2.from(
+    ship.position.x + local.x * cosR - local.y * sinR,
+    ship.position.y + local.x * sinR + local.y * cosR,
+  );
+}
+
+/** Ship-local spawn for grapple boarding — exact stored hull attach (hook world pos). */
+export function grappleBoardSpawnLocal(ship: Ship, hookX: number, hookY: number): Vec2 {
+  return worldPosToShipLocal(Vec2.from(hookX, hookY), ship);
+}
+
+/** Minimum distance from a ship-local point to the hull polygon edge. */
+function distToShipHullEdgeLocal(lx: number, ly: number, hull: Vec2[]): number {
+  const n = hull.length;
+  if (n < 3) return Infinity;
+  let minDistSq = Infinity;
+  for (let i = 0; i < n; i++) {
+    const a = hull[i], b = hull[(i + 1) % n];
+    const ex = b.x - a.x, ey = b.y - a.y;
+    const lenSq = ex * ex + ey * ey;
+    let t = 0;
+    if (lenSq > 1e-10) {
+      t = ((lx - a.x) * ex + (ly - a.y) * ey) / lenSq;
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    }
+    const cx = a.x + t * ex, cy = a.y + t * ey;
+    const dx = lx - cx, dy = ly - cy;
+    const d = dx * dx + dy * dy;
+    if (d < minDistSq) minDistSq = d;
+  }
+  return Math.sqrt(minDistSq);
+}
+
+/** True when a body circle overlaps the ship hull polygon (inside or touching an edge). */
+export function playerTouchingShipHull(
+  worldPos: Vec2,
+  ship: Ship,
+  radius: number = PhysicsConfig.PLAYER_RADIUS,
+): boolean {
+  const hull = ship.hull;
+  if (hull.length < 3) return false;
+  const local = worldPosToShipLocal(worldPos, ship);
+  if (PolygonUtils.pointInPolygon(local, hull, 0)) return true;
+  return distToShipHullEdgeLocal(local.x, local.y, hull) <= radius;
+}
+
+/** Resolve which ship a grapple hook is attached to from its world position. */
+export function findGrappledShip(hookX: number, hookY: number, ships: Ship[]): Ship | null {
+  const hook = Vec2.from(hookX, hookY);
+  let best: Ship | null = null;
+  let bestDist = 25; // hook sits ~17 px inset from the hull edge
+  for (const ship of ships) {
+    if (ship.hull.length < 3) continue;
+    const local = worldPosToShipLocal(hook, ship);
+    if (PolygonUtils.pointInPolygon(local, ship.hull, 0)) return ship;
+    const d = distToShipHullEdgeLocal(local.x, local.y, ship.hull);
+    if (d < bestDist) {
+      bestDist = d;
+      best = ship;
+    }
+  }
+  return best;
 }
 
 /**

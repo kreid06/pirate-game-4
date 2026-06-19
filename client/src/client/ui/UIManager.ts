@@ -15,12 +15,13 @@ import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
+import { ShipSchematicPoolMenu } from './ShipSchematicPoolMenu.js';
 import { CrewLevelMenu } from './CrewLevelMenu.js';
 import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
 import { TombstoneMenu } from './TombstoneMenu.js';
 import { SalvageMenu } from './SalvageMenu.js';
-import { tierColor as _tierColor, tierName as _tierName, statMultLabel as _statMultLabel, QUALITY_STAT_NAMES as _QUALITY_STAT_NAMES } from '../../sim/Quality.js';
+import { tierColor as _tierColor, tierName as _tierName, statMultLabel as _statMultLabel, QUALITY_STAT_NAMES as _QUALITY_STAT_NAMES, itemDisplayName as _itemDisplayName } from '../../sim/Quality.js';
 
 /**
  * UI render context
@@ -95,6 +96,7 @@ export const MENU_ID = {
   MAP:       'map',
   SALVAGE:   'salvage',
   CHEST:     'chest',
+  BED_TRAVEL:'bed_travel',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -126,6 +128,8 @@ export class UIManager {
   public readonly playerMenu = new PlayerMenu();
   // Ship status menu (toggled by [G])
   private shipMenu = new ShipMenu();
+  /** Ship shared schematic pool (opened from ship menu). */
+  public readonly shipSchematicPoolMenu = new ShipSchematicPoolMenu();
   // Shipwreck salvage menu (opened by pressing E on a wreck)
   public readonly salvageMenu = new SalvageMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
@@ -266,6 +270,7 @@ export class UIManager {
     { kind: 'ramp',        label: 'Ramp',            symbol: '/', color: '#7a5c2a', borderColor: '#4a3410', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'gunport',     label: 'Gunport',         symbol: '▪', color: '#4a3828', borderColor: '#2a1808', cost: { wood: 6,  fiber: 0,  metal: 2, stone: 0 } },
     { kind: 'hatch_cover', label: 'Hatch Cover',     symbol: '⊞', color: '#8b832b', borderColor: '#5a5520', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'workbench',   label: 'Workbench',       symbol: '⚒', color: '#9a6a28', borderColor: '#5a4010', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'bed',         label: 'Bed',             symbol: '🛏', color: '#4a3060', borderColor: '#2a1840', cost: { wood: 10, fiber: 5,  metal: 0, stone: 0 } },
   ];
@@ -482,10 +487,20 @@ export class UIManager {
     this.activeMenuId = id;
   }
 
-  /** Open the respawn screen. Pass the current world ships, islands, local company ID, and death position. */
-  openRespawnScreen(ships: import('../../sim/Types.js').Ship[], islands: import('../../sim/Types.js').IslandDef[], localCompanyId: number, deathPos?: { x: number; y: number }): void {
+  /** Open the respawn screen. Pass the current world ships, islands, placed structures, local company ID, and death position. */
+  openRespawnScreen(
+    nearbyShips: import('../../sim/Types.js').Ship[],
+    islands: import('../../sim/Types.js').IslandDef[],
+    placedStructures: readonly import('../../sim/Types.js').PlacedStructure[],
+    localCompanyId: number,
+    deathPos?: { x: number; y: number },
+  ): void {
     this._islands = islands;
-    this.respawnScreen.open(ships, islands, localCompanyId, deathPos);
+    this.respawnScreen.open(nearbyShips, islands, placedStructures, localCompanyId, deathPos);
+  }
+
+  setRespawnFriendlyFleet(ships: import('./RespawnScreen.js').RespawnMapShip[]): void {
+    this.respawnScreen.setFriendlyFleet(ships);
   }
 
   /** Close the respawn screen (called after the server confirms respawn). */
@@ -512,13 +527,8 @@ export class UIManager {
   }
 
   /** Set the callback that fires when the player confirms a respawn location. */
-  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number, bedRespawn?: boolean) => void): void {
+  setRespawnConfirmedCallback(cb: (choice: import('./RespawnScreen.js').RespawnChoice) => void): void {
     this.respawnScreen.onRespawnConfirmed = cb;
-  }
-
-  /** Store a bed respawn point so it appears as an option the next time the player dies. */
-  setBedRespawnPoint(bedId?: number, x?: number, y?: number, shipId?: number): void {
-    this.respawnScreen.setBedRespawn(bedId, x, y, shipId);
   }
 
   /** Store island definitions so the respawn screen minimap can draw them. */
@@ -604,7 +614,8 @@ export class UIManager {
     if (this.tombstoneMenu.visible) return this.tombstoneMenu.handleWheel(x, y, deltaY);
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
-    if (this.activeMenuId === MENU_ID.SHIP)   return this.shipMenu.handleWheel(deltaY, x, y);
+    if (this.activeMenuId === MENU_ID.SHIP)   return this.shipMenu.handleWheel(deltaY, x, y) ||
+      this.shipSchematicPoolMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
@@ -828,6 +839,7 @@ export class UIManager {
     this.shipMenu.controlGroups = context.controlGroups ?? new Map();
     this.shipMenu.scaffoldedAtShipyardId = context.scaffoldedShipyardId ?? 0;
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.shipSchematicPoolMenu.render(ctx);
     this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
     if (this.activeMenuId === MENU_ID.CREW && this.crewMenu.npcId) {
@@ -1443,6 +1455,11 @@ export class UIManager {
     this.shipMenu.onDemolishDeck = cb;
   }
 
+  /** Open the ship schematic pool overlay from the ship status menu. */
+  setShipSchematicPoolOpenCallback(cb: (shipId: number) => void): void {
+    this.shipMenu.onOpenSchematicPool = cb;
+  }
+
   /** Set callback for the Leave Company button in the company menu. */
   setLeaveCompanyCallback(cb: () => void): void {
     this.companyMenu.onLeaveCompany = cb;
@@ -1726,6 +1743,9 @@ export class UIManager {
       return true;
     }
     if (this.activeMenuId === MENU_ID.SHIP) {
+      if (this.shipSchematicPoolMenu.visible) {
+        if (this.shipSchematicPoolMenu.handleClick(x, y)) return true;
+      }
       // Forward to shipMenu — returns true if inside panel (upgrade click or panel area)
       const consumed = this.shipMenu.handleClick(x, y);
       if (!consumed) this.closeActiveMenu();
@@ -2808,7 +2828,7 @@ export class UIManager {
   /** Restore hotbar selections from localStorage, validating each entry. */
   private _loadHotbars(): void {
     const validLand = new Set(UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind));
-    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','chest','bed']);
+    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','workbench','chest','bed']);
     try {
       const landRaw = localStorage.getItem('pirate_mmo_land_hotbar');
       if (landRaw) {
@@ -3292,15 +3312,23 @@ export class UIManager {
       ctx.lineTo(px + W - PAD, ry + ROW_H);
       ctx.stroke();
 
-      // Resolve item name/symbol from ITEM_DEFS
+      // Resolve item name/symbol from ITEM_DEFS or schematic metadata
       const kindNum = item.itemKind;
       let name   = `Item #${kindNum}`;
       let symbol = '?';
-      const kindStr = Object.entries(ITEM_KIND_ID).find(([, v]) => (v as number) === kindNum)?.[0];
-      if (kindStr && (ITEM_DEFS as any)[kindStr]) {
-        const def = (ITEM_DEFS as any)[kindStr];
-        name   = def.name   ?? name;
-        symbol = def.symbol ?? symbol;
+      let rowColor = isHovered ? '#ffd700' : '#e8e0cc';
+      if (item.isSchematic) {
+        symbol = '📜';
+        const tName = _tierName(item.tier ?? 0);
+        name = `${tName} ${_itemDisplayName(kindNum)} Schematic`;
+        rowColor = isHovered ? _tierColor(item.tier ?? 0) : '#d8c8f0';
+      } else {
+        const kindStr = Object.entries(ITEM_KIND_ID).find(([, v]) => (v as number) === kindNum)?.[0];
+        if (kindStr && (ITEM_DEFS as any)[kindStr]) {
+          const def = (ITEM_DEFS as any)[kindStr];
+          name   = def.name   ?? name;
+          symbol = def.symbol ?? symbol;
+        }
       }
 
       ctx.font = '18px Georgia, serif';
@@ -3310,14 +3338,19 @@ export class UIManager {
       ctx.fillText(symbol, px + PAD, ry + ROW_H / 2);
 
       ctx.font = '13px Georgia, serif';
-      ctx.fillStyle = isHovered ? '#ffd700' : '#e8e0cc';
+      ctx.fillStyle = rowColor;
       ctx.fillText(name, px + PAD + 28, ry + ROW_H / 2);
 
-      if (item.quantity > 1) {
+      if (item.quantity > 1 && !item.isSchematic) {
         ctx.font = 'bold 11px Georgia, serif';
         ctx.fillStyle = '#aaa';
         ctx.textAlign = 'right';
         ctx.fillText(`\u00d7${item.quantity}`, px + W - PAD, ry + ROW_H / 2);
+      } else if (item.isSchematic && item.crafts !== undefined) {
+        ctx.font = 'bold 11px Georgia, serif';
+        ctx.fillStyle = '#aaa';
+        ctx.textAlign = 'right';
+        ctx.fillText(`×${item.crafts}`, px + W - PAD, ry + ROW_H / 2);
       }
     }
     ctx.restore(); // unclip

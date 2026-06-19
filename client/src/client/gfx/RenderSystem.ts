@@ -18,7 +18,7 @@ import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
 import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
-import { tierColor, tierName, statMultLabel, computeCannonHullDamage, computeCannonEntityDamage, CANNON_HULL_BASE_DAMAGE, CANNON_ENTITY_BASE_DAMAGE, BAR_SHOT_ENTITY_BASE_DAMAGE } from '../../sim/Quality.js';
+import { tierColor, tierName, statMultLabel, computeCannonHullDamage, computeCannonEntityDamage, CANNON_HULL_BASE_DAMAGE, CANNON_ENTITY_BASE_DAMAGE, BAR_SHOT_ENTITY_BASE_DAMAGE, itemDisplayName } from '../../sim/Quality.js';
 import { SHIP_ATTR_DAMAGE } from '../../sim/Types.js';
 
 /** Max hull HP for ghost (Phantom Brig) ships — server uses raw HP scale, not 0-100. */
@@ -198,6 +198,8 @@ export class RenderSystem {
   private chestBuildMode: boolean = false;
   /** Whether bed placement build mode is active (bed ghost selected). */
   private bedBuildMode: boolean = false;
+  /** Whether ship workbench placement build mode is active (workbench ghost selected). */
+  private workbenchBuildMode: boolean = false;
   /** The gunport snap index currently hovered in gunport build mode. */
   private hoveredGunportSnap: { ship: Ship; snapIndex: number; localPos: { x: number; y: number } } | null = null;
   /** The ramp snap point slot currently under the cursor in ramp build mode. */
@@ -1111,6 +1113,8 @@ export class RenderSystem {
   public npcTaskMap: ReadonlyMap<number, string> = new Map();
   private hoveredPlankSlot: { ship: Ship; sectionName: string; segmentIndex: number } | null = null;
   private plankTemplate: PlankSegment[] | null = null;
+  /** `${shipId}_${section}_${seg}` → wall-clock ms when wreckage clears (blocks placement). */
+  private plankWreckageUntil = new Map<string, number>();
   /** shipId → timestamp (ms) when ship entered the sink-fade sequence — drives the animation. */
   private sinkTimestamps: Map<number, number> = new Map();
   /** Frozen ship snapshots for despawned ships — client-side sink animation ghosts. */
@@ -1129,21 +1133,6 @@ export class RenderSystem {
   private _sailAlphaByShip: Map<number, number> = new Map();
   /** Timestamp (ms) of the last renderWorld call — used to compute per-frame dt for barrel smoothing. */
   private _lastRenderMs: number = 0;
-  /** Last known NPC set — used to detect NPC deaths for kill announcements. */
-  private lastKnownNpcIds: Set<number> = new Set();
-  /** NPC id → name cache for the kill announcement message. */
-  private _lastNpcNames: Map<number, string> = new Map();
-  /** True once at least one world state has been processed; suppresses false kill
-   *  announcements on the first update after a page reload or reconnect. */
-  private _npcKillTrackingReady = false;
-
-  /** Reset NPC kill tracking — call on disconnect so the first world-state update
-   *  after reconnect does not produce spurious "eliminated" announcements. */
-  resetNpcTracking(): void {
-    this.lastKnownNpcIds.clear();
-    this._lastNpcNames.clear();
-    this._npcKillTrackingReady = false;
-  }
   /** Last ship to fire a cannonball near each ship — used for sink announcements. */
   private lastAttackerOf: Map<number, number> = new Map();
   /** Last splash emit time (ms) per sinking ship — throttles particle emission. */
@@ -1868,6 +1857,40 @@ export class RenderSystem {
     this.particleSystem.createExplosion(worldPos, intensity);
   }
 
+  /** Mark a destroyed plank slot as blocked and spawn wreckage particles. */
+  startPlankWreckage(
+    shipId: number,
+    sectionName: string,
+    segmentIndex: number,
+    worldPos: Vec2,
+    wreckageUntilMs: number,
+  ): void {
+    const key = `${shipId}_${sectionName}_${segmentIndex}`;
+    const until = wreckageUntilMs > 0 ? wreckageUntilMs : Date.now() + 15000;
+    const prev = this.plankWreckageUntil.get(key) ?? 0;
+    this.plankWreckageUntil.set(key, Math.max(prev, until));
+    if (prev <= Date.now()) {
+      this.particleSystem.createPlankWreckage(worldPos);
+    }
+  }
+
+  isPlankSlotWrecked(shipId: number, sectionName: string, segmentIndex: number): boolean {
+    const until = this.plankWreckageUntil.get(`${shipId}_${sectionName}_${segmentIndex}`);
+    if (!until) return false;
+    if (Date.now() >= until) {
+      this.plankWreckageUntil.delete(`${shipId}_${sectionName}_${segmentIndex}`);
+      return false;
+    }
+    return true;
+  }
+
+  private prunePlankWreckage(): void {
+    const now = Date.now();
+    for (const [key, until] of this.plankWreckageUntil) {
+      if (now >= until) this.plankWreckageUntil.delete(key);
+    }
+  }
+
   spawnDamageNumber(worldPos: Vec2, damage: number, isKill: boolean = false, team: DamageTeam = 'enemy'): void {
     this.effectRenderer.createDamageNumber(worldPos, damage, isKill, team);
   }
@@ -2176,6 +2199,7 @@ export class RenderSystem {
    * Update render system (particles, effects, etc.)
    */
   update(deltaTime: number): void {
+    this.prunePlankWreckage();
     this.particleSystem.update(deltaTime);
     this.effectRenderer.update(deltaTime);
   }
@@ -3200,6 +3224,16 @@ export class RenderSystem {
     return this.bedBuildMode;
   }
 
+  /** Activate or deactivate ship workbench placement build mode. */
+  setWorkbenchBuildMode(active: boolean): void {
+    this.workbenchBuildMode = active;
+  }
+
+  /** Whether ship workbench build mode is currently active */
+  isInWorkbenchBuildMode(): boolean {
+    return this.workbenchBuildMode;
+  }
+
   /** Whether ramp build mode is currently active */
   isInRampBuildMode(): boolean {
     return this.rampBuildMode;
@@ -4200,16 +4234,37 @@ export class RenderSystem {
     this._droppedItems = list;
   }
 
+  /** Whether a dropped item is visible on the current deck/location (render + pile grouping). */
+  private _droppedItemBucket(d: import('../../sim/Types').DroppedItem): 'world' | 'ship-lower' | 'ship-upper' | null {
+    const player = this._cachedLocalPlayer;
+    if (!player) return null;
+    if (d.shipId) {
+      if (player.carrierId !== d.shipId) return null;
+      return d.deckLevel === 0 ? 'ship-lower' : 'ship-upper';
+    }
+    if (player.carrierId !== 0) return null;
+    return 'world';
+  }
+
+  /** Whether the local player can pick up / interact with a dropped item (same deck on ships). */
+  private _canPickupDroppedItem(d: import('../../sim/Types').DroppedItem): boolean {
+    const bucket = this._droppedItemBucket(d);
+    if (!bucket) return false;
+    if (d.shipId && d.deckLevel !== undefined && d.deckLevel !== this._playerDeckLevel) return false;
+    return true;
+  }
+
   /**
    * Returns all dropped items within `range` px of the local player.
    * Items are returned sorted nearest-first.
    */
   getDroppedItemsInRange(range: number = 80): import('../../sim/Types').DroppedItem[] {
     const player = this._cachedLocalPlayer;
-    if (!player || player.carrierId !== 0) return [];
+    if (!player) return [];
     const range2 = range * range;
     return this._droppedItems
       .filter(d => {
+        if (!this._canPickupDroppedItem(d)) return false;
         const dx = d.x - player.position.x;
         const dy = d.y - player.position.y;
         return dx * dx + dy * dy <= range2;
@@ -4221,22 +4276,21 @@ export class RenderSystem {
       });
   }
 
-  /** Draw all dropped items in world-space. */
-  private drawDroppedItems(ctx: CanvasRenderingContext2D, camera: import('./Camera').CameraState): void {
-    if (this._droppedItems.length === 0) return;
-    const player = this._cachedLocalPlayer;
-    const HOVER_RANGE = 80;
-
-    // Group items into piles: items within 24 world-units of each other
+  private _buildDroppedItemPiles(
+    bucket: 'world' | 'ship-lower' | 'ship-upper',
+  ): Array<{ items: import('../../sim/Types').DroppedItem[]; cx: number; cy: number }> {
     const PILE_RADIUS = 24;
     const consumed = new Set<number>();
-    const piles: { items: import('../../sim/Types').DroppedItem[]; cx: number; cy: number }[] = [];
+    const piles: Array<{ items: import('../../sim/Types').DroppedItem[]; cx: number; cy: number }> = [];
 
     for (const item of this._droppedItems) {
       if (consumed.has(item.id)) continue;
+      if (this._droppedItemBucket(item) !== bucket) continue;
       const pile = { items: [item], cx: item.x, cy: item.y };
       for (const other of this._droppedItems) {
         if (consumed.has(other.id) || other.id === item.id) continue;
+        if (this._droppedItemBucket(other) !== bucket) continue;
+        if (item.shipId && other.shipId !== item.shipId) continue;
         const dx = other.x - item.x, dy = other.y - item.y;
         if (dx * dx + dy * dy <= PILE_RADIUS * PILE_RADIUS) {
           pile.items.push(other);
@@ -4246,26 +4300,71 @@ export class RenderSystem {
       consumed.add(item.id);
       piles.push(pile);
     }
+    return piles;
+  }
 
-    for (const pile of piles) {
-      const sx = (pile.cx - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
-      const sy = (pile.cy - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
-      const sz = Math.max(0.4, Math.min(1.2, camera.zoom));
+  /** Draw one dropped-item pile in world-space (ctx must already be the main canvas). */
+  private _drawDroppedItemPile(
+    pile: { items: import('../../sim/Types').DroppedItem[]; cx: number; cy: number },
+    camera: import('./Camera').CameraState,
+  ): void {
+    const ctx = this.ctx;
+    const player = this._cachedLocalPlayer;
+    const HOVER_RANGE = 80;
+    const sx = (pile.cx - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
+    const sy = (pile.cy - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
+    const sz = Math.max(0.4, Math.min(1.2, camera.zoom));
 
-      const isNear = player != null && player.carrierId === 0 &&
-        (pile.cx - player.position.x) ** 2 + (pile.cy - player.position.y) ** 2
-          <= HOVER_RANGE * HOVER_RANGE;
+    const isNear = player != null && this._canPickupDroppedItem(pile.items[0]) &&
+      (pile.cx - player.position.x) ** 2 + (pile.cy - player.position.y) ** 2
+        <= HOVER_RANGE * HOVER_RANGE;
 
-      ctx.save();
-      ctx.translate(sx, sy);
+    const schematicItem = pile.items.find(it => it.isSchematic);
+    const allSchematics = pile.items.length > 0 && pile.items.every(it => it.isSchematic);
 
-      /* Shadow */
+    ctx.save();
+    ctx.translate(sx, sy);
+
+    /* Shadow */
+    ctx.beginPath();
+    ctx.ellipse(0, 7 * sz, 12 * sz, 4 * sz, 0, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.fill();
+
+    if (allSchematics && schematicItem) {
+      const tCol = tierColor(schematicItem.tier ?? 0);
+      const sw = 22 * sz, sh = 26 * sz;
+      if (isNear) {
+        ctx.beginPath();
+        ctx.arc(0, -sh / 2, 18 * sz, 0, Math.PI * 2);
+        ctx.fillStyle = tCol + '33';
+        ctx.fill();
+      }
+      ctx.fillStyle = isNear ? '#f0e8d0' : '#c8b898';
+      ctx.strokeStyle = isNear ? tCol : '#8a7350';
+      ctx.lineWidth = 1.5 * sz;
       ctx.beginPath();
-      ctx.ellipse(0, 7 * sz, 12 * sz, 4 * sz, 0, 0, Math.PI * 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.roundRect(-sw / 2, -sh, sw, sh, [2 * sz, 2 * sz, 4 * sz, 4 * sz]);
       ctx.fill();
-
-      /* Bag body */
+      ctx.stroke();
+      for (const rollY of [-sh, -2 * sz]) {
+        ctx.beginPath();
+        ctx.ellipse(0, rollY, sw / 2 + 2 * sz, 3 * sz, 0, 0, Math.PI * 2);
+        ctx.fillStyle = isNear ? '#e8dcc0' : '#a89070';
+        ctx.fill();
+        ctx.strokeStyle = isNear ? tCol : '#6a5840';
+        ctx.stroke();
+      }
+      ctx.fillStyle = tCol;
+      ctx.beginPath();
+      ctx.arc(0, -sh / 2, 4 * sz, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.font = `bold ${Math.round(8 * sz)}px Georgia, serif`;
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('📜', 0, -sh / 2 - 1 * sz);
+    } else {
       const bw = 20 * sz, bh = 18 * sz;
       ctx.beginPath();
       ctx.roundRect(-bw / 2, -bh, bw, bh, [4 * sz, 4 * sz, 8 * sz, 8 * sz]);
@@ -4274,77 +4373,108 @@ export class RenderSystem {
       ctx.lineWidth = 1.5 * sz;
       ctx.fill();
       ctx.stroke();
-
-      /* Bag tie / neck */
       ctx.beginPath();
       ctx.roundRect(-6 * sz, -bh - 5 * sz, 12 * sz, 6 * sz, 2 * sz);
       ctx.fillStyle = isNear ? '#c49030' : '#7a5710';
       ctx.fill();
       ctx.stroke();
-
-      /* Drawstring knot dot */
       ctx.beginPath();
       ctx.arc(0, -bh - 2 * sz, 2.5 * sz, 0, Math.PI * 2);
       ctx.fillStyle = isNear ? '#ffe97a' : '#c4920a';
       ctx.fill();
-
-      /* Pile count badge */
-      if (pile.items.length > 1) {
-        const badge = pile.items.length.toString();
-        const bsz = Math.round(9 * sz);
-        ctx.font = `bold ${bsz}px Georgia, serif`;
-        const bw2 = ctx.measureText(badge).width + 6 * sz;
-        const bx = bw / 2 - 2 * sz;
-        const bby = -bh + 4 * sz;
-        ctx.fillStyle = '#cc3322';
-        ctx.beginPath();
-        ctx.roundRect(bx - bw2 / 2, bby - bsz / 2 - 2 * sz, bw2, bsz + 4 * sz, 3 * sz);
-        ctx.fill();
-        ctx.fillStyle = '#ffffff';
+      if (schematicItem) {
+        ctx.font = `${Math.round(10 * sz)}px Georgia, serif`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(badge, bx, bby);
+        ctx.fillText('📜', 0, -bh / 2);
       }
+    }
 
-      /* Countdown timer — drawn above the bag */
-      {
-        const minRemMs = pile.items.reduce((min, it) =>
-          (it.remainingMs !== undefined && it.remainingMs < min) ? it.remainingMs : min,
-          Infinity);
-        if (isFinite(minRemMs)) {
-          const totalSec = Math.ceil(minRemMs / 1000);
-          const mins = Math.floor(totalSec / 60);
-          const secs = totalSec % 60;
-          const timerStr = `${mins}:${secs.toString().padStart(2, '0')}`;
-          // Colour: green > 2 min, yellow 1-2 min, red < 1 min
-          const timerColor = minRemMs > 120000 ? '#88ff88' : minRemMs > 60000 ? '#ffdd44' : '#ff5544';
-          const tsz = Math.round(8 * sz);
-          ctx.font = `bold ${tsz}px Georgia, serif`;
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'bottom';
-          ctx.fillStyle = timerColor;
-          ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-          ctx.lineWidth = 2.5 * sz;
-          ctx.strokeText(timerStr, 0, -20 * sz);
-          ctx.fillText(timerStr, 0, -20 * sz);
-        }
-      }
+    if (pile.items.length > 1) {
+      const badge = pile.items.length.toString();
+      const bsz = Math.round(9 * sz);
+      ctx.font = `bold ${bsz}px Georgia, serif`;
+      const bw2 = ctx.measureText(badge).width + 6 * sz;
+      const bx = (allSchematics ? 11 : 10) * sz;
+      const bby = (allSchematics ? -26 : -18) * sz + 4 * sz;
+      ctx.fillStyle = '#cc3322';
+      ctx.beginPath();
+      ctx.roundRect(bx - bw2 / 2, bby - bsz / 2 - 2 * sz, bw2, bsz + 4 * sz, 3 * sz);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(badge, bx, bby);
+    }
 
-      /* Interact hint */
-      if (isNear && !this._anyBuildActive) {
-        const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
-        const fsz = Math.round(9 * sz);
-        ctx.font = `${fsz}px Georgia, serif`;
+    {
+      const minRemMs = pile.items.reduce((min, it) =>
+        (it.remainingMs !== undefined && it.remainingMs < min) ? it.remainingMs : min,
+        Infinity);
+      if (isFinite(minRemMs)) {
+        const totalSec = Math.ceil(minRemMs / 1000);
+        const mins = Math.floor(totalSec / 60);
+        const secs = totalSec % 60;
+        const timerStr = `${mins}:${secs.toString().padStart(2, '0')}`;
+        const timerColor = minRemMs > 120000 ? '#88ff88' : minRemMs > 60000 ? '#ffdd44' : '#ff5544';
+        const tsz = Math.round(8 * sz);
+        ctx.font = `bold ${tsz}px Georgia, serif`;
         ctx.textAlign = 'center';
-        ctx.textBaseline = 'top';
-        ctx.fillStyle = '#ffffff';
+        ctx.textBaseline = 'bottom';
+        ctx.fillStyle = timerColor;
         ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-        ctx.lineWidth = 3 * sz;
-        ctx.strokeText(hint, 0, 8 * sz);
-        ctx.fillText(hint, 0, 8 * sz);
+        ctx.lineWidth = 2.5 * sz;
+        ctx.strokeText(timerStr, 0, -20 * sz);
+        ctx.fillText(timerStr, 0, -20 * sz);
       }
+    }
 
-      ctx.restore();
+    if (isNear && !this._anyBuildActive) {
+      const hint = pile.items.length > 1 ? '[E] Pick Up  [Hold E] Choose' : '[E] Pick Up';
+      const fsz = Math.round(9 * sz);
+      ctx.font = `${fsz}px Georgia, serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 3 * sz;
+      ctx.strokeText(hint, 0, 8 * sz);
+      ctx.fillText(hint, 0, 8 * sz);
+    }
+
+    ctx.restore();
+  }
+
+  /** Queue dropped items into deck-aware render layers (mirrors NPC layering). */
+  private queueDroppedItems(camera: Camera): void {
+    const camState = camera.getState();
+    for (const pile of this._buildDroppedItemPiles('world')) {
+      this.queueRenderItem(2, 'dropped-items-world', () => this._drawDroppedItemPile(pile, camState), 1);
+    }
+    for (const pile of this._buildDroppedItemPiles('ship-lower')) {
+      this.queueRenderItem(1, 'dropped-items-lower', () => this._drawDroppedItemPile(pile, camState), 2);
+      if (this.altKeyHeld) {
+        this.queueRenderItem(4, 'dropped-items-lower-ghost', () => {
+          this.ctx.save();
+          this.ctx.globalAlpha *= 0.35;
+          this._drawDroppedItemPile(pile, camState);
+          this.ctx.restore();
+        }, 2);
+      }
+    }
+    for (const pile of this._buildDroppedItemPiles('ship-upper')) {
+      const onLowerDeck = this._playerDeckLevel === 0
+        && this._cachedLocalPlayer?.carrierId === pile.items[0]?.shipId;
+      this.queueRenderItem(4, 'dropped-items-upper', () => {
+        if (onLowerDeck) {
+          this.ctx.save();
+          this.ctx.globalAlpha *= this._upperDeckFade;
+          this._drawDroppedItemPile(pile, camState);
+          this.ctx.restore();
+        } else {
+          this._drawDroppedItemPile(pile, camState);
+        }
+      }, 2);
     }
   }
 
@@ -4523,6 +4653,7 @@ export class RenderSystem {
 
       for (const seg of template) {
         if (presentKeys.has(`${seg.sectionName}_${seg.index}`)) continue;
+        if (this.isPlankSlotWrecked(ship.id, seg.sectionName, seg.index)) continue;
 
         let hit = false;
         if (seg.isCurved && seg.curveStart && seg.curveControl && seg.curveEnd && seg.t1 !== undefined && seg.t2 !== undefined) {
@@ -4721,6 +4852,12 @@ export class RenderSystem {
           // Chest is a 40×28 world-unit box
           width = 44;
           height = 32;
+        } else if (moduleKind === 'workbench') {
+          width = 44;
+          height = 31;
+        } else if (moduleKind === 'bed') {
+          width = 44;
+          height = 24;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -6201,8 +6338,7 @@ export class RenderSystem {
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
     this.drawPlacedStructures(camera);
-    // ── Dropped items then tombstones (above boulders, below players) ─────────
-    this.drawDroppedItems(this.ctx, camera.getState());
+    // ── Tombstones (above boulders, below players) — dropped items use deck-aware render queue ──
     this.drawTombstones(this.ctx, camera.getState());
     // Tree leaves and prompts are drawn in renderWorld after bushes (player → bushes → leaves)
   }
@@ -9742,24 +9878,6 @@ export class RenderSystem {
     }
     // ───────────────────────────────────────────────────────────────────────
 
-    // ── NPC kill detection ─────────────────────────────────────────────────
-    // Build current NPC id set and detect disappearances.
-    const currentNpcIds = new Set<number>();
-    for (const npc of worldState.npcs) currentNpcIds.add(npc.id);
-    if (this._npcKillTrackingReady) {
-      for (const id of this.lastKnownNpcIds) {
-        if (!currentNpcIds.has(id)) {
-          const name = this._lastNpcNames.get(id) ?? `Crew ${id}`;
-          this.effectRenderer.createAnnouncement(`${name} eliminated`, 'npc_kill');
-          this._lastNpcNames.delete(id);
-        }
-      }
-    }
-    // Update id set and name map for next frame.
-    this.lastKnownNpcIds = currentNpcIds;
-    this._npcKillTrackingReady = true;
-    for (const npc of worldState.npcs) this._lastNpcNames.set(npc.id, npc.name);
-    // ───────────────────────────────────────────────────────────────────────
     // Emit water-splash bursts for every ship currently in the sink sequence.
     // Burst rate increases from ~1/s at the start to ~4/s near full submersion.
     const nowMs = performance.now();
@@ -9871,7 +9989,15 @@ export class RenderSystem {
 
           const _inBoardingGrace = (performance.now() - this._boardedAtMs) < this._BOARD_GRACE_MS;
 
-          if (this._playerDeckLevel === 1 && !_inBoardingGrace) {
+          // During the post-boarding grace window trust the server/prediction deck and
+          // skip ramp detection entirely — a reconnect spawn on the lower deck near a
+          // ramp would otherwise false-trigger a climb to the upper deck visually.
+          if (_inBoardingGrace) {
+            const _authDeck = (_lp.deckId ?? 1) === 0 ? 0 : 1;
+            if (this._playerDeckLevel !== _authDeck) {
+              this._playerDeckLevel = _authDeck;
+            }
+          } else if (this._playerDeckLevel === 1) {
             // Upper deck — fall through empty holes, or enter a ramp from its top (light) face
             const falling = RenderSystem.RAMP_SNAP_POINTS.some(sp => {
               const drx = _lx - sp.x, dry = _ly - sp.y;
@@ -9892,7 +10018,7 @@ export class RenderSystem {
             if (falling) this._playerDeckLevel = 0;
           }
 
-          if (this._playerDeckLevel === 0) {
+          if (!_inBoardingGrace && this._playerDeckLevel === 0) {
             // Lower deck — climb back up via the bottom/dark face of a ramp.
             // Use CLIMB_ZONE (28) which is wider than FALL_ZONE (22) to absorb the server/client
             // position drift of up to ~10 px (one movement tick + sub-tick accumulation).
@@ -10093,6 +10219,13 @@ export class RenderSystem {
       }
     }
 
+    // In workbench build mode, overlay a ghost workbench at the cursor position on each ship (layer 4)
+    if (this.workbenchBuildMode && this.mouseWorldPos) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `workbench-ghost-${ship.id}`, () => this.drawWorkbenchGhostOnShip(ship, camera), 0);
+      }
+    }
+
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
         ? () => { this.ctx.save(); this.ctx.globalAlpha *= this._upperDeckFade; fn(); this.ctx.restore(); } : fn;
@@ -10102,6 +10235,7 @@ export class RenderSystem {
       this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
       this.queueRenderItem(1, `chests-lower-${ship.id}`,   () => this.drawShipChests(ship, camera, 0), 3);
       this.queueRenderItem(1, `beds-lower-${ship.id}`,     () => this.drawShipBeds(ship, camera, 0), 3);
+      this.queueRenderItem(1, `workbenches-lower-${ship.id}`, () => this.drawShipWorkbenches(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
       this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
       this.queueRenderItem(4, `swivel-guns-upper-${ship.id}`, _da(() => this.drawShipSwivelGuns(ship, camera, 1)));
@@ -10109,6 +10243,7 @@ export class RenderSystem {
       this.queueRenderItem(4, `swivel-aim-guides-${ship.id}`, _da(() => this.drawSwivelAimGuide(ship, worldState, camera)), 1);
       this.queueRenderItem(4, `chests-upper-${ship.id}`, _da(() => this.drawShipChests(ship, camera, 1)));
       this.queueRenderItem(4, `beds-upper-${ship.id}`, _da(() => this.drawShipBeds(ship, camera, 1)));
+      this.queueRenderItem(4, `workbenches-upper-${ship.id}`, _da(() => this.drawShipWorkbenches(ship, camera, 1)));
       this.queueRenderItem(4, `rudder-${ship.id}`, _da(() => this.drawShipRudder(ship, camera)));
       if ((this.showGroupOverlay || this.activeWeaponGroups.size > 0) && this.controlGroups) {
         // Always render at full opacity so active groups remain visible from the steering wheel.
@@ -10311,6 +10446,9 @@ export class RenderSystem {
         this.queueRenderItem(4, `npc-upper-${npc.id}`, () => this.drawNpc(npc, worldState, camera), 2);
       }
     }
+
+    // Queue dropped items — deck-aware layering (mirrors NPC pattern)
+    this.queueDroppedItems(camera);
 
     // Queue ship ammo labels and name labels (layer 9 - HUD overlay above all ship elements)
     for (const ship of renderShips) {
@@ -11403,7 +11541,10 @@ export class RenderSystem {
     }
 
     const template = this.getPlankTemplate();
-    const missing = template.filter(seg => !presentKeys.has(`${seg.sectionName}_${seg.index}`));
+    const missing = template.filter(seg =>
+      !presentKeys.has(`${seg.sectionName}_${seg.index}`) &&
+      !this.isPlankSlotWrecked(ship.id, seg.sectionName, seg.index)
+    );
     if (missing.length === 0) return;
 
     // When a quality blueprint is selected, tint the ghost slots to the tier colour.
@@ -16332,7 +16473,7 @@ export class RenderSystem {
         this.ctx.font = `bold ${9 / zoom}px Georgia, serif`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'bottom';
-        this.ctx.fillText('[E] Set Respawn', 0, -15);
+        this.ctx.fillText('[E] Travel', 0, -15);
       }
       this.ctx.restore();
     }
@@ -16448,6 +16589,148 @@ export class RenderSystem {
     this.ctx.textBaseline = 'bottom';
     this.ctx.fillText('[Click] Place Bed', 0, -16);
     this.ctx.restore();
+  }
+
+  /** Draw all workbench modules on a ship deck. */
+  private drawShipWorkbenches(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
+    const benches = ship.modules.filter(m => m.kind === 'workbench' && (
+      deckFilter === undefined ? true :
+      deckFilter === 0 ? m.deckId === 0 :
+      m.deckId === 1 || m.deckId === 255
+    ));
+    if (benches.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const bench of benches) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === bench.id;
+      const benchHp    = (bench.moduleData as any)?.health    ?? 10000;
+      const benchMaxHp = (bench.moduleData as any)?.maxHealth ?? 10000;
+      const hpFrac = benchMaxHp > 0 ? Math.min(1, benchHp / benchMaxHp) : 1;
+      this.ctx.save();
+      this.ctx.translate(bench.localPos.x, bench.localPos.y);
+      this.ctx.rotate(bench.localRot);
+      this._drawWorkbenchShape(lw, 1.0, isHovered, hpFrac);
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /** Draw a ghost workbench following the cursor when in workbench build mode. */
+  private drawWorkbenchGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos) return;
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const rotDeg = this.pendingGhostState?.kind === 'workbench'
+      ? this.pendingGhostState.rotDeg
+      : 0;
+    const rotRad = (rotDeg * Math.PI) / 180;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this.ctx.rotate(rotRad);
+    this.ctx.globalAlpha *= alpha;
+
+    this._drawWorkbenchShape(lw, alpha, false, 1);
+
+    this.ctx.fillStyle = 'rgba(40, 160, 120, 0.22)';
+    this.ctx.strokeStyle = '#55ddbb';
+    this.ctx.lineWidth = lw * 1.5;
+    this.ctx.setLineDash([3 / zoom, 2 / zoom]);
+    this.ctx.beginPath();
+    this.ctx.rect(-22, -15.5, 44, 31);
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+
+    this.ctx.fillStyle = '#88eedd';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Workbench', 0, -20);
+    if (rotDeg !== 0) {
+      this.ctx.font = `${9 / zoom}px Georgia, serif`;
+      this.ctx.fillStyle = 'rgba(180, 220, 200, 0.85)';
+      this.ctx.fillText(`${Math.round(rotDeg)}°`, 0, -32);
+    }
+    this.ctx.restore();
+  }
+
+  /** Core workbench shape (origin = centre, 44×31 ship-local units). */
+  private _drawWorkbenchShape(lw: number, _alpha: number, isHovered = false, hpFrac = 1): void {
+    const bw = 44, bh = 31;
+    const bx = -bw / 2, by = -bh / 2;
+    const frameColor  = isHovered ? '#5a3010' : this.darkenByDamage('#4a2408', hpFrac);
+    this.ctx.fillStyle   = frameColor;
+    this.ctx.strokeStyle = '#2a1204';
+    this.ctx.lineWidth   = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.rect(bx, by, bw, bh);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    const ft = 4;
+    const sx2 = bx + ft, sy2 = by + ft;
+    const sw  = bw - ft * 2, sh = bh - ft * 2;
+    this.ctx.fillStyle = isHovered ? '#c07838' : this.darkenByDamage('#a86428', hpFrac);
+    this.ctx.beginPath();
+    this.ctx.rect(sx2, sy2, sw, sh);
+    this.ctx.fill();
+
+    this.ctx.strokeStyle = 'rgba(60, 30, 8, 0.35)';
+    this.ctx.lineWidth   = lw;
+    for (let gi = 1; gi < 3; gi++) {
+      const gy = sy2 + sh * (gi / 3);
+      this.ctx.beginPath();
+      this.ctx.moveTo(sx2, gy);
+      this.ctx.lineTo(sx2 + sw, gy);
+      this.ctx.stroke();
+    }
+
+    const vw = 5, vh = sh * 0.45;
+    const vx = sx2 + sw - vw;
+    const vy = sy2 + (sh - vh) / 2;
+    this.ctx.fillStyle   = isHovered ? '#888' : '#6a6a6a';
+    this.ctx.strokeStyle = '#3a3a3a';
+    this.ctx.beginPath();
+    this.ctx.rect(vx, vy, vw, vh);
+    this.ctx.fill();
+    this.ctx.stroke();
+
+    this.ctx.font         = `bold ${10}px Georgia, serif`;
+    this.ctx.textAlign    = 'center';
+    this.ctx.textBaseline = 'middle';
+    this.ctx.fillStyle    = 'rgba(255, 210, 100, 0.9)';
+    this.ctx.fillText('\u2692', -vw / 2, 0);
   }
 
   /** Core chest shape drawing routine (origin = chest centre, 40×28 world units).
@@ -19476,8 +19759,9 @@ export class RenderSystem {
     
     const { ship, module } = this.hoveredModule;
     const moduleData = module.moduleData;
-    
-    if (!moduleData) return;
+    const effectiveKind = (moduleData?.kind ?? module.kind) as string;
+    if (!effectiveKind) return;
+    const md = moduleData;
     
     // Convert mouse world position to screen position for tooltip
     const screenPos = camera.worldToScreen(this.mouseWorldPos);
@@ -19499,15 +19783,17 @@ export class RenderSystem {
       'ladder':         { name: 'Ladder',        color: '#334455', border: '#5577aa', desc: 'Allows crew to move between deck levels.' },
       'seat':           { name: 'Seat',          color: '#553344', border: '#886677', desc: 'Resting position for crew members.' },
       'custom':         { name: 'Custom Module', color: '#444455', border: '#7777aa', desc: 'A custom-built module with unique properties.' },
+      'workbench':      { name: 'Workbench',      color: '#9a6a28', border: '#dda850', desc: 'Crafting station for ship-side equipment and supplies.' },
       'chest':          { name: 'Chest',          color: '#886622', border: '#d4a040', desc: 'Stores raw resources. Contents add weight to the ship.' },
+      'bed':            { name: 'Bed',            color: '#664488', border: '#aa77dd', desc: 'Fast travel hub — respawn here from the death screen.' },
     };
-    const meta = KIND_META[moduleData.kind] ?? { name: moduleData.kind, color: '#555566', border: '#8888aa', desc: '' };
+    const meta = KIND_META[effectiveKind] ?? { name: effectiveKind, color: '#555566', border: '#8888aa', desc: '' };
 
     // Quality tier — overrides name colour, accent bar and border when present
     const qt        = module.qualityTier;
     const hasQuality = typeof qt === 'number' && qt >= 1;
     // For missing plank slots, use the selected blueprint tier for accent colouring
-    const _ghostTier = (moduleData.kind === 'plank' && (moduleData as any).health === 0 && this.ghostPlankTier > 0)
+    const _ghostTier = (effectiveKind === 'plank' && md && (md as any).health === 0 && this.ghostPlankTier > 0)
       ? this.ghostPlankTier : null;
     const qCol      = hasQuality ? tierColor(qt!) : _ghostTier !== null ? tierColor(_ghostTier) : null;
     const qName     = hasQuality ? tierName(qt!)  : _ghostTier !== null ? tierName(_ghostTier)  : null;
@@ -19527,9 +19813,9 @@ export class RenderSystem {
     type StatLine = { label: string; value: string; color?: string };
     const stats: StatLine[] = [];
 
-    if (moduleData.kind === 'plank') {
-      const hp    = Math.round(moduleData.health);
-      const maxHp = moduleData.maxHealth ?? 10000;
+    if (effectiveKind === 'plank') {
+      const hp    = Math.round(md?.health ?? module.health ?? 0);
+      const maxHp = md?.maxHealth ?? 10000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       if (hp === 0) {
         // Missing plank slot — show placement blueprint hint
@@ -19540,15 +19826,15 @@ export class RenderSystem {
         }
       } else {
         stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-        if (!hasQuality) {
+        if (!hasQuality && md?.material) {
           // Plain placed plank — show material-derived quality label
-          stats.push({ label: 'Quality', value: qualityFromMaterial(moduleData.material) });
+          stats.push({ label: 'Quality', value: qualityFromMaterial(md.material) });
         }
       }
-      if (moduleData.sectionName) stats.push({ label: 'Section', value: moduleData.sectionName });
-    } else if (moduleData.kind === 'cannon') {
-      const hp    = Math.round(moduleData.health);
-      const maxHp = (moduleData as any).maxHealth ?? 8000;
+      if (md?.sectionName) stats.push({ label: 'Section', value: md.sectionName });
+    } else if (effectiveKind === 'cannon') {
+      const hp    = Math.round(md?.health ?? module.health ?? 0);
+      const maxHp = (md as any)?.maxHealth ?? 8000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health',  value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
       const dmgLvl = ship.levelStats?.levels?.[SHIP_ATTR_DAMAGE] ?? 1;
@@ -19559,45 +19845,64 @@ export class RenderSystem {
       const crewDmg   = computeCannonEntityDamage(entityBase, dmgLvl);
       stats.push({ label: 'Hull Damage', value: String(hullDmg) });
       stats.push({ label: 'Crew Damage', value: String(crewDmg) });
-      stats.push({ label: 'Reload',  value: `${(moduleData as any).reloadTime ?? 3.0}s` });
+      stats.push({ label: 'Reload',  value: `${(md as any)?.reloadTime ?? 3.0}s` });
       if (!hasQuality) stats.push({ label: 'Quality', value: 'Common' });
-    } else if (moduleData.kind === 'helm' || moduleData.kind === 'steering-wheel') {
-      const hp    = Math.round((moduleData as any).health ?? 10000);
-      const maxHp = (moduleData as any).maxHealth ?? 10000;
+    } else if (effectiveKind === 'helm' || effectiveKind === 'steering-wheel') {
+      const hp    = Math.round((md as any)?.health ?? module.health ?? 10000);
+      const maxHp = (md as any)?.maxHealth ?? 10000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health',         value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      stats.push({ label: 'Turn Rate',      value: moduleData.maxTurnRate.toFixed(2) });
-      stats.push({ label: 'Responsiveness', value: `${(moduleData.responsiveness * 100).toFixed(0)}%` });
-    } else if (moduleData.kind === 'mast') {
-      const Q16   = 100_000;
-      const rawHp = moduleData.health ?? 15000;
-      const rawMax = moduleData.maxHealth ?? 15000;
-      const hp    = Math.round(rawHp  > Q16 ? rawHp  / 65536 : rawHp);
-      const maxHp = Math.round(rawMax > Q16 ? rawMax / 65536 : rawMax);
+      if (md) {
+        stats.push({ label: 'Turn Rate',      value: md.maxTurnRate.toFixed(2) });
+        stats.push({ label: 'Responsiveness', value: `${(md.responsiveness * 100).toFixed(0)}%` });
+      }
+    } else if (effectiveKind === 'mast') {
+      if (md) {
+        const Q16   = 100_000;
+        const rawHp = md.health ?? 15000;
+        const rawMax = md.maxHealth ?? 15000;
+        const hp    = Math.round(rawHp  > Q16 ? rawHp  / 65536 : rawHp);
+        const maxHp = Math.round(rawMax > Q16 ? rawMax / 65536 : rawMax);
+        const pct   = maxHp > 0 ? hp / maxHp : 1;
+        stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
+        const rawFh    = md.fiberHealth    ?? 15000;
+        const rawFhMax = md.fiberMaxHealth ?? 15000;
+        const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16 ? rawFh    / 65536 : rawFh);
+        const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16 ? rawFhMax / 65536 : rawFhMax);
+        const fhPct = fhMax > 0 ? Math.round((fh / fhMax) * 100) : 100;
+        stats.push({ label: 'Sail Fibers',    value: `${fh} / ${fhMax} (${fhPct}%)`, color: fhPct > 60 ? '#44cc66' : fhPct > 30 ? '#ffaa22' : '#ff4444' });
+        stats.push({ label: 'Sail State',     value: md.sailState.toUpperCase() });
+        stats.push({ label: 'Openness',       value: `${md.openness.toFixed(0)}%` });
+        stats.push({ label: 'Wind Eff.',      value: `${(md.windEfficiency * 100).toFixed(0)}%` });
+      } else {
+        const hp = Math.round(module.health ?? 0);
+        stats.push({ label: 'Health', value: `${hp} / 15000` });
+      }
+    } else if (effectiveKind === 'chest') {
+      const hp    = Math.round((md as any)?.health ?? module.health ?? 5000);
+      const maxHp = Math.round((md as any)?.maxHealth ?? 5000);
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      const rawFh    = moduleData.fiberHealth    ?? 15000;
-      const rawFhMax = moduleData.fiberMaxHealth ?? 15000;
-      const fh    = rawFhMax === 0 ? 15000 : Math.round(rawFh    > Q16 ? rawFh    / 65536 : rawFh);
-      const fhMax = rawFhMax === 0 ? 15000 : Math.round(rawFhMax > Q16 ? rawFhMax / 65536 : rawFhMax);
-      const fhPct = fhMax > 0 ? Math.round((fh / fhMax) * 100) : 100;
-      stats.push({ label: 'Sail Fibers',    value: `${fh} / ${fhMax} (${fhPct}%)`, color: fhPct > 60 ? '#44cc66' : fhPct > 30 ? '#ffaa22' : '#ff4444' });
-      stats.push({ label: 'Sail State',     value: moduleData.sailState.toUpperCase() });
-      stats.push({ label: 'Openness',       value: `${moduleData.openness.toFixed(0)}%` });
-      stats.push({ label: 'Wind Eff.',      value: `${(moduleData.windEfficiency * 100).toFixed(0)}%` });
-    } else if (moduleData.kind === 'chest') {
-      const hp    = Math.round((moduleData as any).health    ?? 5000);
-      const maxHp = Math.round((moduleData as any).maxHealth ?? 5000);
+      if (md) {
+        stats.push({ label: 'Wood',        value: String(md.wood) });
+        stats.push({ label: 'Fiber',       value: String(md.fiber) });
+        stats.push({ label: 'Metal',       value: String(md.metal) });
+        stats.push({ label: 'Stone',       value: String(md.stone) });
+      }
+    } else if (effectiveKind === 'bed') {
+      const hp    = Math.round(module.health ?? 5000);
+      const maxHp = 5000;
       const pct   = maxHp > 0 ? hp / maxHp : 1;
       stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
-      stats.push({ label: 'Wood',        value: String(moduleData.wood) });
-      stats.push({ label: 'Fiber',       value: String(moduleData.fiber) });
-      stats.push({ label: 'Metal',       value: String(moduleData.metal) });
-      stats.push({ label: 'Stone',       value: String(moduleData.stone) });
+    } else if (effectiveKind === 'workbench') {
+      const hp    = Math.round(module.health ?? 10000);
+      const maxHp = 10000;
+      const pct   = maxHp > 0 ? hp / maxHp : 1;
+      stats.push({ label: 'Health', value: `${hp} / ${maxHp}`, color: pct > 0.6 ? '#44cc66' : pct > 0.3 ? '#ffaa22' : '#ff4444' });
     }
 
     // Deck assignment — shown for interactive modules (not layout-only planks / decks)
-    if (moduleData.kind !== 'plank' && moduleData.kind !== 'deck') {
+    if (effectiveKind !== 'plank' && effectiveKind !== 'deck') {
       const _deckVal = module.deckId === 255 ? 'Any'
                      : module.deckId === 0    ? 'Lower'
                      :                          'Upper';
@@ -19633,19 +19938,19 @@ export class RenderSystem {
     // Weight
     const MODULE_KG: Record<string, number> = {
       'cannon': 100, 'swivel': 180, 'mast': 150, 'helm': 20, 'steering-wheel': 20,
-      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50,
+      'plank': 30, 'deck': 200, 'ladder': 5, 'seat': 25, 'custom': 50, 'workbench': 40, 'bed': 25,
     };
-    let weightKg = MODULE_KG[moduleData.kind] ?? 50;
-    if (moduleData.kind === 'chest') {
+    let weightKg = MODULE_KG[effectiveKind] ?? 50;
+    if (md?.kind === 'chest') {
       weightKg = 40
-        + moduleData.wood        * 0.5
-        + moduleData.fiber       * 0.1
-        + moduleData.metal       * 1.0
-        + moduleData.stone       * 0.75;
+        + md.wood        * 0.5
+        + md.fiber       * 0.1
+        + md.metal       * 1.0
+        + md.stone       * 0.75;
     }
     // Cannon weight is dynamic: 40 kg when stowed (gunport closed), 100 kg when deployed (gunport open / no gunport)
-    if (moduleData.kind === 'cannon') {
-      const snapIdx = (moduleData as import('../../sim/modules').CannonModuleData).gunportSnapIdx;
+    if (md?.kind === 'cannon') {
+      const snapIdx = (md as import('../../sim/modules').CannonModuleData).gunportSnapIdx;
       if (snapIdx !== undefined && snapIdx !== 255) {
         const gp = ship.modules.find(m => m.moduleData?.kind === 'gunport'
           && (m.moduleData as import('../../sim/modules').GunportModuleData).snapIndex === snapIdx);
@@ -19669,10 +19974,17 @@ export class RenderSystem {
       } else {
         dist = worldPos.sub(Vec2.from(mwx, mwy)).length();
       }
-      const baseLabel = moduleData.kind === 'chest' ? '[E] to open' : '[E] Interact';
+      const baseLabel = effectiveKind === 'chest' ? '[E] to open'
+        : effectiveKind === 'bed' ? '[E] Travel'
+        : effectiveKind === 'workbench' ? 'Hold [E] to interact'
+        : '[E] Interact';
       interactLabel = dist <= MAX_INTERACT_DIST ? baseLabel : 'Not in Range';
-    } else if (moduleData.kind === 'chest') {
+    } else if (effectiveKind === 'chest') {
       interactLabel = '[E] to open';
+    } else if (effectiveKind === 'bed') {
+      interactLabel = '[E] Travel';
+    } else if (effectiveKind === 'workbench') {
+      interactLabel = 'Hold [E] to interact';
     }
 
     // ── Layout ───────────────────────────────────────────────────────────
@@ -19744,7 +20056,7 @@ export class RenderSystem {
     // ID + kind
     ctx.font      = '11px Georgia, serif';
     ctx.fillStyle = '#888888';
-    ctx.fillText(`ID: ${module.id}   [${moduleData.kind}]`, tx + PAD + 4, cy);
+    ctx.fillText(`ID: ${module.id}   [${effectiveKind}]`, tx + PAD + 4, cy);
     cy += LINE + 4;
 
     // Description
@@ -19946,6 +20258,18 @@ export class RenderSystem {
           this.ctx.setLineDash([]);
           break;
         }
+        case 'workbench': {
+          this.ctx.fillStyle = blueprintFill;
+          this.ctx.strokeStyle = blueprintStroke;
+          this.ctx.lineWidth = 1.5;
+          this.ctx.setLineDash([3, 2]);
+          this.ctx.beginPath();
+          this.ctx.rect(-22, -15.5, 44, 31);
+          this.ctx.fill();
+          this.ctx.stroke();
+          this.ctx.setLineDash([]);
+          break;
+        }
         case 'plank':
         default: {
           this.ctx.fillStyle = blueprintFill;
@@ -20012,6 +20336,9 @@ export class RenderSystem {
   private drawPendingGhostCursor(worldState: WorldState, camera: Camera): void {
     if (!this.pendingGhostState || !this.mouseWorldPos) return;
     const { kind, rotDeg } = this.pendingGhostState;
+
+    // Dedicated ship-local ghost drawers handle these kinds (with rotation).
+    if (kind === 'workbench' || kind === 'chest' || kind === 'bed') return;
 
     // Hide the following cursor ghost when the cannon is already snapping to a gunport —
     // the slot ghost itself acts as the placement indicator.

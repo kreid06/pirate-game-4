@@ -17,7 +17,7 @@ import {
   COMPANY_NAVY,
 } from '../../sim/Types.js';
 import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, INVENTORY_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight, PlayerResources } from '../../sim/Inventory.js';
-import { SchematicEntry, tierColor, tierName, statMultLabel, QUALITY_STAT_NAMES, qualityCostMult } from '../../sim/Quality.js';
+import { SchematicEntry, tierColor, tierName, statMultLabel, QUALITY_STAT_NAMES, qualityCostMult, MAX_PLAYER_SCHEMATICS } from '../../sim/Quality.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -158,6 +158,8 @@ export class PlayerMenu {
   private _craftTab = 'SURVIVAL';
   private _craftTabHits: Array<{ label: string; x: number; y: number; w: number; h: number }> = [];
   private _schematicsSubTab: 'LAND' | 'SHIP' = 'LAND';
+  /** Updated each render — true when the local player is aboard a ship. */
+  private _playerOnShip = false;
   private _schematicsSubTabHits: Array<{ label: 'LAND' | 'SHIP'; x: number; y: number; w: number; h: number }> = [];
   /** Which hotbar slot is currently selected for assignment (-1 = none). */
   private _schematicsSelectedSlot = -1;
@@ -321,9 +323,8 @@ export class PlayerMenu {
   public onDropResources: ((kind: keyof PlayerResources, amount: number) => void) | null = null;
 
   /**
-   * Called when the player drags a schematic card outside the player menu panel.
-   * Argument is the blueprint index of the quality variant that was selected for
-   * that kind.  Only fires when a quality variant (not Standard) is active.
+   * Called when the player drags a quality blueprint variant row outside the player menu panel.
+   * Argument is the server blueprint index for that variant.
    */
   public onDropSchematic: ((bpIndex: number) => void) | null = null;
 
@@ -341,8 +342,9 @@ export class PlayerMenu {
   private _resDragColor = '#888';
   private _resDragLabel = '';
 
-  // Schematic card drag-and-drop state
+  // Schematic card / variant drag-and-drop state
   private _schemDragKind: string | null = null;
+  private _schemDragBpIndex: number | null = null;
   private _schemDragX = 0;
   private _schemDragY = 0;
   /** Bounds of the card where the drag started — ghost is hidden until cursor leaves this area. */
@@ -382,7 +384,7 @@ export class PlayerMenu {
   private _sliderKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
   toggle(): void { this.visible = !this.visible; }
-  open():   void { this.visible = true; this.activeTab = 'character'; this._panelScrollY = 0; this._schematicsSubTab = 'LAND'; this._schematicsSelectedSlot = -1; }
+  open():   void { this.visible = true; this.activeTab = 'character'; this._panelScrollY = 0; this._schematicsSelectedSlot = -1; }
   close():  void { this.visible = false; this._closeDropSlider(); }
 
   /** Open directly to the Skills tab. */
@@ -513,7 +515,11 @@ export class PlayerMenu {
       const rel = x - px;
       if      (rel < tabW)         this.activeTab = 'character';
       else if (rel < tabW * 2)     this.activeTab = 'skills';
-      else                         this.activeTab = 'schematics';
+      else {
+        this.activeTab = 'schematics';
+        this._schematicsSubTab = this._playerOnShip ? 'SHIP' : 'LAND';
+        this._schematicsSelectedSlot = -1;
+      }
       // Reset scroll when switching tabs so stale offsets don't carry across
       if (this.activeTab !== prevTab) this._panelScrollY = 0;
       return true;
@@ -575,10 +581,9 @@ export class PlayerMenu {
       if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
         if (hit.bpIndex === null) {
           this._variantSelection.delete(hit.kind); // delete = revert to Standard
-        } else {
-          this._variantSelection.set(hit.kind, hit.bpIndex);
+          this._saveVariantSelections();
         }
-        this._saveVariantSelections();
+        /* Blueprint rows: selection handled on mouseup when not dragged */
         return true;
       }
     }
@@ -680,21 +685,30 @@ export class PlayerMenu {
   handleMouseDown(x: number, y: number, inv: { slots: { item: ItemKind; quantity: number }[] }): boolean {
     if (!this.visible) return false;
 
-    // Schematics tab: drag a card to assign it to a hotbar slot
+    // Schematics tab: drag a variant row to drop, or drag a card to assign hotbar
     if (this.activeTab === 'schematics') {
-      // Variant selection rows are NOT draggable — let handleClick handle them
       for (const hit of this._variantHits) {
         if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
-          return false;
+          if (hit.bpIndex !== null) {
+            this._schemDragKind      = hit.kind;
+            this._schemDragBpIndex   = hit.bpIndex;
+            this._schemDragX         = x;
+            this._schemDragY         = y;
+            this._schemDragSrc       = { x: hit.x, y: hit.y, w: hit.w, h: hit.h };
+            this._schemDragActive    = false;
+            return true; /* defer click-to-select to mouseup if not dragged */
+          }
+          return false; /* Standard row — click selects */
         }
       }
       for (const hit of this._schematicsCardHits) {
         if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
-          this._schemDragKind   = hit.kind;
-          this._schemDragX      = x;
-          this._schemDragY      = y;
-          this._schemDragSrc    = { x: hit.x, y: hit.y, w: hit.w, h: hit.h };
-          this._schemDragActive = false;
+          this._schemDragKind      = hit.kind;
+          this._schemDragBpIndex   = null;
+          this._schemDragX         = x;
+          this._schemDragY         = y;
+          this._schemDragSrc       = { x: hit.x, y: hit.y, w: hit.w, h: hit.h };
+          this._schemDragActive    = false;
           // Return false so handleClick still fires — the expand/collapse toggle is
           // handled there. The drag will still activate on mouse-move via handleMouseMove.
           return false;
@@ -806,37 +820,44 @@ export class PlayerMenu {
       return false;
     }
 
-    // Schematic drag: drop onto a hotbar slot to assign, or outside the panel to drop
+    // Schematic drag: drop variant outside panel, or drop card onto hotbar slot
     if (this._schemDragKind !== null) {
-      const kind = this._schemDragKind;
-      this._schemDragKind = null;
+      const kind     = this._schemDragKind;
+      const bpIndex  = this._schemDragBpIndex;
+      this._schemDragKind     = null;
+      this._schemDragBpIndex  = null;
 
-      // Only act when the ghost was visually active (cursor left the source card)
+      // Only act when the ghost was visually active (cursor left the source row/card)
       if (this._schemDragActive) {
-        // Check hotbar slot drop first
-        for (const hit of this._schematicsHotbarHits) {
-          if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
-            const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
-            const newKind = currentHotbar[hit.slot] === kind ? null : kind;
-            if (this._schematicsSubTab === 'LAND') this.onSetLandHotbarSlot?.(hit.slot, newKind);
-            else this.onSetShipHotbarSlot?.(hit.slot, newKind);
-            this._schematicsSelectedSlot = -1;
-            return true;
+        // Check hotbar slot drop first (card drag only)
+        if (bpIndex === null) {
+          for (const hit of this._schematicsHotbarHits) {
+            if (x >= hit.x && x <= hit.x + hit.w && y >= hit.y && y <= hit.y + hit.h) {
+              const currentHotbar = this._schematicsSubTab === 'LAND' ? this.landHotbarSlots : this.shipHotbarSlots;
+              const newKind = currentHotbar[hit.slot] === kind ? null : kind;
+              if (this._schematicsSubTab === 'LAND') this.onSetLandHotbarSlot?.(hit.slot, newKind);
+              else this.onSetShipHotbarSlot?.(hit.slot, newKind);
+              this._schematicsSelectedSlot = -1;
+              return true;
+            }
           }
         }
 
-        // Dropped outside the panel — drop the selected quality variant blueprint
+        // Dropped outside the panel
         const px2 = this._panelX, py2 = this._panelY;
         const outsidePanel = x < px2 || x > px2 + PANEL_W || y < py2 || y > py2 + PANEL_H;
-        if (outsidePanel) {
-          const bp = this.getVariantSchematic(kind);
-          if (bp != null) {
-            // Clear the variant selection for this kind so the next craft uses Standard
+        if (outsidePanel && bpIndex !== null) {
+          if (this.getVariantForKind(kind) === bpIndex) {
             this.setVariantForKind(kind, null);
-            this.onDropSchematic?.(bp.index);
           }
+          this.onDropSchematic?.(bpIndex);
           return true;
         }
+      } else if (bpIndex !== null) {
+        /* Click without drag — select this blueprint variant */
+        this._variantSelection.set(kind, bpIndex);
+        this._saveVariantSelections();
+        return true;
       }
       return true;
     }
@@ -1008,6 +1029,7 @@ export class PlayerMenu {
     const player = assignedId != null
       ? worldState.players.find(p => p.id === assignedId)
       : worldState.players[0] ?? null;
+    this._playerOnShip = !!(player && player.carrierId !== 0);
 
     if (this.activeTab === 'skills') {
       this._skillsTab(ctx, px, cur, py + PANEL_H, player ?? null);
@@ -2525,12 +2547,13 @@ export class PlayerMenu {
 
     let cy = contentTop + INNER_PAD;
 
-    // ── Sub-tab bar (LAND / SHIP) ─────────────────────────────────────────
+    // ── Sub-tab bar (LAND / SHIP) — context tab first: SHIP on deck, LAND on foot ──
     this._schematicsSubTabHits = [];
     this._schematicsHotbarHits = [];
     this._schematicsCardHits   = [];
     this._variantHits          = [];
-    const subTabs: ('LAND' | 'SHIP')[] = ['LAND', 'SHIP'];
+    const onShip = !!(player && player.carrierId !== 0);
+    const subTabs: ('LAND' | 'SHIP')[] = onShip ? ['SHIP', 'LAND'] : ['LAND', 'SHIP'];
     const subTabW = Math.floor(CARD_W / subTabs.length);
     for (let i = 0; i < subTabs.length; i++) {
       const id   = subTabs[i];
@@ -2703,7 +2726,8 @@ export class PlayerMenu {
     }
 
     // ── Scrollable schematic cards ────────────────────────────────────────
-    const viewH  = contentBottom - cy - INNER_PAD;
+    const SCHEM_FOOTER_H = 26;
+    const viewH  = contentBottom - cy - INNER_PAD - SCHEM_FOOTER_H;
     const items  = PlayerMenu.SCHEMATICS.filter(s => s.subTab === this._schematicsSubTab);
     const BP_ROW_H      = 20; // height per looted-blueprint variant row
     const VAR_STRIP_H   = 26; // height of the "selected variant" collapsed footer strip
@@ -3091,36 +3115,106 @@ export class PlayerMenu {
       ctx.fillRect(sbX, thumbY, SB_W, thumb);
     }
 
+    // ── Schematic inventory count / cap (pinned footer) ─────────────────
+    {
+      const footerY = cy + viewH + 4;
+      const footerH = SCHEM_FOOTER_H - 4;
+      const schemCount = this._lootedSchematics.length;
+      const schemCap   = MAX_PLAYER_SCHEMATICS;
+      const fillPct    = schemCap > 0 ? Math.min(1, schemCount / schemCap) : 0;
+      const countColor = fillPct >= 1 ? '#ff6666' : fillPct >= 0.85 ? '#ffaa44' : '#b8c8d8';
+
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      ctx.strokeStyle = BORDER;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(px + INNER_PAD, footerY, CARD_W, footerH, 3);
+      ctx.fill();
+      ctx.stroke();
+
+      if (fillPct > 0) {
+        ctx.fillStyle = fillPct >= 1
+          ? 'rgba(180,40,40,0.22)'
+          : fillPct >= 0.85
+            ? 'rgba(180,120,20,0.18)'
+            : 'rgba(80,120,180,0.15)';
+        ctx.beginPath();
+        ctx.roundRect(px + INNER_PAD + 1, footerY + 1, Math.max(0, (CARD_W - 2) * fillPct), footerH - 2, 2);
+        ctx.fill();
+      }
+
+      ctx.font = '10px Georgia, serif';
+      ctx.fillStyle = TEXT_DIM;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Schematic Inventory', px + INNER_PAD + 8, footerY + footerH / 2);
+
+      ctx.font = 'bold 11px Georgia, serif';
+      ctx.fillStyle = countColor;
+      ctx.textAlign = 'right';
+      ctx.fillText(`${schemCount} / ${schemCap}`, px + INNER_PAD + CARD_W - 8, footerY + footerH / 2);
+    }
+
     // Schematic drag ghost — rendered above the clip region
     if (this._schemDragKind !== null && this._schemDragActive) {
-      const entry = PlayerMenu.SCHEMATICS.find(s => s.kind === this._schemDragKind);
-      if (entry) {
-        const GS = 46;
-        const gx = this._schemDragX - GS / 2;
-        const gy = this._schemDragY - GS / 2;
-        ctx.save();
-        ctx.globalAlpha = 0.87;
+      const GS = 46;
+      const gx = this._schemDragX - GS / 2;
+      const gy = this._schemDragY - GS / 2;
+      ctx.save();
+      ctx.globalAlpha = 0.87;
+
+      if (this._schemDragBpIndex !== null) {
+        const bp = this._lootedSchematics.find(s => s.index === this._schemDragBpIndex);
+        const entry = PlayerMenu.SCHEMATICS.find(s => s.kind === this._schemDragKind);
+        const col = bp ? tierColor(bp.tier) : '#c89bff';
         ctx.fillStyle = 'rgba(12,12,24,0.80)';
         ctx.beginPath();
         ctx.roundRect(gx, gy, GS, GS, 5);
         ctx.fill();
-        ctx.strokeStyle = GOLD;
+        ctx.strokeStyle = col;
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.roundRect(gx, gy, GS, GS, 5);
         ctx.stroke();
-        ctx.fillStyle = entry.color;
+        ctx.fillStyle = 'rgba(40,20,60,0.85)';
         ctx.beginPath();
         ctx.roundRect(gx + 4, gy + 4, GS - 8, GS - 8, 3);
         ctx.fill();
-        ctx.font = 'bold 17px Georgia, serif';
-        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 20px Georgia, serif';
+        ctx.fillStyle = col;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(entry.symbol, this._schemDragX, this._schemDragY);
-        ctx.globalAlpha = 1;
-        ctx.restore();
+        ctx.fillText('📜', this._schemDragX, this._schemDragY);
+        if (bp && entry) {
+          ctx.font = '9px Georgia, serif';
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText(`${tierName(bp.tier)}`, this._schemDragX, this._schemDragY + GS / 2 + 8);
+        }
+      } else {
+        const entry = PlayerMenu.SCHEMATICS.find(s => s.kind === this._schemDragKind);
+        if (entry) {
+          ctx.fillStyle = 'rgba(12,12,24,0.80)';
+          ctx.beginPath();
+          ctx.roundRect(gx, gy, GS, GS, 5);
+          ctx.fill();
+          ctx.strokeStyle = GOLD;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.roundRect(gx, gy, GS, GS, 5);
+          ctx.stroke();
+          ctx.fillStyle = entry.color;
+          ctx.beginPath();
+          ctx.roundRect(gx + 4, gy + 4, GS - 8, GS - 8, 3);
+          ctx.fill();
+          ctx.font = 'bold 17px Georgia, serif';
+          ctx.fillStyle = '#ffffff';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(entry.symbol, this._schemDragX, this._schemDragY);
+        }
       }
+      ctx.globalAlpha = 1;
+      ctx.restore();
     }
   }
 

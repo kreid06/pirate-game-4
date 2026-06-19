@@ -809,24 +809,27 @@ void handle_module_interact(WebSocketPlayer* player, struct WebSocketClient* cli
             break;
 
         case MODULE_TYPE_BED: {
-            // Bed: set the player's respawn point to this ship.
             if (target_ship->company_id != 0 &&
                 player->company_id      != 0 &&
                 target_ship->company_id != (uint8_t)player->company_id) {
                 send_interaction_failure(client, "wrong_company");
                 break;
             }
-            player->respawn_ship_id   = target_ship->ship_id;
-            player->respawn_bed_id    = 0; /* clear island bed */
-            log_info("🛏️  Player %u set ship bed respawn via module %u on ship %u",
-                     player->player_id, module->id, target_ship->ship_id);
-            char bed_ack[128];
-            snprintf(bed_ack, sizeof(bed_ack),
-                "{\"type\":\"bed_used\",\"bed_id\":%u,\"ship_id\":%u}",
-                module->id, target_ship->ship_id);
+            send_interaction_success(client, "bed_travel");
+            break;
+        }
+
+        case MODULE_TYPE_WORKBENCH: {
+            char wb_ack[160];
+            snprintf(wb_ack, sizeof(wb_ack),
+                     "{\"type\":\"crafting_open\",\"structure_id\":0,\"module_id\":%u,"
+                     "\"structure_type\":\"workbench\"}",
+                     module->id);
             char frame[256];
-            size_t fl = websocket_create_frame(WS_OPCODE_TEXT, bed_ack, strlen(bed_ack), frame, sizeof(frame));
+            size_t fl = websocket_create_frame(WS_OPCODE_TEXT, wb_ack, strlen(wb_ack), frame, sizeof(frame));
             if (fl > 0) send(client->fd, frame, fl, 0);
+            log_info("🔨 Player %u opened ship workbench module %u on ship %u",
+                     player->player_id, module->id, target_ship->ship_id);
             break;
         }
 

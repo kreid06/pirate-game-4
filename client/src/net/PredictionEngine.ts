@@ -407,21 +407,59 @@ export class PredictionEngine {
     // position/velocity, but adopt the server's authoritative movement-state flags so the
     // correct physics branch (land / deck / swim) is selected immediately on a transition.
     const serverLocal = baseWorldState.players.find(p => p.id === localId);
+    const boardingNow = !!(serverLocal &&
+      serverLocal.carrierId > 0 && runningLocal.carrierId === 0);
+    if (boardingNow) {
+      this._boardingClientTick = this.clientTick;
+    }
+    if (serverLocal && serverLocal.carrierId === 0 && runningLocal.carrierId > 0) {
+      this._boardingClientTick = -1;
+    }
+    const inBoardingWindow = this._boardingClientTick >= 0 &&
+      (this.clientTick - this._boardingClientTick) < PredictionEngine.BOARDING_DECK_TRUST_TICKS;
+    const trustBoardingPose = (boardingNow || inBoardingWindow) &&
+      !!serverLocal && serverLocal.carrierId > 0;
+
+    const resolveGrappleRopeLength = (): number | undefined => {
+      if (serverLocal!.grappleState !== 2) {
+        return runningLocal.grappleRopeLength;
+      }
+      const srvRope = serverLocal!.grappleRopeLength;
+      if (srvRope !== undefined && srvRope > 0) return srvRope;
+      const runRope = runningLocal.grappleRopeLength;
+      if (runRope !== undefined && runRope > 0) return runRope;
+      if (serverLocal!.grappleX !== undefined && serverLocal!.grappleY !== undefined) {
+        const pos = trustBoardingPose ? serverLocal!.position : runningLocal.position;
+        const dx = pos.x - serverLocal!.grappleX;
+        const dy = pos.y - serverLocal!.grappleY;
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+      return srvRope ?? runRope;
+    };
+
     const mergedLocal = serverLocal
       ? {
           ...serverLocal,               // ALL server flags (authoritative)
-          position: runningLocal.position,
-          velocity: runningLocal.velocity,
+          position: trustBoardingPose
+            ? serverLocal.position.clone()
+            : runningLocal.position,
+          velocity: trustBoardingPose
+            ? serverLocal.velocity.clone()
+            : runningLocal.velocity,
+          grappleRopeLength: resolveGrappleRopeLength(),
           // localPosition (ship-local anchor) ownership depends on mount state:
+          //   • Boarding window: trust server hook attach point (grapple head).
           //   • Mounted: the SERVER anchor wins — local_x/local_y is the module mount point
           //     (e.g. steering wheel). Using the predicted value would keep the player locked
           //     to their pre-mount deck position and never snap them onto the module.
           //   • Walking on deck: the PREDICTED anchor wins — it advances at client rate with
           //     input. Resetting it to the server's RTT-old anchor every tick would yank the
           //     player backwards each simulation step (rubberbanding while walking on deck).
-          localPosition: serverLocal.isMounted
-            ? serverLocal.localPosition
-            : (runningLocal.localPosition ?? serverLocal.localPosition),
+          localPosition: trustBoardingPose
+            ? (serverLocal.localPosition?.clone() ?? runningLocal.localPosition)
+            : serverLocal.isMounted
+              ? serverLocal.localPosition
+              : (runningLocal.localPosition ?? serverLocal.localPosition),
           // deckId: CLIENT semi-authority during ramp transitions — the RenderSystem state
           // machine transitions this immediately when the player enters/exits a ramp zone,
           // then sends player_set_deck to the server.  Until the server echoes back the new
@@ -431,22 +469,9 @@ export class PredictionEngine {
           // upper-deck floors.  We keep the client value — EXCEPT within the first
           // BOARDING_DECK_TRUST_TICKS ticks after boarding (carrierId changed 0 → non-zero),
           // where we trust the server's authoritative deck_level unconditionally.
-          deckId: (() => {
-            const boardingNow = serverLocal.carrierId > 0 && runningLocal.carrierId === 0;
-            if (boardingNow) {
-              // Record the tick we first saw the boarding so the grace window can be measured.
-              this._boardingClientTick = this.clientTick;
-            }
-            const inBoardingWindow = this._boardingClientTick >= 0 &&
-              (this.clientTick - this._boardingClientTick) < PredictionEngine.BOARDING_DECK_TRUST_TICKS;
-            // Reset boarding window when the player dismounts
-            if (serverLocal.carrierId === 0 && runningLocal.carrierId > 0) {
-              this._boardingClientTick = -1;
-            }
-            return (boardingNow || inBoardingWindow)
-              ? serverLocal.deckId   // boarding window: trust server's authoritative deck_level
-              : runningLocal.deckId; // normal walking / ramp transition: keep client value
-          })(),
+          deckId: trustBoardingPose
+            ? serverLocal.deckId
+            : runningLocal.deckId,
         }
       : { ...runningLocal };
 
@@ -586,6 +611,26 @@ export class PredictionEngine {
     if (!this.runningPredicted || this.localPlayerId === null) return;
     const local = this.runningPredicted.players.find(p => p.id === this.localPlayerId);
     if (local) local.deckId = deckLevel;
+  }
+
+  /** Snap the local player onto a ship at the grapple hook / server board position. */
+  snapLocalPlayerToBoard(
+    position: Vec2,
+    localPosition: Vec2,
+    carrierId: number,
+    deckId: number,
+    velocity?: Vec2,
+  ): void {
+    if (!this.runningPredicted || this.localPlayerId === null) return;
+    const local = this.runningPredicted.players.find(p => p.id === this.localPlayerId);
+    if (!local) return;
+    local.carrierId = carrierId;
+    local.onDeck = true;
+    local.deckId = deckId;
+    local.position = position.clone();
+    local.localPosition = localPosition.clone();
+    local.velocity = velocity?.clone() ?? Vec2.zero();
+    this._boardingClientTick = this.clientTick;
   }
 
   /**

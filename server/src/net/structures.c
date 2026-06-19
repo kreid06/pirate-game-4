@@ -10,12 +10,16 @@
 #include "net/websocket_server_internal.h"
 #include "net/websocket_protocol.h"
 #include "net/structures.h"
+#include "net/module_interactions.h"
 #include "net/dock_physics.h"
 #include "net/cannon_fire.h"
 #include "net/crafting.h"
 #include "net/quality.h"
+#include "net/ship_schematics.h"
+#include "net/ship_plank_wreckage.h"
 #include "net/claim.h"
 #include "sim/island.h"
+#include "sim/simulation.h"
 #include "util/time.h"
 
 /* ── Spatial hash for ceiling-connectivity flood-fill (O(N) cascade) ─────────
@@ -1744,36 +1748,9 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_BED) {
-            /* Company check: player must own this bed (same company or solo placer) */
-            if (placed_structures[i].company_id != 0 &&
-                player->company_id != 0 &&
-                placed_structures[i].company_id != player->company_id) {
-                snprintf(response, sizeof(response),
-                         "{\"type\":\"structure_interact_fail\",\"reason\":\"wrong_company\"}");
-                goto si_send;
-            }
-            /* Cooldown check: 60 seconds between bed uses */
-            uint32_t now_bed = get_time_ms();
-            if (player->bed_last_use_ms != 0 &&
-                now_bed - player->bed_last_use_ms < 60000u) {
-                uint32_t remaining = 60000u - (now_bed - player->bed_last_use_ms);
-                snprintf(response, sizeof(response),
-                         "{\"type\":\"bed_cooldown\",\"remaining_ms\":%u}",
-                         remaining);
-                goto si_send;
-            }
-            /* Set island respawn point and clear any ship respawn */
-            player->respawn_bed_id  = (uint16_t)placed_structures[i].id;
-            player->respawn_ship_id = 0;
-            player->bed_last_use_ms = now_bed;
-            log_info("🛏️  Player %u set respawn at island bed %u (%.1f,%.1f)",
-                     player->player_id, placed_structures[i].id,
-                     placed_structures[i].x, placed_structures[i].y);
+            /* Beds are chosen on the respawn screen — E opens fast travel (client-side). */
             snprintf(response, sizeof(response),
-                     "{\"type\":\"bed_used\",\"bed_id\":%u,\"x\":%.1f,\"y\":%.1f}",
-                     placed_structures[i].id,
-                     placed_structures[i].x,
-                     placed_structures[i].y);
+                     "{\"type\":\"structure_interact_fail\",\"reason\":\"use_travel\"}");
             goto si_send;
         }
         snprintf(response, sizeof(response),
@@ -1787,6 +1764,249 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
 si_send:;
     char frame[512];
     size_t flen = websocket_create_frame(
+        WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
+    if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
+}
+
+#define BED_TRAVEL_RANGE 120.0f
+
+static bool bed_company_ok(WebSocketPlayer* player, uint8_t bed_company) {
+    if (bed_company == 0) return true;
+    if (player->company_id == 0) return false;
+    return bed_company == (uint8_t)player->company_id;
+}
+
+static void bed_sync_sim_player(WebSocketPlayer* player) {
+    if (!global_sim || player->sim_entity_id == 0) return;
+    struct Player* sp = sim_get_player(global_sim, player->sim_entity_id);
+    if (!sp) return;
+    sp->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->x));
+    sp->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(player->y));
+    sp->velocity.x = 0;
+    sp->velocity.y = 0;
+}
+
+static bool player_near_island_bed(WebSocketPlayer* player, uint32_t bed_id) {
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        const PlacedStructure* s = &placed_structures[i];
+        if (!s->active || s->type != STRUCT_BED || s->id != bed_id) continue;
+        float dx = player->x - s->x;
+        float dy = player->y - s->y;
+        return (dx * dx + dy * dy) <= (BED_TRAVEL_RANGE * BED_TRAVEL_RANGE);
+    }
+    return false;
+}
+
+static bool player_near_ship_bed(WebSocketPlayer* player, uint16_t ship_id, uint16_t module_id) {
+    SimpleShip* ship = find_ship(ship_id);
+    ShipModule* mod  = ship ? find_module_by_id(ship, module_id) : NULL;
+    if (!ship || !mod || mod->type_id != MODULE_TYPE_BED) return false;
+    float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+    float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+    if (player->parent_ship_id == ship_id) {
+        float dx = player->local_x - lx;
+        float dy = player->local_y - ly;
+        return (dx * dx + dy * dy) <= (BED_TRAVEL_RANGE * BED_TRAVEL_RANGE);
+    }
+    float wx, wy;
+    ship_local_to_world(ship, lx, ly, &wx, &wy);
+    float dx = player->x - wx;
+    float dy = player->y - wy;
+    return (dx * dx + dy * dy) <= (BED_TRAVEL_RANGE * BED_TRAVEL_RANGE);
+}
+
+static void teleport_player_to_island_bed(WebSocketPlayer* player, const PlacedStructure* bed) {
+    if (player->parent_ship_id != 0) {
+        SimpleShip* old = find_ship(player->parent_ship_id);
+        player->parent_ship_id = 0;
+        if (old) recalc_ship_mass(old);
+    }
+    player->x = bed->x;
+    player->y = bed->y;
+    player->local_x = 0.0f;
+    player->local_y = 0.0f;
+    player->movement_state = PLAYER_STATE_WALKING;
+    player->velocity_x = 0.0f;
+    player->velocity_y = 0.0f;
+    bed_sync_sim_player(player);
+}
+
+static void teleport_player_to_ship_bed(WebSocketPlayer* player, SimpleShip* ship, ShipModule* mod) {
+    float lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+    float ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+    board_player_on_ship(player, ship, lx, ly);
+    if (mod->deck_id <= 1) player->deck_level = mod->deck_id;
+    bed_sync_sim_player(player);
+}
+
+bool respawn_player_at_island_bed(WebSocketPlayer* player, uint32_t bed_id)
+{
+    for (uint32_t i = 0; i < placed_structure_count; i++) {
+        const PlacedStructure* bed = &placed_structures[i];
+        if (!bed->active || bed->type != STRUCT_BED || bed->id != bed_id)
+            continue;
+        if (!bed_company_ok(player, bed->company_id))
+            return false;
+        teleport_player_to_island_bed(player, bed);
+        log_info("🛏️  Player %u respawned at island bed %u (%.1f,%.1f)",
+                 player->player_id, bed_id, player->x, player->y);
+        return true;
+    }
+    return false;
+}
+
+bool respawn_player_at_ship_bed(WebSocketPlayer* player, uint16_t ship_id, uint16_t module_id)
+{
+    SimpleShip* ship = find_ship(ship_id);
+    ShipModule* mod  = ship ? find_module_by_id(ship, module_id) : NULL;
+    if (!ship || !mod || mod->type_id != MODULE_TYPE_BED)
+        return false;
+    if (!bed_company_ok(player, ship->company_id))
+        return false;
+    teleport_player_to_ship_bed(player, ship, mod);
+    log_info("🛏️  Player %u respawned at ship %u bed module %u local=(%.1f,%.1f)",
+             player->player_id, ship_id, module_id, player->local_x, player->local_y);
+    return true;
+}
+
+/*
+ * bed_travel: fast-travel from one bed to another owned by the same company.
+ * Payload:
+ *   source_island_bed / source_ship_id + source_module_id  (exactly one source)
+ *   target_island_bed / target_ship_id + target_module_id  (exactly one target)
+ */
+void handle_bed_travel(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
+    char response[256];
+    uint32_t src_island = 0, tgt_island = 0;
+    uint32_t src_ship = 0, src_mod = 0, tgt_ship = 0, tgt_mod = 0;
+    uint32_t now;
+    const char* p;
+    bool src_is_island, src_is_ship, tgt_is_island, tgt_is_ship;
+    char tp_msg[256];
+    char frame[512];
+    size_t flen;
+
+    if ((p = strstr(payload, "\"source_island_bed\":"))) sscanf(p + 20, "%u", &src_island);
+    if ((p = strstr(payload, "\"source_ship_id\":")))   sscanf(p + 17, "%u", &src_ship);
+    if ((p = strstr(payload, "\"source_module_id\":"))) sscanf(p + 19, "%u", &src_mod);
+    if ((p = strstr(payload, "\"target_island_bed\":"))) sscanf(p + 20, "%u", &tgt_island);
+    if ((p = strstr(payload, "\"target_ship_id\":")))   sscanf(p + 17, "%u", &tgt_ship);
+    if ((p = strstr(payload, "\"target_module_id\":"))) sscanf(p + 19, "%u", &tgt_mod);
+
+    src_is_island = src_island != 0;
+    src_is_ship   = src_ship != 0 && src_mod != 0;
+    tgt_is_island = tgt_island != 0;
+    tgt_is_ship   = tgt_ship != 0 && tgt_mod != 0;
+
+    if (player->is_dead) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"bed_travel_fail\",\"reason\":\"dead\"}");
+        goto bt_send;
+    }
+    if (player->mounted_module_id != 0) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"bed_travel_fail\",\"reason\":\"mounted\"}");
+        goto bt_send;
+    }
+    if ((src_is_island == src_is_ship) || (tgt_is_island == tgt_is_ship)) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"bed_travel_fail\",\"reason\":\"bad_request\"}");
+        goto bt_send;
+    }
+    if ((src_is_island && src_island == tgt_island) ||
+        (src_is_ship && src_ship == tgt_ship && src_mod == tgt_mod)) {
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"bed_travel_fail\",\"reason\":\"same_bed\"}");
+        goto bt_send;
+    }
+
+    now = get_time_ms();
+    if (player->bed_last_use_ms != 0 && now - player->bed_last_use_ms < 60000u) {
+        uint32_t rem = 60000u - (now - player->bed_last_use_ms);
+        snprintf(response, sizeof(response),
+                 "{\"type\":\"bed_cooldown\",\"remaining_ms\":%u}", rem);
+        goto bt_send;
+    }
+
+    if (src_is_island) {
+        PlacedStructure* src = NULL;
+        for (uint32_t i = 0; i < placed_structure_count; i++) {
+            if (!placed_structures[i].active) continue;
+            if (placed_structures[i].type != STRUCT_BED) continue;
+            if (placed_structures[i].id != src_island) continue;
+            src = &placed_structures[i];
+            break;
+        }
+        if (!src || !bed_company_ok(player, src->company_id) ||
+            !player_near_island_bed(player, src_island)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_travel_fail\",\"reason\":\"too_far\"}");
+            goto bt_send;
+        }
+    } else {
+        SimpleShip* src_s = find_ship((uint16_t)src_ship);
+        ShipModule* src_m = src_s ? find_module_by_id(src_s, src_mod) : NULL;
+        if (!src_s || !src_m || src_m->type_id != MODULE_TYPE_BED ||
+            !bed_company_ok(player, src_s->company_id) ||
+            !player_near_ship_bed(player, (uint16_t)src_ship, (uint16_t)src_mod)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_travel_fail\",\"reason\":\"too_far\"}");
+            goto bt_send;
+        }
+    }
+
+    if (tgt_is_island) {
+        PlacedStructure* tgt = NULL;
+        for (uint32_t i = 0; i < placed_structure_count; i++) {
+            if (!placed_structures[i].active) continue;
+            if (placed_structures[i].type != STRUCT_BED) continue;
+            if (placed_structures[i].id != tgt_island) continue;
+            tgt = &placed_structures[i];
+            break;
+        }
+        if (!tgt || !bed_company_ok(player, tgt->company_id)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_travel_fail\",\"reason\":\"bed_not_found\"}");
+            goto bt_send;
+        }
+        teleport_player_to_island_bed(player, tgt);
+        log_info("🛏️  Player %u bed-travelled to island bed %u (%.1f,%.1f)",
+                 player->player_id, tgt->id, tgt->x, tgt->y);
+    } else {
+        SimpleShip* ship = find_ship((uint16_t)tgt_ship);
+        ShipModule* mod  = ship ? find_module_by_id(ship, tgt_mod) : NULL;
+        if (!ship || !mod || mod->type_id != MODULE_TYPE_BED) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_travel_fail\",\"reason\":\"bed_not_found\"}");
+            goto bt_send;
+        }
+        if (!bed_company_ok(player, ship->company_id)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"bed_travel_fail\",\"reason\":\"wrong_company\"}");
+            goto bt_send;
+        }
+        teleport_player_to_ship_bed(player, ship, mod);
+        log_info("🛏️  Player %u bed-travelled to ship %u bed module %u local=(%.1f,%.1f)",
+                 player->player_id, ship->ship_id, mod->id,
+                 SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x)),
+                 SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y)));
+    }
+
+    player->bed_last_use_ms = now;
+
+    snprintf(tp_msg, sizeof(tp_msg),
+        "{\"type\":\"player_teleported\",\"player_id\":%u,"
+        "\"x\":%.1f,\"y\":%.1f,\"parent_ship\":%u,"
+        "\"local_x\":%.1f,\"local_y\":%.1f}",
+        player->player_id, player->x, player->y,
+        player->parent_ship_id, player->local_x, player->local_y);
+    websocket_server_broadcast(tp_msg);
+
+    snprintf(response, sizeof(response), "{\"type\":\"bed_travel_ok\"}");
+    save_player_to_file(player);
+
+bt_send:;
+    flen = websocket_create_frame(
         WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
     if (flen > 0 && flen < sizeof(frame)) send(client->fd, frame, flen, 0);
 }
@@ -2693,9 +2913,15 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
                 goto dm_send;
             }
 
-            /* Capture health before memmove invalidates the pointer */
+            /* Capture health and position before memmove invalidates the pointer */
             q16_t plank_health = mod->health;
             q16_t plank_max_hp = mod->max_health;
+            float plank_wx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x)) + ship->x;
+            float plank_wy = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y)) + ship->y;
+
+            ship_plank_start_wreckage_for_module(ship, (uint16_t)module_id);
+            uint32_t wreck_until = ship_plank_wreckage_until_ms(ship,
+                ship_plank_slot_from_module_id((uint16_t)module_id, ship->ship_seq));
 
             /* Remove from SimpleShip */
             memmove(&ship->modules[mod_idx],
@@ -2721,13 +2947,11 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
 
             /* Broadcast as PLANK_HIT (destroyed) — clients already handle this */
-            char plank_bcast[160];
+            char plank_bcast[192];
             snprintf(plank_bcast, sizeof(plank_bcast),
                      "{\"type\":\"PLANK_HIT\",\"shipId\":%u,\"plankId\":%u,"
-                     "\"damage\":9999,\"x\":%.1f,\"y\":%.1f}",
-                     ship_id, module_id,
-                     SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x)) + ship->x,
-                     SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y)) + ship->y);
+                     "\"damage\":9999,\"x\":%.1f,\"y\":%.1f,\"wreckageUntilMs\":%u}",
+                     ship_id, module_id, plank_wx, plank_wy, wreck_until);
             websocket_server_broadcast(plank_bcast);
 
             /* Refund half the plank cost scaled by remaining health */
@@ -2766,11 +2990,13 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
             }
         }
 
-        /* Capture type, deck, and health before the memmove invalidates the pointer */
+        /* Capture type, deck, health, and world position before the memmove invalidates the pointer */
         ModuleTypeId demolished_type   = mod->type_id;
         uint8_t      demolished_deck   = mod->deck_id;
         q16_t        demolished_health = mod->health;
         q16_t        demolished_max_hp = mod->max_health;
+        float mod_lx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+        float mod_ly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
 
         log_info("🪓 Player %u demolished module %u (type %u) on ship %u",
                  player->player_id, module_id, (unsigned)demolished_type, ship_id);
@@ -2809,6 +3035,16 @@ void handle_demolish_module(WebSocketPlayer* player, struct WebSocketClient* cli
 
         /* Refund half the module cost scaled by remaining health */
         res_refund_module_demolish(player, demolished_type, demolished_health, demolished_max_hp);
+
+        if (demolished_type == MODULE_TYPE_WORKBENCH &&
+            !ship_has_workbench(ship) &&
+            ship->ship_schematic_count > 0) {
+            float cr = cosf(ship->rotation), sr = sinf(ship->rotation);
+            float ruin_wx = ship->x + mod_lx * cr - mod_ly * sr;
+            float ruin_wy = ship->y + mod_lx * sr + mod_ly * cr;
+            if (ship_schematic_spawn_pool_wrecks(ship, ruin_wx, ruin_wy) > 0)
+                ship_schematic_broadcast_list((uint16_t)ship_id);
+        }
 
         /* ── Cascade: if a deck was demolished, remove all modules on that deck ── */
         if (demolished_type == MODULE_TYPE_DECK) {

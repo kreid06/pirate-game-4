@@ -114,6 +114,9 @@ export class ShipMenu {
   /** Called when the player clicks a weapon group name row — prompt to rename. */
   public onGroupRename?: (shipId: number, groupIndex: number, currentName: string) => void;
 
+  /** Called when the player opens the ship schematic pool from the header. */
+  public onOpenSchematicPool?: (shipId: number) => void;
+
   /** Current weapon group state (set each frame by UIManager before render). */
   public controlGroups: Map<number, WeaponGroupState> = new Map();
 
@@ -129,6 +132,7 @@ export class ShipMenu {
   /** Whether the settings sub-panel is currently open. */
   private _settingsOpen = false;
   private _gearBtnArea:    { x: number; y: number; w: number; h: number } | null = null;
+  private _schemBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
   private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
   private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
@@ -156,6 +160,14 @@ export class ShipMenu {
       const g = this._gearBtnArea;
       if (x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h) {
         this._settingsOpen = !this._settingsOpen;
+        return true;
+      }
+    }
+
+    if (this._schemBtnArea) {
+      const s = this._schemBtnArea;
+      if (x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) {
+        if (this._currentShipId) this.onOpenSchematicPool?.(this._currentShipId);
         return true;
       }
     }
@@ -306,11 +318,14 @@ export class ShipMenu {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText('Not aboard a ship.', px + PANEL_W / 2, cur + 20);
+      this._schemBtnArea = null;
       ctx.restore();
       return;
     }
 
+    this._currentShipId = ship.id;
     this._currentShipName = ship.shipName ?? '';
+    this._drawSchematicPoolButton(ctx, px, py);
     cur = this._identity(ctx, px, cur, ship, worldState.companies ?? []);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._statsSection(ctx, px, cur, ship, worldState);
@@ -328,6 +343,24 @@ export class ShipMenu {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+
+  private _drawSchematicPoolButton(ctx: CanvasRenderingContext2D, px: number, py: number): void {
+    const schemW = 72;
+    const schemH = 24;
+    const schemX = px + PANEL_W - PAD - 100 - schemW - 8 - 28 - 8;
+    const schemY = py + (HEADER_H - schemH) / 2;
+    ctx.fillStyle = 'rgba(68,204,102,0.12)';
+    ctx.fillRect(schemX, schemY, schemW, schemH);
+    ctx.strokeStyle = GREEN;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(schemX, schemY, schemW, schemH);
+    ctx.font = '11px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = GREEN;
+    ctx.fillText('Schematics', schemX + schemW / 2, schemY + schemH / 2);
+    this._schemBtnArea = { x: schemX, y: schemY, w: schemW, h: schemH };
+  }
 
   private _header(ctx: CanvasRenderingContext2D, px: number, py: number): number {
     ctx.fillStyle = 'rgba(255,215,0,0.06)';

@@ -17,6 +17,11 @@ bool craft_grant_quality(WebSocketPlayer* player, ItemKind item, const QualityPa
 bool schematic_add(WebSocketPlayer* player, ItemKind item, uint8_t crafts,
                    const QualityPayload* q);
 
+/** Clear a schematic slot and recompute the high-water index. Returns false if empty. */
+bool schematic_remove_at(WebSocketPlayer* player, int index);
+
+void schematic_recompute_count(WebSocketPlayer* player);
+
 /* Craft one item from a schematic (by index). Validates resources (quality-scaled
  * cost) + workbench, decrements the charge, grants a quality item. */
 void handle_craft_blueprint(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);

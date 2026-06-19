@@ -531,6 +531,67 @@ export class ParticleSystem {
   }
 
   /**
+   * Sustained wood splinters and dust when a hull plank is destroyed.
+   * Clears after 15 seconds — matches server placement block duration.
+   */
+  createPlankWreckage(position: Vec2): void {
+    const q = this.qualityMultipliers[this.quality];
+    const particles: Particle[] = [];
+    const woodColors = ['#6b3510', '#8B4513', '#a0522d', '#c8813a', '#5a3a1a', '#e0aa60'];
+
+    const spawnDebris = (): Particle => {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 30 + Math.random() * 90;
+      return {
+        position: position.add(Vec2.from((Math.random() - 0.5) * 24, (Math.random() - 0.5) * 24)),
+        velocity: Vec2.from(Math.cos(angle) * speed, Math.sin(angle) * speed - 20),
+        life: 0,
+        maxLife: 0.5 + Math.random() * 0.8,
+        size: 2 + Math.random() * 5,
+        color: woodColors[Math.floor(Math.random() * woodColors.length)],
+        alpha: 0.85,
+      };
+    };
+
+    const spawnDust = (): Particle => {
+      const grey = 80 + Math.floor(Math.random() * 70);
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 4 + Math.random() * 12;
+      const size = 8 + Math.random() * 14;
+      const alpha = 0.35 + Math.random() * 0.25;
+      return {
+        position: position.add(Vec2.from((Math.random() - 0.5) * 20, (Math.random() - 0.5) * 20)),
+        velocity: Vec2.from(Math.cos(ang) * spd, Math.sin(ang) * spd - 8),
+        life: 0,
+        maxLife: 1.5 + Math.random() * 2.0,
+        size,
+        color: `rgb(${grey},${grey},${grey})`,
+        alpha,
+        smoke: true,
+        _initAlpha: alpha,
+        _initSize: size,
+      };
+    };
+
+    for (let i = 0; i < Math.floor(10 * q); i++) particles.push(spawnDebris());
+    for (let i = 0; i < 2; i++) particles.push(spawnDust());
+
+    this.effects.push({
+      position: position.clone(),
+      type: ParticleEffectType.EXPLOSION,
+      intensity: 0.45,
+      particles,
+      emitter: {
+        elapsed: 0,
+        duration: 15,
+        accumulator: 0,
+        spawnRate: 3.5,
+        spawn: () => (Math.random() < 0.65 ? spawnDebris() : spawnDust()),
+      },
+    });
+  }
+
+  /**
    * Scatter fire blobs through the live flame-cone volume.
    * Called every frame from RenderSystem.drawFlameCones.
    *

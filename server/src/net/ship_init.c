@@ -15,6 +15,8 @@
 #include "net/module_interactions.h"
 #include "sim/ship_level.h"
 #include "net/quality.h"
+#include "net/ship_schematics.h"
+#include "net/ship_chest_resources.h"
 #include "core/rng.h"
 #include "sim/island.h"
 
@@ -158,6 +160,15 @@ void tick_sinking_ships(void) {
         /* Convert any tombstones attached to this ship to world coords so they
          * persist in the world after the ship is removed from the ships array. */
         detach_tombstones_from_ship((uint16_t)sunk_id);
+        detach_dropped_items_from_ship((uint16_t)sunk_id);
+
+        /* Spill ship chest resources and workbench schematic pool before despawn
+         * (player ships only — ghost wrecks use procedurally rolled loot below). */
+        if (sunk_company != COMPANY_GHOST) {
+            ship_chest_spawn_ruin_wreck(ship, wx, wy);
+            if (ship->ship_schematic_count > 0)
+                ship_schematic_spawn_pool_wrecks(ship, wx, wy);
+        }
 
         /* Swap-and-pop */
         ships[s] = ships[ship_count - 1];

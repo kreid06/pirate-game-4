@@ -56,6 +56,16 @@ typedef struct {
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
 
+#define MAX_SHIP_SCHEMATICS 48
+
+/** Shared ship schematic pool entry — NPC repair crew consumes these when replacing modules. */
+typedef struct {
+    uint8_t        item;
+    uint8_t        crafts_remaining;
+    uint8_t        priority; /* lower = used first within the same item type */
+    QualityPayload quality;
+} ShipPoolBlueprint;
+
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint16_t ship_id;
@@ -131,6 +141,15 @@ typedef struct SimpleShip {
     /* Ship ID of the last player-owned ship to hit this ship.
      * Used to credit kill XP when a ghost ship finishes sinking. */
     uint16_t killer_ship_id;
+
+    /* Shared schematic pool — crew NPCs consume these when replacing modules. */
+    ShipPoolBlueprint ship_schematics[MAX_SHIP_SCHEMATICS];
+    uint8_t           ship_schematic_count;
+
+    /** Wall-clock ms when each plank slot (0–9) finishes clearing wreckage.
+     *  0 = slot is placeable. Set when a plank is destroyed; blocks placement
+     *  for PLANK_WRECKAGE_DURATION_MS. */
+    uint32_t plank_wreckage_until_ms[10];
 } SimpleShip;
 
 // NPC behavior types
@@ -272,6 +291,10 @@ typedef struct WorldNpc {
     // When > 0, NPC is dwelling at a roam module; counts down in ms per tick.
     // Cleared to 0 when any module on the ship takes damage.
     uint32_t      roam_wait_ms;
+
+    // ── Repairer resource payment ───────────────────────────────────────
+    // Set after ship-chest repair cost is consumed for the current assignment.
+    bool          repair_resources_paid;
 
     // ── Deck level ──────────────────────────────────────────────────────
     // 0 = lower deck, 1 = upper deck.  NPCs default to upper deck (1).
@@ -724,17 +747,15 @@ typedef struct WebSocketPlayer {
      * upper-deck modules (cannons, helm) but always collides with masts. */
     uint8_t deck_level;
 
-    /* ── Bed respawn point ───────────────────────────────────────────────────
-     * A player can sleep in a STRUCT_BED (island) or use a bed item on a ship
-     * to set a custom respawn location.  Only one of these is active at a time:
-     * respawn_bed_id > 0 → island bed (cleared when structure is destroyed)
-     * respawn_ship_id > 0 → ship bed (cleared when ship is destroyed)
-     * bed_last_use_ms tracks the 60-second cooldown between uses. */
-    uint16_t respawn_bed_id;    /* PlacedStructure.id of active island bed (0 = none) */
-    uint16_t respawn_ship_id;   /* ship_id of active ship bed (0 = none) */
-    float    respawn_ship_lx;   /* ship-local X where the bed was placed */
-    float    respawn_ship_ly;   /* ship-local Y where the bed was placed */
-    uint32_t bed_last_use_ms;   /* wall-clock ms of last bed sleep (cooldown gate) */
+    /* ── Bed travel cooldown + legacy respawn fields ─────────────────────────
+     * Beds are chosen on the respawn screen at death — not pre-set via interact.
+     * bed_last_use_ms gates the 60-second cooldown for bed_travel fast travel.
+     * respawn_* fields are unused (kept for struct layout compatibility). */
+    uint16_t respawn_bed_id;
+    uint16_t respawn_ship_id;
+    float    respawn_ship_lx;
+    float    respawn_ship_ly;
+    uint32_t bed_last_use_ms;
 } WebSocketPlayer;
 
 struct WebSocketStats {

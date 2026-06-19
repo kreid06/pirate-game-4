@@ -9,6 +9,10 @@
 #include "net/npc_world.h"
 #include "net/npc_agents.h"
 #include "net/module_interactions.h"
+#include "net/ship_schematics.h"
+#include "net/ship_chest_resources.h"
+#include "net/ship_plank_wreckage.h"
+#include "sim/module_types.h"
 
 // ── Repairer occupancy: small precomputed set rebuilt each tick ──────────────
 typedef struct { uint16_t npc_id; uint16_t ship_id; module_id_t mod_id; } NpcOccEntry;
@@ -19,6 +23,124 @@ static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
         if (buf[k].ship_id == ship_id && buf[k].mod_id == mod_id && buf[k].npc_id != self_npc_id)
             return true;
     return false;
+}
+
+/** Sync a sim-layer module back into the SimpleShip mirror. */
+static void npc_sync_module_to_simple(SimpleShip* simple, const ShipModule* mod) {
+    if (!simple || !mod) return;
+    for (uint8_t m = 0; m < simple->module_count; m++) {
+        if (simple->modules[m].id == mod->id) {
+            simple->modules[m] = *mod;
+            return;
+        }
+    }
+}
+
+/** After NPC places a fresh module, apply the highest-priority ship pool schematic if any. */
+static void npc_apply_ship_pool_schematic(SimpleShip* simple, struct Ship* sim_ship,
+                                          int mod_idx, ItemKind item) {
+    if (!simple || !sim_ship || mod_idx < 0 || mod_idx >= (int)sim_ship->module_count) return;
+    QualityPayload q;
+    if (!ship_schematic_consume_for_item(simple, item, &q)) return;
+
+    ShipModule* mod = &sim_ship->modules[mod_idx];
+    module_apply_quality(mod, &q);
+    mod->health        = mod->max_health / 10;
+    mod->target_health = mod->max_health;
+
+    npc_sync_module_to_simple(simple, mod);
+    ship_schematic_broadcast_list(simple->ship_id);
+    log_info("📋 NPC placed module with pool schematic item=%u on ship %u module %u",
+             (unsigned)item, (unsigned)simple->ship_id, (unsigned)mod->id);
+}
+
+/** When repairing an existing plain module, consume the top-priority pool schematic once. */
+static void npc_try_apply_pool_schematic_on_repair(SimpleShip* simple, struct Ship* sim_ship,
+                                                   uint32_t target_id) {
+    if (!simple || !sim_ship) return;
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        ShipModule* mod = &sim_ship->modules[m];
+        if ((uint32_t)mod->id != target_id) continue;
+        if (mod->quality.quality_q8 != 0) return;
+
+        ItemKind item = ship_schematic_item_from_module_type(mod->type_id);
+        if (item == ITEM_NONE) return;
+
+        QualityPayload q;
+        if (!ship_schematic_consume_for_item(simple, item, &q)) return;
+
+        float ratio = (mod->max_health > 0)
+            ? (float)mod->health / (float)mod->max_health
+            : 0.1f;
+        module_apply_quality(mod, &q);
+        mod->health = (int32_t)((float)mod->max_health * ratio);
+        if (mod->health < 1) mod->health = 1;
+        mod->target_health = mod->max_health;
+
+        npc_sync_module_to_simple(simple, mod);
+        ship_schematic_broadcast_list(simple->ship_id);
+        log_info("📋 NPC repair applied pool schematic item=%u on ship %u module %u",
+                 (unsigned)item, (unsigned)simple->ship_id, (unsigned)mod->id);
+        return;
+    }
+}
+
+static float npc_repair_missing_ratio(const ShipModule* mod) {
+    float ratio = 0.0f;
+    if (mod->max_health > 0) {
+        int32_t gap = mod->max_health - mod->health;
+        if (gap < 0) gap = 0;
+        ratio = (float)gap / (float)mod->max_health;
+    }
+    if (mod->type_id == MODULE_TYPE_MAST) {
+        float fhmax = Q16_TO_FLOAT(mod->data.mast.fiber_max_health);
+        if (fhmax > 0.0f) {
+            float fh = Q16_TO_FLOAT(mod->data.mast.fiber_health);
+            float fiber_ratio = (fhmax - fh) / fhmax;
+            if (fiber_ratio > ratio) ratio = fiber_ratio;
+        }
+    }
+    if (ratio < 0.001f) ratio = 0.001f;
+    return ratio > 1.0f ? 1.0f : ratio;
+}
+
+static bool npc_repair_job_info(struct Ship* sim_ship, uint32_t target_id,
+                                ModuleTypeId* out_type, float* out_ratio) {
+    if (MID_OFFSET((uint16_t)target_id) == MODULE_OFFSET_DECK) {
+        *out_type  = MODULE_TYPE_DECK;
+        *out_ratio = 1.0f;
+        return true;
+    }
+    if (MODULE_OFFSET_IS_PLANK(MID_OFFSET((uint16_t)target_id))) {
+        *out_type  = MODULE_TYPE_PLANK;
+        *out_ratio = 1.0f;
+        return true;
+    }
+    if (!sim_ship) return false;
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        ShipModule* mod = &sim_ship->modules[m];
+        if ((uint32_t)mod->id != target_id) continue;
+        *out_type  = mod->type_id;
+        *out_ratio = npc_repair_missing_ratio(mod);
+        return true;
+    }
+    return false;
+}
+
+static bool npc_repair_job_affordable(SimpleShip* simple, struct Ship* sim_ship, uint32_t target_id) {
+    ModuleTypeId type;
+    float ratio;
+    if (!npc_repair_job_info(sim_ship, target_id, &type, &ratio)) return false;
+    return ship_chest_can_afford_repair(simple, type, ratio);
+}
+
+static bool npc_pay_repair_resources(SimpleShip* simple, struct Ship* sim_ship, uint32_t target_id) {
+    ModuleTypeId type;
+    float ratio;
+    if (!simple || !npc_repair_job_info(sim_ship, target_id, &type, &ratio)) return false;
+    if (!ship_chest_consume_repair(simple, type, ratio)) return false;
+    ship_chest_sync_to_sim(simple, sim_ship);
+    return true;
 }
 
 /**
@@ -837,10 +959,12 @@ void tick_world_npcs(float dt) {
                     }
                     bool intr_deck_taken = !intr_deck_present &&
                         occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, _intr_deck_mid);
-                    if (!intr_deck_present && !intr_deck_taken) {
-                        npc->target_local_x     = 0.0f;
-                        npc->target_local_y     = 0.0f;
-                        npc->assigned_weapon_id = _intr_deck_mid;
+                    if (!intr_deck_present && !intr_deck_taken &&
+                        _intr_ss && npc_repair_job_affordable(_intr_ss, intr_ship, _intr_deck_mid)) {
+                        npc->target_local_x          = 0.0f;
+                        npc->target_local_y          = 0.0f;
+                        npc->assigned_weapon_id      = _intr_deck_mid;
+                        npc->repair_resources_paid   = false;
                         occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, _intr_deck_mid };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
                                  npc->id, npc->name);
@@ -854,20 +978,25 @@ void tick_world_npcs(float dt) {
                     int intr_missing = -1;
                     for (int k = 0; k < 10; k++) {
                         if (present[k]) continue;
+                        if (_intr_ss && ship_plank_wreckage_blocks(_intr_ss, k)) continue;
                         uint32_t pmid_k = MID(_intr_seq, MODULE_OFFSET_PLANK(k));
                         if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, pmid_k))
                             { intr_missing = k; break; }
                     }
                     if (intr_missing >= 0) {
+                        uint32_t intr_plank_mid = MID(_intr_seq, MODULE_OFFSET_PLANK(intr_missing));
+                        if (_intr_ss && npc_repair_job_affordable(_intr_ss, intr_ship, intr_plank_mid)) {
                         float pcx = s_plank_cx[intr_missing], pcy = s_plank_cy[intr_missing];
                         float pmag = sqrtf(pcx * pcx + pcy * pcy);
                         if (pmag > 0.0f) { pcx -= (pcx / pmag) * 28.0f; pcy -= (pcy / pmag) * 28.0f; }
-                        npc->target_local_x     = pcx;
-                        npc->target_local_y     = pcy;
-                        npc->assigned_weapon_id = MID(_intr_seq, MODULE_OFFSET_PLANK(intr_missing));
+                        npc->target_local_x          = pcx;
+                        npc->target_local_y          = pcy;
+                        npc->assigned_weapon_id      = intr_plank_mid;
+                        npc->repair_resources_paid   = false;
                         occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to missing plank %u",
                                  npc->id, npc->name, npc->assigned_weapon_id);
+                        }
                     } else {
                         // Check for damaged modules
                         ShipModule* intr_mod = NULL;
@@ -879,6 +1008,7 @@ void tick_world_npcs(float dt) {
                             if (mod->max_health == 0) continue;
                             float ratio = (float)mod->health / (float)mod->max_health;
                             if (ratio >= 1.0f) continue;
+                            if (_intr_ss && !npc_repair_job_affordable(_intr_ss, intr_ship, (uint32_t)mod->id)) continue;
                             bool taken = occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)mod->id);
                             if (!taken && ratio < intr_worst)  { intr_mod   = mod; intr_worst  = ratio; }
                             if ( taken && ratio < intr_stack_r){ intr_stack = mod; intr_stack_r = ratio; }
@@ -887,9 +1017,10 @@ void tick_world_npcs(float dt) {
                         if (intr_mod) {
                             float mx, my;
                             get_module_interact_pos(intr_mod, &mx, &my);
-                            npc->target_local_x     = mx;
-                            npc->target_local_y     = my;
-                            npc->assigned_weapon_id = (uint32_t)intr_mod->id;
+                            npc->target_local_x          = mx;
+                            npc->target_local_y          = my;
+                            npc->assigned_weapon_id      = (uint32_t)intr_mod->id;
+                            npc->repair_resources_paid   = false;
                             occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                             log_info("🔧 NPC %u (%s) interrupted — redirecting to damaged module %u (%.0f%% HP)",
                                      npc->id, npc->name, intr_mod->id, intr_worst * 100.0f);
@@ -1161,6 +1292,19 @@ void tick_world_npcs(float dt) {
 
             if (sim_ship) {
                 uint32_t target_id = npc->assigned_weapon_id;
+                SimpleShip* simple = find_ship(npc->ship_id);
+
+                if (!npc->repair_resources_paid) {
+                    if (!npc_pay_repair_resources(simple, sim_ship, target_id)) {
+                        log_info("📦 NPC %u (%s) — no ship chest resources for module %u",
+                                 npc->id, npc->name, target_id);
+                        npc->assigned_weapon_id   = 0;
+                        npc->repair_resources_paid = false;
+                        npc->state                = WORLD_NPC_STATE_IDLE;
+                        continue;
+                    }
+                    npc->repair_resources_paid = true;
+                }
 
                 // If the deck is missing, place it first
                 if (MID_OFFSET((uint16_t)target_id) == MODULE_OFFSET_DECK) {
@@ -1173,9 +1317,11 @@ void tick_world_npcs(float dt) {
                         new_deck.health      = new_deck.max_health / 10;
                         new_deck.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
                         sim_ship->modules[sim_ship->module_count++] = new_deck;
-                        SimpleShip* simple = find_ship(npc->ship_id);
                         if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                             simple->modules[simple->module_count++] = new_deck;
+                        if (simple)
+                            npc_apply_ship_pool_schematic(simple, sim_ship,
+                                (int)sim_ship->module_count - 1, ITEM_DECK);
                         log_info("🔨 NPC %u (%s) placed missing deck on ship %u",
                                  npc->id, npc->name, sim_ship->id);
                     }
@@ -1191,6 +1337,9 @@ void tick_world_npcs(float dt) {
                     }
                     if (!module_exists && sim_ship->module_count < MAX_MODULES_PER_SHIP) {
                         int idx = (int)(MID_OFFSET((uint16_t)target_id) - MODULE_OFFSET_PLANK_BASE);
+                        if (simple && ship_plank_wreckage_blocks(simple, idx)) {
+                            still_working = true;
+                        } else {
                         Vec2Q16 pos = {
                             Q16_FROM_FLOAT(CLIENT_TO_SERVER(s_plank_cx[idx])),
                             Q16_FROM_FLOAT(CLIENT_TO_SERVER(s_plank_cy[idx]))
@@ -1200,13 +1349,21 @@ void tick_world_npcs(float dt) {
                         new_plank.state_bits |= MODULE_STATE_DAMAGED | MODULE_STATE_REPAIRING;
                         sim_ship->modules[sim_ship->module_count++] = new_plank;
                         // Also register in SimpleShip so hit-event tracking stays in sync
-                        SimpleShip* simple = find_ship(npc->ship_id);
                         if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                             simple->modules[simple->module_count++] = new_plank;
+                        if (simple)
+                            npc_apply_ship_pool_schematic(simple, sim_ship,
+                                (int)sim_ship->module_count - 1, ITEM_PLANK);
                         log_info("🔨 NPC %u (%s) placed missing plank %u on ship %u",
                                  npc->id, npc->name, target_id, sim_ship->id);
+                        if (simple)
+                            ship_plank_clear_wreckage(simple, idx);
+                        }
                     }
                 }
+
+                if (simple)
+                    npc_try_apply_pool_schematic_on_repair(simple, sim_ship, target_id);
 
                 // Now repair the module (whether freshly placed or already present)
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
@@ -1259,7 +1416,8 @@ void tick_world_npcs(float dt) {
                          npc->id, npc->name, npc->assigned_weapon_id);
                 /* Award XP for completing a repair */
                 npc_apply_xp(npc, 25);
-                npc->assigned_weapon_id = 0;
+                npc->assigned_weapon_id    = 0;
+                npc->repair_resources_paid = false;
                 // Fall through to the IDLE scan below so the NPC goes directly to
                 // the next damaged/missing module without returning home first.
                 npc->state = WORLD_NPC_STATE_IDLE;
@@ -1283,11 +1441,13 @@ void tick_world_npcs(float dt) {
                 if (sim_ship->modules[m].type_id == MODULE_TYPE_DECK) { deck_present = true; break; }
             }
             if (!deck_present) {
-                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, _idle_deck_mid)) {
-                    npc->target_local_x     = 0.0f;
-                    npc->target_local_y     = 0.0f;
-                    npc->assigned_weapon_id = _idle_deck_mid;
-                    npc->state              = WORLD_NPC_STATE_MOVING;
+                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, _idle_deck_mid) &&
+                    npc_repair_job_affordable(_idle_ss, sim_ship, _idle_deck_mid)) {
+                    npc->target_local_x          = 0.0f;
+                    npc->target_local_y          = 0.0f;
+                    npc->assigned_weapon_id      = _idle_deck_mid;
+                    npc->repair_resources_paid   = false;
+                    npc->state                   = WORLD_NPC_STATE_MOVING;
                     occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, _idle_deck_mid };
                     log_info("🔨 NPC %u (%s) → walking to replace missing deck", npc->id, npc->name);
                     continue;
@@ -1303,24 +1463,31 @@ void tick_world_npcs(float dt) {
             int missing_idx = -1;
             for (int k = 0; k < 10; k++) {
                 if (present[k]) continue;
+                if (_idle_ss && ship_plank_wreckage_blocks(_idle_ss, k)) continue;
                 uint32_t plank_mid_k = MID(_idle_seq, MODULE_OFFSET_PLANK(k));
                 if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, plank_mid_k))
                     { missing_idx = k; break; }
             }
 
             if (missing_idx >= 0) {
+                uint32_t plank_mid = MID(_idle_seq, MODULE_OFFSET_PLANK(missing_idx));
+                if (!npc_repair_job_affordable(_idle_ss, sim_ship, plank_mid)) {
+                    /* no resources — skip plank placement */
+                } else {
                 // Pull inward toward ship centre by REPAIR_PLANK_INSET units
                 float pcx = s_plank_cx[missing_idx], pcy = s_plank_cy[missing_idx];
                 float pmag = sqrtf(pcx * pcx + pcy * pcy);
                 if (pmag > 0.0f) { pcx -= (pcx / pmag) * REPAIR_PLANK_INSET; pcy -= (pcy / pmag) * REPAIR_PLANK_INSET; }
-                npc->target_local_x     = pcx;
-                npc->target_local_y     = pcy;
-                npc->assigned_weapon_id = MID(_idle_seq, MODULE_OFFSET_PLANK(missing_idx));
-                npc->state              = WORLD_NPC_STATE_MOVING;
+                npc->target_local_x          = pcx;
+                npc->target_local_y          = pcy;
+                npc->assigned_weapon_id      = plank_mid;
+                npc->repair_resources_paid   = false;
+                npc->state                   = WORLD_NPC_STATE_MOVING;
                 occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_debug("🔨 NPC %u (%s) → walking to place missing plank %u",
                          npc->id, npc->name, npc->assigned_weapon_id);
                 continue;
+                }
             }
 
             // --- 2. Check for damaged modules ------------------------------------
@@ -1345,6 +1512,7 @@ void tick_world_npcs(float dt) {
                     }
                 }
                 if (ratio >= 1.0f) continue;
+                if (_idle_ss && !npc_repair_job_affordable(_idle_ss, sim_ship, (uint32_t)mod->id)) continue;
                 bool taken = occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, (uint32_t)mod->id);
                 if (!taken && ratio < worst_ratio) { target_mod = mod; worst_ratio = ratio; }
                 if ( taken && ratio < stack_ratio)  { stack_mod  = mod; stack_ratio = ratio; }
@@ -1355,10 +1523,11 @@ void tick_world_npcs(float dt) {
             if (target_mod) {
                 float mx, my;
                 get_module_repair_pos(target_mod, &mx, &my);
-                npc->target_local_x     = mx;
-                npc->target_local_y     = my;
-                npc->assigned_weapon_id = (uint32_t)target_mod->id;
-                npc->state              = WORLD_NPC_STATE_MOVING;
+                npc->target_local_x          = mx;
+                npc->target_local_y          = my;
+                npc->assigned_weapon_id      = (uint32_t)target_mod->id;
+                npc->repair_resources_paid   = false;
+                npc->state                   = WORLD_NPC_STATE_MOVING;
                 occ_buf[occ_cnt++] = (NpcOccEntry){ npc->id, npc->ship_id, npc->assigned_weapon_id };
                 log_info("🔧 NPC %u (%s) → walking to repair module %u (%.0f%% HP)",
                          npc->id, npc->name, target_mod->id, worst_ratio * 100.0f);
