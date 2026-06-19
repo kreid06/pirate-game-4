@@ -13,6 +13,7 @@
 #include "net/ship_chest_resources.h"
 #include "net/ship_plank_wreckage.h"
 #include "sim/module_types.h"
+#include "sim/island.h"
 
 // ── Repairer occupancy: small precomputed set rebuilt each tick ──────────────
 typedef struct { uint16_t npc_id; uint16_t ship_id; module_id_t mod_id; } NpcOccEntry;
@@ -747,6 +748,141 @@ uint32_t spawn_unclaimed_npc(float wx, float wy, int index) {
 /* Max distance from the issuing player before a manual move order is cancelled. */
 #define NPC_COMMAND_RANGE 900.0f
 
+static bool npc_point_on_island_land(float wx, float wy, uint32_t* out_island_id) {
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef* isl = &ISLAND_PRESETS[ii];
+        float dx = wx - isl->x, dy = wy - isl->y;
+        float ds = dx * dx + dy * dy;
+        bool on;
+        if (isl->vertex_count > 0) {
+            on = (ds < isl->poly_bound_r * isl->poly_bound_r)
+              && island_poly_contains(isl, wx, wy);
+        } else {
+            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+            if (ds >= broad_r * broad_r) {
+                on = false;
+            } else {
+                float angle = atan2f(dy, dx);
+                float nr = island_boundary_r(isl->beach_radius_px,
+                                             isl->beach_bumps, angle);
+                on = (ds < nr * nr);
+            }
+        }
+        if (on) {
+            if (out_island_id) *out_island_id = (uint32_t)isl->id;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool npc_still_on_island(const WorldNpc* npc) {
+    if (!npc || npc->on_island_id == 0) return false;
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef* isl = &ISLAND_PRESETS[ii];
+        if ((uint32_t)isl->id != npc->on_island_id) continue;
+        float dx = npc->x - isl->x, dy = npc->y - isl->y;
+        float ds = dx * dx + dy * dy;
+        if (isl->vertex_count > 0) {
+            return (ds < isl->poly_bound_r * isl->poly_bound_r)
+                && island_poly_contains(isl, npc->x, npc->y);
+        }
+        float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+        if (ds >= broad_r * broad_r) return false;
+        float angle = atan2f(dy, dx);
+        float nr = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+        return ds < nr * nr;
+    }
+    return false;
+}
+
+uint32_t npc_island_at(float wx, float wy) {
+    uint32_t id = 0;
+    return npc_point_on_island_land(wx, wy, &id) ? id : 0;
+}
+
+void npc_update_island_presence(WorldNpc* npc) {
+    if (!npc) return;
+
+    if (npc->ship_id != 0) {
+        npc->on_island_id = 0;
+        const float DECK_HALF_LEN = 260.0f;
+        const float DECK_HALF_WID =  75.0f;
+        bool was_water = npc->in_water;
+        npc->in_water = (fabsf(npc->local_x) > DECK_HALF_LEN ||
+                         fabsf(npc->local_y) > DECK_HALF_WID);
+        if (!was_water && npc->in_water && npc->fire_timer_ms > 0) {
+            npc->fire_timer_ms = 0;
+            char fx[192];
+            char fxf[256];
+            snprintf(fx, sizeof(fx),
+                "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
+                npc->id);
+            size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
+            if (fxfl > 0) {
+                for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
+                    struct WebSocketClient* wc = &ws_server.clients[ci];
+                    if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
+                }
+            }
+        }
+        return;
+    }
+
+    uint32_t landed = npc_island_at(npc->x, npc->y);
+    if (landed != 0) {
+        npc->on_island_id = landed;
+        npc->in_water     = false;
+        npc->oxygen       = npc->max_oxygen;
+        npc->oxygen_accum = 0.0f;
+        npc->suffoc_accum = 0.0f;
+        return;
+    }
+
+    if (npc->on_island_id != 0 && npc_still_on_island(npc)) {
+        npc->in_water = false;
+        return;
+    }
+
+    npc->on_island_id = 0;
+    npc->in_water     = true;
+}
+
+void npc_restore_persisted_state(WorldNpc* npc) {
+    if (!npc || !npc->active) return;
+
+    if (npc->ship_id == 0) {
+        /* Off-ship: local_x/y are world coordinates — keep them aligned. */
+        if (fabsf(npc->local_x - npc->x) > 1.0f || fabsf(npc->local_y - npc->y) > 1.0f) {
+            npc->local_x = npc->x;
+            npc->local_y = npc->y;
+        }
+        if (npc->on_island_id == 0)
+            npc->on_island_id = npc_island_at(npc->x, npc->y);
+        npc->in_water = (npc->on_island_id == 0);
+        if (!npc->in_water) {
+            npc->oxygen       = npc->max_oxygen;
+            npc->oxygen_accum = 0.0f;
+            npc->suffoc_accum = 0.0f;
+        }
+        /* Old saves lacked move targets — don't walk to map origin. */
+        if (npc->state == WORLD_NPC_STATE_MOVING) {
+            float tdx = npc->target_local_x - npc->local_x;
+            float tdy = npc->target_local_y - npc->local_y;
+            if (tdx * tdx + tdy * tdy < 0.25f) {
+                npc->state = WORLD_NPC_STATE_IDLE;
+            } else if (fabsf(npc->target_local_x) < 1.0f && fabsf(npc->target_local_y) < 1.0f &&
+                       (fabsf(npc->local_x) > 50.0f || fabsf(npc->local_y) > 50.0f)) {
+                npc->target_local_x = npc->local_x;
+                npc->target_local_y = npc->local_y;
+                npc->state          = WORLD_NPC_STATE_IDLE;
+            }
+        }
+    } else {
+        npc->on_island_id = 0;
+    }
+}
+
 void npc_set_manual_order(WorldNpc* npc, uint32_t player_id) {
     if (!npc) return;
     npc->order_player_id = player_id;
@@ -1097,7 +1233,8 @@ void tick_world_npcs(float dt) {
                 } else {
                     npc->state = WORLD_NPC_STATE_IDLE;
                     if (npc->order_player_id != 0) {
-                        if (npc->ship_id != 0) {
+                        if (npc->ship_id != 0 ||
+                            npc_island_at(npc->local_x, npc->local_y) != 0) {
                             npc->idle_local_x = npc->local_x;
                             npc->idle_local_y = npc->local_y;
                         }
@@ -1139,34 +1276,6 @@ void tick_world_npcs(float dt) {
             if (fabsf(npc->velocity_y) < 0.5f) npc->velocity_y = 0.0f;
         }
 
-        /* Deck-bounds water check: if the NPC slid off the ship edges, mark in_water.
-         * Ship is ~480 wide x 120 tall client units; use generous margins.
-         * If ship_id == 0 (ship sank) the NPC is always in water. */
-        {
-            const float DECK_HALF_LEN = 260.0f;
-            const float DECK_HALF_WID =  75.0f;
-            bool was_water = npc->in_water;
-            npc->in_water = (npc->ship_id == 0) ||
-                            (fabsf(npc->local_x) > DECK_HALF_LEN ||
-                             fabsf(npc->local_y) > DECK_HALF_WID);
-            if (!was_water && npc->in_water && npc->fire_timer_ms > 0) {
-                /* Fell into water while burning — extinguish immediately */
-                npc->fire_timer_ms = 0;
-                char fx[192];
-                char fxf[256];
-                snprintf(fx, sizeof(fx),
-                    "{\"type\":\"FIRE_EXTINGUISHED\",\"entityType\":\"npc\",\"id\":%u}",
-                    npc->id);
-                size_t fxfl = websocket_create_frame(WS_OPCODE_TEXT, fx, strlen(fx), fxf, sizeof(fxf));
-                if (fxfl > 0) {
-                    for (int ci = 0; ci < WS_MAX_CLIENTS; ci++) {
-                        struct WebSocketClient* wc = &ws_server.clients[ci];
-                        if (wc->connected && wc->handshake_complete) send(wc->fd, fxf, fxfl, 0);
-                    }
-                }
-            }
-        }
-
         // Keep world position in sync with ship transform
         if (!grappled) {
             if (npc->ship_id != 0) {
@@ -1178,6 +1287,10 @@ void tick_world_npcs(float dt) {
                 npc->y = npc->local_y;
             }
         }
+
+        /* Island land vs open water (off-ship) or deck edge (on-ship). */
+        if (!grappled)
+            npc_update_island_presence(npc);
 
         /* ── Passive HP regeneration ──────────────────────────────────────────
          * Same cadence as player regen: +2 HP every 5 s, 10 s combat delay. */

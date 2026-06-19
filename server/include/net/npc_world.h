@@ -12,6 +12,13 @@ void tick_world_npcs(float dt);
 void npc_set_manual_order(WorldNpc* npc, uint32_t player_id);
 void npc_clear_manual_order(WorldNpc* npc);
 
+/** Island id under (wx, wy), or 0 if open water / off all island land. */
+uint32_t npc_island_at(float wx, float wy);
+/** Refresh in_water / on_island_id from current world position (call after moves). */
+void npc_update_island_presence(WorldNpc* npc);
+/** Normalize off-ship coords + island state after world_save load. */
+void npc_restore_persisted_state(WorldNpc* npc);
+
 /** Idle crew grid on the upper deck — up to NPC_IDLE_SLOT_MAX positions. */
 #define NPC_IDLE_SLOT_MAX 50
 

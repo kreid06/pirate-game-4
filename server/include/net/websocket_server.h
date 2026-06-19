@@ -210,6 +210,7 @@ typedef struct WorldNpc {
     // Ship attachment
     uint16_t      ship_id;         // 0 = free-standing
     float         local_x, local_y; // Ship-local position in CLIENT units
+    uint32_t      on_island_id;    // IslandDef id when walking ashore; 0 = not on island land
 
     // Module associations
     // Rigger: port_cannon_id = mast module ID (starboard_cannon_id mirrors it).

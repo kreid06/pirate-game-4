@@ -31,6 +31,7 @@
 #include "sim/world_save.h"
 #include "sim/ship_level.h"
 #include "net/websocket_server_internal.h"
+#include "net/npc_world.h"
 #include "net/module_interactions.h"
 #include "sim/island.h"
 #include "sim/module_types.h"
@@ -390,7 +391,14 @@ int world_save(const char *path) {
             "      \"assigned_weapon_id\": %u,\n"
             "      \"wants_cannon\": %u,\n"
             "      \"npc_state\": %u,\n"
-            "      \"owner_player_id\": %u\n"
+            "      \"owner_player_id\": %u,\n"
+            "      \"on_island_id\": %u,\n"
+            "      \"target_lx\": %.3f,\n"
+            "      \"target_ly\": %.3f,\n"
+            "      \"idle_lx\": %.3f,\n"
+            "      \"idle_ly\": %.3f,\n"
+            "      \"in_water\": %u,\n"
+            "      \"order_player_id\": %u\n"
             "    }",
             (unsigned)n->id,
             n->name,
@@ -413,7 +421,14 @@ int world_save(const char *path) {
             (unsigned)n->assigned_weapon_id,
             (unsigned)n->wants_cannon,
             (unsigned)n->state,
-            (unsigned)n->owner_player_id
+            (unsigned)n->owner_player_id,
+            (unsigned)n->on_island_id,
+            (double)n->target_local_x,
+            (double)n->target_local_y,
+            (double)n->idle_local_x,
+            (double)n->idle_local_y,
+            (unsigned)(n->in_water ? 1u : 0u),
+            (unsigned)n->order_player_id
         );
     }
     fprintf(f, "\n  ],\n");
@@ -993,7 +1008,9 @@ int world_load(const char *path) {
                 unsigned xp = 0;
                 unsigned sh = 0, sd = 0, ss = 0, sw = 0;
                 unsigned assigned_weapon_id = 0, wants_cannon = 0, npc_state = 0;
+                unsigned on_island_id = 0, in_water = 0, order_player_id = 0;
                 float x = 0, y = 0, rot = 0, lx = 0, ly = 0;
+                float target_lx = 0, target_ly = 0, idle_lx = 0, idle_ly = 0;
 
                 ws_json_uint(obj,  "id",                 &id);
                 ws_json_str (obj,  "name",               n->name, sizeof(n->name));
@@ -1018,6 +1035,13 @@ int world_load(const char *path) {
                 ws_json_uint(obj,  "npc_state",          &npc_state);
                 uint32_t owner_player_id = 0;
                 ws_json_uint(obj,  "owner_player_id",    &owner_player_id);
+                ws_json_uint(obj,  "on_island_id",       &on_island_id);
+                ws_json_float(obj, "target_lx",          &target_lx);
+                ws_json_float(obj, "target_ly",          &target_ly);
+                ws_json_float(obj, "idle_lx",            &idle_lx);
+                ws_json_float(obj, "idle_ly",            &idle_ly);
+                ws_json_uint(obj,  "in_water",           &in_water);
+                ws_json_uint(obj,  "order_player_id",    &order_player_id);
 
                 n->id         = id ? (uint16_t)id : next_world_npc_id;
                 n->role       = (NpcRole)role;
@@ -1042,6 +1066,13 @@ int world_load(const char *path) {
                 n->wants_cannon       = (bool)wants_cannon;
                 n->state              = (WorldNpcState)npc_state;
                 n->owner_player_id    = owner_player_id;
+                n->on_island_id       = on_island_id;
+                n->target_local_x     = target_lx;
+                n->target_local_y     = target_ly;
+                n->idle_local_x       = idle_lx;
+                n->idle_local_y       = idle_ly;
+                n->in_water           = (in_water != 0);
+                n->order_player_id    = order_player_id;
                 n->active     = true;
 
                 /* Remap ship_id from the saved entity ID to the newly
@@ -1076,6 +1107,7 @@ int world_load(const char *path) {
                 }
 
                 if (n->id >= next_world_npc_id) next_world_npc_id = n->id + 1;
+                npc_restore_persisted_state(n);
                 world_npc_count++;
                 free(obj);
             }

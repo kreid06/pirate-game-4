@@ -11176,17 +11176,23 @@ int websocket_server_update(struct Sim* sim) {
                                         }
                                     } else {
                                         /* World walk / disembark */
-                                        /* Use current world pos as local origin for path continuity */
                                         tp_npc->local_x          = tp_npc->x;
                                         tp_npc->local_y          = tp_npc->y;
                                         tp_npc->ship_id          = 0;
-                                        tp_npc->in_water         = true;
-                                        tp_npc->boarding_ship_id = 0;  /* cancel any pending boarding */
+                                        tp_npc->boarding_ship_id = 0;
                                         tp_npc->target_local_x   = tp_wx;
                                         tp_npc->target_local_y   = tp_wy;
                                         tp_npc->state            = WORLD_NPC_STATE_MOVING;
-                                        log_info("\U0001f30a NPC %u (%s) \u2192 world (%.0f, %.0f)",
-                                                 tp_npc_id, tp_npc->name, tp_wx, tp_wy);
+                                        tp_npc->x                = tp_npc->local_x;
+                                        tp_npc->y                = tp_npc->local_y;
+                                        npc_update_island_presence(tp_npc);
+                                        if (!tp_npc->in_water) {
+                                            tp_npc->idle_local_x = tp_wx;
+                                            tp_npc->idle_local_y = tp_wy;
+                                        }
+                                        log_info("\U0001f30a NPC %u (%s) \u2192 world (%.0f, %.0f)%s",
+                                                 tp_npc_id, tp_npc->name, tp_wx, tp_wy,
+                                                 tp_npc->on_island_id ? " [island]" : " [swim]");
                                         strcpy(response, "{\"type\":\"message_ack\",\"status\":\"npc_moving\"}");
                                     }
                                 } else {
