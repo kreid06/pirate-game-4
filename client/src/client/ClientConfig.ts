@@ -125,7 +125,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
       : 'wss://192.168.56.10:44300', // Fallback to default if env vars not set
     maxReconnectAttempts: 5,
     reconnectDelay: 2000,
-    heartbeatInterval: 30000,
+    heartbeatInterval: 1000, // 1 s ping keeps the adaptive interpolation buffer calibrated
     timeoutDuration: 10000,
     protocol: 'websocket',
     fallbackToWebSocket: true

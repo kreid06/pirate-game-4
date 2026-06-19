@@ -7,6 +7,38 @@
 #include "net/websocket_protocol.h"
 #include "net/crafting.h"
 #include "net/quality.h"
+#include "sim/module_types.h"
+
+/** True when the player is within crafting range of an island or ship workbench. */
+static bool player_near_workbench(WebSocketPlayer* player) {
+    const float ISLAND_WB_RANGE2 = 200.0f * 200.0f;
+    const float SHIP_WB_RANGE2   = 120.0f * 120.0f;
+
+    for (uint32_t si = 0; si < placed_structure_count; si++) {
+        const PlacedStructure* s = &placed_structures[si];
+        if (!s->active || s->type != STRUCT_WORKBENCH) continue;
+        float dx = s->x - player->x;
+        float dy = s->y - player->y;
+        if (dx * dx + dy * dy <= ISLAND_WB_RANGE2) return true;
+    }
+
+    if (player->parent_ship_id != 0) {
+        SimpleShip* ship = find_ship(player->parent_ship_id);
+        if (ship && ship->active) {
+            for (uint32_t mi = 0; mi < ship->module_count; mi++) {
+                ShipModule* mod = &ship->modules[mi];
+                if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
+                if (mod->type_id != MODULE_TYPE_WORKBENCH) continue;
+                float mlx = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.x));
+                float mly = SERVER_TO_CLIENT(Q16_TO_FLOAT(mod->local_pos.y));
+                float dx = player->local_x - mlx;
+                float dy = player->local_y - mly;
+                if (dx * dx + dy * dy <= SHIP_WB_RANGE2) return true;
+            }
+        }
+    }
+    return false;
+}
 
 
 
@@ -178,16 +210,7 @@ void handle_craft_item(WebSocketPlayer* player, struct WebSocketClient* client, 
 
     /* Workbench proximity check */
     if (recipe->require_workbench) {
-        const float WB_RANGE2 = 200.0f * 200.0f;
-        bool near_workbench = false;
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            const PlacedStructure* s = &placed_structures[si];
-            if (!s->active || s->type != STRUCT_WORKBENCH) continue;
-            float dx = s->x - player->x;
-            float dy = s->y - player->y;
-            if (dx*dx + dy*dy <= WB_RANGE2) { near_workbench = true; break; }
-        }
-        if (!near_workbench) {
+        if (!player_near_workbench(player)) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"craft_result\",\"success\":false,\"reason\":\"not_at_workbench\",\"recipe_id\":\"%s\"}", recipe_id);
             goto send_craft_resp;
@@ -280,6 +303,22 @@ bool schematic_add(WebSocketPlayer* player, ItemKind item, uint8_t crafts,
     return false;
 }
 
+void schematic_recompute_count(WebSocketPlayer* player) {
+    if (!player) return;
+    uint8_t hw = 0;
+    for (int i = 0; i < MAX_PLAYER_SCHEMATICS; i++)
+        if (player->schematics[i].item != 0) hw = (uint8_t)(i + 1);
+    player->schematic_count = hw;
+}
+
+bool schematic_remove_at(WebSocketPlayer* player, int index) {
+    if (!player || index < 0 || index >= MAX_PLAYER_SCHEMATICS) return false;
+    if (player->schematics[index].item == 0) return false;
+    memset(&player->schematics[index], 0, sizeof(PlayerBlueprint));
+    schematic_recompute_count(player);
+    return true;
+}
+
 /* Canonical base recipe (ingredients + workbench req) for a quality-craftable item.
  * Mirrors the cheapest matching recipe in handle_craft_item's table. */
 typedef struct { ItemKind item; int count; } BpIng;
@@ -342,15 +381,7 @@ void handle_craft_blueprint(WebSocketPlayer* player, struct WebSocketClient* cli
     }
 
     if (require_wb) {
-        const float WB_RANGE2 = 200.0f * 200.0f;
-        bool near_wb = false;
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            const PlacedStructure* s = &placed_structures[si];
-            if (!s->active || s->type != STRUCT_WORKBENCH) continue;
-            float dx = s->x - player->x, dy = s->y - player->y;
-            if (dx*dx + dy*dy <= WB_RANGE2) { near_wb = true; break; }
-        }
-        if (!near_wb) {
+        if (!player_near_workbench(player)) {
             snprintf(response, sizeof(response),
                      "{\"type\":\"craft_blueprint_result\",\"success\":false,\"reason\":\"not_at_workbench\",\"index\":%d}", index);
             goto bp_send;
@@ -391,12 +422,7 @@ void handle_craft_blueprint(WebSocketPlayer* player, struct WebSocketClient* cli
     int tier = quality_tier(quality);
     if (remaining == 0) {
         /* Blueprint exhausted — free the slot. */
-        memset(bp, 0, sizeof(*bp));
-        /* Recompute high-water count. */
-        uint8_t hw = 0;
-        for (int i = 0; i < MAX_PLAYER_SCHEMATICS; i++)
-            if (player->schematics[i].item != 0) hw = (uint8_t)(i + 1);
-        player->schematic_count = hw;
+        schematic_remove_at(player, index);
     }
 
     log_info("\u2692 Player %u craft-blueprint %d -> item %u (tier %d, %u crafts left)",

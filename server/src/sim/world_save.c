@@ -9,6 +9,7 @@
  *                  is_sinking,
  *                  "modules": [ { id, type, lx, ly, lr, health, max_health, target_health } ],
  *                  "weapon_groups": [...],
+ *                  "ship_schematics": [ { item, crafts, prio, q, sm } ],
  *                  "level_stats": { xp, w, r, d, c, s } } ],
  *   "world_npcs": [ { id, name, role, company, x, y, rot,
  *                     ship_id, lx, ly, health, max_health, level, xp,
@@ -309,6 +310,26 @@ int world_save(const char *path) {
                     fprintf(f, "%u", (unsigned)wg->weapon_ids[wi]);
                 }
                 fprintf(f, "]}");
+            }
+        }
+        fprintf(f, "\n      ]");
+        /* Ship workbench schematic pool (priority order + quality payloads) */
+        fprintf(f, ",\n      \"ship_schematics\": [");
+        {
+            bool sch_first = true;
+            for (uint8_t sci = 0; sci < s->ship_schematic_count; sci++) {
+                const ShipPoolBlueprint *bp = &s->ship_schematics[sci];
+                if (bp->item == 0 || bp->crafts_remaining == 0) continue;
+                fprintf(f,
+                    "%s{\"item\":%u,\"crafts\":%u,\"prio\":%u,\"q\":%u,\"sm\":[%u,%u,%u,%u,%u]}",
+                    sch_first ? "" : ",",
+                    (unsigned)bp->item, (unsigned)bp->crafts_remaining,
+                    (unsigned)bp->priority,
+                    (unsigned)bp->quality.quality_q8,
+                    (unsigned)bp->quality.stat_mult_q8[0], (unsigned)bp->quality.stat_mult_q8[1],
+                    (unsigned)bp->quality.stat_mult_q8[2], (unsigned)bp->quality.stat_mult_q8[3],
+                    (unsigned)bp->quality.stat_mult_q8[4]);
+                sch_first = false;
             }
         }
         fprintf(f, "\n      ]");
@@ -905,6 +926,41 @@ int world_load(const char *path) {
                                     }
                                 }
                                 free(wgobj);
+                            }
+                        }
+                        /* Restore ship workbench schematic pool */
+                        s->ship_schematic_count = 0;
+                        memset(s->ship_schematics, 0, sizeof(s->ship_schematics));
+                        const char *scharr = find_array(obj, "ship_schematics");
+                        if (scharr) {
+                            char *schobj;
+                            while ((schobj = next_json_object(&scharr)) != NULL &&
+                                   s->ship_schematic_count < MAX_SHIP_SCHEMATICS) {
+                                unsigned item = 0, crafts = 0, prio = 0, q = 0;
+                                ws_json_uint(schobj, "item",  &item);
+                                ws_json_uint(schobj, "crafts", &crafts);
+                                ws_json_uint(schobj, "prio",  &prio);
+                                ws_json_uint(schobj, "q",     &q);
+                                if (item != 0 && crafts > 0) {
+                                    ShipPoolBlueprint *bp =
+                                        &s->ship_schematics[s->ship_schematic_count++];
+                                    bp->item               = (uint8_t)item;
+                                    bp->crafts_remaining   = (uint8_t)crafts;
+                                    bp->priority           = (uint8_t)prio;
+                                    bp->quality.quality_q8 = (uint8_t)q;
+                                    const char *smp = strstr(schobj, "\"sm\":[");
+                                    if (smp) {
+                                        unsigned v0 = 0, v1 = 0, v2 = 0, v3 = 0, v4 = 0;
+                                        sscanf(smp + 6, "%u,%u,%u,%u,%u",
+                                               &v0, &v1, &v2, &v3, &v4);
+                                        bp->quality.stat_mult_q8[0] = (uint16_t)v0;
+                                        bp->quality.stat_mult_q8[1] = (uint16_t)v1;
+                                        bp->quality.stat_mult_q8[2] = (uint16_t)v2;
+                                        bp->quality.stat_mult_q8[3] = (uint16_t)v3;
+                                        bp->quality.stat_mult_q8[4] = (uint16_t)v4;
+                                    }
+                                }
+                                free(schobj);
                             }
                         }
                     }

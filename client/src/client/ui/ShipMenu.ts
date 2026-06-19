@@ -36,6 +36,7 @@ import {
   WeaponGroupState,
 } from '../../sim/Types.js';
 import { computeInventoryWeight } from '../../sim/Inventory.js';
+import { tierColor, tierName, statMultLabel } from '../../sim/Quality.js';
 
 // ── Shared palette ────────────────────────────────────────────────────────────
 
@@ -113,6 +114,9 @@ export class ShipMenu {
   /** Called when the player clicks a weapon group name row — prompt to rename. */
   public onGroupRename?: (shipId: number, groupIndex: number, currentName: string) => void;
 
+  /** Called when the player opens the ship schematic pool from the header. */
+  public onOpenSchematicPool?: (shipId: number) => void;
+
   /** Current weapon group state (set each frame by UIManager before render). */
   public controlGroups: Map<number, WeaponGroupState> = new Map();
 
@@ -128,6 +132,7 @@ export class ShipMenu {
   /** Whether the settings sub-panel is currently open. */
   private _settingsOpen = false;
   private _gearBtnArea:    { x: number; y: number; w: number; h: number } | null = null;
+  private _schemBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
   private _unclaimBtnArea: { x: number; y: number; w: number; h: number } | null = null;
   private _claimBtnArea:   { x: number; y: number; w: number; h: number } | null = null;
   private _renameBtnArea:  { x: number; y: number; w: number; h: number } | null = null;
@@ -155,6 +160,14 @@ export class ShipMenu {
       const g = this._gearBtnArea;
       if (x >= g.x && x <= g.x + g.w && y >= g.y && y <= g.y + g.h) {
         this._settingsOpen = !this._settingsOpen;
+        return true;
+      }
+    }
+
+    if (this._schemBtnArea) {
+      const s = this._schemBtnArea;
+      if (x >= s.x && x <= s.x + s.w && y >= s.y && y <= s.y + s.h) {
+        if (this._currentShipId) this.onOpenSchematicPool?.(this._currentShipId);
         return true;
       }
     }
@@ -305,11 +318,14 @@ export class ShipMenu {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'top';
       ctx.fillText('Not aboard a ship.', px + PANEL_W / 2, cur + 20);
+      this._schemBtnArea = null;
       ctx.restore();
       return;
     }
 
+    this._currentShipId = ship.id;
     this._currentShipName = ship.shipName ?? '';
+    this._drawSchematicPoolButton(ctx, px, py);
     cur = this._identity(ctx, px, cur, ship, worldState.companies ?? []);
     cur = this._hullAmmo(ctx, px, cur, ship);
     cur = this._statsSection(ctx, px, cur, ship, worldState);
@@ -327,6 +343,24 @@ export class ShipMenu {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+
+  private _drawSchematicPoolButton(ctx: CanvasRenderingContext2D, px: number, py: number): void {
+    const schemW = 72;
+    const schemH = 24;
+    const schemX = px + PANEL_W - PAD - 100 - schemW - 8 - 28 - 8;
+    const schemY = py + (HEADER_H - schemH) / 2;
+    ctx.fillStyle = 'rgba(68,204,102,0.12)';
+    ctx.fillRect(schemX, schemY, schemW, schemH);
+    ctx.strokeStyle = GREEN;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(schemX, schemY, schemW, schemH);
+    ctx.font = '11px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = GREEN;
+    ctx.fillText('Schematics', schemX + schemW / 2, schemY + schemH / 2);
+    this._schemBtnArea = { x: schemX, y: schemY, w: schemW, h: schemH };
+  }
 
   private _header(ctx: CanvasRenderingContext2D, px: number, py: number): number {
     ctx.fillStyle = 'rgba(255,215,0,0.06)';
@@ -627,37 +661,36 @@ export class ShipMenu {
         const hpPct    = hp    / maxHp;
         const qualPct  = tgtHp / maxHp;
 
-        // HP bar
+        // Blueprint quality data (present when deck was crafted from a quality blueprint)
+        const qt  = mod.qualityTier;
+        const hasQ = typeof qt === 'number' && qt >= 1;
+        const qCol  = hasQ ? tierColor(qt!) : null;
+        const qName = hasQ ? tierName(qt!)  : null;
+        const qdRaw = mod.qualityDurabilityQ8;
+        const qwRaw = mod.qualityWeaponDmgQ8;
+        const qdLbl = (typeof qdRaw === 'number' && qdRaw > 0) ? statMultLabel(qdRaw) : null;
+        const qwLbl = (typeof qwRaw === 'number' && qwRaw > 0) ? statMultLabel(qwRaw) : null;
+
+        // Row count: base 2 (HP + condition); +1 if blueprint quality info exists
+        const qualityRows = hasQ ? 1 : 0;
+
+        // HP bar (row 1)
         const barColor = hpPct >= 0.7 ? GREEN : hpPct >= 0.3 ? ORANGE : RED;
         ctx.fillStyle = '#1a1a28';
         ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
         ctx.fillStyle = barColor;
         ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * hpPct), BAR_H);
-        // Quality overlay (lighter shade)
         ctx.fillStyle = 'rgba(255,255,255,0.15)';
         ctx.fillRect(barX, py + (ROW_H - BAR_H) / 2, Math.round(barW * qualPct), BAR_H);
         ctx.strokeStyle = '#334';
         ctx.lineWidth = 0.8;
         ctx.strokeRect(barX, py + (ROW_H - BAR_H) / 2, barW, BAR_H);
 
-        // HP% label inside bar
+        // HP% label
         ctx.font = '11px Georgia, serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = TEXT_HEAD;
         ctx.fillText(`${Math.round(hpPct * 100)}%`, barX + barW - 2, py + ROW_H / 2);
-
-        // Condition label (row 2)
-        const condLabel = qualPct >= 0.7 ? 'Good' : qualPct >= 0.3 ? 'Damaged' : 'Critical';
-        const condColor = qualPct >= 0.7 ? GREEN   : qualPct >= 0.3 ? ORANGE   : RED;
-        ctx.font = '11px Georgia, serif';
-        ctx.textAlign = 'left';
-        ctx.fillStyle = TEXT_DIM;
-        ctx.fillText('Condition:', px + PAD + 8, py + ROW_H + ROW_H / 2);
-        ctx.fillStyle = condColor;
-        ctx.fillText(condLabel, barX, py + ROW_H + ROW_H / 2);
-        // Quality % next to condition
-        ctx.fillStyle = TEXT_DIM;
-        ctx.fillText(`  (${Math.round(qualPct * 100)}% quality)`, barX + 48, py + ROW_H + ROW_H / 2);
 
         // [Demolish] button
         ctx.fillStyle = 'rgba(160,30,30,0.75)';
@@ -672,7 +705,63 @@ export class ShipMenu {
         ctx.fillText('Demolish', btnX + btnW / 2, btnY + btnH / 2);
         this._deckDemolishAreas.push({ moduleId: mod.id, deckLevel, x: btnX, y: btnY, w: btnW, h: btnH });
 
-        py += ROW_H * 2;
+        // Condition label (row 2)
+        const condLabel = qualPct >= 0.7 ? 'Good' : qualPct >= 0.3 ? 'Damaged' : 'Critical';
+        const condColor = qualPct >= 0.7 ? GREEN   : qualPct >= 0.3 ? ORANGE   : RED;
+        ctx.font = '11px Georgia, serif';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText('Condition:', px + PAD + 8, py + ROW_H + ROW_H / 2);
+        ctx.fillStyle = condColor;
+        ctx.fillText(condLabel, barX, py + ROW_H + ROW_H / 2);
+        ctx.fillStyle = TEXT_DIM;
+        ctx.fillText(`  (${Math.round(qualPct * 100)}% quality)`, barX + 48, py + ROW_H + ROW_H / 2);
+
+        // Blueprint quality row (row 3 — only for blueprint-crafted decks)
+        if (hasQ) {
+          const qRowY = py + ROW_H * 2;
+          ctx.font = '11px Georgia, serif';
+          ctx.textAlign = 'left';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = TEXT_DIM;
+          ctx.fillText('Blueprint:', px + PAD + 8, qRowY + ROW_H / 2);
+
+          // Tier name pill
+          let pillX = barX;
+          const tierPill = qName!;
+          ctx.font = 'bold 11px Georgia, serif';
+          ctx.fillStyle = qCol!;
+          ctx.fillText(tierPill, pillX, qRowY + ROW_H / 2);
+          pillX += ctx.measureText(tierPill).width + 8;
+
+          // Tier bonus
+          ctx.font = '10px Georgia, serif';
+          ctx.fillStyle = qCol!;
+          ctx.fillText(`+${qt! * 10}% T`, pillX, qRowY + ROW_H / 2);
+          pillX += ctx.measureText(`+${qt! * 10}% T`).width + 8;
+
+          // Resist. bonus
+          if (qdLbl) {
+            ctx.fillStyle = TEXT_DIM;
+            ctx.fillText('Resist:', pillX, qRowY + ROW_H / 2);
+            pillX += ctx.measureText('Resist:').width + 4;
+            ctx.fillStyle = qCol!;
+            ctx.fillText(qdLbl, pillX, qRowY + ROW_H / 2);
+            pillX += ctx.measureText(qdLbl).width + 8;
+          }
+
+          // Damage bonus
+          if (qwLbl) {
+            ctx.fillStyle = TEXT_DIM;
+            ctx.fillText('Dmg:', pillX, qRowY + ROW_H / 2);
+            pillX += ctx.measureText('Dmg:').width + 4;
+            ctx.fillStyle = qCol!;
+            ctx.fillText(qwLbl, pillX, qRowY + ROW_H / 2);
+          }
+        }
+
+        py += ROW_H * (2 + qualityRows);
       } else {
         // Deck not installed
         ctx.font = '11px Georgia, serif';

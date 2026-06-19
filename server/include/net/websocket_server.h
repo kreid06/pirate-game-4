@@ -56,6 +56,16 @@ typedef struct {
 } WeaponGroup;
 // ────────────────────────────────────────────────────────────────────────────
 
+#define MAX_SHIP_SCHEMATICS 48
+
+/** Shared ship schematic pool entry — NPC repair crew consumes these when replacing modules. */
+typedef struct {
+    uint8_t        item;
+    uint8_t        crafts_remaining;
+    uint8_t        priority; /* lower = used first within the same item type */
+    QualityPayload quality;
+} ShipPoolBlueprint;
+
 // Simple ship structure for WebSocket server
 typedef struct SimpleShip {
     uint16_t ship_id;
@@ -131,6 +141,15 @@ typedef struct SimpleShip {
     /* Ship ID of the last player-owned ship to hit this ship.
      * Used to credit kill XP when a ghost ship finishes sinking. */
     uint16_t killer_ship_id;
+
+    /* Shared schematic pool — crew NPCs consume these when replacing modules. */
+    ShipPoolBlueprint ship_schematics[MAX_SHIP_SCHEMATICS];
+    uint8_t           ship_schematic_count;
+
+    /** Wall-clock ms when each plank slot (0–9) finishes clearing wreckage.
+     *  0 = slot is placeable. Set when a plank is destroyed; blocks placement
+     *  for PLANK_WRECKAGE_DURATION_MS. */
+    uint32_t plank_wreckage_until_ms[10];
 } SimpleShip;
 
 // NPC behavior types
@@ -236,13 +255,34 @@ typedef struct WorldNpc {
     uint32_t      hp_regen_accum_ms; // accumulates ms; triggers +2 HP every 5 s
     uint32_t      last_damage_ms;    // timestamp (get_time_ms) of last damage taken
 
+    // ── Stamina (drains while swimming; blocks regen while in water) ─────────
+    uint16_t      stamina;           // current stamina (0–max_stamina)
+    uint16_t      max_stamina;       // always 100 for NPCs
+    uint32_t      stamina_last_used_ms; // wall-clock ms of last drain (regen delayed 2 s)
+
+    // ── Oxygen (depletes when swimming with stamina = 0; suffocation at 0) ──
+    uint16_t      oxygen;            // current oxygen (0–max_oxygen)
+    uint16_t      max_oxygen;        // always 100
+
+    // ── Fractional accumulators — carry sub-unit drain/regen across 30 Hz ticks ──
+    float         stam_accum;        // fractional stamina drain carry
+    float         oxygen_accum;      // fractional oxygen drain/regen carry
+    float         suffoc_accum;      // fractional suffocation damage carry
+
     // ── Task lock ───────────────────────────────────────────────────────────
     bool          task_locked;    // When true: player has pinned this NPC to their current module;
                                   // rejected by handle_crew_assign & auto cannon-sector dispatch.
 
+    // ── Manual move order (Move To / goto module) ───────────────────────────
+    // Non-zero while a player-issued walk/swim/board command is in progress.
+    // Blocks repairer auto-redirect, repairer roam, and cannon-sector re-dispatch.
+    // Cleared on arrival or when the issuing player moves out of command range.
+    uint32_t      order_player_id;
+
     // ── Boarding approach ──────────────────────────────────────────────────
-    // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a hull
-    // entry point.  On arrival it snaps aboard and walks to (boarding_local_x/y).
+    // When boarding_ship_id != 0 the NPC is swimming (ship_id == 0) toward a ship.
+    // On hull contact (same company) it boards immediately and walks to (boarding_local_x/y).
+    // Enemy-company hulls require grapples (future) — no auto-board.
     uint16_t      boarding_ship_id;  // target ship to board; 0 = not boarding
     float         boarding_local_x;  // on-deck destination (ship-local) after boarding
     float         boarding_local_y;
@@ -251,6 +291,10 @@ typedef struct WorldNpc {
     // When > 0, NPC is dwelling at a roam module; counts down in ms per tick.
     // Cleared to 0 when any module on the ship takes damage.
     uint32_t      roam_wait_ms;
+
+    // ── Repairer resource payment ───────────────────────────────────────
+    // Set after ship-chest repair cost is consumed for the current assignment.
+    bool          repair_resources_paid;
 
     // ── Deck level ──────────────────────────────────────────────────────
     // 0 = lower deck, 1 = upper deck.  NPCs default to upper deck (1).
@@ -650,6 +694,13 @@ typedef struct WebSocketPlayer {
     uint32_t stamina_last_used_ms; // Wall-clock ms of last stamina drain (regen delayed 2 s after)
     uint32_t hp_regen_accum_ms;   // Accumulated ms since last passive HP regen tick
     uint32_t last_damage_ms;      // Wall-clock ms of last time this player took damage (delays regen)
+    float    stamina_accum;       // Fractional stamina drain/regen carry (per-second rates × dt)
+
+    // Oxygen pool — depletes when swimming with no stamina; suffocation damage at 0
+    uint16_t oxygen;             // Current oxygen (0–max_oxygen)
+    uint16_t max_oxygen;         // Max oxygen (always 100)
+    float    oxygen_accum;       // Fractional oxygen drain/regen carry
+    float    suffoc_accum;       // Fractional suffocation damage carry
 
     // Player XP / levelling (mirrors WorldNpc system)
     uint8_t  player_level;       // 1–120
@@ -696,17 +747,15 @@ typedef struct WebSocketPlayer {
      * upper-deck modules (cannons, helm) but always collides with masts. */
     uint8_t deck_level;
 
-    /* ── Bed respawn point ───────────────────────────────────────────────────
-     * A player can sleep in a STRUCT_BED (island) or use a bed item on a ship
-     * to set a custom respawn location.  Only one of these is active at a time:
-     * respawn_bed_id > 0 → island bed (cleared when structure is destroyed)
-     * respawn_ship_id > 0 → ship bed (cleared when ship is destroyed)
-     * bed_last_use_ms tracks the 60-second cooldown between uses. */
-    uint16_t respawn_bed_id;    /* PlacedStructure.id of active island bed (0 = none) */
-    uint16_t respawn_ship_id;   /* ship_id of active ship bed (0 = none) */
-    float    respawn_ship_lx;   /* ship-local X where the bed was placed */
-    float    respawn_ship_ly;   /* ship-local Y where the bed was placed */
-    uint32_t bed_last_use_ms;   /* wall-clock ms of last bed sleep (cooldown gate) */
+    /* ── Bed travel cooldown + legacy respawn fields ─────────────────────────
+     * Beds are chosen on the respawn screen at death — not pre-set via interact.
+     * bed_last_use_ms gates the 60-second cooldown for bed_travel fast travel.
+     * respawn_* fields are unused (kept for struct layout compatibility). */
+    uint16_t respawn_bed_id;
+    uint16_t respawn_ship_id;
+    float    respawn_ship_lx;
+    float    respawn_ship_ly;
+    uint32_t bed_last_use_ms;
 } WebSocketPlayer;
 
 struct WebSocketStats {
@@ -766,6 +815,13 @@ void websocket_server_cleanup(void);
  * @return 0 on success, -1 on error
  */
 int websocket_server_update(struct Sim* sim);
+
+/**
+ * Send GAME_STATE to all connected clients.
+ * Must be called AFTER step_simulation() so clients receive fresh physics state.
+ * Replaces the adaptive-rate send that was previously embedded in websocket_server_update().
+ */
+void websocket_server_send_game_state(void);
 
 /**
  * Apply movement state to all players (HYBRID approach)

@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <sys/socket.h>
 #include "net/harvesting.h"
+#include "net/websocket_server_internal.h"
 #include "net/npc_agents.h"
 #include "net/claim.h"
 #include "util/time.h"
@@ -74,14 +75,31 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         (void)equipped; /* referenced below at wood grant */
     }
 
-    /* Stamina check */
-    if (player->stamina < HARVEST_STAMINA_COST) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_failure\",\"reason\":\"no_stamina\"}");
-        goto send_and_ret;
-    }
-    player->stamina -= HARVEST_STAMINA_COST;
+    /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
     player->stamina_last_used_ms = get_time_ms();
+    if (player->stamina >= HARVEST_STAMINA_COST) {
+        player->stamina -= HARVEST_STAMINA_COST;
+    } else {
+        uint16_t _dmg = HARVEST_STAMINA_COST;
+        player->stamina = 0;
+        if (_dmg >= player->health) {
+            player_die(player);
+            /* Broadcast ENTITY_HIT so the dead player's client opens the respawn screen. */
+            {
+                char _hit[256];
+                snprintf(_hit, sizeof(_hit),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                    "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                    "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    player->player_id, player->x, player->y,
+                    (unsigned)_dmg, (unsigned)player->max_health);
+                websocket_server_broadcast(_hit);
+            }
+            goto send_and_ret;
+        }
+        player->health -= _dmg;
+        player->last_damage_ms = get_time_ms();
+    }
 
     /* Find the island definition */
     IslandDef *isl = (IslandDef *)get_island_for_player(player);
@@ -254,14 +272,31 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         }
     }
 
-    /* Stamina check */
-    if (player->stamina < HARVEST_STAMINA_COST) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_rock_failure\",\"reason\":\"no_stamina\"}");
-        goto send_rock_ret;
-    }
-    player->stamina -= HARVEST_STAMINA_COST;
+    /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
     player->stamina_last_used_ms = get_time_ms();
+    if (player->stamina >= HARVEST_STAMINA_COST) {
+        player->stamina -= HARVEST_STAMINA_COST;
+    } else {
+        uint16_t _dmg = HARVEST_STAMINA_COST;
+        player->stamina = 0;
+        if (_dmg >= player->health) {
+            player_die(player);
+            /* Broadcast ENTITY_HIT so the dead player's client opens the respawn screen. */
+            {
+                char _hit[256];
+                snprintf(_hit, sizeof(_hit),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                    "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                    "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    player->player_id, player->x, player->y,
+                    (unsigned)_dmg, (unsigned)player->max_health);
+                websocket_server_broadcast(_hit);
+            }
+            goto send_rock_ret;
+        }
+        player->health -= _dmg;
+        player->last_damage_ms = get_time_ms();
+    }
 
     {
         IslandDef *isl = (IslandDef *)get_island_for_player(player);
@@ -406,14 +441,31 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Stamina check */
-    if (player->stamina < HARVEST_STAMINA_COST) {
-        snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_boulder_failure\",\"reason\":\"no_stamina\"}");
-        goto send_boulder_ret;
-    }
-    player->stamina -= HARVEST_STAMINA_COST;
+    /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
     player->stamina_last_used_ms = get_time_ms();
+    if (player->stamina >= HARVEST_STAMINA_COST) {
+        player->stamina -= HARVEST_STAMINA_COST;
+    } else {
+        uint16_t _dmg = HARVEST_STAMINA_COST;
+        player->stamina = 0;
+        if (_dmg >= player->health) {
+            player_die(player);
+            /* Broadcast ENTITY_HIT so the dead player's client opens the respawn screen. */
+            {
+                char _hit[256];
+                snprintf(_hit, sizeof(_hit),
+                    "{\"type\":\"ENTITY_HIT\",\"entityType\":\"player\","
+                    "\"id\":%u,\"x\":%.1f,\"y\":%.1f,"
+                    "\"damage\":%u,\"health\":0,\"maxHealth\":%u,\"killed\":true}",
+                    player->player_id, player->x, player->y,
+                    (unsigned)_dmg, (unsigned)player->max_health);
+                websocket_server_broadcast(_hit);
+            }
+            goto send_boulder_ret;
+        }
+        player->health -= _dmg;
+        player->last_damage_ms = get_time_ms();
+    }
 
     {
         IslandDef *isl = (IslandDef *)get_island_for_player(player);

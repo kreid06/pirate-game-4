@@ -19,18 +19,9 @@ else()
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2")
 endif()
 
-# ──────────────────────────────────────────────────────────────────────────
-# Shared physics library (float + Q16 APIs, collision, ship physics)
-# ──────────────────────────────────────────────────────────────────────────
-
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../shared
-                 ${CMAKE_CURRENT_BINARY_DIR}/shared-build)
-# PIRATE_SIM_LIBRARY and PIRATE_SIM_INCLUDE_DIR are now set.
-
 # Include directories
 include_directories(include)
 include_directories(src)
-include_directories(${PIRATE_SIM_INCLUDE_DIR})
 
 # Source files organized by module (only files that actually exist)
 set(CORE_SOURCES
@@ -50,6 +41,7 @@ set(SIM_SOURCES
     src/sim/island_loader.c
     src/sim/ship_level.c
     src/sim/world_save.c
+    src/sim/deck_utils.c
 )
 
 set(NET_SOURCES
@@ -73,6 +65,9 @@ set(NET_SOURCES
     src/net/quality.c
     src/net/ship_control.c
     src/net/ship_init.c
+    src/net/ship_schematics.c
+    src/net/ship_chest_resources.c
+    src/net/ship_plank_wreckage.c
     src/net/structures.c
 )
 
@@ -107,7 +102,6 @@ find_package(Threads REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_library(JSONC_LIBRARY json-c REQUIRED)
 target_link_libraries(pirate-server
-    ${PIRATE_SIM_LIBRARY}
     Threads::Threads
     m
     OpenSSL::SSL

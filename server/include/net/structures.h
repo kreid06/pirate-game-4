@@ -6,6 +6,11 @@ struct WebSocketClient;
 
 void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
 void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
+void handle_bed_travel(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
+
+/** Respawn a dead player at an island bed or ship bed module (company-checked). */
+bool respawn_player_at_island_bed(WebSocketPlayer* player, uint32_t bed_id);
+bool respawn_player_at_ship_bed(WebSocketPlayer* player, uint16_t ship_id, uint16_t module_id);
 void handle_land_chest_transfer(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
 void handle_land_chest_drop(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);
 void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload);

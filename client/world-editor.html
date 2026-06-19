@@ -247,6 +247,11 @@
         <input type="number" id="sp-cnt-max" step="1" min="0" max="10" />
       </div>
     </div>
+    <label>Zone cap <span style="color:#475569">(0 = same as count max)</span></label>
+    <input type="number" id="sp-zone-cap" step="1" min="0" max="50" value="0" />
+    <div style="font-size:10px;color:#475569;margin-top:-4px;margin-bottom:6px;">
+      Hard ceiling for this zone — ships can never exceed this, regardless of global cap
+    </div>
     <label>Respawn delay (s)</label>
     <input type="number" id="sp-respawn" step="10" min="10" max="3600" />
     <div class="row-2">
