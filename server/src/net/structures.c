@@ -293,6 +293,12 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
+    float place_rotation_deg = 0.0f;
+    {
+        const char* rots = strstr(payload, "\"rotation\":");
+        if (rots) sscanf(rots + 11, "%f", &place_rotation_deg);
+    }
+
     /* Placement point (px,py) must lie within a valid island beach boundary.
        Only wooden floors are rejected for water placement — other structures
        require a floor tile anyway, so the floor-edge/floor-centre checks
@@ -362,6 +368,11 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                          "{\"type\":\"place_structure_fail\",\"reason\":\"occupied\"}");
                 goto ps_send;
             }
+        }
+        if (dock_brig_slot_overlaps_land(px, py, place_rotation_deg)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"ship_slot_on_land\"}");
+            goto ps_send;
         }
     }
 
@@ -762,8 +773,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Parse rotation early so all subsequent checks can use it */
-    float place_rotation_deg = 0.0f;
+    /* Parse rotation (may already be set for shipyard land check above) */
     {
         const char* rots = strstr(payload, "\"rotation\":");
         if (rots) sscanf(rots + 11, "%f", &place_rotation_deg);

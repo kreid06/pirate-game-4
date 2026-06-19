@@ -8,6 +8,13 @@
 
 import type { PlacedStructure } from '../../sim/Types.js';
 import { tierColor } from '../../sim/Quality.js';
+import {
+  SHIPYARD_TILE,
+  SHIPYARD_ARM_T,
+  SHIPYARD_INT_W,
+  SHIPYARD_ARM_L,
+  SHIPYARD_BACK_T,
+} from '../../sim/ShipyardGeometry.js';
 
 export const STRUCT_TILE = 50;
 
@@ -633,10 +640,10 @@ export function getClaimFlagSprite(cache: StructureSpriteCache, opts: StructureS
 }
 
 function drawShipyardBody(ctx: OffscreenCanvasRenderingContext2D, sz: number, hovered: boolean, companyId: number, building: boolean, dmgDarken: number): { w: number; h: number } {
-  const ARM_T = sz * 1.00;
-  const INT_W = sz * 4.80;
-  const ARM_L = sz * 16.80;
-  const BACK_T = sz * 1.00;
+  const ARM_T = sz * (SHIPYARD_ARM_T / SHIPYARD_TILE);
+  const INT_W = sz * (SHIPYARD_INT_W / SHIPYARD_TILE);
+  const ARM_L = sz * (SHIPYARD_ARM_L / SHIPYARD_TILE);
+  const BACK_T = sz * (SHIPYARD_BACK_T / SHIPYARD_TILE);
   const totalW = ARM_T + INT_W + ARM_T;
   const totalH = BACK_T + ARM_L;
   const hw = totalW / 2, hh = totalH / 2;
@@ -772,7 +779,7 @@ function drawShipyardBody(ctx: OffscreenCanvasRenderingContext2D, sz: number, ho
 
 export function getShipyardSprite(cache: StructureSpriteCache, opts: StructureSpriteOpts): StructureSprite {
   const building = opts.building ? 1 : 0;
-  const key = `shipyard:${keyPart(opts)}:b${building}`;
+  const key = `shipyard:v2:${keyPart(opts)}:b${building}`;
   return cache.get(key, () => bake((ctx) => {
     const sz = STRUCT_TILE;
     const dmgDarken = dmgDarkenFromBucket(hpDamageBucket(opts.hpFrac));

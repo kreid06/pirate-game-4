@@ -464,6 +464,12 @@ export function predictShipCollisions(ships: Ship[], dt: number): void {
 // contact-cache warm start are omitted: at 120 Hz prediction steps the per-step
 // displacement (< 2 px) can't tunnel a 50 px wall, and divergence is mopped up
 // by normal reconciliation.
+import {
+  SHIPYARD_HW as DOCK_HW,
+  SHIPYARD_HH as DOCK_HH,
+  SHIPYARD_ARM_T as DOCK_ARM_T,
+  SHIPYARD_BACK_T as DOCK_BACK_T,
+} from './ShipyardGeometry.js';
 
 /** Minimal placed-structure shape needed for dock collision prediction. */
 export interface DockStructure {
@@ -474,12 +480,6 @@ export interface DockStructure {
   rotation?: number;
   construction?: { scaffoldedShipId?: number };
 }
-
-// Dock geometry in client pixels (matches dock_physics.c defines)
-const DOCK_HW     = 170;
-const DOCK_HH     = 445;
-const DOCK_ARM_T  = 50;
-const DOCK_BACK_T = 50;
 
 const DOCK_RESTITUTION       = 0.18;
 const DOCK_WALL_FRICTION     = 0.6;

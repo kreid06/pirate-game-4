@@ -255,11 +255,13 @@ function pointInPolygon(px: number, py: number, verts: { x: number; y: number }[
 }
 
 // ── Shipyard dock collision — mirrors dock_physics.c ─────────────────────────
-// Geometry constants must match dock_physics.c exactly.
-const DOCK_HW     = 170;   // half-width of the U
-const DOCK_HH     = 445;   // half-height of each arm
-const DOCK_ARM_T  = 50;    // arm wall thickness
-const DOCK_BACK_T = 50;    // back wall thickness
+// Geometry constants from ShipyardGeometry.ts (shared with server dock_physics.h).
+import {
+  SHIPYARD_HW as DOCK_HW,
+  SHIPYARD_HH as DOCK_HH,
+  SHIPYARD_ARM_T as DOCK_ARM_T,
+  SHIPYARD_BACK_T as DOCK_BACK_T,
+} from './ShipyardGeometry.js';
 
 /**
  * OBB circle pushout in dock-local space.

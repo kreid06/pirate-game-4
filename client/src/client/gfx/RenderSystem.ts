@@ -26,6 +26,18 @@ import {
   getWoodCeilingSprite,
   structureCompanyColor as structureCompanyStripColor,
 } from './StructureSprites.js';
+import {
+  SHIPYARD_TILE,
+  SHIPYARD_ARM_T,
+  SHIPYARD_INT_W,
+  SHIPYARD_ARM_L,
+  SHIPYARD_BACK_T,
+  SHIPYARD_HW,
+  SHIPYARD_HH,
+  SHIPYARD_HEIGHT_MULT,
+  brigSlotCornersLocal,
+  brigSlotOverlapsLand,
+} from '../../sim/ShipyardGeometry.js';
 import { tierColor, tierName, statMultLabel, computeCannonHullDamage, computeCannonEntityDamage, CANNON_HULL_BASE_DAMAGE, CANNON_ENTITY_BASE_DAMAGE, BAR_SHOT_ENTITY_BASE_DAMAGE, itemDisplayName } from '../../sim/Quality.js';
 import { SHIP_ATTR_DAMAGE } from '../../sim/Types.js';
 
@@ -4056,8 +4068,8 @@ export class RenderSystem {
       const c = Math.cos(-rot), sn = Math.sin(-rot);
       const lx = dx * c - dy * sn;
       const ly = dx * sn + dy * c;
-      // hw=170, hh=445 are world-unit half-extents; +100 interaction margin
-      return Math.abs(lx) <= 270 && Math.abs(ly) <= 545 ? s : null;
+      // hw=170, hh=420 are world-unit half-extents; +100 interaction margin
+      return Math.abs(lx) <= SHIPYARD_HW + 100 && Math.abs(ly) <= SHIPYARD_HH + 100 ? s : null;
     }
     const dx = s.x - player.position.x;
     const dy = s.y - player.position.y;
@@ -6701,8 +6713,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'bed' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'bed' ? 25 * 0.48 : s.type === 'shipyard' ? 445 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'bed' ? 25 * 0.88 : s.type === 'shipyard' ? SHIPYARD_HW : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'bed' ? 25 * 0.48 : s.type === 'shipyard' ? SHIPYARD_HH : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'shipyard') {
             // For empty shipyard: only highlight the physical U-shaped dock arms,
@@ -6830,12 +6842,12 @@ export class RenderSystem {
     }
 
     // TILE = 50 CLIENT units (= 5 server units after ×WORLD_SCALE_FACTOR=10).
-    // Half-extents in CLIENT units: shipyard 445 (= TILE*17.8/2), flag_fort ~70, fortress ~90.
+    // Half-extents in CLIENT units: shipyard SHIPYARD_HH, flag_fort ~70, fortress ~90.
     const STRUCT_TILE = 50;
     for (const s of sortedWrapped) {
       // World-space bounding radius for each structure type.
       // isWorldPositionVisible margin is in CLIENT units — same space as s.x / s.y.
-      const _halfExt = s.type === 'shipyard'         ? STRUCT_TILE * 17.8 / 2   // 445
+      const _halfExt = s.type === 'shipyard'         ? SHIPYARD_HH
                      : s.type === 'flag_fort'        ? STRUCT_TILE * 1.4        //  70
                      : s.type === 'company_fortress' ? STRUCT_TILE * 1.8        //  90
                      : STRUCT_TILE * 1.1;                                        //  55
@@ -7042,10 +7054,10 @@ export class RenderSystem {
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
       } else if (s.type === 'shipyard') {
-        const ARM_T  = sz * 1.00;
-        const INT_W  = sz * 4.80;
-        const ARM_L  = sz * 16.80;
-        const BACK_T = sz * 1.00;
+        const ARM_T  = sz * (SHIPYARD_ARM_T / SHIPYARD_TILE);
+        const INT_W  = sz * (SHIPYARD_INT_W / SHIPYARD_TILE);
+        const ARM_L  = sz * (SHIPYARD_ARM_L / SHIPYARD_TILE);
+        const BACK_T = sz * (SHIPYARD_BACK_T / SHIPYARD_TILE);
         const totalW = ARM_T + INT_W + ARM_T;
         const totalH = BACK_T + ARM_L;
         const hw = totalW / 2, hh = totalH / 2;
@@ -7556,7 +7568,7 @@ export class RenderSystem {
     // small tier-colored gem above each so the world shows item prestige.
     for (const s of sortedWrapped) {
       if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
-      const _qHalfExt = s.type === 'shipyard' ? STRUCT_TILE * 17.8 / 2 : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
+      const _qHalfExt = s.type === 'shipyard' ? SHIPYARD_HH : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
       if (!this.fogVisibleAt(s.x, s.y, _qHalfExt)) continue;
       if (!camera.isWorldPositionVisible(Vec2.from(s.x, s.y), _qHalfExt)) continue;
       const gsp = camera.worldToScreen(Vec2.from(s.x, s.y));
@@ -7608,8 +7620,8 @@ export class RenderSystem {
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
       // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'bed' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'bed' ? sz * 0.48 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'bed' ? sz * 0.88 : s.type === 'shipyard' ? sz * (SHIPYARD_HW * 2 / SHIPYARD_TILE) : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'bed' ? sz * 0.48 : s.type === 'shipyard' ? sz * SHIPYARD_HEIGHT_MULT : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -7680,7 +7692,7 @@ export class RenderSystem {
           const c = Math.cos(-rot), sn = Math.sin(-rot);
           const lx = dx * c - dy * sn;
           const ly = dx * sn + dy * c;
-          return Math.abs(lx) <= 270 && Math.abs(ly) <= 545;
+          return Math.abs(lx) <= SHIPYARD_HW + 100 && Math.abs(ly) <= SHIPYARD_HH + 100;
         }
         const dx = s.x - player.position.x;
         const dy = s.y - player.position.y;
@@ -7923,8 +7935,8 @@ export class RenderSystem {
           }
 
           const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'bed' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
-          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'bed' ? sz2 * 0.48 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'bed' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * (SHIPYARD_HW * 2 / SHIPYARD_TILE) : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'bed' ? sz2 * 0.48 : s.type === 'shipyard' ? sz2 * SHIPYARD_HEIGHT_MULT : s.type === 'cannon' ? 50 * zoom : sz2;
 
           ctx.save();
           ctx.globalAlpha = flashAlpha;
@@ -8479,8 +8491,7 @@ export class RenderSystem {
       }
 
       // Check that the dock mouth leads to open water for ship release.
-      // Mouth is 445 world units from center in the local +y direction.
-      const HH_WORLD = 445;
+      const HH_WORLD = SHIPYARD_HH;
       const rotRad = effectiveRotDeg * Math.PI / 180;
       const mouthX = mx - HH_WORLD * Math.sin(rotRad);
       const mouthY = my + HH_WORLD * Math.cos(rotRad);
@@ -8488,6 +8499,9 @@ export class RenderSystem {
       const releaseX = mx - 600 * Math.sin(rotRad);
       const releaseY = my + 600 * Math.cos(rotRad);
       const mouthClear = isPointInWater(mouthX, mouthY) && isPointInWater(releaseX, releaseY);
+
+      const isOnLand = (px: number, py: number) => !isPointInWater(px, py);
+      const shipSlotOnLand = brigSlotOverlapsLand(mx, my, effectiveRotDeg, isOnLand);
 
       // Allow placing from shore — 700 px matches the server shipyard placement range
       const syPlayerFar = playerG ? (() => {
@@ -8497,14 +8511,13 @@ export class RenderSystem {
       const syOccupied = this.placedStructures.some(s =>
         s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 700
       );
-      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear;
+      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear || shipSlotOnLand;
       const syCantAfford = !syInvalid && !this.landGhostCanAfford;
       this._islandGhostTooFar = syInvalid;
-      // Ghost uses same proportions as rendered shipyard (bracketized to brigantine scale)
-      const GA_T = TILE * 1.00 * zoom;
-      const GI_W = TILE * 4.80 * zoom;
-      const GA_L = TILE * 16.80 * zoom;
-      const GB_T = TILE * 1.00 * zoom;
+      const GA_T = TILE * (SHIPYARD_ARM_T / SHIPYARD_TILE) * zoom;
+      const GI_W = TILE * (SHIPYARD_INT_W / SHIPYARD_TILE) * zoom;
+      const GA_L = TILE * (SHIPYARD_ARM_L / SHIPYARD_TILE) * zoom;
+      const GB_T = TILE * (SHIPYARD_BACK_T / SHIPYARD_TILE) * zoom;
       const gtW  = Math.max(4, GA_T + GI_W + GA_T);
       const gtH  = Math.max(4, GB_T + GA_L);
       const gHW = gtW / 2, gHH = gtH / 2;
@@ -8533,6 +8546,26 @@ export class RenderSystem {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
+
+      // Brigantine build-slot preview (where the scaffolded ship spawns).
+      // Draw in dock-local screen offsets inside the same ctx rotation as the U-shape —
+      // worldToScreen corners would double-apply the active canvas transform.
+      const slotInvalid = shipSlotOnLand;
+      ctx.fillStyle   = slotInvalid ? 'rgba(255, 80, 40, 0.35)' : 'rgba(180, 140, 60, 0.30)';
+      ctx.strokeStyle = slotInvalid ? 'rgba(255, 120, 60, 0.90)' : 'rgba(220, 180, 90, 0.85)';
+      ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+      ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+      ctx.beginPath();
+      const slotCorners = brigSlotCornersLocal();
+      for (let ci = 0; ci < slotCorners.length; ci++) {
+        const slx = slotCorners[ci].x * zoom;
+        const sly = slotCorners[ci].y * zoom;
+        if (ci === 0) ctx.moveTo(msp.x + slx, msp.y + sly);
+        else ctx.lineTo(msp.x + slx, msp.y + sly);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
       ctx.setLineDash([]);
       const syLabelY = msp.y - gHH - 6;
       ctx.globalAlpha = 1;
@@ -8545,6 +8578,8 @@ export class RenderSystem {
         ctx.fillStyle = '#4488ff'; ctx.fillText('PLACE IN SHALLOW WATER', msp.x, syLabelY);
       } else if (!mouthClear) {
         ctx.fillStyle = '#ff6644'; ctx.fillText('SHIP EXIT BLOCKED BY LAND', msp.x, syLabelY);
+      } else if (shipSlotOnLand) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('SHIP SLOT ON LAND', msp.x, syLabelY);
       } else if (syOccupied) {
         ctx.fillStyle = '#ff6644'; ctx.fillText('TOO CLOSE TO SHIPYARD', msp.x, syLabelY);
       } else if (syPlayerFar) {
@@ -18577,10 +18612,10 @@ export class RenderSystem {
 
     // ── Shipyard physics bodies (U-shape: left arm, right arm, back wall) ───
     // Constants mirror server websocket_server.c DOCK_* (all in client px)
-    const DOCK_HW_D    = 170;  // half total width
-    const DOCK_HH_D    = 445;  // half total height
-    const DOCK_ARM_T_D =  50;  // arm thickness
-    const DOCK_BACK_T_D = 50;  // back wall thickness
+    const DOCK_HW_D    = SHIPYARD_HW;
+    const DOCK_HH_D    = SHIPYARD_HH;
+    const DOCK_ARM_T_D = SHIPYARD_ARM_T;
+    const DOCK_BACK_T_D = SHIPYARD_BACK_T;
     const DOCK_STAIR_D  = 50;  // stair gap at arm tips
 
     // [local-cx, local-cy, half-x, half-y, label, color]
