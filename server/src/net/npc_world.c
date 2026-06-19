@@ -924,7 +924,10 @@ void tick_world_npcs(float dt) {
         WorldNpc* npc = &world_npcs[i];
         if (!npc->active) continue;
 
-        if (npc->state == WORLD_NPC_STATE_MOVING) {
+        /* Grapple rope owns world position — updated later in update_grapple_hooks(). */
+        const bool grappled = world_npc_is_grapple_target(i);
+
+        if (!grappled && npc->state == WORLD_NPC_STATE_MOVING) {
             /* Player-issued move: cancel if the commander walked out of range. */
             if (npc->order_player_id != 0 && npc_manual_order_out_of_range(npc)) {
                 npc_cancel_manual_order(npc, "commander out of range");
@@ -1124,7 +1127,7 @@ void tick_world_npcs(float dt) {
         }
 
         // Integrate knockback velocity and apply drag
-        if (npc->velocity_x != 0.0f || npc->velocity_y != 0.0f) {
+        if (!grappled && (npc->velocity_x != 0.0f || npc->velocity_y != 0.0f)) {
             const float DRAG = 8.0f; // decay rate (higher = stops faster)
             npc->local_x   += npc->velocity_x * dt;
             npc->local_y   += npc->velocity_y * dt;
@@ -1165,13 +1168,15 @@ void tick_world_npcs(float dt) {
         }
 
         // Keep world position in sync with ship transform
-        if (npc->ship_id != 0) {
-            SimpleShip* ship = find_ship(npc->ship_id);
-            if (ship) ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
-        } else {
-            /* Off-ship NPCs: local_x/y ARE the world coordinates — keep x/y in sync */
-            npc->x = npc->local_x;
-            npc->y = npc->local_y;
+        if (!grappled) {
+            if (npc->ship_id != 0) {
+                SimpleShip* ship = find_ship(npc->ship_id);
+                if (ship) ship_local_to_world(ship, npc->local_x, npc->local_y, &npc->x, &npc->y);
+            } else {
+                /* Off-ship NPCs: local_x/y ARE the world coordinates — keep x/y in sync */
+                npc->x = npc->local_x;
+                npc->y = npc->local_y;
+            }
         }
 
         /* ── Passive HP regeneration ──────────────────────────────────────────

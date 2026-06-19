@@ -156,3 +156,8 @@ void detach_dropped_items_from_ship(uint16_t ship_id);
 /** Apply a group's current gunports_open state to all cannons in the group.
  *  Opens/closes each cannon's associated gunport and moves the cannon barrel. */
 void apply_group_gunport_state(SimpleShip* ship, WeaponGroup* group);
+
+/** True when a world NPC index is the attached target of an active grapple hook. */
+bool world_npc_is_grapple_target(int npc_index);
+/** True when a player is the attached target of another player's grapple hook. */
+bool player_is_grapple_target(uint32_t player_id);

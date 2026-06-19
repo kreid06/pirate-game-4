@@ -251,7 +251,7 @@ static uint32_t    next_dropped_item_id = 1;
 #define GRAPPLE_HIT_R_ITEM      80.0f   /* hit radius for dropped items          */
 #define GRAPPLE_HIT_R_SHIP     140.0f   /* hit radius for ships (approx hull)    */
 #define GRAPPLE_HIT_R_ENTITY    55.0f   /* hit radius for players / NPCs         */
-#define GRAPPLE_DETACH_DIST     80.0f   /* auto-detach when target this close    */
+#define GRAPPLE_DETACH_DIST     80.0f   /* auto-pickup/salvage for items & wrecks only */
 #define GRAPPLE_TIMEOUT_MS    5000u     /* safety auto-release timeout           */
 #define GRAPPLE_COOLDOWN_MS    500u     /* minimum time between fire attempts    */
 #define GRAPPLE_REEL_PULL       90.0f   /* px/s player moves when reeling in to ship */
@@ -1977,6 +1977,9 @@ static const float ITEM_WEIGHT_KG[64] = {
 /** Body mass assumed for every player aboard (kg). */
 #define PLAYER_BODY_MASS_KG 80.0f
 
+/** Base body mass for grappled players / crew (kg) — added to grappler's carry load. */
+#define GRAPPLE_BODY_MASS_KG 40.0f
+
 /** Return the total weight (kg) of one player's inventory (bag + equipment). */
 static float player_inventory_weight(const WebSocketPlayer* p) {
     float w = 0.0f;
@@ -1996,6 +1999,13 @@ static float player_inventory_weight(const WebSocketPlayer* p) {
     w += ITEM_WEIGHT_KG[ITEM_STONE] * (float)p->res_stone;
     return w;
 }
+
+WebSocketPlayer* find_player(uint32_t player_id);
+
+static float grapple_hook_target_weight_kg(const GrappleHook* gh);
+static float player_grapple_carry_kg(int slot, const WebSocketPlayer* p);
+static bool player_grapple_encumbered(int slot, const WebSocketPlayer* p);
+static bool grapple_target_is_entity(uint8_t target_type);
 
 /* Copy the player fields needed by the blob worker into a BlobPlayer slot.
  * Called from both the threaded submit path and the synchronous fallback. */
@@ -2735,8 +2745,20 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                             (unsigned)snap->players[p].res_metal,
                             (unsigned)snap->players[p].res_stone);
 
-        /* Effective movement speed multiplier — accounts for carry weight. */
+        /* Effective movement speed multiplier — accounts for carry weight + grapple load. */
         float _snap_inv_kg    = blob_player_inventory_weight(&snap->players[p]);
+        {
+            int _snap_slot = -1;
+            for (int _si = 0; _si < WS_MAX_CLIENTS; _si++) {
+                if (players[_si].active &&
+                    players[_si].player_id == snap->players[p].player_id) {
+                    _snap_slot = _si;
+                    break;
+                }
+            }
+            if (_snap_slot >= 0)
+                _snap_inv_kg = player_grapple_carry_kg(_snap_slot, &players[_snap_slot]);
+        }
         float _snap_carry_cap = 300.0f * (1.0f + (float)snap->players[p].stat_weight * 0.1f);
         float _snap_carry_r   = (_snap_carry_cap > 0.0f) ? (_snap_inv_kg / _snap_carry_cap) : 0.0f;
         float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
@@ -4446,6 +4468,76 @@ static void grapple_sync_owner_sim_position(WebSocketPlayer* owner) {
     owner->client_pos_ms = 0;
 }
 
+/** After entity-target rope constraint moves a grappled NPC, sync local coords. */
+static void grapple_sync_target_world_npc(WorldNpc* npc) {
+    if (!npc) return;
+    if (npc->ship_id != 0) {
+        SimpleShip* ship = find_ship(npc->ship_id);
+        if (ship)
+            ship_world_to_local(ship, npc->x, npc->y, &npc->local_x, &npc->local_y);
+    } else {
+        npc->local_x = npc->x;
+        npc->local_y = npc->y;
+    }
+    npc->target_local_x = npc->local_x;
+    npc->target_local_y = npc->local_y;
+    npc->velocity_x = 0.0f;
+    npc->velocity_y = 0.0f;
+}
+
+/** After entity-target rope constraint moves a grappled player, sync sim + ship-local coords. */
+static void grapple_sync_target_ws_player(WebSocketPlayer* tgt) {
+    if (!tgt) return;
+    if (tgt->parent_ship_id != 0) {
+        SimpleShip* cur = find_ship(tgt->parent_ship_id);
+        if (cur)
+            ship_world_to_local(cur, tgt->x, tgt->y, &tgt->local_x, &tgt->local_y);
+    }
+    if (global_sim && tgt->sim_entity_id != 0) {
+        struct Player* sp = sim_get_player(global_sim, tgt->sim_entity_id);
+        if (sp) {
+            sp->position.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tgt->x));
+            sp->position.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tgt->y));
+            if (tgt->parent_ship_id != 0) {
+                sp->relative_pos.x = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tgt->local_x));
+                sp->relative_pos.y = Q16_FROM_FLOAT(CLIENT_TO_SERVER(tgt->local_y));
+            }
+            sp->velocity.x = 0;
+            sp->velocity.y = 0;
+        }
+    }
+    tgt->client_pos_ms = 0;
+}
+
+/**
+ * Hard rope constraint for player/NPC grapple targets.
+ * Target cannot drag the grappler — only the target is pulled back to rope_length.
+ * Entity grapples never auto-detach on proximity; release is manual only.
+ */
+static void grapple_apply_entity_rope(GrappleHook* gh, WebSocketPlayer* owner,
+                                      float* tgt_x, float* tgt_y) {
+    float tdx   = owner->x - *tgt_x;
+    float tdy   = owner->y - *tgt_y;
+    float tdist = sqrtf(tdx * tdx + tdy * tdy);
+    if (tdist < 0.5f) {
+        gh->hook_x = *tgt_x;
+        gh->hook_y = *tgt_y;
+        return;
+    }
+
+    if (!gh->reel_out && tdist > gh->rope_length) {
+        float over = tdist - gh->rope_length;
+        float nx = tdx / tdist;
+        float ny = tdy / tdist;
+        *tgt_x += nx * over;
+        *tgt_y += ny * over;
+        tdist = gh->rope_length;
+    }
+
+    gh->hook_x = *tgt_x;
+    gh->hook_y = *tgt_y;
+}
+
 /** Per-tick grapple physics.  Called from the main server tick with dt seconds. */
 static void update_grapple_hooks(float dt, uint32_t now_ms)
 {
@@ -4653,8 +4745,18 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
             }
             /* Non-ship reel-in: shorten rope_length so constraint does the pull. */
             if (gh->reel_in && gh->target_type != GRAPPLE_TARGET_SHIP) {
-                gh->rope_length -= GRAPPLE_REEL_RATE * dt;
-                if (gh->rope_length < GRAPPLE_ROPE_MIN) gh->rope_length = GRAPPLE_ROPE_MIN;
+                if (player_grapple_encumbered(si, owner)) {
+                    gh->reel_in = false;
+                } else {
+                    gh->rope_length -= GRAPPLE_REEL_RATE * dt;
+                    if (gh->rope_length < GRAPPLE_ROPE_MIN) gh->rope_length = GRAPPLE_ROPE_MIN;
+                }
+            }
+
+            /* Entity grapples: stop reel-in when overencumbered (rope stays attached). */
+            if (grapple_target_is_entity(gh->target_type) &&
+                player_grapple_encumbered(si, owner)) {
+                gh->reel_in = false;
             }
 
             /* ── Pull logic ─────────────────────────────────────────────────── */
@@ -4765,17 +4867,8 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 WebSocketPlayer* tgt = find_player(gh->target_id);
                 if (!tgt || !tgt->active) { grapple_detach(si); break; }
 
-                float tdx = owner->x - tgt->x;
-                float tdy = owner->y - tgt->y;
-                float tdist = sqrtf(tdx * tdx + tdy * tdy);
-                if (tdist < GRAPPLE_DETACH_DIST) { grapple_detach(si); break; }
-                if (tdist > gh->rope_length) {
-                    float step = GRAPPLE_PULL_PLAYER * dt / tdist;
-                    tgt->x += tdx * step;
-                    tgt->y += tdy * step;
-                }
-                gh->hook_x = tgt->x;
-                gh->hook_y = tgt->y;
+                grapple_apply_entity_rope(gh, owner, &tgt->x, &tgt->y);
+                grapple_sync_target_ws_player(tgt);
                 break;
             }
 
@@ -4784,17 +4877,8 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 if (ni < 0 || ni >= world_npc_count || !world_npcs[ni].active) {
                     grapple_detach(si); break;
                 }
-                float tdx = owner->x - world_npcs[ni].x;
-                float tdy = owner->y - world_npcs[ni].y;
-                float tdist = sqrtf(tdx * tdx + tdy * tdy);
-                if (tdist < GRAPPLE_DETACH_DIST) { grapple_detach(si); break; }
-                if (tdist > gh->rope_length) {
-                    float step = GRAPPLE_PULL_PLAYER * dt / tdist;
-                    world_npcs[ni].x += tdx * step;
-                    world_npcs[ni].y += tdy * step;
-                }
-                gh->hook_x = world_npcs[ni].x;
-                gh->hook_y = world_npcs[ni].y;
+                grapple_apply_entity_rope(gh, owner, &world_npcs[ni].x, &world_npcs[ni].y);
+                grapple_sync_target_world_npc(&world_npcs[ni]);
                 break;
             }
 
@@ -4959,6 +5043,68 @@ WebSocketPlayer* find_player_by_sim_id(entity_id sim_entity_id) {
         }
     }
     return NULL;
+}
+
+/** Extra carry load (kg) from a grappled player or NPC target. */
+static float grapple_hook_target_weight_kg(const GrappleHook* gh) {
+    if (!gh || !gh->active || gh->state != GRAPPLE_ATTACHED) return 0.0f;
+    if (gh->target_type == GRAPPLE_TARGET_PLAYER) {
+        WebSocketPlayer* tgt = find_player(gh->target_id);
+        if (!tgt || !tgt->active) return 0.0f;
+        return GRAPPLE_BODY_MASS_KG + player_inventory_weight(tgt);
+    }
+    if (gh->target_type == GRAPPLE_TARGET_NPC) {
+        return GRAPPLE_BODY_MASS_KG;
+    }
+    return 0.0f;
+}
+
+/** Own inventory plus grappled entity weight (players / NPCs only). */
+static float player_grapple_carry_kg(int slot, const WebSocketPlayer* p) {
+    float w = player_inventory_weight(p);
+    if (slot >= 0 && slot < WS_MAX_CLIENTS)
+        w += grapple_hook_target_weight_kg(&grapple_hooks[slot]);
+    return w;
+}
+
+static float player_grapple_carry_ratio(int slot, const WebSocketPlayer* p) {
+    float cap = 300.0f * (1.0f + (float)p->stat_weight * 0.1f);
+    if (cap <= 0.0f) return 0.0f;
+    return player_grapple_carry_kg(slot, p) / cap;
+}
+
+static bool player_grapple_encumbered(int slot, const WebSocketPlayer* p) {
+    return player_grapple_carry_ratio(slot, p) >= 1.0f;
+}
+
+static bool grapple_target_is_entity(uint8_t target_type) {
+    return target_type == GRAPPLE_TARGET_PLAYER || target_type == GRAPPLE_TARGET_NPC;
+}
+
+bool world_npc_is_grapple_target(int npc_index) {
+    if (npc_index < 0 || npc_index >= world_npc_count) return false;
+    for (int si = 0; si < WS_MAX_CLIENTS; si++) {
+        const GrappleHook* gh = &grapple_hooks[si];
+        if (gh->active && gh->state == GRAPPLE_ATTACHED &&
+            gh->target_type == GRAPPLE_TARGET_NPC &&
+            (int)gh->target_id == npc_index) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool player_is_grapple_target(uint32_t player_id) {
+    if (player_id == 0) return false;
+    for (int si = 0; si < WS_MAX_CLIENTS; si++) {
+        const GrappleHook* gh = &grapple_hooks[si];
+        if (gh->active && gh->state == GRAPPLE_ATTACHED &&
+            gh->target_type == GRAPPLE_TARGET_PLAYER &&
+            gh->target_id == player_id) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static WebSocketPlayer* create_player(uint32_t player_id) {
@@ -7605,7 +7751,7 @@ int websocket_server_update(struct Sim* sim) {
                                                     if (dirp && strncmp(dirp + 13, "out", 3) == 0) {
                                                         _gh->reel_out = true;
                                                         _gh->reel_in  = false;
-                                                    } else {
+                                                    } else if (!player_grapple_encumbered(_gsi, player)) {
                                                         _gh->reel_in  = true;
                                                         _gh->reel_out = false;
                                                     }
@@ -8067,6 +8213,11 @@ int websocket_server_update(struct Sim* sim) {
                                     if (slot_ptr) sscanf(slot_ptr + 7, "%d", &slot);
                                     if (slot >= 0 && slot < INVENTORY_SLOTS)
                                         player->inventory.active_slot = (uint8_t)slot;
+                                    {
+                                        int _gsi = ws_player_slot(player);
+                                        if (_gsi >= 0 && grapple_hooks[_gsi].active)
+                                            handle_release_grapple(_gsi);
+                                    }
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"slot_selected\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -8082,6 +8233,11 @@ int websocket_server_update(struct Sim* sim) {
                                 WebSocketPlayer* player = find_player(client->player_id);
                                 if (player) {
                                     player->inventory.active_slot = 255;
+                                    {
+                                        int _gsi = ws_player_slot(player);
+                                        if (_gsi >= 0 && grapple_hooks[_gsi].active)
+                                            handle_release_grapple(_gsi);
+                                    }
                                     strcpy(response, "{\"type\":\"message_ack\",\"status\":\"unequipped\"}");
                                 } else {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"no_player\"}");
@@ -15177,7 +15333,7 @@ void websocket_server_tick(float dt) {
                  * player_inventory_weight() would otherwise be called 3–5× in the
                  * movement / stamina branches below with identical inputs.  Compute
                  * once here so all branches share the cached result. */
-                float _ws_inv_kg   = player_inventory_weight(ws_player);
+                float _ws_inv_kg   = player_grapple_carry_kg(ws_player_slot(ws_player), ws_player);
                 float _ws_carry_cap= 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
                 float _ws_carry_r  = (_ws_carry_cap > 0.0f) ? (_ws_inv_kg / _ws_carry_cap) : 0.0f;
                 bool  _ws_sprint_ok= (_ws_carry_r < 0.85f);
@@ -15346,6 +15502,8 @@ void websocket_server_tick(float dt) {
                         sim_player->velocity.y = 0;
                     }
                     // Skip movement processing
+                } else if (player_is_grapple_target(ws_player->player_id)) {
+                    /* Position owned by update_grapple_hooks() — skip movement integration. */
                 } else if (ws_player->is_moving) {
                     // Player is actively moving
                     float movement_x = ws_player->movement_direction_x;
@@ -16224,7 +16382,8 @@ void websocket_server_tick(float dt) {
                     // Skip while cross-ship grappling — local_x/y may be stale and would
                     // snap the player to deck centre before the grapple tick runs.
                     if (player_ship && ws_player->parent_ship_id != 0 &&
-                        !ws_player_grappling_other_ship(ws_player_slot(ws_player), ws_player)) {
+                        !ws_player_grappling_other_ship(ws_player_slot(ws_player), ws_player) &&
+                        !player_is_grapple_target(ws_player->player_id)) {
                         ship_local_to_world(player_ship, ws_player->local_x, ws_player->local_y,
                                           &ws_player->x, &ws_player->y);
                         // On-ship players have zero velocity (movement is relative to ship)

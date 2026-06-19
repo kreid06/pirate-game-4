@@ -1,6 +1,6 @@
 {
   "meta": {
-    "timestamp": 1781851367,
+    "timestamp": 1781878418,
     "ship_count": 1,
     "npc_count": 0,
     "structure_count": 21
@@ -40,7 +40,8 @@
         {"id":272,"type":6,"lx":-18.5000,"ly":-9.0000,"lr":0.000000,"health":41015,"max_health":41015,"target_health":41015,"gp_snap":255,"gp_open":0,"deck":0,"q":230,"sm":[1050,0,0,0,0]},
         {"id":280,"type":9,"lx":-14.0000,"ly":0.0000,"lr":0.000000,"health":8000,"max_health":8000,"target_health":8000,"gp_snap":255,"gp_open":0,"deck":255},
         {"id":281,"type":15,"lx":-26.1835,"ly":-0.0154,"lr":0.000000,"health":5000,"max_health":5000,"target_health":5000,"gp_snap":255,"gp_open":0,"deck":0},
-        {"id":271,"type":6,"lx":-3.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0}
+        {"id":271,"type":6,"lx":-3.5000,"ly":-9.0000,"lr":0.000000,"health":10000,"max_health":10000,"target_health":10000,"gp_snap":255,"gp_open":0,"deck":0},
+        {"id":282,"type":11,"lx":-14.7500,"ly":-9.0000,"lr":0.000000,"health":0,"max_health":0,"target_health":0,"gp_snap":4,"gp_open":0,"deck":0}
       ],
       "weapon_groups": [
         {"co":0,"idx":0,"mode":2,"target":0,"gpopen":0,"name":"Port","wids":[]},
