@@ -8,6 +8,13 @@
 
 import type { PlacedStructure } from '../../sim/Types.js';
 import { tierColor } from '../../sim/Quality.js';
+import {
+  SHIPYARD_TILE,
+  SHIPYARD_ARM_T,
+  SHIPYARD_INT_W,
+  SHIPYARD_ARM_L,
+  SHIPYARD_BACK_T,
+} from '../../sim/ShipyardGeometry.js';
 
 export const STRUCT_TILE = 50;
 
@@ -124,34 +131,43 @@ function keyPart(opts: StructureSpriteOpts): string {
 // ── Bake functions ────────────────────────────────────────────────────────
 
 export function getWoodenFloorSprite(cache: StructureSpriteCache, opts: StructureSpriteOpts): StructureSprite {
-  const key = `floor:${keyPart(opts)}`;
+  const key = `floor:v2:${keyPart(opts)}`;
   return cache.get(key, () => bake((ctx) => {
     const sz = STRUCT_TILE;
+    /** Bleed into neighbours so snapped tiles don't show stroke/AA gaps. */
+    const BLEED = 1;
+    const drawSz = sz + BLEED * 2;
+    const half = drawSz / 2;
+    const tileHalf = sz / 2;
     const baseColor = opts.blocker ? '#cc3322' : opts.hovered ? '#d09a3a' : '#b8832b';
     const dmgDarken = dmgDarkenFromBucket(hpDamageBucket(opts.hpFrac));
+
     ctx.fillStyle = baseColor;
-    ctx.strokeStyle = '#7a5520';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.rect(-sz / 2, -sz / 2, sz, sz);
-    ctx.fill();
-    ctx.stroke();
-    if (dmgDarken > 0.01) {
-      ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
-      ctx.fillRect(-sz / 2, -sz / 2, sz, sz);
-    }
+    ctx.fillRect(-half, -half, drawSz, drawSz);
+
+    // Inset edge line — outer stroke left dark seams between adjacent tiles.
+    ctx.strokeStyle = 'rgba(60, 35, 10, 0.35)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-tileHalf + 0.5, -tileHalf + 0.5, sz - 1, sz - 1);
+
     ctx.strokeStyle = 'rgba(90, 55, 15, 0.5)';
     ctx.lineWidth = 1;
     const third = sz / 3;
     for (let li = 1; li < 3; li++) {
       ctx.beginPath();
-      ctx.moveTo(-sz / 2, -sz / 2 + li * third);
-      ctx.lineTo(sz / 2, -sz / 2 + li * third);
+      ctx.moveTo(-tileHalf, -tileHalf + li * third);
+      ctx.lineTo(tileHalf, -tileHalf + li * third);
       ctx.stroke();
     }
+
     ctx.fillStyle = structureCompanyColor(opts.companyId);
-    ctx.fillRect(-sz / 2, -sz / 2, sz, 3);
-    return { w: sz, h: sz };
+    ctx.fillRect(-tileHalf, -tileHalf, sz, 3);
+
+    if (dmgDarken > 0.01) {
+      ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+      ctx.fillRect(-half, -half, drawSz, drawSz);
+    }
+    return { w: drawSz, h: drawSz };
   }));
 }
 
@@ -402,6 +418,36 @@ export function getChestSprite(cache: StructureSpriteCache, opts: StructureSprit
   }));
 }
 
+export function getBedSprite(cache: StructureSpriteCache, opts: StructureSpriteOpts): StructureSprite {
+  const key = `bed:${keyPart(opts)}`;
+  return cache.get(key, () => bake((ctx) => {
+    const sz = STRUCT_TILE;
+    const bw = sz * 0.88;
+    const bh = sz * 0.48;
+    const dmgDarken = dmgDarkenFromBucket(hpDamageBucket(opts.hpFrac));
+    ctx.fillStyle = opts.hovered ? '#6a3090' : '#3d1f60';
+    ctx.strokeStyle = '#aa77dd';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.roundRect(-bw / 2, -bh / 2, bw, bh, 3);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = '#c8a0e8';
+    ctx.beginPath();
+    ctx.roundRect(-bw / 2 + 2, -bh / 2 + 2, bw * 0.32, bh - 4, 2);
+    ctx.fill();
+    ctx.fillStyle = '#7755aa';
+    ctx.fillRect(-bw / 2 + bw * 0.34, -bh / 2 + 2, bw * 0.54, bh - 4);
+    ctx.fillStyle = structureCompanyColor(opts.companyId);
+    ctx.fillRect(-bw / 2, -bh / 2, bw, 2);
+    if (dmgDarken > 0.01) {
+      ctx.fillStyle = `rgba(0,0,0,${dmgDarken.toFixed(2)})`;
+      ctx.fillRect(-bw / 2, -bh / 2, bw, bh);
+    }
+    return { w: bw, h: bh };
+  }));
+}
+
 export function getCannonBaseSprite(cache: StructureSpriteCache, opts: StructureSpriteOpts): StructureSprite {
   const key = `cannon_base:${keyPart(opts)}`;
   return cache.get(key, () => bake((ctx) => {
@@ -594,10 +640,10 @@ export function getClaimFlagSprite(cache: StructureSpriteCache, opts: StructureS
 }
 
 function drawShipyardBody(ctx: OffscreenCanvasRenderingContext2D, sz: number, hovered: boolean, companyId: number, building: boolean, dmgDarken: number): { w: number; h: number } {
-  const ARM_T = sz * 1.00;
-  const INT_W = sz * 4.80;
-  const ARM_L = sz * 16.80;
-  const BACK_T = sz * 1.00;
+  const ARM_T = sz * (SHIPYARD_ARM_T / SHIPYARD_TILE);
+  const INT_W = sz * (SHIPYARD_INT_W / SHIPYARD_TILE);
+  const ARM_L = sz * (SHIPYARD_ARM_L / SHIPYARD_TILE);
+  const BACK_T = sz * (SHIPYARD_BACK_T / SHIPYARD_TILE);
   const totalW = ARM_T + INT_W + ARM_T;
   const totalH = BACK_T + ARM_L;
   const hw = totalW / 2, hh = totalH / 2;
@@ -733,7 +779,7 @@ function drawShipyardBody(ctx: OffscreenCanvasRenderingContext2D, sz: number, ho
 
 export function getShipyardSprite(cache: StructureSpriteCache, opts: StructureSpriteOpts): StructureSprite {
   const building = opts.building ? 1 : 0;
-  const key = `shipyard:${keyPart(opts)}:b${building}`;
+  const key = `shipyard:v2:${keyPart(opts)}:b${building}`;
   return cache.get(key, () => bake((ctx) => {
     const sz = STRUCT_TILE;
     const dmgDarken = dmgDarkenFromBucket(hpDamageBucket(opts.hpFrac));
@@ -765,6 +811,8 @@ export function getStructureBaseSprite(
       return { sprite: getWoodCeilingSprite(cache, fullOpts), rotRad: (s.rotation ?? 0) * Math.PI / 180 };
     case 'chest':
       return { sprite: getChestSprite(cache, fullOpts), rotRad: 0 };
+    case 'bed':
+      return { sprite: getBedSprite(cache, fullOpts), rotRad: 0 };
     case 'cannon':
       return { sprite: getCannonBaseSprite(cache, fullOpts), rotRad: (s.rotation ?? 0) * Math.PI / 180 };
     case 'wreck':

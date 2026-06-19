@@ -14,7 +14,7 @@ BINDIR = bin
 
 # Source files (excluding duplicates and test files)
 CORE_SOURCES = $(filter-out $(SRCDIR)/core/server.c, $(wildcard $(SRCDIR)/core/*.c)) $(wildcard $(SRCDIR)/sim/*.c) $(wildcard $(SRCDIR)/util/*.c)
-NET_SOURCES = $(SRCDIR)/net/network.c $(SRCDIR)/net/protocol.c $(SRCDIR)/net/reliability.c $(SRCDIR)/net/snapshot.c $(SRCDIR)/net/websocket_server.c $(SRCDIR)/net/websocket_protocol.c $(SRCDIR)/net/websocket_auth.c $(SRCDIR)/net/player_persistence.c $(SRCDIR)/net/dock_physics.c $(SRCDIR)/net/module_interactions.c $(SRCDIR)/net/harvesting.c $(SRCDIR)/net/npc_agents.c $(SRCDIR)/net/npc_world.c $(SRCDIR)/net/ship_control.c $(SRCDIR)/net/cannon_fire.c $(SRCDIR)/net/structures.c $(SRCDIR)/net/crafting.c $(SRCDIR)/net/player_movement.c $(SRCDIR)/net/ship_init.c $(SRCDIR)/net/ship_schematics.c $(SRCDIR)/net/ship_chest_resources.c $(SRCDIR)/net/ship_plank_wreckage.c $(SRCDIR)/net/claim.c $(SRCDIR)/net/quality.c
+NET_SOURCES = $(SRCDIR)/net/network.c $(SRCDIR)/net/protocol.c $(SRCDIR)/net/reliability.c $(SRCDIR)/net/snapshot.c $(SRCDIR)/net/websocket_server.c $(SRCDIR)/net/websocket_protocol.c $(SRCDIR)/net/websocket_auth.c $(SRCDIR)/net/player_persistence.c $(SRCDIR)/net/dock_physics.c $(SRCDIR)/net/module_interactions.c $(SRCDIR)/net/harvesting.c $(SRCDIR)/net/npc_agents.c $(SRCDIR)/net/npc_world.c $(SRCDIR)/net/ship_control.c $(SRCDIR)/net/cannon_fire.c $(SRCDIR)/net/structures.c $(SRCDIR)/net/crafting.c $(SRCDIR)/net/player_movement.c $(SRCDIR)/net/ship_init.c $(SRCDIR)/net/ship_schematics.c $(SRCDIR)/net/ship_chest_resources.c $(SRCDIR)/net/ship_plank_wreckage.c $(SRCDIR)/net/bucket_bail.c $(SRCDIR)/net/claim.c $(SRCDIR)/net/quality.c
 AOI_SOURCES = $(wildcard $(SRCDIR)/aoi/*.c)
 ADMIN_SOURCES = $(SRCDIR)/admin/admin_server.c $(SRCDIR)/admin/admin_api.c
 MAIN_SOURCES = $(SRCDIR)/main.c $(SRCDIR)/server.c
@@ -58,7 +58,10 @@ install-deps:
 	sudo apt-get update
 	sudo apt-get install -y build-essential libwebsockets-dev libjson-c-dev
 
-.PHONY: all clean install-deps test-integration demo-simple
+.PHONY: all clean install-deps test-integration test-bucket-bail demo-simple
+
+test-bucket-bail: obj/net/bucket_bail.o obj/util/time.o
+	gcc -Wall -Wextra -std=c99 -O2 -g -Iinclude -o bin/test_bucket_bail tests/test_bucket_bail.c obj/net/bucket_bail.o obj/util/time.o -lm
 
 # Full integration test for Week 3-4 systems
 test-integration: obj/core/rewind_buffer.o obj/core/input_validation.o obj/core/math.o obj/core/rng.o

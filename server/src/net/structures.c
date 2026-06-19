@@ -227,6 +227,44 @@ static uint32_t island_dominant_company(uint32_t island_id) {
     return 0;
 }
 
+static int schematic_blueprint_item(int stype_enum) {
+    switch (stype_enum) {
+        case STRUCT_WOODEN_FLOOR:     return ITEM_WOODEN_FLOOR;
+        case STRUCT_WORKBENCH:        return ITEM_WORKBENCH;
+        case STRUCT_WALL:             return ITEM_WALL;
+        case STRUCT_DOOR_FRAME:       return ITEM_DOOR_FRAME;
+        case STRUCT_DOOR:             return ITEM_DOOR;
+        case STRUCT_SHIPYARD:         return ITEM_SHIPYARD;
+        case STRUCT_CEILING:          return ITEM_WOOD_CEILING;
+        case STRUCT_CANNON:           return ITEM_CANNON;
+        case STRUCT_FLAG_FORT:        return ITEM_FLAG_FORT;
+        case STRUCT_CLAIM_FLAG:       return ITEM_CLAIM_FLAG;
+        case STRUCT_COMPANY_FORTRESS: return ITEM_COMPANY_FORTRESS;
+        case STRUCT_BED:              return ITEM_BED;
+        default:                      return ITEM_NONE;
+    }
+}
+
+static float schematic_placement_cost_mult(WebSocketPlayer *player, const char *payload, int stype_enum) {
+    int expected_item = schematic_blueprint_item(stype_enum);
+    if (expected_item == ITEM_NONE) return 1.0f;
+    const char *_pbp = strstr(payload, "\"bp_index\":");
+    int _bpi = -1;
+    if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+    if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+        PlayerBlueprint *_bp = &player->schematics[_bpi];
+        if (_bp->item == (uint8_t)expected_item && _bp->crafts_remaining > 0)
+            return quality_craft_cost_mult(quality_from_q8(_bp->quality.quality_q8));
+    }
+    return 1.0f;
+}
+
+static int scale_schematic_res_cost(int base, float mult) {
+    if (base <= 0 || mult <= 1.0f) return base;
+    int out = (int)ceilf((float)base * mult);
+    return out < base ? base : out;
+}
+
 void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
@@ -253,6 +291,12 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
             int ti = 0;
             while (ti < 31 && *st && *st != '"') stype[ti++] = *st++;
         }
+    }
+
+    float place_rotation_deg = 0.0f;
+    {
+        const char* rots = strstr(payload, "\"rotation\":");
+        if (rots) sscanf(rots + 11, "%f", &place_rotation_deg);
     }
 
     /* Placement point (px,py) must lie within a valid island beach boundary.
@@ -325,6 +369,11 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
                 goto ps_send;
             }
         }
+        if (dock_brig_slot_overlaps_land(px, py, place_rotation_deg)) {
+            snprintf(response, sizeof(response),
+                     "{\"type\":\"place_structure_fail\",\"reason\":\"ship_slot_on_land\"}");
+            goto ps_send;
+        }
     }
 
     PlacedStructureType stype_enum;
@@ -367,7 +416,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         required_item = ITEM_NONE;  /* built from raw resources via schematic */
     } else if (strcmp(stype, "bed") == 0) {
         stype_enum    = STRUCT_BED;
-        required_item = ITEM_BED;
+        required_item = ITEM_NONE;  /* built from raw resources via schematic */
     } else {
         snprintf(response, sizeof(response),
                  "{\"type\":\"place_structure_fail\",\"reason\":\"unknown_type\"}");
@@ -412,10 +461,11 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         [STRUCT_BED]              = { 10, 5,  0,   0 },
     };
     if (req_schematic && (int)stype_enum < 14) {
-        int nw = SCHEMATIC_COST[stype_enum].wood;
-        int nf = SCHEMATIC_COST[stype_enum].fiber;
-        int nm = SCHEMATIC_COST[stype_enum].metal;
-        int ns = SCHEMATIC_COST[stype_enum].stone;
+        float cost_mult = schematic_placement_cost_mult(player, payload, stype_enum);
+        int nw = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].wood,  cost_mult);
+        int nf = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].fiber, cost_mult);
+        int nm = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].metal, cost_mult);
+        int ns = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].stone, cost_mult);
         if (craft_count_item(player, ITEM_WOOD)  < nw ||
             craft_count_item(player, ITEM_FIBER) < nf ||
             craft_count_item(player, ITEM_METAL) < nm ||
@@ -723,8 +773,7 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
         }
     }
 
-    /* Parse rotation early so all subsequent checks can use it */
-    float place_rotation_deg = 0.0f;
+    /* Parse rotation (may already be set for shipyard land check above) */
     {
         const char* rots = strstr(payload, "\"rotation\":");
         if (rots) sscanf(rots + 11, "%f", &place_rotation_deg);
@@ -1193,10 +1242,11 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
     /* Consume resources from pool for schematic placements */
     if (req_schematic && (int)stype_enum < 14) {
-        int nw = SCHEMATIC_COST[stype_enum].wood;
-        int nf = SCHEMATIC_COST[stype_enum].fiber;
-        int nm = SCHEMATIC_COST[stype_enum].metal;
-        int ns = SCHEMATIC_COST[stype_enum].stone;
+        float cost_mult = schematic_placement_cost_mult(player, payload, stype_enum);
+        int nw = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].wood,  cost_mult);
+        int nf = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].fiber, cost_mult);
+        int nm = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].metal, cost_mult);
+        int ns = scale_schematic_res_cost(SCHEMATIC_COST[stype_enum].stone, cost_mult);
         if (nw > 0) craft_consume(player, ITEM_WOOD,  nw);
         if (nf > 0) craft_consume(player, ITEM_FIBER, nf);
         if (nm > 0) craft_consume(player, ITEM_METAL, nm);
@@ -1453,6 +1503,12 @@ ps_send:;
  * structure_interact: player presses E near a placed structure.
  * Only workbenches currently do anything (open crafting UI).
  */
+static void build_shipyard_state_json(char* buf, size_t bufsz,
+                                      const PlacedStructure* sy,
+                                      uint32_t ship_spawned,
+                                      uint32_t spawner_player_id,
+                                      const WebSocketPlayer* player);
+
 void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* client, const char* payload) {
     char response[256];
 
@@ -1661,13 +1717,7 @@ void handle_structure_interact(WebSocketPlayer* player, struct WebSocketClient* 
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_SHIPYARD) {
-            const char* phase_str = placed_structures[i].construction_phase == CONSTRUCTION_BUILDING
-                                    ? "building" : "empty";
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
-                     "\"phase\":\"%s\",\"modules_placed\":[],"
-                     "\"scaffolded_ship_id\":%u}",
-                     sid, phase_str, placed_structures[i].scaffolded_ship_id);
+            build_shipyard_state_json(response, sizeof(response), &placed_structures[i], 0, 0, player);
             goto si_send;
         }
         if (placed_structures[i].type == STRUCT_DOOR) {
@@ -2058,7 +2108,9 @@ void handle_land_chest_transfer(WebSocketPlayer* player, struct WebSocketClient*
 
         bool is_ruin = (placed_structures[i].type == STRUCT_WRECK &&
                         placed_structures[i].wreck_resource_cache);
-        if (placed_structures[i].type != STRUCT_CHEST && !is_ruin) {
+        if (placed_structures[i].type != STRUCT_CHEST
+            && placed_structures[i].type != STRUCT_SHIPYARD
+            && !is_ruin) {
             snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"not_chest\"}");
             goto lct_send;
         }
@@ -2078,7 +2130,9 @@ void handle_land_chest_transfer(WebSocketPlayer* player, struct WebSocketClient*
         /* Range check */
         float dx = player->x - placed_structures[i].x;
         float dy = player->y - placed_structures[i].y;
-        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+        float max_ir = (placed_structures[i].type == STRUCT_SHIPYARD)
+                       ? SHIPYARD_INTERACT_R : STRUCT_INTERACT_R;
+        if (dx*dx + dy*dy > max_ir * max_ir) {
             snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"too_far\"}");
             goto lct_send;
         }
@@ -2191,7 +2245,8 @@ void handle_land_chest_drop(WebSocketPlayer* player, struct WebSocketClient* cli
     for (uint32_t i = 0; i < placed_structure_count; i++) {
         if (!placed_structures[i].active) continue;
         if (placed_structures[i].id != sid) continue;
-        if (placed_structures[i].type != STRUCT_CHEST) {
+        if (placed_structures[i].type != STRUCT_CHEST
+            && placed_structures[i].type != STRUCT_SHIPYARD) {
             snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"not_chest\"}");
             goto lcd_send;
         }
@@ -2205,7 +2260,9 @@ void handle_land_chest_drop(WebSocketPlayer* player, struct WebSocketClient* cli
         /* Range check */
         float dx = player->x - placed_structures[i].x;
         float dy = player->y - placed_structures[i].y;
-        if (dx*dx + dy*dy > STRUCT_INTERACT_R * STRUCT_INTERACT_R) {
+        float max_ir = (placed_structures[i].type == STRUCT_SHIPYARD)
+                       ? SHIPYARD_INTERACT_R : STRUCT_INTERACT_R;
+        if (dx*dx + dy*dy > max_ir * max_ir) {
             snprintf(response, sizeof(response), "{\"type\":\"land_chest_fail\",\"reason\":\"too_far\"}");
             goto lcd_send;
         }
@@ -2250,22 +2307,38 @@ lcd_send:;
 static void build_shipyard_state_json(char* buf, size_t bufsz,
                                       const PlacedStructure* sy,
                                       uint32_t ship_spawned,
-                                      uint32_t spawner_player_id) {
+                                      uint32_t spawner_player_id,
+                                      const WebSocketPlayer* player) {
     const char* phase_str = sy->construction_phase == CONSTRUCTION_BUILDING ? "building" : "empty";
+    char player_extra[128] = "";
+    if (player) {
+        snprintf(player_extra, sizeof(player_extra),
+                 ",\"player_wood\":%u,\"player_fiber\":%u,\"player_metal\":%u,\"player_stone\":%u",
+                 (unsigned)player->res_wood, (unsigned)player->res_fiber,
+                 (unsigned)player->res_metal, (unsigned)player->res_stone);
+    }
     if (ship_spawned) {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
                  "\"phase\":\"%s\",\"modules_placed\":[],"
-                 "\"ship_spawned\":%u,\"scaffolded_ship_id\":%u,"
-                 "\"spawner_player_id\":%u}",
-                 sy->id, phase_str, ship_spawned, sy->scaffolded_ship_id,
-                 spawner_player_id);
+                 "\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u"
+                 ",\"ship_spawned\":%u,\"scaffolded_ship_id\":%u,"
+                 "\"spawner_player_id\":%u%s}",
+                 sy->id, phase_str,
+                 (unsigned)sy->chest_wood, (unsigned)sy->chest_fiber,
+                 (unsigned)sy->chest_metal, (unsigned)sy->chest_stone,
+                 ship_spawned, sy->scaffolded_ship_id,
+                 spawner_player_id, player_extra);
     } else {
         snprintf(buf, bufsz,
                  "{\"type\":\"shipyard_state\",\"structure_id\":%u,"
                  "\"phase\":\"%s\",\"modules_placed\":[],"
-                 "\"scaffolded_ship_id\":%u}",
-                 sy->id, phase_str, sy->scaffolded_ship_id);
+                 "\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u,"
+                 "\"scaffolded_ship_id\":%u%s}",
+                 sy->id, phase_str,
+                 (unsigned)sy->chest_wood, (unsigned)sy->chest_fiber,
+                 (unsigned)sy->chest_metal, (unsigned)sy->chest_stone,
+                 sy->scaffolded_ship_id, player_extra);
     }
 }
 
@@ -2381,7 +2454,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
         sy->modules_placed      = 0;
         sy->scaffolded_ship_id  = 0;
         char bcast[512];
-        build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id, player->player_id);
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id, player->player_id, NULL);
         websocket_server_broadcast(bcast);
         log_info("⚓ Shipyard %u: released ship %u", sid, released_id);
         return; /* broadcast sent */
@@ -2395,7 +2468,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
     /* Broadcast updated state to all clients */
     {
         char bcast[512];
-        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0, 0);
+        build_shipyard_state_json(bcast, sizeof(bcast), sy, 0, 0, NULL);
         websocket_server_broadcast(bcast);
     }
     return;

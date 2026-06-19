@@ -210,6 +210,7 @@ typedef struct WorldNpc {
     // Ship attachment
     uint16_t      ship_id;         // 0 = free-standing
     float         local_x, local_y; // Ship-local position in CLIENT units
+    uint32_t      on_island_id;    // IslandDef id when walking ashore; 0 = not on island land
 
     // Module associations
     // Rigger: port_cannon_id = mast module ID (starboard_cannon_id mirrors it).
@@ -347,6 +348,8 @@ typedef enum {
     ITEM_METAL_AXE     = 40,  /* Metal axe — better yield/damage than the stone axe    */
     ITEM_METAL_PICKAXE = 41,  /* Metal pickaxe — better yield/damage than stone one    */
     ITEM_GRAPPLE_HOOK  = 42,  /* Grapple hook — workbench-crafted utility tool         */
+    ITEM_METAL_SICKLE  = 43,  /* Metal sickle — faster fiber harvest than bare hands   */
+    ITEM_BUCKET        = 44,  /* Bucket — bail floodwater from a ship                  */
 
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
@@ -577,7 +580,7 @@ typedef struct {
 #define MAX_DOMINATORS 32
     uint32_t dominators[MAX_DOMINATORS];
     uint8_t  dominator_count;
-    /* ── Land chest storage (STRUCT_CHEST only) ─────────────────────────── */
+    /* ── Land chest / shipyard storage ──────────────────────────────────── */
 #define LAND_CHEST_MAX 8192
     uint16_t chest_wood;
     uint16_t chest_fiber;
@@ -756,6 +759,10 @@ typedef struct WebSocketPlayer {
     float    respawn_ship_lx;
     float    respawn_ship_ly;
     uint32_t bed_last_use_ms;
+
+    /* Bucket bail state — 0=empty, 1=half, 2=full */
+    uint8_t  bucket_fill;
+    uint32_t bucket_cooldown_until_ms;
 } WebSocketPlayer;
 
 struct WebSocketStats {

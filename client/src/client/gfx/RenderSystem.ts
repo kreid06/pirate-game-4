@@ -12,7 +12,8 @@ import { Camera } from './Camera.js';
 import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company, LandGhostPlacement } from '../../sim/Types.js';
-import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
+import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, DeckModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
+import { BUCKET_LOWER_SCOOP_FILL, BUCKET_UPPER_SCOOP_FILL, computeDeckFloodTint } from '../../sim/BucketBail.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
@@ -26,6 +27,18 @@ import {
   getWoodCeilingSprite,
   structureCompanyColor as structureCompanyStripColor,
 } from './StructureSprites.js';
+import {
+  SHIPYARD_TILE,
+  SHIPYARD_ARM_T,
+  SHIPYARD_INT_W,
+  SHIPYARD_ARM_L,
+  SHIPYARD_BACK_T,
+  SHIPYARD_HW,
+  SHIPYARD_HH,
+  SHIPYARD_HEIGHT_MULT,
+  brigSlotCornersLocal,
+  brigSlotOverlapsLand,
+} from '../../sim/ShipyardGeometry.js';
 import { tierColor, tierName, statMultLabel, computeCannonHullDamage, computeCannonEntityDamage, CANNON_HULL_BASE_DAMAGE, CANNON_ENTITY_BASE_DAMAGE, BAR_SHOT_ENTITY_BASE_DAMAGE, itemDisplayName } from '../../sim/Quality.js';
 import { SHIP_ATTR_DAMAGE } from '../../sim/Types.js';
 
@@ -206,6 +219,8 @@ export class RenderSystem {
   private chestBuildMode: boolean = false;
   /** Whether bed placement build mode is active (bed ghost selected). */
   private bedBuildMode: boolean = false;
+  /** Whether bilge well placement build mode is active (well ghost selected). */
+  private wellBuildMode: boolean = false;
   /** Whether ship workbench placement build mode is active (workbench ghost selected). */
   private workbenchBuildMode: boolean = false;
   /** The gunport snap index currently hovered in gunport build mode. */
@@ -231,6 +246,13 @@ export class RenderSystem {
   public onDeckLevelChange: ((deckLevel: number) => void) | null = null;
   /** Read-only access to the current player deck level for placement decisions. */
   public get playerDeckLevel(): number { return this._playerDeckLevel; }
+  /** Bucket bail UI — true while local player holds water and can dump. */
+  private _bucketDumpHintActive = false;
+  private _bucketDumpHintValid = false;
+  public setBucketDumpHint(active: boolean, valid: boolean): void {
+    this._bucketDumpHintActive = active;
+    this._bucketDumpHintValid = valid;
+  }
   /**
    * Timestamp (performance.now) of the most recent boarding event.
    * Ramp fall-through detection is suppressed for 500 ms after boarding so a
@@ -412,7 +434,15 @@ export class RenderSystem {
 
   // Per-frame memoization caches — cleared at the top of renderWorld() each frame.
   // computeSinkState() is called ~10× per visible ship per frame; caching cuts it to 1 compute per ship.
-  private _sinkStateCache: Map<number, { waterFill: number; floodTint: number; phase1Alpha: number; phase2Alpha: number; phase3Alpha: number }> = new Map();
+  private _sinkStateCache: Map<number, {
+    waterFill: number;
+    lowerDeckFloodTint: number;
+    upperDeckFloodTint: number;
+    floodTint: number;
+    phase1Alpha: number;
+    phase2Alpha: number;
+    phase3Alpha: number;
+  }> = new Map();
   // darkenByDamage() allocates a new rgb() string on every call (~116/frame for a full brig).
   // Key is "<hex>:<health_bucket>"; 21 buckets (0–20) × ~6 distinct hex colours → ≤126 entries.
   private _darkenCache: Map<string, string> = new Map();
@@ -1038,6 +1068,8 @@ export class RenderSystem {
   private _cachedCompanies: Company[] = [];
   /** Dropped items in the world (player-dropped inventory items). */
   private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
+  /** Pickup radius — matches server handle_pickup_item distance check. */
+  static readonly DROPPED_ITEM_PICKUP_RANGE = 80;
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
   private _scaffoldedShips: Map<number, PlacedStructure> = new Map();
   /** Structure currently under the cursor (within hover range of the local player). */
@@ -1085,7 +1117,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed' | null = null;
   /** Active Build Schematic Hotbar selection — used to detect ghost plan hover for construction. */
   private buildSchematicKind: string | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
@@ -1625,9 +1657,9 @@ export class RenderSystem {
       { ox:  85, oy: -25, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
       { ox:  15, oy:  80, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
       { ox: -90, oy:  38, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
-      { ox:  45, oy: -78, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
-      { ox: -28, oy:  32, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
-      { ox:  70, oy:  50, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
+      { ox:  45, oy: -78, type: 'fiber' as const, size: 1.0, hp: 150, maxHp: 150 },
+      { ox: -28, oy:  32, type: 'fiber' as const, size: 1.0, hp: 150, maxHp: 150 },
+      { ox:  70, oy:  50, type: 'fiber' as const, size: 1.0, hp: 150, maxHp: 150 },
     ],
   };
 
@@ -2219,6 +2251,22 @@ export class RenderSystem {
    */
   showAnnouncement(text: string, kind: AnnouncementKind = 'info', duration = 3.5): void {
     this.effectRenderer.createAnnouncement(text, kind, duration);
+  }
+
+  /** Green/red ring around the local player when holding bucket water. */
+  private drawBucketDumpHint(camera: Camera): void {
+    if (!this._bucketDumpHintActive) return;
+    const player = this._cachedLocalPlayer;
+    if (!player) return;
+    const sp = camera.worldToScreen(player.position);
+    const r = 22 * camera.getState().zoom;
+    this.ctx.save();
+    this.ctx.strokeStyle = this._bucketDumpHintValid ? 'rgba(80, 220, 120, 0.9)' : 'rgba(220, 80, 80, 0.75)';
+    this.ctx.lineWidth = 2.5;
+    this.ctx.beginPath();
+    this.ctx.arc(sp.x, sp.y, r, 0, Math.PI * 2);
+    this.ctx.stroke();
+    this.ctx.restore();
   }
 
   /** Returns the ship ID of the last ship that fired a cannonball near shipId, or null. */
@@ -3255,6 +3303,14 @@ export class RenderSystem {
     return this.bedBuildMode;
   }
 
+  setWellBuildMode(active: boolean): void {
+    this.wellBuildMode = active;
+  }
+
+  isInWellBuildMode(): boolean {
+    return this.wellBuildMode;
+  }
+
   /** Activate or deactivate ship workbench placement build mode. */
   setWorkbenchBuildMode(active: boolean): void {
     this.workbenchBuildMode = active;
@@ -3542,7 +3598,7 @@ export class RenderSystem {
     id: number,
     res: { wood: number; fiber: number; metal: number; stone: number },
   ): void {
-    const s = this.placedStructures.find(p => p.id === id && p.type === 'chest');
+    const s = this.placedStructures.find(p => p.id === id && (p.type === 'chest' || p.type === 'shipyard'));
     if (!s) return;
     s.chestResources = { wood: res.wood, fiber: res.fiber, metal: res.metal, stone: res.stone };
   }
@@ -3688,7 +3744,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -3948,7 +4004,7 @@ export class RenderSystem {
       });
     }
 
-    if (kind === 'workbench' || kind === 'cannon') {
+    if (kind === 'workbench' || kind === 'cannon' || kind === 'chest') {
       return bases.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -3957,6 +4013,21 @@ export class RenderSystem {
         const ly = dx * Math.sin(-rad) + dy * Math.cos(-rad);
         return Math.abs(lx) <= HALF && Math.abs(ly) <= HALF;
       });
+    }
+
+    if (kind === 'bed') {
+      const onFloor = bases.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const dx = px - s.x, dy = py - s.y;
+        const lx = dx * Math.cos(-rad) - dy * Math.sin(-rad);
+        const ly = dx * Math.sin(-rad) + dy * Math.cos(-rad);
+        return Math.abs(lx) <= HALF && Math.abs(ly) <= HALF;
+      });
+      if (!onFloor) return false;
+      return !bases.some(s =>
+        s.type === 'bed' && Math.hypot(s.x - px, s.y - py) < 30
+      );
     }
 
     if (kind === 'door') {
@@ -4039,8 +4110,8 @@ export class RenderSystem {
       const c = Math.cos(-rot), sn = Math.sin(-rot);
       const lx = dx * c - dy * sn;
       const ly = dx * sn + dy * c;
-      // hw=170, hh=445 are world-unit half-extents; +100 interaction margin
-      return Math.abs(lx) <= 270 && Math.abs(ly) <= 545 ? s : null;
+      // hw=170, hh=420 are world-unit half-extents; +100 interaction margin
+      return Math.abs(lx) <= SHIPYARD_HW + 100 && Math.abs(ly) <= SHIPYARD_HH + 100 ? s : null;
     }
     const dx = s.x - player.position.x;
     const dy = s.y - player.position.y;
@@ -4277,34 +4348,54 @@ export class RenderSystem {
     return 'world';
   }
 
-  /** Whether the local player can pick up / interact with a dropped item (same deck on ships). */
-  private _canPickupDroppedItem(d: import('../../sim/Types').DroppedItem): boolean {
-    const bucket = this._droppedItemBucket(d);
-    if (!bucket) return false;
-    if (d.shipId && d.deckLevel !== undefined && d.deckLevel !== this._playerDeckLevel) return false;
-    return true;
+  /** Whether the local player can pick up a drop (deck/location rules only — no cursor hover). */
+  private _canPlayerPickupDrop(
+    d: import('../../sim/Types').DroppedItem,
+    player: import('../../sim/Types').Player,
+  ): boolean {
+    const deck = typeof player.deckId === 'number'
+      ? (player.deckId === 0 ? 0 : 1)
+      : this._playerDeckLevel;
+    if (d.shipId) {
+      if (player.carrierId !== d.shipId) return false;
+      if (d.deckLevel !== undefined && d.deckLevel !== deck) return false;
+      return true;
+    }
+    return player.carrierId === 0;
   }
 
   /**
-   * Returns all dropped items within `range` px of the local player.
-   * Items are returned sorted nearest-first.
+   * Returns dropped items within `range` px of the player (proximity — cursor hover not required).
+   * Sorted nearest-first. Pass `player` from world state when calling outside the render pass.
    */
-  getDroppedItemsInRange(range: number = 80): import('../../sim/Types').DroppedItem[] {
-    const player = this._cachedLocalPlayer;
-    if (!player) return [];
+  getDroppedItemsInRange(
+    range: number = RenderSystem.DROPPED_ITEM_PICKUP_RANGE,
+    player?: import('../../sim/Types').Player | null,
+  ): import('../../sim/Types').DroppedItem[] {
+    const p = player ?? this._cachedLocalPlayer;
+    if (!p) return [];
     const range2 = range * range;
     return this._droppedItems
       .filter(d => {
-        if (!this._canPickupDroppedItem(d)) return false;
-        const dx = d.x - player.position.x;
-        const dy = d.y - player.position.y;
+        if (!this._canPlayerPickupDrop(d, p)) return false;
+        const dx = d.x - p.position.x;
+        const dy = d.y - p.position.y;
         return dx * dx + dy * dy <= range2;
       })
       .sort((a, b) => {
-        const dxa = a.x - player.position.x, dya = a.y - player.position.y;
-        const dxb = b.x - player.position.x, dyb = b.y - player.position.y;
+        const dxa = a.x - p.position.x, dya = a.y - p.position.y;
+        const dxb = b.x - p.position.x, dyb = b.y - p.position.y;
         return (dxa * dxa + dya * dya) - (dxb * dxb + dyb * dyb);
       });
+  }
+
+  /** Nearest dropped item in pickup range, or null. */
+  getNearestDroppedItem(
+    range: number = RenderSystem.DROPPED_ITEM_PICKUP_RANGE,
+    player?: import('../../sim/Types').Player | null,
+  ): import('../../sim/Types').DroppedItem | null {
+    const items = this.getDroppedItemsInRange(range, player);
+    return items.length > 0 ? items[0] : null;
   }
 
   private _buildDroppedItemPiles(
@@ -4341,14 +4432,14 @@ export class RenderSystem {
   ): void {
     const ctx = this.ctx;
     const player = this._cachedLocalPlayer;
-    const HOVER_RANGE = 80;
+    const pickupR = RenderSystem.DROPPED_ITEM_PICKUP_RANGE;
     const sx = (pile.cx - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
     const sy = (pile.cy - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
     const sz = Math.max(0.4, Math.min(1.2, camera.zoom));
 
-    const isNear = player != null && this._canPickupDroppedItem(pile.items[0]) &&
+    const isNear = player != null && this._canPlayerPickupDrop(pile.items[0], player) &&
       (pile.cx - player.position.x) ** 2 + (pile.cy - player.position.y) ** 2
-        <= HOVER_RANGE * HOVER_RANGE;
+        <= pickupR * pickupR;
 
     const schematicItem = pile.items.find(it => it.isSchematic);
     const allSchematics = pile.items.length > 0 && pile.items.every(it => it.isSchematic);
@@ -4889,6 +4980,9 @@ export class RenderSystem {
         } else if (moduleKind === 'bed') {
           width = 44;
           height = 24;
+        } else if (moduleKind === 'well') {
+          width = 32;
+          height = 32;
         }
         
         // Check if mouse is within module bounds (simple rectangle check)
@@ -4936,8 +5030,10 @@ export class RenderSystem {
 
   /**
    * Returns sinking-related render state for a ship.
-   *  waterFill    0–1 : fraction of hull filled with water (1 - hullHealth/100)
-   *  floodTint    0–1 : how blue the deck is (ramps up from waterFill=0.75 → 1.0)
+   *  waterFill           0–1 : fraction of hull filled with water (1 - hullHealth/100)
+   *  lowerDeckFloodTint  0–1 : lower deck blue overlay (ramps from 25% flood → full)
+   *  upperDeckFloodTint  0–1 : upper deck blue overlay (ramps from 75% flood → full)
+   *  floodTint           alias for upperDeckFloodTint (legacy call sites)
    *  phase1Alpha  1–0 : hull / deck / planks fade (0–4 s after despawn)
    *  phase2Alpha  1–0 : cannons fade (2–6 s after despawn)
    *  phase3Alpha  1–0 : sail fibers & masts fade (4–8 s after despawn)
@@ -4954,6 +5050,8 @@ export class RenderSystem {
 
   private computeSinkState(ship: Ship): {
     waterFill: number;
+    lowerDeckFloodTint: number;
+    upperDeckFloodTint: number;
     floodTint: number;
     phase1Alpha: number;
     phase2Alpha: number;
@@ -4972,7 +5070,9 @@ export class RenderSystem {
     const rawHullPct = Math.max(0, Math.min(1, ship.hullHealth / maxHullHP));
     const hullPct = this.sinkTimestamps.has(ship.id) ? 0 : rawHullPct;
     const waterFill = Math.max(0, Math.min(1, 1 - hullPct));
-    const floodTint = waterFill >= 0.75 ? (waterFill - 0.75) / 0.25 : 0;
+    const lowerDeckFloodTint = computeDeckFloodTint(waterFill, BUCKET_LOWER_SCOOP_FILL);
+    const upperDeckFloodTint = computeDeckFloodTint(waterFill, BUCKET_UPPER_SCOOP_FILL);
+    const floodTint = upperDeckFloodTint;
 
     // Start the clock for any live ship the moment hullHealth hits 0 (fallback if SHIP_SINKING arrives late).
     // Ghost ships rely exclusively on the explicit markShipSinking() call from the SHIP_SINKING server
@@ -4990,9 +5090,102 @@ export class RenderSystem {
       phase2Alpha = Math.max(0, 1 - Math.max(0, elapsed - 2) / 4);        // 2–6 s
       phase3Alpha = Math.max(0, 1 - Math.max(0, elapsed - 4) / 4);        // 4–8 s
     }
-    const result = { waterFill, floodTint, phase1Alpha, phase2Alpha, phase3Alpha };
+    const result = {
+      waterFill,
+      lowerDeckFloodTint,
+      upperDeckFloodTint,
+      floodTint,
+      phase1Alpha,
+      phase2Alpha,
+      phase3Alpha,
+    };
     this._sinkStateCache.set(ship.id, result);
     return result;
+  }
+
+  /**
+   * Build a canvas path for a deck's walkable surface (module area polygon, or hull fallback).
+   * Upper deck (1) subtracts ramp/hatch holes via even-odd fill.
+   */
+  private _buildDeckSurfacePath(ship: Ship, deckLevel: number, deckMod?: ShipModule): 'fill' | 'evenodd' | null {
+    const area = deckMod?.moduleData?.kind === 'deck'
+      ? (deckMod.moduleData as DeckModuleData).area
+      : undefined;
+    if (area && area.length >= 3) {
+      this.ctx.beginPath();
+      this.ctx.moveTo(area[0].x, area[0].y);
+      for (let i = 1; i < area.length; i++) this.ctx.lineTo(area[i].x, area[i].y);
+      this.ctx.closePath();
+      return 'fill';
+    }
+    if (ship.hull.length < 3) return null;
+    this.ctx.beginPath();
+    this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+    for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+    this.ctx.closePath();
+    if (deckLevel === 1) {
+      for (const sp of RenderSystem.RAMP_SNAP_POINTS) {
+        this.ctx.rect(sp.x - 25, sp.y - 25, 50, 50);
+      }
+      return 'evenodd';
+    }
+    return 'fill';
+  }
+
+  /** Blue flood tint clipped to a single deck's walkable surface. */
+  private _drawDeckFloodFill(
+    ship: Ship,
+    deckLevel: number,
+    floodTint: number,
+    phase1Alpha: number,
+    deckMod?: ShipModule,
+  ): void {
+    if (floodTint <= 0) return;
+    const mod = deckMod ?? ship.modules.find(m => m.kind === 'deck' && m.deckId === deckLevel);
+    const fillMode = this._buildDeckSurfacePath(ship, deckLevel, mod);
+    if (!fillMode) return;
+    this.ctx.save();
+    this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
+    this.ctx.fillStyle = '#1a6eb5';
+    if (fillMode === 'evenodd') this.ctx.fill('evenodd');
+    else this.ctx.fill();
+    this.ctx.restore();
+  }
+
+  /**
+   * Per-deck-index flood overlays on walkable deck surfaces (layer 3).
+   * Lower deck on two-deck ships is handled in drawLowerDeckFloor (hatches / below-deck view).
+   */
+  private drawShipDeckFloodOverlays(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
+    if (ship.shipType === SHIP_TYPE_GHOST) return;
+
+    const { lowerDeckFloodTint, upperDeckFloodTint, phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    const playerBelow = this._lowerDeckShipId === ship.id;
+
+    this.ctx.save();
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const mod of ship.modules) {
+      if (mod.kind !== 'deck') continue;
+      const deckLevel = mod.deckId;
+      if (deckLevel === 0) {
+        if (hasUpperDeck) continue;
+        this._drawDeckFloodFill(ship, 0, lowerDeckFloodTint, phase1Alpha, mod);
+      } else if (deckLevel === 1) {
+        if (playerBelow) continue;
+        this._drawDeckFloodFill(ship, 1, upperDeckFloodTint, phase1Alpha, mod);
+      }
+    }
+
+    this.ctx.restore();
   }
 
   private isPointInCurvedPlank(
@@ -5333,6 +5526,7 @@ export class RenderSystem {
     this.drawGrapeshotTracers(camera);
     // Directional fog mask (after world geometry and effects, before HUD)
     this.drawFogMask(camera);
+    this.drawBucketDumpHint(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
 
@@ -5970,12 +6164,14 @@ export class RenderSystem {
     const axeEquipped = (() => {
       if (!localPlayer || localPlayer.carrierId !== 0) return false;
       const slot = localPlayer.inventory?.activeSlot ?? 0;
-      return localPlayer.inventory?.slots[slot]?.item === 'axe';
+      const item = localPlayer.inventory?.slots[slot]?.item;
+      return item === 'axe' || item === 'metal_axe';
     })();
     const pickaxeEquipped = (() => {
       if (!localPlayer || localPlayer.carrierId !== 0) return false;
       const slot = localPlayer.inventory?.activeSlot ?? 0;
-      return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
+      const item = localPlayer.inventory?.slots[slot]?.item;
+      return item === 'pickaxe' || item === 'metal_pickaxe';
     })();
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
@@ -6662,8 +6858,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'shipyard' ? 170 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'shipyard' ? 445 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'bed' ? 25 * 0.88 : s.type === 'shipyard' ? SHIPYARD_HW : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'bed' ? 25 * 0.48 : s.type === 'shipyard' ? SHIPYARD_HH : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'shipyard') {
             // For empty shipyard: only highlight the physical U-shaped dock arms,
@@ -6678,8 +6874,8 @@ export class RenderSystem {
               floorHit = null;
               break;
             }
-          } else if (s.type === 'workbench') {
-            // Workbench always wins — stop searching
+          } else if (s.type === 'workbench' || s.type === 'bed') {
+            // Workbench/bed always wins — stop searching
             this._hoveredStructure = s;
             wallHit = null;
             floorHit = null;
@@ -6791,12 +6987,12 @@ export class RenderSystem {
     }
 
     // TILE = 50 CLIENT units (= 5 server units after ×WORLD_SCALE_FACTOR=10).
-    // Half-extents in CLIENT units: shipyard 445 (= TILE*17.8/2), flag_fort ~70, fortress ~90.
+    // Half-extents in CLIENT units: shipyard SHIPYARD_HH, flag_fort ~70, fortress ~90.
     const STRUCT_TILE = 50;
     for (const s of sortedWrapped) {
       // World-space bounding radius for each structure type.
       // isWorldPositionVisible margin is in CLIENT units — same space as s.x / s.y.
-      const _halfExt = s.type === 'shipyard'         ? STRUCT_TILE * 17.8 / 2   // 445
+      const _halfExt = s.type === 'shipyard'         ? SHIPYARD_HH
                      : s.type === 'flag_fort'        ? STRUCT_TILE * 1.4        //  70
                      : s.type === 'company_fortress' ? STRUCT_TILE * 1.8        //  90
                      : STRUCT_TILE * 1.1;                                        //  55
@@ -7003,10 +7199,10 @@ export class RenderSystem {
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
       } else if (s.type === 'shipyard') {
-        const ARM_T  = sz * 1.00;
-        const INT_W  = sz * 4.80;
-        const ARM_L  = sz * 16.80;
-        const BACK_T = sz * 1.00;
+        const ARM_T  = sz * (SHIPYARD_ARM_T / SHIPYARD_TILE);
+        const INT_W  = sz * (SHIPYARD_INT_W / SHIPYARD_TILE);
+        const ARM_L  = sz * (SHIPYARD_ARM_L / SHIPYARD_TILE);
+        const BACK_T = sz * (SHIPYARD_BACK_T / SHIPYARD_TILE);
         const totalW = ARM_T + INT_W + ARM_T;
         const totalH = BACK_T + ARM_L;
         const hw = totalW / 2, hh = totalH / 2;
@@ -7480,6 +7676,35 @@ export class RenderSystem {
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
+      } else if (s.type === 'bed') {
+        const bw = sz * 0.88;
+        const bh = sz * 0.48;
+        const bedTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const bedIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const bedHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
+        if (this.hammerEquipped && bedIsSchematic) {
+          ctx.save();
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(-camRot);
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(-bw / 2, -bh / 2, bw, bh);
+          const bedBuildFrac = Math.max(0, Math.min(1, bedTargetHp > 0 ? s.hp / bedTargetHp : 0));
+          const bedBarW = bw * 0.7; const bedBarH = Math.max(2, 4 * zoom);
+          const bedBarX = -bedBarW / 2; const bedBarY = -bh / 2 - bedBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(bedBarX, bedBarY, bedBarW, bedBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(bedBarX, bedBarY, bedBarW * bedBuildFrac, bedBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', 0, bedBarY - 2);
+          ctx.restore();
+        }
+        if (this.hammerEquipped && !bedIsSchematic && bedHpFrac < 0.999) {
+          ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
       }
     } // end for sorted
 
@@ -7488,7 +7713,7 @@ export class RenderSystem {
     // small tier-colored gem above each so the world shows item prestige.
     for (const s of sortedWrapped) {
       if (typeof s.qualityTier !== 'number' || s.qualityTier < 1) continue;
-      const _qHalfExt = s.type === 'shipyard' ? STRUCT_TILE * 17.8 / 2 : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
+      const _qHalfExt = s.type === 'shipyard' ? SHIPYARD_HH : s.type === 'flag_fort' ? STRUCT_TILE * 1.4 : s.type === 'company_fortress' ? STRUCT_TILE * 1.8 : STRUCT_TILE * 1.1;
       if (!this.fogVisibleAt(s.x, s.y, _qHalfExt)) continue;
       if (!camera.isWorldPositionVisible(Vec2.from(s.x, s.y), _qHalfExt)) continue;
       const gsp = camera.worldToScreen(Vec2.from(s.x, s.y));
@@ -7540,8 +7765,8 @@ export class RenderSystem {
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
       // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'bed' ? sz * 0.88 : s.type === 'shipyard' ? sz * (SHIPYARD_HW * 2 / SHIPYARD_TILE) : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'bed' ? sz * 0.48 : s.type === 'shipyard' ? sz * SHIPYARD_HEIGHT_MULT : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -7612,7 +7837,7 @@ export class RenderSystem {
           const c = Math.cos(-rot), sn = Math.sin(-rot);
           const lx = dx * c - dy * sn;
           const ly = dx * sn + dy * c;
-          return Math.abs(lx) <= 270 && Math.abs(ly) <= 545;
+          return Math.abs(lx) <= SHIPYARD_HW + 100 && Math.abs(ly) <= SHIPYARD_HH + 100;
         }
         const dx = s.x - player.position.x;
         const dy = s.y - player.position.y;
@@ -7631,6 +7856,7 @@ export class RenderSystem {
                  : s.type === 'company_fortress' ? 'Company Fortress'
                  : s.type === 'claim_flag' ? 'Claiming Flag'
                  : s.type === 'chest' ? 'Chest'
+                 : s.type === 'bed' ? 'Bed'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -7673,6 +7899,7 @@ export class RenderSystem {
                            : s.type === 'wreck' ? '[E] to salvage loot'
                            : s.type === 'cannon' ? 'Hold [E] to fire'
                            : s.type === 'chest' ? '[E] to open'
+                           : s.type === 'bed' ? '[E] Travel'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -7853,8 +8080,8 @@ export class RenderSystem {
           }
 
           const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
-          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'bed' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * (SHIPYARD_HW * 2 / SHIPYARD_TILE) : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'bed' ? sz2 * 0.48 : s.type === 'shipyard' ? sz2 * SHIPYARD_HEIGHT_MULT : s.type === 'cannon' ? 50 * zoom : sz2;
 
           ctx.save();
           ctx.globalAlpha = flashAlpha;
@@ -8016,6 +8243,7 @@ export class RenderSystem {
       company_fortress: [30, 30],
       claim_flag:   [10, 10],
       chest:        [20, 14],
+      bed:          [22, 12],
     };
     const DEFAULT_DIMS: [number, number] = [20, 20];
 
@@ -8408,8 +8636,7 @@ export class RenderSystem {
       }
 
       // Check that the dock mouth leads to open water for ship release.
-      // Mouth is 445 world units from center in the local +y direction.
-      const HH_WORLD = 445;
+      const HH_WORLD = SHIPYARD_HH;
       const rotRad = effectiveRotDeg * Math.PI / 180;
       const mouthX = mx - HH_WORLD * Math.sin(rotRad);
       const mouthY = my + HH_WORLD * Math.cos(rotRad);
@@ -8417,6 +8644,9 @@ export class RenderSystem {
       const releaseX = mx - 600 * Math.sin(rotRad);
       const releaseY = my + 600 * Math.cos(rotRad);
       const mouthClear = isPointInWater(mouthX, mouthY) && isPointInWater(releaseX, releaseY);
+
+      const isOnLand = (px: number, py: number) => !isPointInWater(px, py);
+      const shipSlotOnLand = brigSlotOverlapsLand(mx, my, effectiveRotDeg, isOnLand);
 
       // Allow placing from shore — 700 px matches the server shipyard placement range
       const syPlayerFar = playerG ? (() => {
@@ -8426,14 +8656,13 @@ export class RenderSystem {
       const syOccupied = this.placedStructures.some(s =>
         s.type === 'shipyard' && Math.hypot(s.x - mx, s.y - my) < 700
       );
-      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear;
+      const syInvalid = !inWater || !inShallowZone || syPlayerFar || syOccupied || !mouthClear || shipSlotOnLand;
       const syCantAfford = !syInvalid && !this.landGhostCanAfford;
       this._islandGhostTooFar = syInvalid;
-      // Ghost uses same proportions as rendered shipyard (bracketized to brigantine scale)
-      const GA_T = TILE * 1.00 * zoom;
-      const GI_W = TILE * 4.80 * zoom;
-      const GA_L = TILE * 16.80 * zoom;
-      const GB_T = TILE * 1.00 * zoom;
+      const GA_T = TILE * (SHIPYARD_ARM_T / SHIPYARD_TILE) * zoom;
+      const GI_W = TILE * (SHIPYARD_INT_W / SHIPYARD_TILE) * zoom;
+      const GA_L = TILE * (SHIPYARD_ARM_L / SHIPYARD_TILE) * zoom;
+      const GB_T = TILE * (SHIPYARD_BACK_T / SHIPYARD_TILE) * zoom;
       const gtW  = Math.max(4, GA_T + GI_W + GA_T);
       const gtH  = Math.max(4, GB_T + GA_L);
       const gHW = gtW / 2, gHH = gtH / 2;
@@ -8462,6 +8691,26 @@ export class RenderSystem {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
+
+      // Brigantine build-slot preview (where the scaffolded ship spawns).
+      // Draw in dock-local screen offsets inside the same ctx rotation as the U-shape —
+      // worldToScreen corners would double-apply the active canvas transform.
+      const slotInvalid = shipSlotOnLand;
+      ctx.fillStyle   = slotInvalid ? 'rgba(255, 80, 40, 0.35)' : 'rgba(180, 140, 60, 0.30)';
+      ctx.strokeStyle = slotInvalid ? 'rgba(255, 120, 60, 0.90)' : 'rgba(220, 180, 90, 0.85)';
+      ctx.lineWidth   = Math.max(1, 1.5 * zoom);
+      ctx.setLineDash([Math.max(2, 3 * zoom), Math.max(2, 2 * zoom)]);
+      ctx.beginPath();
+      const slotCorners = brigSlotCornersLocal();
+      for (let ci = 0; ci < slotCorners.length; ci++) {
+        const slx = slotCorners[ci].x * zoom;
+        const sly = slotCorners[ci].y * zoom;
+        if (ci === 0) ctx.moveTo(msp.x + slx, msp.y + sly);
+        else ctx.lineTo(msp.x + slx, msp.y + sly);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
       ctx.setLineDash([]);
       const syLabelY = msp.y - gHH - 6;
       ctx.globalAlpha = 1;
@@ -8474,6 +8723,8 @@ export class RenderSystem {
         ctx.fillStyle = '#4488ff'; ctx.fillText('PLACE IN SHALLOW WATER', msp.x, syLabelY);
       } else if (!mouthClear) {
         ctx.fillStyle = '#ff6644'; ctx.fillText('SHIP EXIT BLOCKED BY LAND', msp.x, syLabelY);
+      } else if (shipSlotOnLand) {
+        ctx.fillStyle = '#ff6644'; ctx.fillText('SHIP SLOT ON LAND', msp.x, syLabelY);
       } else if (syOccupied) {
         ctx.fillStyle = '#ff6644'; ctx.fillText('TOO CLOSE TO SHIPYARD', msp.x, syLabelY);
       } else if (syPlayerFar) {
@@ -8574,9 +8825,9 @@ export class RenderSystem {
       }
     }
 
-    // Workbench/cannon needs a floor tile whose AABB contains the cursor point
+    // Workbench/cannon/chest/bed needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
-    if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
+    if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon' || this.islandBuildKind === 'chest' || this.islandBuildKind === 'bed') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -8585,6 +8836,12 @@ export class RenderSystem {
         const ly = (mx - s.x) * rs + (my - s.y) * rc;
         return Math.abs(lx) <= 25 && Math.abs(ly) <= 25;
       });
+    }
+    let bedOccupied = false;
+    if (this.islandBuildKind === 'bed') {
+      bedOccupied = this.placedStructures.some(s =>
+        s.type === 'bed' && Math.hypot(s.x - mx, s.y - my) < 30
+      );
     }
 
     // Wall/door_frame needs to be at a floor tile edge midpoint; door panel needs a door_frame
@@ -8741,7 +8998,7 @@ export class RenderSystem {
     const cfSliceAlreadyOwned  = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && cfInEnemyClaim && inMyDominantArea;
 
     // Workbench/cannon on enemy floor: a floor exists under cursor but belongs to a different company
-    const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
+    const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon' || this.islandBuildKind === 'chest' || this.islandBuildKind === 'bed') && !noFloor &&
       !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -8754,7 +9011,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
+    const invalid = tooFar || waterBlocked || noFloor || bedOccupied || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const cantAfford = !invalid && !this.landGhostCanAfford;
     const ghostColor  = (invalid || cantAfford) ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = (invalid || cantAfford) ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
@@ -9101,6 +9358,20 @@ export class RenderSystem {
       const latchW = bw * 0.20, latchH = bh * 0.22;
       ctx.fillRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
       ctx.strokeRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
+    } else if (this.islandBuildKind === 'bed') {
+      const bw = sz * 0.88, bh = sz * 0.48;
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      ctx.beginPath();
+      ctx.roundRect(msp.x - bw / 2, msp.y - bh / 2, bw, bh, 3);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(200,160,232,0.55)';
+      ctx.beginPath();
+      ctx.roundRect(msp.x - bw / 2 + 2, msp.y - bh / 2 + 2, bw * 0.32, bh - 4, 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(119,85,170,0.55)';
+      ctx.fillRect(msp.x - bw / 2 + bw * 0.34, msp.y - bh / 2 + 2, bw * 0.54, bh - 4);
     } else {
       ctx.beginPath();
       ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
@@ -9112,6 +9383,7 @@ export class RenderSystem {
     // Label above the ghost — for flag_fort and chest, account for their actual top extent
     const labelTopOffset = this.islandBuildKind === 'flag_fort' ? sz * 0.9 * 0.5 + sz * 0.9 * 0.22 + 6
                          : this.islandBuildKind === 'chest' ? sz * 0.56 / 2 + 6
+                         : this.islandBuildKind === 'bed' ? sz * 0.48 / 2 + 6
                          : ghostH / 2 + 6;
     const labelY = msp.y - labelTopOffset;
     ctx.globalAlpha = 1;
@@ -9130,7 +9402,7 @@ export class RenderSystem {
     } else if (blockedByStructure) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED BY STRUCTURE', msp.x, labelY);
-    } else if (overlaps || wallOccupied || doorOccupied || ceilingOccupied) {
+    } else if (overlaps || wallOccupied || doorOccupied || ceilingOccupied || bedOccupied) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);
     } else if (noCeilingSupport) {
@@ -9175,6 +9447,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
                   : this.islandBuildKind === 'claim_flag' ? 'Claim Flag — Contested Area'
                   : this.islandBuildKind === 'chest' ? 'Chest'
+                  : this.islandBuildKind === 'bed' ? 'Bed'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }
@@ -9507,6 +9780,7 @@ export class RenderSystem {
     for (const ship of renderShips) {
       if (ship.shipType !== SHIP_TYPE_GHOST) {
         this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+        this.queueRenderItem(3, `deck-flood-${ship.id}`, () => this.drawShipDeckFloodOverlays(ship, camera), 2);
       }
       // Ghost deck effects (runic circle + crew silhouettes) drawn above planks
       if (ship.shipType === SHIP_TYPE_GHOST) {
@@ -9603,6 +9877,12 @@ export class RenderSystem {
       }
     }
 
+    if (this.wellBuildMode && this.mouseWorldPos && this._playerDeckLevel === 0) {
+      for (const ship of worldState.ships) {
+        this.queueRenderItem(4, `well-ghost-${ship.id}`, () => this.drawWellGhostOnShip(ship, camera), 0);
+      }
+    }
+
     // In workbench build mode, overlay a ghost workbench at the cursor position on each ship (layer 4)
     if (this.workbenchBuildMode && this.mouseWorldPos) {
       for (const ship of worldState.ships) {
@@ -9619,6 +9899,7 @@ export class RenderSystem {
       this.queueRenderItem(1, `swivels-lower-${ship.id}`,  () => this.drawShipSwivelGuns(ship, camera, 0), 3);
       this.queueRenderItem(1, `chests-lower-${ship.id}`,   () => this.drawShipChests(ship, camera, 0), 3);
       this.queueRenderItem(1, `beds-lower-${ship.id}`,     () => this.drawShipBeds(ship, camera, 0), 3);
+      this.queueRenderItem(1, `wells-lower-${ship.id}`,    () => this.drawShipWells(ship, camera, 0), 3);
       this.queueRenderItem(1, `workbenches-lower-${ship.id}`, () => this.drawShipWorkbenches(ship, camera, 0), 3);
       // Upper-deck + deck-independent modules at their normal layers.
       this.queueRenderItem(4, `cannons-upper-${ship.id}`, _da(() => this.drawShipCannons(ship, camera, 1)));
@@ -10359,7 +10640,7 @@ export class RenderSystem {
     
     if (ship.hull.length === 0) return;
 
-    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return; // fully faded — nothing to draw
     
     this.ctx.save();
@@ -10497,29 +10778,24 @@ export class RenderSystem {
         this.ctx.stroke();
       }
 
-      // Water flood tint: blue overlay (non-ghost), cyan mist dissolve (ghost)
-      // Ghost mist begins at 75% HP (25% damage) and reaches full intensity at 0 HP
-      const ghostNpcLvl3 = isGhost && ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
-      const ghostLvlMaxHP3 = isGhost ? Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl3 - 1) * 9 / 59)) : GHOST_MAX_HULL_HP;
-      const ghostMistAlpha = isGhost ? Math.max(0, (1 - ship.hullHealth / ghostLvlMaxHP3) - 0.25) / 0.75 : 0;
-      if (isGhost ? ghostMistAlpha > 0 : floodTint > 0) {
-        if (isGhost) {
-          // Ghost dissolve: level-tinted mist, starts from 75% HP
+      // Ghost dissolve mist (not per-deck flood — spectral hull effect only)
+      if (isGhost) {
+        const ghostNpcLvl3 = ship.npcLevel != null && ship.npcLevel > 0 ? ship.npcLevel : 1;
+        const ghostLvlMaxHP3 = Math.round(GHOST_MAX_HULL_HP * (1 + (ghostNpcLvl3 - 1) * 9 / 59));
+        const ghostMistAlpha = Math.max(0, (1 - ship.hullHealth / ghostLvlMaxHP3) - 0.25) / 0.75;
+        if (ghostMistAlpha > 0) {
           const sinkMult = phase1Alpha < 1 ? phase1Alpha : 1;
           const ghostMistClr = ghostSpectralColor(ship.npcLevel ?? 1);
           this.ctx.globalAlpha = ghostMistAlpha * 0.75 * sinkMult;
           this.ctx.fillStyle = ghostMistClr;
           this.ctx.shadowColor = ghostMistClr;
           this.ctx.shadowBlur  = 16 / cameraState.zoom;
-        } else {
-          this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-          this.ctx.fillStyle = '#1a6eb5';
+          this.ctx.beginPath();
+          this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
+          for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
+          this.ctx.closePath();
+          this.ctx.fill();
         }
-        this.ctx.beginPath();
-        this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-        for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-        this.ctx.closePath();
-        this.ctx.fill();
       }
     }
 
@@ -10627,11 +10903,10 @@ export class RenderSystem {
       return;
     }
 
-    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
 
     const isGhostShip = ship.shipType === SHIP_TYPE_GHOST;
-    
     this.ctx.save();
     // Ghost planks fade with hull damage (full opacity 0.45 at 60000 HP → 0.05 at 0 HP)
     const ghostHealthFade = isGhostShip ? Math.max(0.1, ship.hullHealth / GHOST_MAX_HULL_HP) : 1;
@@ -10819,41 +11094,6 @@ export class RenderSystem {
           }
         }
 
-        this.ctx.restore();
-      }
-    }
-
-    // Water flood tint: blue overlay painted on top of each plank
-    if (floodTint > 0) {
-      const tintAlpha = floodTint * 0.50 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      for (const plank of planks) {
-        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
-        if ((plank.moduleData.health ?? 1) <= 0) continue;
-        this.ctx.save();
-        this.ctx.globalAlpha = tintAlpha;
-        this.ctx.fillStyle = '#1a6eb5';
-        if (plank.moduleData.isCurved && plank.moduleData.curveData) {
-          // Approximate the curved plank outline using the bezier start/end points
-          const cd = plank.moduleData.curveData;
-          const w = plank.moduleData.width;
-          const s = cd.start, e = cd.end;
-          const nx = -(e.y - s.y), ny = (e.x - s.x);
-          const nlen = Math.hypot(nx, ny) || 1;
-          const ox = (nx / nlen) * w * 0.5, oy = (ny / nlen) * w * 0.5;
-          this.ctx.beginPath();
-          this.ctx.moveTo(s.x - ox, s.y - oy);
-          this.ctx.lineTo(s.x + ox, s.y + oy);
-          this.ctx.lineTo(e.x + ox, e.y + oy);
-          this.ctx.lineTo(e.x - ox, e.y - oy);
-          this.ctx.closePath();
-          this.ctx.fill();
-        } else {
-          this.ctx.translate(plank.localPos.x, plank.localPos.y);
-          this.ctx.rotate(plank.localRot);
-          const hl = plank.moduleData.length / 2;
-          const hw = plank.moduleData.width / 2;
-          this.ctx.fillRect(-hl, -hw, plank.moduleData.length, plank.moduleData.width);
-        }
         this.ctx.restore();
       }
     }
@@ -12416,6 +12656,8 @@ export class RenderSystem {
         ? Math.max(0, lowerDeckData.health / lowerDeckData.maxHealth)
         : 1;
     const lowerDeckFloorColor = this.darkenByDamage('#5c3d1e', lowerDeckHealthRatio);
+    const { lowerDeckFloodTint, phase1Alpha } = this.computeSinkState(ship);
+    const lowerFloodAlpha = lowerDeckFloodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
 
     this.ctx.save();
     const screenPos   = camera.worldToScreen(ship.position);
@@ -12458,6 +12700,7 @@ export class RenderSystem {
           this.ctx.moveTo(minX, y); this.ctx.lineTo(maxX, y);
         }
         this.ctx.stroke();
+        this._drawDeckFloodFill(ship, 0, lowerDeckFloodTint, phase1Alpha, lowerDeckMod);
       } else {
         this.ctx.fillStyle = '#1a0e06';
         this.ctx.fill();
@@ -12501,6 +12744,15 @@ export class RenderSystem {
           this.ctx.strokeStyle = '#3d2608';
           this.ctx.lineWidth = lw * 2;
           this.ctx.strokeRect(rx, ry, 50, 50);
+          if (lowerDeckFloodTint > 0) {
+            this.ctx.save();
+            this.ctx.globalAlpha = lowerFloodAlpha;
+            this.ctx.fillStyle = '#1a6eb5';
+            this.ctx.fillRect(rx, ry, 50, 50);
+            this.ctx.fillStyle = 'rgba(170,230,255,0.45)';
+            this.ctx.fillRect(rx + 2, ry + 2, 46, 3);
+            this.ctx.restore();
+          }
         } else {
           const grad = this.ctx.createLinearGradient(rx, ry, rx, ry + 50);
           grad.addColorStop(0, '#1a0e06');
@@ -12519,7 +12771,7 @@ export class RenderSystem {
 
   /**
    * Bake the upper-deck cover (hull polygon fill + grain) into an OffscreenCanvas.
-   * Re-baked only when deck health bucket changes.  Flood tint is still drawn dynamically.
+   * Re-baked only when deck health bucket changes.
    */
   private _getShipUpperDeckSprite(ship: Ship): { canvas: OffscreenCanvas; ox: number; oy: number } | null {
     if (ship.hull.length < 3) return null;
@@ -12590,7 +12842,7 @@ export class RenderSystem {
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
     if (ship.hull.length < 3) return;
 
-    const { floodTint, phase1Alpha } = this.computeSinkState(ship);
+    const { phase1Alpha } = this.computeSinkState(ship);
     if (phase1Alpha <= 0) return;
 
     const screenPos   = camera.worldToScreen(ship.position);
@@ -12616,17 +12868,6 @@ export class RenderSystem {
         fillColor = this.darkenByDamage(fillColor, Math.max(0, dmd.health / dmd.maxHealth));
       }
       this.ctx.fillStyle = fillColor;
-      this.ctx.beginPath();
-      this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
-      for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
-      this.ctx.closePath();
-      this.ctx.fill();
-    }
-
-    // Flood tint overlay — dynamic, drawn directly (cannot be cached)
-    if (floodTint > 0) {
-      this.ctx.globalAlpha = floodTint * 0.55 * (phase1Alpha < 1 ? phase1Alpha : 1);
-      this.ctx.fillStyle = '#1a6eb5';
       this.ctx.beginPath();
       this.ctx.moveTo(ship.hull[0].x, ship.hull[0].y);
       for (let i = 1; i < ship.hull.length; i++) this.ctx.lineTo(ship.hull[i].x, ship.hull[i].y);
@@ -15975,6 +16216,94 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
+  private _drawWellShape(lw: number, alpha: number, isHovered: boolean): void {
+    const r = 16;
+    this.ctx.globalAlpha *= alpha;
+    this.ctx.fillStyle = isHovered ? '#3a6898' : '#2a4868';
+    this.ctx.strokeStyle = isHovered ? '#88bbee' : '#5a8ac0';
+    this.ctx.lineWidth = lw * 1.5;
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, r, 0, Math.PI * 2);
+    this.ctx.fill();
+    this.ctx.stroke();
+    this.ctx.fillStyle = 'rgba(100, 180, 255, 0.45)';
+    this.ctx.beginPath();
+    this.ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2);
+    this.ctx.fill();
+  }
+
+  /** Draw placed bilge well modules (lower deck only). */
+  private drawShipWells(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
+    const wells = ship.modules.filter(m => m.kind === 'well' && (
+      deckFilter === undefined ? true : m.deckId === deckFilter
+    ));
+    if (wells.length === 0) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    for (const well of wells) {
+      const isHovered = this.hoveredModule?.ship?.id === ship.id &&
+                        this.hoveredModule?.module?.id === well.id;
+      this.ctx.save();
+      this.ctx.translate(well.localPos.x, well.localPos.y);
+      this._drawWellShape(lw, 1.0, isHovered);
+      if (isHovered) {
+        this.ctx.fillStyle = '#c8e8ff';
+        this.ctx.font = `bold ${9 / zoom}px Georgia, serif`;
+        this.ctx.textAlign = 'center';
+        this.ctx.textBaseline = 'bottom';
+        this.ctx.fillText('Bilge Well', 0, -18);
+      }
+      this.ctx.restore();
+    }
+
+    this.ctx.restore();
+  }
+
+  /** Draw a ghost well when placing from the build menu (lower deck only). */
+  private drawWellGhostOnShip(ship: Ship, camera: Camera): void {
+    if (!this.mouseWorldPos || ship.modules.some(m => m.kind === 'well')) return;
+    const dx = this.mouseWorldPos.x - ship.position.x;
+    const dy = this.mouseWorldPos.y - ship.position.y;
+    const cosR = Math.cos(-ship.rotation);
+    const sinR = Math.sin(-ship.rotation);
+    const localX =  dx * cosR - dy * sinR;
+    const localY =  dx * sinR + dy * cosR;
+    const isOnShip = ship.hull.length >= 3
+      ? this._isPointInHull(localX, localY, ship.hull)
+      : Math.hypot(localX, localY) < 150;
+    if (!isOnShip) return;
+
+    const screenPos   = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    const zoom        = cameraState.zoom;
+    const lw          = 1 / zoom;
+    const t           = performance.now() / 1000;
+    const alpha       = 0.50 + 0.22 * Math.sin(t * 3.0);
+
+    this.ctx.save();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(zoom, zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+    this.ctx.translate(localX, localY);
+    this._drawWellShape(lw, alpha, false);
+    this.ctx.fillStyle = '#88ccff';
+    this.ctx.font = `bold ${10 / zoom}px Georgia, serif`;
+    this.ctx.textAlign = 'center';
+    this.ctx.textBaseline = 'bottom';
+    this.ctx.fillText('[Click] Place Well', 0, -22);
+    this.ctx.restore();
+  }
+
   /** Draw all workbench modules on a ship deck. */
   private drawShipWorkbenches(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
@@ -18484,10 +18813,10 @@ export class RenderSystem {
 
     // ── Shipyard physics bodies (U-shape: left arm, right arm, back wall) ───
     // Constants mirror server websocket_server.c DOCK_* (all in client px)
-    const DOCK_HW_D    = 170;  // half total width
-    const DOCK_HH_D    = 445;  // half total height
-    const DOCK_ARM_T_D =  50;  // arm thickness
-    const DOCK_BACK_T_D = 50;  // back wall thickness
+    const DOCK_HW_D    = SHIPYARD_HW;
+    const DOCK_HH_D    = SHIPYARD_HH;
+    const DOCK_ARM_T_D = SHIPYARD_ARM_T;
+    const DOCK_BACK_T_D = SHIPYARD_BACK_T;
     const DOCK_STAIR_D  = 50;  // stair gap at arm tips
 
     // [local-cx, local-cy, half-x, half-y, label, color]
@@ -19722,7 +20051,7 @@ export class RenderSystem {
     const { kind, rotDeg } = this.pendingGhostState;
 
     // Dedicated ship-local ghost drawers handle these kinds (with rotation).
-    if (kind === 'workbench' || kind === 'chest' || kind === 'bed') return;
+    if (kind === 'workbench' || kind === 'chest' || kind === 'bed' || kind === 'well') return;
 
     // Hide the following cursor ghost when the cannon is already snapping to a gunport —
     // the slot ghost itself acts as the placement indicator.

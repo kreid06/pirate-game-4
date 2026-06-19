@@ -1,5 +1,6 @@
 #include "net/websocket_server_internal.h"
 #include "net/dock_physics.h"
+#include "sim/island.h"
 #define _USE_MATH_DEFINES
 #include <math.h>
 #include <string.h>
@@ -59,12 +60,7 @@ bool wall_has_support(float wx, float wy) {
 /* ─── Shipyard (dry dock) geometry helpers ───────────────────────────────────
  * Dock-local coordinate system:
  *   +Y = dock length axis (mouth/open end); +X = dock width axis
- * Sizes in client pixels (rendering BASE = 50):
- *   ARM_T=50  INT_W=240  ARM_L=840  BACK_T=50  hw=170  hh=445            */
-#define DOCK_HW       170.0f
-#define DOCK_HH       445.0f
-#define DOCK_ARM_T     50.0f
-#define DOCK_BACK_T    50.0f
+ * Constants live in dock_physics.h (shared with client ShipyardGeometry.ts).   */
 #define DOCK_STAIR_H   50.0f   /* stair opening at each end of each arm */
 
 /* Coordinate convention: rotation matches ctx.rotate() — standard matrix.
@@ -109,15 +105,17 @@ static bool dock_obb_pushout(float cx, float cy, float hx, float hy,
 
 /* True if dock-local point (lx,ly) is on a walkable dock surface. */
 bool dock_point_on_surface(float lx, float ly, bool has_scaffolding) {
-    const float P  = 10.0f;                      /* padding ~ player radius */
+    const float P  = 10.0f;                      /* padding ~ player radius (outer edges only) */
     const float ai = DOCK_HW - DOCK_ARM_T;       /* arm inner edge = 120   */
+    const float back_top = -(DOCK_HH - DOCK_BACK_T); /* mouth-facing edge of back deck = -395 */
     /* Left arm top surface */
     if (lx >= -(DOCK_HW + P) && lx <= -(ai - P) && fabsf(ly) <= DOCK_HH + P) return true;
     /* Right arm top surface */
     if (lx >=  (ai - P)      && lx <=  (DOCK_HW + P) && fabsf(ly) <= DOCK_HH + P) return true;
-    /* Back wall top surface */
+    /* Back wall top surface — no mouth-side padding: +P there extended walkability into
+     * the interior water channel for |lx| < ai, creating dead zones on the base deck. */
     if (fabsf(lx) <= DOCK_HW + P &&
-        ly >= -(DOCK_HH + P) && ly <= -(DOCK_HH - DOCK_BACK_T - P)) return true;
+        ly >= -(DOCK_HH + P) && ly <= back_top) return true;
     /* Interior bay — fully walkable when scaffolding is up */
     if (has_scaffolding && fabsf(lx) <= ai + P &&
         ly >= -(DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
@@ -131,6 +129,11 @@ void dock_apply_player_collision(const PlacedStructure *sy, float player_r,
                                         bool has_scaffolding, float *wx, float *wy) {
     float lx, ly;
     dock_world_to_local(sy, *wx, *wy, &lx, &ly);
+
+    /* Walkable deck tops sit on/outside the wall OBBs. Padding on isDockPointOnSurface
+     * extends slightly past OBB faces — applying OBB pushout there ejects players walking
+     * from the base onto an arm (feels like invisible walls between the three deck parts). */
+    if (dock_point_on_surface(lx, ly, has_scaffolding)) return;
 
     float ai         = DOCK_HW - DOCK_ARM_T;              /* 120  */
     float arm_cx_l   = -(DOCK_HW - DOCK_ARM_T / 2.0f);   /* -145 */
@@ -147,6 +150,54 @@ void dock_apply_player_collision(const PlacedStructure *sy, float player_r,
     }
 
     dock_local_to_world(sy, lx, ly, wx, wy);
+}
+
+static bool world_point_on_island_land(float px, float py) {
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        const IslandDef *isl = &ISLAND_PRESETS[ii];
+        float dx = px - isl->x, dy = py - isl->y;
+        float dist_sq = dx * dx + dy * dy;
+        if (isl->vertex_count > 0) {
+            if (dist_sq < isl->poly_bound_r * isl->poly_bound_r
+                && island_poly_contains(isl, px, py)) {
+                return true;
+            }
+        } else {
+            float broad_r = isl->beach_radius_px + isl->beach_max_bump;
+            if (dist_sq >= broad_r * broad_r) continue;
+            float angle   = atan2f(dy, dx);
+            float narrow_r = island_boundary_r(isl->beach_radius_px, isl->beach_bumps, angle);
+            if (dist_sq < narrow_r * narrow_r) return true;
+        }
+    }
+    return false;
+}
+
+bool dock_brig_slot_overlaps_land(float dock_x, float dock_y, float dock_rot_deg) {
+    PlacedStructure tmp;
+    memset(&tmp, 0, sizeof(tmp));
+    tmp.x = dock_x;
+    tmp.y = dock_y;
+    tmp.rotation = dock_rot_deg;
+
+    static const float SAMPLES[][2] = {
+        {-BRIG_SLOT_HALF_X, BRIG_SLOT_Y_MIN},
+        { 0.0f,             BRIG_SLOT_Y_MIN},
+        { BRIG_SLOT_HALF_X, BRIG_SLOT_Y_MIN},
+        {-BRIG_SLOT_HALF_X, (BRIG_SLOT_Y_MIN + BRIG_SLOT_Y_MAX) * 0.5f},
+        { 0.0f,             (BRIG_SLOT_Y_MIN + BRIG_SLOT_Y_MAX) * 0.5f},
+        { BRIG_SLOT_HALF_X, (BRIG_SLOT_Y_MIN + BRIG_SLOT_Y_MAX) * 0.5f},
+        {-BRIG_SLOT_HALF_X, BRIG_SLOT_Y_MAX},
+        { 0.0f,             BRIG_SLOT_Y_MAX},
+        { BRIG_SLOT_HALF_X, BRIG_SLOT_Y_MAX},
+    };
+
+    for (size_t i = 0; i < sizeof(SAMPLES) / sizeof(SAMPLES[0]); i++) {
+        float wx, wy;
+        dock_local_to_world(&tmp, SAMPLES[i][0], SAMPLES[i][1], &wx, &wy);
+        if (world_point_on_island_land(wx, wy)) return true;
+    }
+    return false;
 }
 
 /* Push non-scaffolded sim ships out of dock U-walls.

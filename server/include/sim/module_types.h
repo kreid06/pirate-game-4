@@ -33,6 +33,7 @@ typedef enum {
     MODULE_TYPE_WORKBENCH    = 12,  // Workbench — required on ship to build any ship module
     MODULE_TYPE_CHEST        = 13,  // Storage chest — on-ship loot/storage container
     MODULE_TYPE_BED          = 14,  // Bed — sets ship respawn point for crewmates
+    MODULE_TYPE_WELL         = 15,  // Bilge well — scoop floodwater on lower deck
     MODULE_TYPE_CUSTOM       = 255  // User-defined
 } ModuleTypeId;
 
@@ -152,6 +153,10 @@ typedef struct {
     uint8_t _pad[8];
 } BedModuleData;
 
+typedef struct {
+    uint8_t _pad[8];
+} WellModuleData;
+
 /**
  * Generic ship module structure
  */
@@ -176,6 +181,7 @@ typedef struct {
         GunportModuleData gunport;
         ChestModuleData   chest;
         BedModuleData     bed;
+        WellModuleData    well;
     } data;
 
     uint32_t fire_timer_ms;  // >0 = burning; auto-extinguishes at 0

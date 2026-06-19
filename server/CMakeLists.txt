@@ -68,6 +68,7 @@ set(NET_SOURCES
     src/net/ship_schematics.c
     src/net/ship_chest_resources.c
     src/net/ship_plank_wreckage.c
+    src/net/bucket_bail.c
     src/net/structures.c
 )
 

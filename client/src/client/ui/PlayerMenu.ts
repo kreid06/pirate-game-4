@@ -17,6 +17,7 @@ import {
   COMPANY_NAVY,
 } from '../../sim/Types.js';
 import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, INVENTORY_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight, PlayerResources } from '../../sim/Inventory.js';
+import { computePlayerCarriedKg, playerCarryCapacityKg } from '../../sim/Grapple.js';
 import { SchematicEntry, tierColor, tierName, statMultLabel, QUALITY_STAT_NAMES, qualityCostMult, MAX_PLAYER_SCHEMATICS } from '../../sim/Quality.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
@@ -1707,9 +1708,8 @@ export class PlayerMenu {
       sty += 5;
 
       const weightLvl     = (player.statWeight ?? 0) as number;
-      const BASE_CAPACITY = 300;
-      const capacity      = Math.round(BASE_CAPACITY * (1 + weightLvl * 0.1));
-      const carried       = computeInventoryWeight(player.inventory);
+      const capacity      = Math.round(playerCarryCapacityKg(weightLvl));
+      const carried       = Math.round(computePlayerCarriedKg(player, _worldState.players));
       const pct           = Math.min(carried / capacity, 1);
 
       // Warn colours: normal → green, >75% → amber, >95% → red
@@ -2515,6 +2515,8 @@ export class PlayerMenu {
     { subTab: 'LAND', kind: 'door',            name: 'Door',         symbol: '\uD83D\uDEAA', color: '#7a5838', wood:   8, fiber: 0, metal:  0, stone:   0 },
     { subTab: 'LAND', kind: 'wood_ceiling',    name: 'Wood Ceiling', symbol: '\u229e',       color: '#7a5c2a', wood:  25, fiber: 0, metal:  0, stone:   0 },
     { subTab: 'LAND', kind: 'workbench',       name: 'Workbench',    symbol: '\u2692',       color: '#6a4a20', wood:  12, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'chest',           name: 'Chest',        symbol: '\u229f',       color: '#7a4820', wood:  12, fiber: 0, metal:  0, stone:   0 },
+    { subTab: 'LAND', kind: 'bed',             name: 'Bed',          symbol: '\uD83D\uDECF', color: '#4a3060', wood:  10, fiber: 5, metal:  0, stone:   0 },
     { subTab: 'LAND', kind: 'shipyard',        name: 'Shipyard',     symbol: '\u26F5',       color: '#1e6080', wood: 250, fiber: 0, metal:  0, stone: 100 },
     { subTab: 'LAND', kind: 'cannon',          name: 'Cannon',       symbol: '\u26AB',       color: '#444444', wood:  15, fiber: 0, metal: 25, stone:   0 },
     { subTab: 'LAND', kind: 'flag_fort',       name: 'Flag Fort',    symbol: '\u2302',       color: '#5a5848', wood: 300, fiber: 0, metal:  0, stone: 200 },

@@ -1925,11 +1925,11 @@ void check_projectile_static_collisions(struct Sim* sim) {
         }
 
         /* Pass 4: shipyards — U-shaped dock arms and back wall. */
-        /* Dock local constants (client px, matching dock_physics.c) */
-        #define SY_HW      170.0f   /* half total width */
-        #define SY_HH      445.0f   /* half total height */
-        #define SY_ARM_T    50.0f   /* arm thickness */
-        #define SY_BACK_T   50.0f   /* back wall thickness */
+        /* Dock local constants (client px, matching dock_physics.h) */
+        #define SY_HW      DOCK_HW
+        #define SY_HH      DOCK_HH
+        #define SY_ARM_T   DOCK_ARM_T
+        #define SY_BACK_T  DOCK_BACK_T
         for (uint32_t si = 0; si < placed_structure_count && !removed; si++) {
             PlacedStructure* s = &placed_structures[si];
             if (!s->active || s->type != STRUCT_SHIPYARD) continue;
