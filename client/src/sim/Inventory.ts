@@ -193,13 +193,15 @@ export const ITEM_KIND_ID: Partial<Record<ItemKind, number>> = Object.fromEntrie
 
 // ── Canvas icon helpers ───────────────────────────────────────────────────────
 
-/** Cached sword sprite loaded from /items/sword.png. */
+import { publicAsset } from '../common/publicAsset.js';
+
+/** Cached sword sprite loaded from public/items/sword.png. */
 let _swordImg: HTMLImageElement | null = null;
 let _swordImgLoaded = false;
 (function () {
   if (typeof window === 'undefined') return;
   const img = new Image();
-  img.src = '/items/sword.png';
+  img.src = publicAsset('items/sword.png');
   img.onload = () => { _swordImgLoaded = true; };
   _swordImg = img;
 })();

@@ -1,8 +1,8 @@
 {
   "meta": {
-    "timestamp": 1781878763,
+    "timestamp": 1781893010,
     "ship_count": 1,
-    "npc_count": 0,
+    "npc_count": 1,
     "structure_count": 21
   },
   "ships": [
@@ -67,6 +67,37 @@
     }
   ],
   "world_npcs": [
+    {
+      "id": 9000,
+      "name": "Walt the Fang",
+      "role": 0,
+      "company": 3,
+      "x": 20276.207,
+      "y": 18352.832,
+      "rot": 0.000000,
+      "ship_id": 0,
+      "lx": 20276.207,
+      "ly": 18352.832,
+      "health": 100,
+      "max_health": 100,
+      "level": 1,
+      "xp": 0,
+      "stat_health": 0,
+      "stat_damage": 0,
+      "stat_stamina": 0,
+      "stat_weight": 0,
+      "assigned_weapon_id": 0,
+      "wants_cannon": 0,
+      "npc_state": 0,
+      "owner_player_id": 0,
+      "on_island_id": 4,
+      "target_lx": 20276.207,
+      "target_ly": 18352.832,
+      "idle_lx": 19682.900,
+      "idle_ly": 18632.900,
+      "in_water": 0,
+      "order_player_id": 0
+    }
   ],
   "placed_structures": [
     {
