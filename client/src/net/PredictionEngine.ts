@@ -69,7 +69,8 @@ interface ServerStateEntry {
   worldState: WorldState;
   tick: number;
   timestamp: number;
-  receiveTime: number; // Client time when received
+  receiveTime: number; // Client time (performance.now) when received
+  serverTime: number;  // Server clock in ms (tick × SERVER_MS_PER_TICK) — monotonic, jitter-free
 }
 
 /**
@@ -98,12 +99,72 @@ export class PredictionEngine {
   
   // Server state buffer for interpolation
   private serverStateBuffer: ServerStateEntry[] = [];
-  private static readonly MAX_SERVER_STATES = 10;
+  // 16 entries × 33ms = ~530ms of server time covered, well above the 300ms max buffer.
+  private static readonly MAX_SERVER_STATES = 16;
+
+  // ── Server-clock-locked interpolation timeline ──────────────────────────────
+  // Playback is paced on the server's own monotonic clock (derived from the snapshot
+  // `tick`, which the server sets to its get_time_ms()/33), NOT on packet ARRIVAL
+  // time. Arrival time carries network jitter, so using it stretches/compresses the
+  // interpolation alpha and makes remote ships micro-accelerate every frame. The
+  // server clock is regularly spaced, so interpolating against it is jitter-immune.
+  //
+  // serverClockOffset maps local→server time: serverTime ≈ localTime − serverClockOffset.
+  // Estimated as the MINIMUM observed (receiveTime − serverTime) so it locks onto the
+  // least-delayed packet (true offset), immune to per-packet jitter, then drifts slowly
+  // upward to follow genuine latency/clock skew increases.
+  private serverClockOffset: number | null = null;
+  // Smoothed render delay (= serverClockOffset + interpolationBuffer) actually applied to
+  // renderTime. serverClockOffset is stepped at the 30 Hz packet rate and interpolationBuffer
+  // at the ping rate; applying those steps directly makes renderTime jump every ~33 ms, which
+  // shimmers the world (very visible once the camera is locked to a moving ship). We ease the
+  // applied delay toward its target each render frame so the steps become smooth sub-pixel
+  // per-frame changes. Clock drift is slow, so the easing lag is negligible.
+  private _renderDelaySmoothed: number | null = null;
+  private _lastRenderDelayTime = 0;
+
+  // ── Interpolation telemetry (gated; set true to log per-second interp/hold stats) ──
+  // Kept after the jitter hunt: this is the fastest way to re-diagnose any future
+  // interpolation regression (interp vs hold counts, buffer cadence, clock-offset stability).
+  // When false the only cost is one boolean check per frame.
+  public static DEBUG_INTERP = false;
+  private _diag = {
+    t0: 0, frames: 0, interp: 0, holdNew: 0, holdOld: 0, disabled: 0,
+    shipMoved: 0, lastShipX: NaN, lastShipId: -1,
+    alphaMin: 1, alphaMax: 0,
+  };
+  private static readonly RENDER_DELAY_TAU = 0.25;  // s — gentle; clock drift is slow
+  private static readonly RENDER_DELAY_SNAP = 50;   // ms — beyond this, snap (resync/teleport)
+  // Server physics runs at exactly 30 Hz → 1000/30 = 33.333... ms per tick.
+  // Using the integer 33 caused a 10 ms/second cumulative drift (3 s per 5 min).
+  private static readonly SERVER_MS_PER_TICK = 1000 / 30;
+  // Smoothing factor for the clock offset (per snapshot). We track a STABLE AVERAGE offset,
+  // not the minimum-transit packet. Min-tracking anchored renderTime to the lowest-latency
+  // packet — the most-forward position — which ate the buffer margin and caused hold-newest
+  // whenever cadence/jitter exceeded the slack (the oscillating 30 Hz we observed). A slow EMA
+  // toward the typical offset keeps renderTime a reliable `buffer` ms behind the newest
+  // snapshot; transit jitter is absorbed by the buffer + the per-frame _renderDelaySmoothed ease.
+  // ~0.05 at ~20 snapshots/s ⇒ ~1 s time constant: stable, still tracks real clock drift.
+  private static readonly CLOCK_EMA_ALPHA = 0.05;
+  // Resync guard: if a fresh sample diverges from the tracked offset by more than this,
+  // the offset has clearly mis-latched (tick discontinuity, tab resume, clock jump, or a
+  // bad latch the slow drift can't crawl back from in a session). Snap to the sample
+  // instead of crawling. Normal transit jitter is a few ms, well under this, so steady-state
+  // min-tracking is unaffected. Without this, a single bad latch pins renderTime forever and
+  // every frame falls into the hold-newest branch → permanent 30 Hz instead of interpolation.
+  private static readonly CLOCK_RESYNC_MS = 500;
   
   // Timing and lag compensation
   private clientTick = 0;
   private clientTickAtLastServerState = 0;
   private estimatedNetworkDelay = 0;
+  // Observed real-time cadence between DISTINCT server snapshots. The server may broadcast
+  // slower than its 30 Hz sim (we've seen ~20 Hz with 133 ms bursts), so the interpolation
+  // buffer must cover the actual packet interval, not the tick interval — otherwise renderTime
+  // outruns the newest snapshot during a gap and we fall into hold-newest (visible 30 Hz).
+  private _snapshotIntervalMs = PredictionEngine.SERVER_MS_PER_TICK; // EMA of receive spacing
+  private _maxRecentIntervalMs = PredictionEngine.SERVER_MS_PER_TICK; // decaying worst-case gap
+  private _lastSnapshotReceive = 0;
   private serverTickOffset = 0;
   // RTT expressed in server ticks. The local input made "now" will be applied by the server
   // roughly this many ticks ahead of the last snapshot we received, so we label predictions
@@ -151,6 +212,12 @@ export class PredictionEngine {
   // the detection confirmationTicks would always be 0 and onDeck would flicker every frame.
   private persistentCarrierDetection: Map<number, CarrierDetectionState> = new Map();
 
+  // ── Ship rendering ───────────────────────────────────────────────────────
+  // Ships are rendered straight from the server-clock-driven linear interpolation
+  // (see getInterpolatedState + interpolateShips). No second smoothing stage is
+  // applied: a frameDt-dependent follower reintroduced jitter, so the clean,
+  // evenly-distributed interpolated transform is passed through unmodified.
+
   // Running, accumulated predicted world. The local player's position persists across ticks
   // and is advanced one sim step per client tick (120 Hz). Remote entities are refreshed from
   // the latest server snapshot each tick. This is what makes prediction feel 120 Hz instead of
@@ -190,24 +257,17 @@ export class PredictionEngine {
    * Update network latency estimate for dynamic interpolation buffer
    */
   updateNetworkLatency(pingMs: number): void {
-    // One-way latency is half of round-trip time (ping)
     const oneWayLatency = pingMs / 2;
-    
-    // Smooth the estimate with exponential moving average
-    const alpha = 0.1; // Smoothing factor
+
+    // Fast-start: on the first sample, jump straight to the measured value so we
+    // don't spend the first few seconds at the cold-start default (100ms buffer).
+    const alpha = this.estimatedNetworkDelay === 0 ? 1.0 : 0.1;
     this.estimatedNetworkDelay = this.estimatedNetworkDelay * (1 - alpha) + oneWayLatency * alpha;
     
-    // Calculate dynamic interpolation buffer
-    // Buffer = one-way latency + server tick time + jitter margin
-    const serverTickTime = 1000 / this.config.serverTickRate;
-    const jitterMargin = 30; // 30ms safety margin for network jitter
-    const dynamicBuffer = this.estimatedNetworkDelay + serverTickTime + jitterMargin;
-    
-    // Update config with dynamic buffer (but cap at reasonable limits)
-    const minBuffer = 50; // Minimum 50ms
-    const maxBuffer = 300; // Maximum 300ms
-    this.config.interpolationBuffer = Math.max(minBuffer, Math.min(maxBuffer, dynamicBuffer));
+    // Recompute the interpolation buffer from the latest latency estimate.
+    this._recomputeBuffer();
 
+    const serverTickTime = 1000 / this.config.serverTickRate;
     // Prediction lead, in server ticks, = full RTT / server tick time. Smoothed implicitly via
     // estimatedNetworkDelay (one-way) ×2. Clamped so it never exceeds the history window.
     const fullRttMs = this.estimatedNetworkDelay * 2;
@@ -221,7 +281,28 @@ export class PredictionEngine {
       console.log(`📡 Network: ping=${pingMs.toFixed(0)}ms, buffer=${this.config.interpolationBuffer.toFixed(0)}ms, lead=${this.rttTicks} ticks`);
     }
   }
-  
+
+  /**
+   * Size the interpolation buffer so renderTime always sits behind a snapshot we actually have.
+   *
+   * Driven by the OBSERVED snapshot cadence (`_snapshotIntervalMs` / `_maxRecentIntervalMs`),
+   * not the nominal tick rate, because the server can broadcast slower/irregularly (~20 Hz with
+   * 133 ms bursts seen in the wild). The buffer must exceed the worst recent gap + transit, or
+   * renderTime outruns the newest snapshot during a gap → hold-newest → visible 30 Hz.
+   *
+   * Self-tuning: if the server later delivers a clean 30 Hz, the observed interval collapses to
+   * ~33 ms and the buffer shrinks back toward the 100 ms floor — no permanent added latency.
+   */
+  private _recomputeBuffer(): void {
+    const jitterMargin = 40;
+    // Cover the worst recent gap; the EMA keeps it from collapsing on a lucky run of tight packets.
+    const cadence = Math.max(this._snapshotIntervalMs, this._maxRecentIntervalMs);
+    const dynamicBuffer = this.estimatedNetworkDelay + cadence + jitterMargin;
+    const minBuffer = Math.ceil(3 * PredictionEngine.SERVER_MS_PER_TICK); // 100 ms at 30 Hz
+    const maxBuffer = 350;
+    this.config.interpolationBuffer = Math.max(minBuffer, Math.min(maxBuffer, dynamicBuffer));
+  }
+
   /**
    * Initialize ring buffers for prediction and rewind
    */
@@ -327,21 +408,59 @@ export class PredictionEngine {
     // position/velocity, but adopt the server's authoritative movement-state flags so the
     // correct physics branch (land / deck / swim) is selected immediately on a transition.
     const serverLocal = baseWorldState.players.find(p => p.id === localId);
+    const boardingNow = !!(serverLocal &&
+      serverLocal.carrierId > 0 && runningLocal.carrierId === 0);
+    if (boardingNow) {
+      this._boardingClientTick = this.clientTick;
+    }
+    if (serverLocal && serverLocal.carrierId === 0 && runningLocal.carrierId > 0) {
+      this._boardingClientTick = -1;
+    }
+    const inBoardingWindow = this._boardingClientTick >= 0 &&
+      (this.clientTick - this._boardingClientTick) < PredictionEngine.BOARDING_DECK_TRUST_TICKS;
+    const trustBoardingPose = (boardingNow || inBoardingWindow) &&
+      !!serverLocal && serverLocal.carrierId > 0;
+
+    const resolveGrappleRopeLength = (): number | undefined => {
+      if (serverLocal!.grappleState !== 2) {
+        return runningLocal.grappleRopeLength;
+      }
+      const srvRope = serverLocal!.grappleRopeLength;
+      if (srvRope !== undefined && srvRope > 0) return srvRope;
+      const runRope = runningLocal.grappleRopeLength;
+      if (runRope !== undefined && runRope > 0) return runRope;
+      if (serverLocal!.grappleX !== undefined && serverLocal!.grappleY !== undefined) {
+        const pos = trustBoardingPose ? serverLocal!.position : runningLocal.position;
+        const dx = pos.x - serverLocal!.grappleX;
+        const dy = pos.y - serverLocal!.grappleY;
+        return Math.sqrt(dx * dx + dy * dy);
+      }
+      return srvRope ?? runRope;
+    };
+
     const mergedLocal = serverLocal
       ? {
           ...serverLocal,               // ALL server flags (authoritative)
-          position: runningLocal.position,
-          velocity: runningLocal.velocity,
+          position: trustBoardingPose
+            ? serverLocal.position.clone()
+            : runningLocal.position,
+          velocity: trustBoardingPose
+            ? serverLocal.velocity.clone()
+            : runningLocal.velocity,
+          grappleRopeLength: resolveGrappleRopeLength(),
           // localPosition (ship-local anchor) ownership depends on mount state:
+          //   • Boarding window: trust server hook attach point (grapple head).
           //   • Mounted: the SERVER anchor wins — local_x/local_y is the module mount point
           //     (e.g. steering wheel). Using the predicted value would keep the player locked
           //     to their pre-mount deck position and never snap them onto the module.
           //   • Walking on deck: the PREDICTED anchor wins — it advances at client rate with
           //     input. Resetting it to the server's RTT-old anchor every tick would yank the
           //     player backwards each simulation step (rubberbanding while walking on deck).
-          localPosition: serverLocal.isMounted
-            ? serverLocal.localPosition
-            : (runningLocal.localPosition ?? serverLocal.localPosition),
+          localPosition: trustBoardingPose
+            ? (serverLocal.localPosition?.clone() ?? runningLocal.localPosition)
+            : serverLocal.isMounted
+              ? serverLocal.localPosition
+              : (runningLocal.localPosition ?? serverLocal.localPosition),
           // deckId: CLIENT semi-authority during ramp transitions — the RenderSystem state
           // machine transitions this immediately when the player enters/exits a ramp zone,
           // then sends player_set_deck to the server.  Until the server echoes back the new
@@ -351,22 +470,9 @@ export class PredictionEngine {
           // upper-deck floors.  We keep the client value — EXCEPT within the first
           // BOARDING_DECK_TRUST_TICKS ticks after boarding (carrierId changed 0 → non-zero),
           // where we trust the server's authoritative deck_level unconditionally.
-          deckId: (() => {
-            const boardingNow = serverLocal.carrierId > 0 && runningLocal.carrierId === 0;
-            if (boardingNow) {
-              // Record the tick we first saw the boarding so the grace window can be measured.
-              this._boardingClientTick = this.clientTick;
-            }
-            const inBoardingWindow = this._boardingClientTick >= 0 &&
-              (this.clientTick - this._boardingClientTick) < PredictionEngine.BOARDING_DECK_TRUST_TICKS;
-            // Reset boarding window when the player dismounts
-            if (serverLocal.carrierId === 0 && runningLocal.carrierId > 0) {
-              this._boardingClientTick = -1;
-            }
-            return (boardingNow || inBoardingWindow)
-              ? serverLocal.deckId   // boarding window: trust server's authoritative deck_level
-              : runningLocal.deckId; // normal walking / ramp transition: keep client value
-          })(),
+          deckId: trustBoardingPose
+            ? serverLocal.deckId
+            : runningLocal.deckId,
         }
       : { ...runningLocal };
 
@@ -508,250 +614,350 @@ export class PredictionEngine {
     if (local) local.deckId = deckLevel;
   }
 
-  
+  /** Snap the local player onto a ship at the grapple hook / server board position. */
+  snapLocalPlayerToBoard(
+    position: Vec2,
+    localPosition: Vec2,
+    carrierId: number,
+    deckId: number,
+    velocity?: Vec2,
+  ): void {
+    if (!this.runningPredicted || this.localPlayerId === null) return;
+    const local = this.runningPredicted.players.find(p => p.id === this.localPlayerId);
+    if (!local) return;
+    local.carrierId = carrierId;
+    local.onDeck = true;
+    local.deckId = deckId;
+    local.position = position.clone();
+    local.localPosition = localPosition.clone();
+    local.velocity = velocity?.clone() ?? Vec2.zero();
+    this._boardingClientTick = this.clientTick;
+  }
+
   /**
-   * Get interpolated state for rendering
+   * Remote-entity snapshot interpolation (rewritten clean).
+   *
+   * Model: keep a small buffer of authoritative server snapshots, each tagged with a
+   * server-clock time (tick × 33.33ms). Each render frame we pick a renderTime slightly
+   * in the past (so we always have a snapshot ahead to interpolate toward), find the two
+   * snapshots straddling it, and LINEARLY interpolate between them. The fraction `alpha`
+   * is derived from the server clock, so it advances perfectly evenly between snapshots —
+   * filling the 120 Hz frames at uniform spacing with no spline overshoot.
+   *
+   * No extrapolation: if renderTime runs past the newest snapshot (a late/missed packet)
+   * we HOLD the newest known state until the next packet arrives. A brief micro-freeze is
+   * preferred over dead-reckoning that overshoots and then snaps back.
+   *
+   * The local player is handled separately by prediction and spliced in by the renderer;
+   * this path only produces smooth remote entities (ships, other players, NPCs, balls).
    */
   getInterpolatedState(currentTime: number): WorldState | null {
     if (!this.config.enableInterpolation || this.serverStateBuffer.length === 0) {
-      if (this.serverStateBuffer.length === 0) {
-        console.warn('⚠️ No server states in buffer - waiting for data');
-      }
+      if (PredictionEngine.DEBUG_INTERP) { this._diag.disabled++; this._diagTick(currentTime, null); }
       return this.authoritativeState;
     }
-    
-    // Use interpolation buffer delay to smooth out network jitter
-    const renderTime = currentTime - this.config.interpolationBuffer;
-    
-    // Find two states to interpolate between
-    let fromState: ServerStateEntry | null = null;
-    let toState: ServerStateEntry | null = null;
-    
-    for (let i = 0; i < this.serverStateBuffer.length - 1; i++) {
-      const current = this.serverStateBuffer[i];
-      const next = this.serverStateBuffer[i + 1];
-      
-      if (current.receiveTime <= renderTime && next.receiveTime >= renderTime) {
-        fromState = current;
-        toState = next;
-        break;
-      }
-    }
-    
-    // Handle cases where we can't find two states to interpolate between
-    if (!fromState || !toState) {
-      if (this.serverStateBuffer.length > 0) {
-        const latestState = this.serverStateBuffer[this.serverStateBuffer.length - 1];
-        const oldestState = this.serverStateBuffer[0];
 
-        // Buffer starved: renderTime is ahead of the newest snapshot we have.
-        // Dead-reckon forward from the latest state using velocity so entities
-        // glide smoothly through the gap instead of freezing then snapping when
-        // the next snapshot arrives. Cap at extrapolationLimit to avoid
-        // diverging badly during a prolonged outage.
-        if (renderTime >= latestState.receiveTime) {
-          const staleDt = renderTime - latestState.receiveTime;
-          if (staleDt > 0 && this.config.extrapolationLimit > 0) {
-            const clampedDt = Math.min(staleDt, this.config.extrapolationLimit) / 1000;
-            return this.extrapolateState(latestState.worldState, clampedDt);
-          }
-          return latestState.worldState;
-        }
-        
-        // If we're behind the buffer, use oldest state
-        if (renderTime < oldestState.receiveTime) {
-          if (Math.random() < 0.05) {
-            console.warn(`⚠️ Render time ${renderTime.toFixed(1)} behind oldest state ${oldestState.receiveTime.toFixed(1)} - buffer underrun`);
-          }
-          return oldestState.worldState;
-        }
+    // ── Render clock ─────────────────────────────────────────────────────────
+    // renderTime = local time mapped onto the server clock (via the jitter-immune
+    // serverClockOffset) minus the interpolation buffer. The applied delay
+    // (offset + buffer) is eased toward its target so the discrete steps in offset
+    // (30 Hz packet rate) and buffer (ping rate) don't perturb renderTime and shimmer
+    // the world. The ease only ever holds the delay slightly behind target, so renderTime
+    // stays monotonic (currentTime advances a full frame each call, far more than the
+    // sub-millisecond per-frame delay change).
+    const targetDelay = (this.serverClockOffset ?? 0) + this.config.interpolationBuffer;
+    if (this._renderDelaySmoothed === null) {
+      this._renderDelaySmoothed = targetDelay;
+    } else {
+      const gap = targetDelay - this._renderDelaySmoothed;
+      if (Math.abs(gap) > PredictionEngine.RENDER_DELAY_SNAP) {
+        this._renderDelaySmoothed = targetDelay; // big change → snap (initial sync / resync)
+      } else {
+        const sdt = Math.max(0, (currentTime - this._lastRenderDelayTime) / 1000);
+        this._renderDelaySmoothed += gap * (1 - Math.exp(-sdt / PredictionEngine.RENDER_DELAY_TAU));
       }
-      return this.authoritativeState;
     }
-    
-    // Calculate interpolation factor
-    const timeDelta = toState.receiveTime - fromState.receiveTime;
-    if (timeDelta === 0) {
-      return fromState.worldState;
+    this._lastRenderDelayTime = currentTime;
+    const renderTime = currentTime - this._renderDelaySmoothed;
+
+    const buf = this.serverStateBuffer;
+    const newest = buf[buf.length - 1];
+    const oldest = buf[0];
+
+    // ── Buffer boundaries: HOLD, never extrapolate ──────────────────────────
+    if (renderTime >= newest.serverTime) {
+      this._pruneHullCache(newest.worldState);
+      if (PredictionEngine.DEBUG_INTERP) { this._diag.holdNew++; this._diagTick(currentTime, newest.worldState); }
+      return newest.worldState;        // ahead of newest packet — hold latest
     }
-    
-    const alpha = (renderTime - fromState.receiveTime) / timeDelta;
-    
-    // Debug: Log abnormal time deltas (server updates should be ~50ms at 20Hz)
-    if ((timeDelta < 30 || timeDelta > 100) && Math.random() < 0.02) {
-      console.warn(`⚠️ Unusual server update interval: ${timeDelta.toFixed(1)}ms (expected ~50ms at 20Hz)`);
+    if (renderTime <= oldest.serverTime) {
+      this._pruneHullCache(oldest.worldState);
+      if (PredictionEngine.DEBUG_INTERP) { this._diag.holdOld++; this._diagTick(currentTime, oldest.worldState); }
+      return oldest.worldState;        // behind oldest packet — hold earliest
     }
-    
-    // Be conservative with alpha - stay within known data
-    const clampedAlpha = Math.max(0, Math.min(1.0, alpha));
-    
-    // Interpolate between the two states
-    return this.interpolateStates(fromState.worldState, toState.worldState, clampedAlpha);
+
+    // ── Find the straddling pair and LINEARLY interpolate ───────────────────
+    for (let i = 0; i < buf.length - 1; i++) {
+      const from = buf[i];
+      const to   = buf[i + 1];
+      if (from.serverTime <= renderTime && renderTime <= to.serverTime) {
+        const span = to.serverTime - from.serverTime;
+        if (span <= 0) {               // duplicate/late tick — nothing to interpolate
+          this._pruneHullCache(from.worldState);
+          if (PredictionEngine.DEBUG_INTERP) { this._diag.holdNew++; this._diagTick(currentTime, from.worldState); }
+          return from.worldState;
+        }
+        const alpha = (renderTime - from.serverTime) / span; // intrinsically within [0,1]
+        const out = this.interpolateStates(from.worldState, to.worldState, alpha);
+        this._pruneHullCache(out);
+        if (PredictionEngine.DEBUG_INTERP) {
+          this._diag.interp++;
+          this._diag.alphaMin = Math.min(this._diag.alphaMin, alpha);
+          this._diag.alphaMax = Math.max(this._diag.alphaMax, alpha);
+          this._diagTick(currentTime, out);
+        }
+        return out;
+      }
+    }
+
+    // Unreachable (renderTime is between oldest and newest) — hold newest defensively.
+    this._pruneHullCache(newest.worldState);
+    if (PredictionEngine.DEBUG_INTERP) { this._diag.holdNew++; this._diagTick(currentTime, newest.worldState); }
+    return newest.worldState;
   }
-  
-  /**
-   * Extrapolate state forward based on velocity (for smooth 60Hz rendering with 20Hz server)
-   * Conservative extrapolation to avoid jitter from snap-backs
-   */
-  private extrapolateState(state: WorldState, deltaTime: number): WorldState {
-    // Use conservative damping to reduce jitter from corrections
-    const dampingFactor = 0.75; // Lower damping for maximum smoothness
-    
-    return {
-      tick: state.tick,
-      timestamp: state.timestamp + deltaTime * 1000,
-      ships: state.ships.map(ship => ({
-        ...ship,
-        position: ship.position.add(ship.velocity.mul(deltaTime * dampingFactor)),
-        rotation: ship.rotation + ship.angularVelocity * deltaTime * dampingFactor
-      })),
-      players: state.players.map(player => ({
-        ...player,
-        position: player.position.add(player.velocity.mul(deltaTime * dampingFactor))
-      })),
-      cannonballs: state.cannonballs.map(ball => ({
-        ...ball,
-        position: ball.position.add(ball.velocity.mul(deltaTime * dampingFactor))
-      })),
-      npcs: state.npcs,
-      tombstones: state.tombstones,
-      droppedItems: state.droppedItems ?? [],
-      companies: state.companies ?? [],
-      carrierDetection: new Map(state.carrierDetection)
-    };
+
+  /** TEMP DIAG: tally per-frame interpolation outcome + sample ship motion; log at 1 Hz. */
+  private _diagTick(currentTime: number, state: WorldState | null): void {
+    const d = this._diag;
+    d.frames++;
+
+    // Track whether a sample ship's rendered X actually changes frame-to-frame.
+    const ship = state?.ships?.[0];
+    if (ship) {
+      if (ship.id !== d.lastShipId) { d.lastShipId = ship.id; d.lastShipX = NaN; }
+      if (!Number.isNaN(d.lastShipX) && Math.abs(ship.position.x - d.lastShipX) > 1e-4) d.shipMoved++;
+      d.lastShipX = ship.position.x;
+    }
+
+    if (d.t0 === 0) d.t0 = currentTime;
+    if (currentTime - d.t0 >= 1000) {
+      const buf = this.serverStateBuffer;
+      const ticks = buf.map(e => e.tick);
+      const spacings: number[] = [];
+      for (let i = 1; i < buf.length; i++) spacings.push(+(buf[i].serverTime - buf[i - 1].serverTime).toFixed(1));
+      console.log(
+        `[INTERP] ${d.frames}f/s | interp=${d.interp} holdNew=${d.holdNew} holdOld=${d.holdOld} off=${d.disabled}` +
+        ` | shipPosChanged=${d.shipMoved}/${d.frames}f` +
+        ` | alpha=[${d.alphaMin.toFixed(2)},${d.alphaMax.toFixed(2)}]` +
+        ` | bufLen=${buf.length} ticks=${ticks.join(',')} spacingMs=${spacings.join(',')}` +
+        ` | offset=${(this.serverClockOffset ?? 0).toFixed(0)} buf=${this.config.interpolationBuffer.toFixed(0)} delay=${(this._renderDelaySmoothed ?? 0).toFixed(0)}`,
+      );
+      this._diag = { t0: currentTime, frames: 0, interp: 0, holdNew: 0, holdOld: 0, disabled: 0,
+                     shipMoved: 0, lastShipX: d.lastShipX, lastShipId: d.lastShipId, alphaMin: 1, alphaMax: 0 };
+    }
+  }
+
+  /** Drop cached hull geometry for ships that no longer exist (memory hygiene only). */
+  private _pruneHullCache(worldState: WorldState): void {
+    if (this._hullRefCache.size > worldState.ships.length + 4) {
+      const live = new Set(worldState.ships.map(s => s.id));
+      for (const id of this._hullRefCache.keys()) {
+        if (!live.has(id)) this._hullRefCache.delete(id);
+      }
+    }
   }
   
   /**
    * Add server state to interpolation buffer
    */
   private addServerState(worldState: WorldState): void {
+    const receiveTime = performance.now();
+    // Server clock for this snapshot: tick × (1000/30) ms.
+    // Tick is the monotonic sim tick counter (incremented once per physics step).
+    const serverTime = worldState.tick * PredictionEngine.SERVER_MS_PER_TICK;
+
+    // ── Clock offset estimation ────────────────────────────────────────────────
+    // serverClockOffset maps local time → server time: serverTime ≈ localTime - offset.
+    // We track a STABLE AVERAGE of (receiveTime - serverTime), not the minimum. The mean
+    // keeps renderTime a predictable `buffer` ms behind the newest snapshot; the buffer and
+    // the per-frame render-delay ease absorb transit jitter. A discontinuity (tick jump, tab
+    // resume, clock skew) is snapped so a mis-latch can't pin renderTime forever (the 30 Hz bug).
+    const sample = receiveTime - serverTime;
+
+    if (this.serverClockOffset === null) {
+      this.serverClockOffset = sample;
+    } else if (Math.abs(sample - this.serverClockOffset) > PredictionEngine.CLOCK_RESYNC_MS) {
+      this.serverClockOffset = sample;   // discontinuity → snap
+    } else {
+      this.serverClockOffset += (sample - this.serverClockOffset) * PredictionEngine.CLOCK_EMA_ALPHA;
+    }
+
+    // ── Deduplicate ticks ──────────────────────────────────────────────────────
+    // A retransmit or duplicate packet with the same tick would waste a buffer
+    // slot and evict a valid older state.  Update in-place instead of pushing.
+    const existingIdx = this.serverStateBuffer.findIndex(e => e.tick === worldState.tick);
+    if (existingIdx >= 0) {
+      this.serverStateBuffer[existingIdx] = {
+        worldState: this.cloneWorldState(worldState),
+        tick: worldState.tick,
+        timestamp: worldState.timestamp,
+        receiveTime,
+        serverTime,
+      };
+      return;
+    }
+
+    // ── Observed cadence (distinct ticks only) ──────────────────────────────────
+    // Track the real receive spacing between fresh snapshots and re-size the buffer to
+    // cover it. The server's broadcast cadence (not its tick rate) is what determines how
+    // far back renderTime must sit to always have a snapshot ahead to interpolate toward.
+    if (this._lastSnapshotReceive > 0) {
+      const interval = receiveTime - this._lastSnapshotReceive;
+      if (interval > 0 && interval < 1000) { // ignore the first packet after a long stall
+        this._snapshotIntervalMs += (interval - this._snapshotIntervalMs) * 0.2; // EMA
+        // Decaying worst-case: jump up to big gaps instantly, relax slowly afterward.
+        this._maxRecentIntervalMs = Math.max(interval, this._maxRecentIntervalMs * 0.98);
+        this._recomputeBuffer();
+      }
+    }
+    this._lastSnapshotReceive = receiveTime;
+
     const entry: ServerStateEntry = {
       worldState: this.cloneWorldState(worldState),
       tick: worldState.tick,
       timestamp: worldState.timestamp,
-      receiveTime: performance.now()
+      receiveTime,
+      serverTime,
     };
     
     this.serverStateBuffer.push(entry);
     
-    // Keep buffer size limited
     if (this.serverStateBuffer.length > PredictionEngine.MAX_SERVER_STATES) {
       this.serverStateBuffer.shift();
     }
-    
   }
   
   /**
-   * Interpolate between two world states
+   * Linearly interpolate every entity collection between two server snapshots.
+   * `alpha` is the server-clock fraction within the [from, to] tick window.
    */
-  private interpolateStates(from: WorldState, to: WorldState, alpha: number): WorldState {
-    // Apply smoothing curve for more natural motion (ease-out)
-    const smoothAlpha = this.smoothStep(alpha);
-    
+  private interpolateStates(
+    from: WorldState,
+    to: WorldState,
+    alpha: number,
+  ): WorldState {
     return {
       tick: Math.round(from.tick + (to.tick - from.tick) * alpha),
       timestamp: from.timestamp + (to.timestamp - from.timestamp) * alpha,
-      ships: this.interpolateShips(from.ships, to.ships, alpha), // LINEAR - handles varying server intervals better
-      players: this.interpolatePlayers(from.players, to.players, alpha), // LINEAR - matches ship interpolation for mounted players
-      cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, smoothAlpha),
-      npcs: this.interpolateNpcs(from.npcs, to.npcs, alpha), // LINEAR - matches player/ship interpolation
-      tombstones: to.tombstones ?? [],
+      ships:       this.interpolateShips(from.ships, to.ships, alpha),
+      players:     this.interpolatePlayers(from.players, to.players, alpha),
+      cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, alpha),
+      npcs:        this.interpolateNpcs(from.npcs, to.npcs, alpha),
+      tombstones:  to.tombstones ?? [],
       droppedItems: to.droppedItems ?? [],
-      companies: to.companies ?? [],
-      carrierDetection: new Map(from.carrierDetection)
+      companies:   to.companies ?? [],
+      carrierDetection: new Map(from.carrierDetection),
     };
   }
   
   /**
-   * Smooth step function for natural interpolation (quintic ease-in-out for extra smoothness)
+   * Interpolate ship positions and rotations with pure LINEAR interpolation.
+   *
+   * `alpha` comes from the server clock (see getInterpolatedState), so it
+   * advances perfectly evenly between two 30 Hz snapshots. A plain lerp therefore
+   * fills the intermediate 120 Hz frames at uniform spacing — e.g.
+   * (10,10)→(20,20) renders as (12.5,12.5)(15,15)(17.5,17.5)(20,20).
+   *
+   * Cubic splines (Hermite / Catmull-Rom) were tried previously but their tangents
+   * (whether server-velocity or finite-difference) produce non-uniform frame spacing
+   * and can overshoot, which is read as jitter. Rotation uses the same uniform lerp
+   * with a shortest-arc unwrap to handle the ±π discontinuity.
    */
-  private smoothStep(t: number): number {
-    // Strict clamp - no extrapolation to avoid jitter
-    t = Math.max(0, Math.min(1.0, t));
-    
-    // Quintic ease-in-out: 6t⁵ - 15t⁴ + 10t³ (smoother than cubic)
-    return t * t * t * (t * (t * 6 - 15) + 10);
-  }
-  
-  /**
-   * Interpolate ship positions and rotations
-   */
-  private interpolateShips(fromShips: any[], toShips: any[], alpha: number): any[] {
+  private interpolateShips(
+    fromShips: any[], toShips: any[], alpha: number,
+  ): any[] {
     const result = [];
-
-    // Build O(1) lookup to avoid O(N²) .find() per ship
     const fromById = new Map<number, any>();
     for (const s of fromShips) fromById.set(s.id, s);
 
-    if (fromShips.length !== toShips.length) {
-      console.warn(`⚠️ Ship count mismatch! From: ${fromShips.length}, To: ${toShips.length}`);
-    }
-
     for (const toShip of toShips) {
       const fromShip = fromById.get(toShip.id);
-
       if (!fromShip) {
-        console.warn(`⚠️ Ship ${toShip.id} missing in from state - can't interpolate, using toShip directly`);
+        // Ship not yet in the previous snapshot (just spawned / first frame).
+        // Show at final position — will be smooth from next frame onward.
         result.push(toShip);
         continue;
       }
 
+      // ── Pure linear position ─────────────────────────────────────────────────
+      // alpha is derived from the SERVER clock in getInterpolatedState, so it
+      // advances evenly (0.25, 0.5, 0.75, 1.0 across a 30→120 Hz segment). A plain
+      // lerp therefore distributes frames perfectly evenly between the two server
+      // states — e.g. (10,10)→(20,20) renders as (12.5,12.5)(15,15)(17.5,17.5)(20,20).
+      // Cubic splines (Catmull-Rom/Hermite) are intentionally NOT used here: their
+      // frame spacing is non-uniform and their tangents can overshoot, which reads
+      // as the residual jitter we were chasing. Server positions are already in
+      // client-pixel space (scaled ×10), so no extra scaling is needed.
+      const pos = this.lerpVec2(fromShip.position, toShip.position, alpha);
+
+      // ── Shortest-arc linear rotation ─────────────────────────────────────────
+      let rotErr = toShip.rotation - fromShip.rotation;
+      while (rotErr >  Math.PI) rotErr -= 2 * Math.PI;
+      while (rotErr < -Math.PI) rotErr += 2 * Math.PI;
+      const rot = fromShip.rotation + rotErr * alpha;
+
       result.push({
         ...toShip,
-        position: this.lerpVec2(fromShip.position, toShip.position, alpha),
-        velocity: this.lerpVec2(fromShip.velocity, toShip.velocity, alpha),
-        rotation: this.lerpAngle(fromShip.rotation, toShip.rotation, alpha),
-        angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha
+        position:        pos,
+        rotation:        rot,
+        // Interpolate velocity so mounted-player anchoring uses smooth vel
+        velocity:        this.lerpVec2(fromShip.velocity, toShip.velocity, alpha),
+        angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha,
       });
     }
 
     return result;
   }
-  
+
   /**
-   * Interpolate player positions
+   * Interpolate remote player positions — pure linear (uniform frame spacing).
    */
   private interpolatePlayers(fromPlayers: any[], toPlayers: any[], alpha: number): any[] {
     const result = [];
-
-    // Build O(1) lookup to avoid O(N²) .find() per player
     const fromById = new Map<number, any>();
     for (const p of fromPlayers) fromById.set(p.id, p);
 
     for (const toPlayer of toPlayers) {
       const fromPlayer = fromById.get(toPlayer.id);
-
       if (!fromPlayer) {
-        result.push(toPlayer);
+        result.push(toPlayer);   // just appeared — show at final position
         continue;
       }
 
       result.push({
         ...toPlayer,
         position: this.lerpVec2(fromPlayer.position, toPlayer.position, alpha),
-        velocity: this.lerpVec2(fromPlayer.velocity, toPlayer.velocity, alpha)
+        velocity: (fromPlayer.velocity && toPlayer.velocity)
+          ? this.lerpVec2(fromPlayer.velocity, toPlayer.velocity, alpha)
+          : toPlayer.velocity,
       });
     }
 
     return result;
   }
-  
+
   /**
-   * Interpolate NPC positions, rotations, and local (deck) positions.
-   * NPCs on a ship also have localPosition interpolated so they glide smoothly
-   * across the deck between server ticks.
+   * Interpolate NPC positions, rotations, and deck-local positions — pure linear.
    */
   private interpolateNpcs(fromNpcs: any[], toNpcs: any[], alpha: number): any[] {
     const result = [];
-
     const fromById = new Map<number, any>();
     for (const n of fromNpcs) fromById.set(n.id, n);
 
     for (const toNpc of toNpcs) {
       const fromNpc = fromById.get(toNpc.id);
-
       if (!fromNpc) {
-        result.push(toNpc);
+        result.push(toNpc);   // just appeared — show at final position
         continue;
       }
 
@@ -761,7 +967,6 @@ export class PredictionEngine {
         rotation: this.lerpAngle(fromNpc.rotation ?? 0, toNpc.rotation ?? 0, alpha),
       };
 
-      // Interpolate deck-local position when the NPC is aboard a ship
       if (fromNpc.localPosition && toNpc.localPosition) {
         interpolated.localPosition = this.lerpVec2(fromNpc.localPosition, toNpc.localPosition, alpha);
       }
@@ -814,24 +1019,19 @@ export class PredictionEngine {
    * Linear interpolation for angles (handles wrapping)
    */
   private lerpAngle(from: number, to: number, alpha: number): number {
-    // Normalize angles to [-PI, PI]
     const normalizeAngle = (angle: number) => {
       while (angle > Math.PI) angle -= 2 * Math.PI;
       while (angle < -Math.PI) angle += 2 * Math.PI;
       return angle;
     };
-    
     from = normalizeAngle(from);
-    to = normalizeAngle(to);
-    
-    // Take shortest path
+    to   = normalizeAngle(to);
     let diff = to - from;
-    if (diff > Math.PI) diff -= 2 * Math.PI;
+    if (diff > Math.PI)  diff -= 2 * Math.PI;
     if (diff < -Math.PI) diff += 2 * Math.PI;
-    
     return normalizeAngle(from + diff * alpha);
   }
-  
+
   /**
    * Check if client-side prediction is enabled
    */
@@ -1008,38 +1208,51 @@ export class PredictionEngine {
     } as WorldState;
   }
 
+  // Per-ship hull geometry cache: hull arrays are static (shape never changes) so we
+  // reuse the same reference across all cloned snapshots.  Cloning 47 Vec2 objects
+  // per ship per state arrival (30 Hz × 8 ships = 11,280 allocations/s) was a major
+  // GC pressure source causing periodic main-thread pauses visible as snap frames.
+  private _hullRefCache = new Map<number, any[]>();
+
   private cloneWorldState(worldState: WorldState): WorldState {
-    // Deep clone world state for prediction
     return {
       tick: worldState.tick,
       timestamp: worldState.timestamp,
-      ships: worldState.ships.map(ship => ({
-        ...ship,
-        position: ship.position ? ship.position.clone() : Vec2.zero(),
-        velocity: ship.velocity ? ship.velocity.clone() : Vec2.zero(),
-        hull: ship.hull ? ship.hull.map(point => point ? point.clone() : Vec2.zero()) : [],
-        modules: ship.modules ? ship.modules.map(module => ({ ...module })) : []
-      })),
+      ships: worldState.ships.map(ship => {
+        // Hull geometry is set once on ship creation and never changes.
+        // Share the same array reference across all buffer entries.
+        let hullRef = this._hullRefCache.get(ship.id);
+        if (!hullRef || hullRef !== ship.hull) {
+          // First time or hull replaced (shouldn't happen, but be safe)
+          hullRef = ship.hull ?? [];
+          this._hullRefCache.set(ship.id, hullRef);
+        }
+        return {
+          ...ship,
+          position: ship.position ? ship.position.clone() : Vec2.zero(),
+          velocity: ship.velocity ? ship.velocity.clone() : Vec2.zero(),
+          hull: hullRef,                    // shared ref — never mutated after parse
+          modules: ship.modules ? ship.modules.map(m => ({ ...m })) : [],
+        };
+      }),
       players: worldState.players.map(player => ({
         ...player,
         position: player.position ? player.position.clone() : Vec2.zero(),
-        velocity: player.velocity ? player.velocity.clone() : Vec2.zero()
+        velocity: player.velocity ? player.velocity.clone() : Vec2.zero(),
       })),
       cannonballs: worldState.cannonballs.map(ball => ({
         ...ball,
         position: ball.position ? ball.position.clone() : Vec2.zero(),
         velocity: ball.velocity ? ball.velocity.clone() : Vec2.zero(),
         firingVelocity: ball.firingVelocity ? ball.firingVelocity.clone() : Vec2.zero(),
-        smokeTrail: ball.smokeTrail ? ball.smokeTrail.map(smoke => ({
-          ...smoke,
-          position: smoke.position ? smoke.position.clone() : Vec2.zero()
-        })) : []
+        // smokeTrail is client-side only (not received from server), so no need to clone
+        smokeTrail: ball.smokeTrail ?? [],
       })),
       npcs: worldState.npcs || [],
       tombstones: worldState.tombstones ?? [],
       droppedItems: worldState.droppedItems ?? [],
       companies: worldState.companies ?? [],
-      carrierDetection: new Map(worldState.carrierDetection)
+      carrierDetection: new Map(worldState.carrierDetection),
     };
   }
   

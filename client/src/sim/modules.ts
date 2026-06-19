@@ -16,6 +16,7 @@ export type ModuleKind =
   | 'ramp'           // Deck ramp - connects lower and upper deck levels
   | 'hatch_cover'    // Hatch cover - seals a snap-point hole, blocks falling through
   | 'gunport'        // Gunport - openable hull hole for lower-deck cannons
+  | 'workbench'      // Workbench - crafting station on ship deck
   | 'chest'          // Resource chest - stores raw resources for auto-repair and land supply
   | 'bed'            // Bed - sets ship respawn point for crewmates
   | 'custom';        // User-defined module types
@@ -37,6 +38,7 @@ export enum ModuleTypeId {
   RAMP = 9,
   HATCH_COVER = 10,  // Hatch cover — seals a snap-point hole, blocks falling through
   GUNPORT = 11,      // Gunport — openable hull hole for lower-deck cannons
+  WORKBENCH = 12,    // Workbench — crafting station on ship deck
   CHEST = 13,        // Resource chest — stores raw resources for auto-repair and land supply
   BED = 14,          // Bed — sets ship respawn point for crewmates
   CUSTOM = 255  // Use high value for custom types
@@ -60,6 +62,7 @@ export const MODULE_TYPE_MAP = {
       case 'ramp': return ModuleTypeId.RAMP;
       case 'hatch_cover': return ModuleTypeId.HATCH_COVER;
       case 'gunport': return ModuleTypeId.GUNPORT;
+      case 'workbench': return ModuleTypeId.WORKBENCH;
       case 'chest': return ModuleTypeId.CHEST;
       case 'bed': return ModuleTypeId.BED;
       case 'custom': return ModuleTypeId.CUSTOM;
@@ -79,6 +82,7 @@ export const MODULE_TYPE_MAP = {
       case ModuleTypeId.RAMP: return 'ramp';
       case ModuleTypeId.HATCH_COVER: return 'hatch_cover';
       case ModuleTypeId.GUNPORT: return 'gunport';
+      case ModuleTypeId.WORKBENCH: return 'workbench';
       case ModuleTypeId.CHEST: return 'chest';
       case ModuleTypeId.BED: return 'bed';
       case ModuleTypeId.CUSTOM: return 'custom';
@@ -122,6 +126,8 @@ export interface ShipModule {
   qualityWeaponDmgQ8?: number;
   /** q8 sail-effectiveness multiplier (256=1.00x, 0=N/A). Present on masts. */
   qualitySailEffQ8?: number;
+  /** q8 durability/resistance multiplier (256=1.00x, 0=N/A). Present on planks/decks. */
+  qualityDurabilityQ8?: number;
   
   // Module-specific data (varies by kind)
   moduleData?: ModuleData;
@@ -140,6 +146,7 @@ export type ModuleData =
   | DeckModuleData
   | SwivelModuleData
   | GunportModuleData
+  | WorkbenchModuleData
   | ChestModuleData
   | BedModuleData
   | CustomModuleData;
@@ -271,6 +278,13 @@ export interface SwivelModuleData {
   health: number;               // Current HP (base max: 4000)
   targetHealth: number;         // Repair ceiling — decreases with damage; spend wood to raise
   maxHealth: number;            // Max HP
+}
+
+/**
+ * Workbench module data — no persistent state; presence enables ship-side crafting.
+ */
+export interface WorkbenchModuleData {
+  kind: 'workbench';
 }
 
 /**
@@ -977,6 +991,9 @@ export function getModuleFootprint(kind: ModuleKind): ModuleFootprint {
     case 'helm':           return { kind: 'box', hw: 14, hh: 14 };
     case 'seat':           return { kind: 'box', hw: 10, hh: 10 };
     case 'ladder':         return { kind: 'box', hw: 10, hh: 15 };
+    case 'workbench':      return { kind: 'box', hw: 22, hh: 15.5 };
+    case 'chest':          return { kind: 'box', hw: 22, hh: 16 };
+    case 'bed':            return { kind: 'box', hw: 22, hh: 12 };
     default:               return { kind: 'circle', radius: 10 };
   }
 }

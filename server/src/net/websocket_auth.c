@@ -61,6 +61,14 @@ bool jwt_extract_display_name(const char *token,
         log_error("JWT_SECRET not set — refusing token (set EnvironmentFile in pirate-server.service)");
         return false;
     }
+    /* Defence-in-depth: also refuse the publicly-known default placeholder.
+     * The startup guard in main() should catch this before the server ever
+     * accepts connections, but an extra check here makes the auth path safe
+     * regardless of how the library is invoked.                              */
+    if (strcmp(secret, "change-me-to-a-long-random-secret") == 0) {
+        log_error("JWT_SECRET is the default placeholder — refusing token (rotate the secret)");
+        return false;
+    }
     {
         /* Signed message = everything before the second dot */
         size_t msg_len = (size_t)(dot2 - token);

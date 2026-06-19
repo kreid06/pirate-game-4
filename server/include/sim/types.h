@@ -94,6 +94,17 @@ struct Ship {
     float rudder_angle;
     float target_rudder_angle;
 
+    /* Wind / reverse-thrust target — written by websocket_server_tick BEFORE
+     * sim_step runs so the sail propulsion goes through the same integration
+     * path as every other force.  wind_tau == 0 means no sail propulsion this
+     * tick (sails closed, no helm, etc.).
+     *
+     * sim_step applies:  v += (wind_target - v) * (1 - exp(-dt / wind_tau))
+     * then resets wind_tau to 0 so a stale target never persists.             */
+    float wind_target_vx;   /* target x-velocity from sails/reverse (server u/s) */
+    float wind_target_vy;   /* target y-velocity from sails/reverse (server u/s) */
+    float wind_tau;         /* time-constant (s); 0 = no wind this tick */
+
     // Ship state flags
     uint16_t flags;
     uint8_t reserved[1];

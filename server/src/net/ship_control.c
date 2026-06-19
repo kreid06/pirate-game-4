@@ -71,12 +71,24 @@ void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient*
         target_angle = 0.0f;    // Center rudder
     }
     
-    // Update simulation ship target rudder angle and reverse flag
+    // Update simulation ship target rudder angle and reverse flag.
+    // Reverse thrust is only permitted when all sails are fully closed.
     {
         struct Ship* _ss = find_sim_ship(ship->ship_id);
         if (_ss) _ss->target_rudder_angle = target_angle;
     }
-    ship->reverse_thrust = moving_backward;
+    if (moving_backward) {
+        /* Block reverse if any mast has openness > 0 */
+        bool sails_open = false;
+        for (uint8_t _m = 0; _m < ship->module_count && !sails_open; _m++) {
+            if (ship->modules[_m].type_id == MODULE_TYPE_MAST &&
+                ship->modules[_m].data.mast.openness > 0)
+                sails_open = true;
+        }
+        ship->reverse_thrust = !sails_open;
+    } else {
+        ship->reverse_thrust = false;
+    }
     
     // Send acknowledgment
     char response[256];
@@ -88,6 +100,29 @@ void handle_ship_rudder_control(WebSocketPlayer* player, struct WebSocketClient*
     size_t frame_len = websocket_create_frame(WS_OPCODE_TEXT, response, strlen(response), frame, sizeof(frame));
     if (frame_len > 0) {
         send(client->fd, frame, frame_len, 0);
+    }
+}
+
+/**
+ * Normalize helm control inputs to neutral.
+ * Called whenever a player leaves the helm (dismount, death, disconnect).
+ * Rudder is centred and reverse thrust cleared; sail openness is left as-is
+ * so the sails remain deployed at whatever setting the helmsman last used.
+ */
+void helm_release_controls(uint16_t ship_id) {
+    if (!ship_id) return;
+
+    /* Sim ship carries rudder angles */
+    struct Ship* sim = find_sim_ship(ship_id);
+    if (sim) {
+        sim->target_rudder_angle = 0.0f;
+        sim->rudder_angle        = 0.0f;
+    }
+
+    /* SimpleShip carries reverse_thrust */
+    SimpleShip* ss = find_ship(ship_id);
+    if (ss) {
+        ss->reverse_thrust = false;
     }
 }
 

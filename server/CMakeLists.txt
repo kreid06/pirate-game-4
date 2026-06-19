@@ -73,6 +73,8 @@ set(NET_SOURCES
     src/net/quality.c
     src/net/ship_control.c
     src/net/ship_init.c
+    src/net/ship_schematics.c
+    src/net/ship_chest_resources.c
     src/net/structures.c
 )
 

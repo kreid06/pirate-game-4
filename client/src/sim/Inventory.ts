@@ -291,6 +291,7 @@ export const STRUCTURE_COSTS: Record<string, PlayerResources> = {
   ramp:        { wood: 8,  fiber: 0,  metal: 0,  stone: 0 },
   hatch_cover: { wood: 8,  fiber: 0,  metal: 0,  stone: 0 },
   gunport:     { wood: 6,  fiber: 0,  metal: 2,  stone: 0 },
+  workbench:   { wood: 12, fiber: 0,  metal: 0,  stone: 0 },
   chest:       { wood: 12, fiber: 0,  metal: 0,  stone: 0 },
 };
 

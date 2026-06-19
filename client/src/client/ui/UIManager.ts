@@ -15,12 +15,13 @@ import { ManningPriorityPanel } from './ManningPriorityPanel.js';
 import { CompanyMenu } from './CompanyMenu.js';
 import { PlayerMenu } from './PlayerMenu.js';
 import { ShipMenu } from './ShipMenu.js';
+import { ShipSchematicPoolMenu } from './ShipSchematicPoolMenu.js';
 import { CrewLevelMenu } from './CrewLevelMenu.js';
 import { RespawnScreen } from './RespawnScreen.js';
 import { WorldMapScreen } from './WorldMapScreen.js';
 import { TombstoneMenu } from './TombstoneMenu.js';
 import { SalvageMenu } from './SalvageMenu.js';
-import { tierColor as _tierColor, tierName as _tierName } from '../../sim/Quality.js';
+import { tierColor as _tierColor, tierName as _tierName, statMultLabel as _statMultLabel, QUALITY_STAT_NAMES as _QUALITY_STAT_NAMES, itemDisplayName as _itemDisplayName } from '../../sim/Quality.js';
 
 /**
  * UI render context
@@ -52,6 +53,8 @@ export interface UIRenderContext {
   playerShip?: Ship | null;
   /** User-defined weapon control groups — set while on helm. */
   controlGroups?: Map<number, WeaponGroupState>;
+  /** Groups showing the temporary RMB-hold AIM tag. */
+  rmbAimingGroups?: Set<number>;
   /** Active ammo group on helm: 'cannon' (IDs 0-1) or 'swivel' (IDs 2-4). */
   activeAmmoGroup?: 'cannon' | 'swivel';
   /** Current world wind direction (radians, 0=North, clockwise). */
@@ -93,6 +96,7 @@ export const MENU_ID = {
   MAP:       'map',
   SALVAGE:   'salvage',
   CHEST:     'chest',
+  BED_TRAVEL:'bed_travel',
 } as const;
 export type MenuId = typeof MENU_ID[keyof typeof MENU_ID];
 
@@ -124,6 +128,8 @@ export class UIManager {
   public readonly playerMenu = new PlayerMenu();
   // Ship status menu (toggled by [G])
   private shipMenu = new ShipMenu();
+  /** Ship shared schematic pool (opened from ship menu). */
+  public readonly shipSchematicPoolMenu = new ShipSchematicPoolMenu();
   // Shipwreck salvage menu (opened by pressing E on a wreck)
   public readonly salvageMenu = new SalvageMenu();
   // Crew level / upgrade panel (opened by clicking an NPC)
@@ -264,6 +270,7 @@ export class UIManager {
     { kind: 'ramp',        label: 'Ramp',            symbol: '/', color: '#7a5c2a', borderColor: '#4a3410', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'gunport',     label: 'Gunport',         symbol: '▪', color: '#4a3828', borderColor: '#2a1808', cost: { wood: 6,  fiber: 0,  metal: 2, stone: 0 } },
     { kind: 'hatch_cover', label: 'Hatch Cover',     symbol: '⊞', color: '#8b832b', borderColor: '#5a5520', cost: { wood: 8,  fiber: 0,  metal: 0, stone: 0 } },
+    { kind: 'workbench',   label: 'Workbench',       symbol: '⚒', color: '#9a6a28', borderColor: '#5a4010', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'chest',       label: 'Chest',           symbol: '⊡', color: '#7a4820', borderColor: '#4a2810', cost: { wood: 12, fiber: 0,  metal: 0, stone: 0 } },
     { kind: 'bed',         label: 'Bed',             symbol: '🛏', color: '#4a3060', borderColor: '#2a1840', cost: { wood: 10, fiber: 5,  metal: 0, stone: 0 } },
   ];
@@ -480,10 +487,20 @@ export class UIManager {
     this.activeMenuId = id;
   }
 
-  /** Open the respawn screen. Pass the current world ships, islands, local company ID, and death position. */
-  openRespawnScreen(ships: import('../../sim/Types.js').Ship[], islands: import('../../sim/Types.js').IslandDef[], localCompanyId: number, deathPos?: { x: number; y: number }): void {
+  /** Open the respawn screen. Pass the current world ships, islands, placed structures, local company ID, and death position. */
+  openRespawnScreen(
+    nearbyShips: import('../../sim/Types.js').Ship[],
+    islands: import('../../sim/Types.js').IslandDef[],
+    placedStructures: readonly import('../../sim/Types.js').PlacedStructure[],
+    localCompanyId: number,
+    deathPos?: { x: number; y: number },
+  ): void {
     this._islands = islands;
-    this.respawnScreen.open(ships, islands, localCompanyId, deathPos);
+    this.respawnScreen.open(nearbyShips, islands, placedStructures, localCompanyId, deathPos);
+  }
+
+  setRespawnFriendlyFleet(ships: import('./RespawnScreen.js').RespawnMapShip[]): void {
+    this.respawnScreen.setFriendlyFleet(ships);
   }
 
   /** Close the respawn screen (called after the server confirms respawn). */
@@ -510,13 +527,8 @@ export class UIManager {
   }
 
   /** Set the callback that fires when the player confirms a respawn location. */
-  setRespawnConfirmedCallback(cb: (shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number, bedRespawn?: boolean) => void): void {
+  setRespawnConfirmedCallback(cb: (choice: import('./RespawnScreen.js').RespawnChoice) => void): void {
     this.respawnScreen.onRespawnConfirmed = cb;
-  }
-
-  /** Store a bed respawn point so it appears as an option the next time the player dies. */
-  setBedRespawnPoint(bedId?: number, x?: number, y?: number, shipId?: number): void {
-    this.respawnScreen.setBedRespawn(bedId, x, y, shipId);
   }
 
   /** Store island definitions so the respawn screen minimap can draw them. */
@@ -602,7 +614,8 @@ export class UIManager {
     if (this.tombstoneMenu.visible) return this.tombstoneMenu.handleWheel(x, y, deltaY);
     if (this.respawnScreen.visible) return this.respawnScreen.handleWheel(deltaY, x, y);
     if (this.activeMenuId === MENU_ID.PLAYER) return this.playerMenu.handleWheel(deltaY, x, y);
-    if (this.activeMenuId === MENU_ID.SHIP)   return this.shipMenu.handleWheel(deltaY, x, y);
+    if (this.activeMenuId === MENU_ID.SHIP)   return this.shipMenu.handleWheel(deltaY, x, y) ||
+      this.shipSchematicPoolMenu.handleWheel(deltaY, x, y);
     return this.worldMapScreen.handleWheel(deltaY, x, y);
   }
 
@@ -746,7 +759,7 @@ export class UIManager {
         const groupIdx = i; // slot 0→G0 (Port), slot 1→G1 (Starboard), …, slot 9→G9
         const state = this._cachedControlGroups.get(groupIdx);
         if (!state) return false;
-        const CYCLE: WeaponGroupMode[] = ['aiming', 'freefire', 'haltfire', 'targetfire'];
+        const CYCLE: WeaponGroupMode[] = ['freefire', 'haltfire', 'targetfire'];
         const next = CYCLE[(CYCLE.indexOf(state.mode) + 1) % CYCLE.length];
         if (this.onGroupModeChange) this.onGroupModeChange(groupIdx, next);
         return true;
@@ -826,6 +839,7 @@ export class UIManager {
     this.shipMenu.controlGroups = context.controlGroups ?? new Map();
     this.shipMenu.scaffoldedAtShipyardId = context.scaffoldedShipyardId ?? 0;
     this.shipMenu.render(ctx, context.worldState, context.assignedPlayerId);
+    this.shipSchematicPoolMenu.render(ctx);
     this.salvageMenu.render(ctx, ctx.canvas.width, ctx.canvas.height);
     // Crew level menu — update live NPC data before rendering
     if (this.activeMenuId === MENU_ID.CREW && this.crewMenu.npcId) {
@@ -896,6 +910,46 @@ export class UIManager {
     // Tombstone menu — rendered above everything else
     if (this.tombstoneMenu.visible) {
       this.tombstoneMenu.render(ctx);
+    }
+
+    // ── Suffocation / low-oxygen vignette ─────────────────────────────────
+    // Shown while swimming with stamina = 0 and oxygen < max.
+    // Deepens from a subtle blue tint to a full dark overlay as oxygen depletes.
+    {
+      const _vigPlayer = context.worldState.players.find(p => p.id === context.assignedPlayerId)
+        ?? context.worldState.players[0];
+      if (_vigPlayer) {
+        const _vigO2    = _vigPlayer.oxygen    ?? (_vigPlayer.maxOxygen ?? 100);
+        const _vigMaxO2 = _vigPlayer.maxOxygen ?? 100;
+        const _vigSt    = _vigPlayer.stamina   ?? (_vigPlayer.maxStamina ?? 100);
+        const _isSwim   = _vigPlayer.movementState === 'SWIMMING';
+        if (_isSwim && _vigSt <= 0 && _vigO2 < _vigMaxO2) {
+          const _depleted = _vigMaxO2 > 0 ? 1 - _vigO2 / _vigMaxO2 : 1;
+          // Alpha: 0 at full O2, up to 0.75 when depleted
+          const _vigAlpha = _depleted * 0.75;
+          // Pulse the vignette when critically low (O2 < 25%)
+          const _pulse = (_vigO2 / _vigMaxO2 < 0.25)
+            ? 0.7 + 0.3 * Math.sin(performance.now() / 200) : 1;
+          ctx.save();
+          const _cw = ctx.canvas.width, _ch = ctx.canvas.height;
+          // Radial gradient: dark blue edges → transparent centre
+          const _grad = ctx.createRadialGradient(
+            _cw / 2, _ch / 2, _ch * 0.15,
+            _cw / 2, _ch / 2, _ch * 0.72,
+          );
+          _grad.addColorStop(0, 'rgba(0,20,60,0)');
+          _grad.addColorStop(1, `rgba(0,10,40,${(_vigAlpha * _pulse).toFixed(3)})`);
+          ctx.fillStyle = _grad;
+          ctx.fillRect(0, 0, _cw, _ch);
+          // Thin bright-blue border ring when nearly suffocating
+          if (_vigO2 / _vigMaxO2 < 0.25) {
+            ctx.strokeStyle = `rgba(30,160,255,${(0.25 * _pulse).toFixed(3)})`;
+            ctx.lineWidth = 6;
+            ctx.strokeRect(0, 0, _cw, _ch);
+          }
+          ctx.restore();
+        }
+      }
     }
 
     // White flash — very topmost, fades out after respawn
@@ -1401,6 +1455,11 @@ export class UIManager {
     this.shipMenu.onDemolishDeck = cb;
   }
 
+  /** Open the ship schematic pool overlay from the ship status menu. */
+  setShipSchematicPoolOpenCallback(cb: (shipId: number) => void): void {
+    this.shipMenu.onOpenSchematicPool = cb;
+  }
+
   /** Set callback for the Leave Company button in the company menu. */
   setLeaveCompanyCallback(cb: () => void): void {
     this.companyMenu.onLeaveCompany = cb;
@@ -1684,6 +1743,9 @@ export class UIManager {
       return true;
     }
     if (this.activeMenuId === MENU_ID.SHIP) {
+      if (this.shipSchematicPoolMenu.visible) {
+        if (this.shipSchematicPoolMenu.handleClick(x, y)) return true;
+      }
       // Forward to shipMenu — returns true if inside panel (upgrade click or panel area)
       const consumed = this.shipMenu.handleClick(x, y);
       if (!consumed) this.closeActiveMenu();
@@ -2738,6 +2800,8 @@ export class UIManager {
     _hudEl.setVariantForKind      = (kind, idx) => this.playerMenu.setVariantForKind(kind, idx);
     _hudEl.tierColorFn            = _tierColor;
     _hudEl.tierNameFn             = _tierName;
+    _hudEl.statMultLabelFn        = _statMultLabel;
+    _hudEl.qualityStatNamesFn     = () => _QUALITY_STAT_NAMES;
     this.elements.set(UIElementType.HUD, _hudEl);
     this._loadHotbars();
     
@@ -2764,7 +2828,7 @@ export class UIManager {
   /** Restore hotbar selections from localStorage, validating each entry. */
   private _loadHotbars(): void {
     const validLand = new Set(UIManager.LAND_BUILD_PANEL_ENTRIES.map(e => e.kind));
-    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','chest','bed']);
+    const validShip = new Set<string>(['plank','cannon','mast','helm','deck','swivel','ramp','hatch_cover','gunport','workbench','chest','bed']);
     try {
       const landRaw = localStorage.getItem('pirate_mmo_land_hotbar');
       if (landRaw) {
@@ -3248,15 +3312,23 @@ export class UIManager {
       ctx.lineTo(px + W - PAD, ry + ROW_H);
       ctx.stroke();
 
-      // Resolve item name/symbol from ITEM_DEFS
+      // Resolve item name/symbol from ITEM_DEFS or schematic metadata
       const kindNum = item.itemKind;
       let name   = `Item #${kindNum}`;
       let symbol = '?';
-      const kindStr = Object.entries(ITEM_KIND_ID).find(([, v]) => (v as number) === kindNum)?.[0];
-      if (kindStr && (ITEM_DEFS as any)[kindStr]) {
-        const def = (ITEM_DEFS as any)[kindStr];
-        name   = def.name   ?? name;
-        symbol = def.symbol ?? symbol;
+      let rowColor = isHovered ? '#ffd700' : '#e8e0cc';
+      if (item.isSchematic) {
+        symbol = '📜';
+        const tName = _tierName(item.tier ?? 0);
+        name = `${tName} ${_itemDisplayName(kindNum)} Schematic`;
+        rowColor = isHovered ? _tierColor(item.tier ?? 0) : '#d8c8f0';
+      } else {
+        const kindStr = Object.entries(ITEM_KIND_ID).find(([, v]) => (v as number) === kindNum)?.[0];
+        if (kindStr && (ITEM_DEFS as any)[kindStr]) {
+          const def = (ITEM_DEFS as any)[kindStr];
+          name   = def.name   ?? name;
+          symbol = def.symbol ?? symbol;
+        }
       }
 
       ctx.font = '18px Georgia, serif';
@@ -3266,14 +3338,19 @@ export class UIManager {
       ctx.fillText(symbol, px + PAD, ry + ROW_H / 2);
 
       ctx.font = '13px Georgia, serif';
-      ctx.fillStyle = isHovered ? '#ffd700' : '#e8e0cc';
+      ctx.fillStyle = rowColor;
       ctx.fillText(name, px + PAD + 28, ry + ROW_H / 2);
 
-      if (item.quantity > 1) {
+      if (item.quantity > 1 && !item.isSchematic) {
         ctx.font = 'bold 11px Georgia, serif';
         ctx.fillStyle = '#aaa';
         ctx.textAlign = 'right';
         ctx.fillText(`\u00d7${item.quantity}`, px + W - PAD, ry + ROW_H / 2);
+      } else if (item.isSchematic && item.crafts !== undefined) {
+        ctx.font = 'bold 11px Georgia, serif';
+        ctx.fillStyle = '#aaa';
+        ctx.textAlign = 'right';
+        ctx.fillText(`×${item.crafts}`, px + W - PAD, ry + ROW_H / 2);
       }
     }
     ctx.restore(); // unclip
@@ -3358,7 +3435,7 @@ class HUDElement implements UIElement {
   /** Wired by UIManager so build-hotbar tooltip can show the active quality variant. */
   public getVariantTooltipInfo: (kind: string) => { tierPrefix: string; crafts: number; color: string; costMult: number } | undefined = () => undefined;
   /** Wired by UIManager — returns quality blueprints available for a build kind. */
-  public getVariantsForKind: (kind: string) => Array<{ index: number; tier: number; crafts: number }> = () => [];
+  public getVariantsForKind: (kind: string) => Array<{ index: number; tier: number; crafts: number; stats: number[] }> = () => [];
   /** Wired by UIManager — persists a variant selection (null = Standard). */
   public setVariantForKind: (kind: string, index: number | null) => void = () => {};
 
@@ -3607,18 +3684,21 @@ class HUDElement implements UIElement {
     }
 
     // Health / stamina bars above hotbar
-    const maxSt = player.maxStamina ?? 100;
-    const st    = player.stamina    ?? maxSt;
+    const maxSt  = player.maxStamina ?? 100;
+    const st     = player.stamina    ?? maxSt;
+    const maxO2  = player.maxOxygen  ?? 100;
+    const o2     = player.oxygen     ?? maxO2;
+    const isSwimming = (player.movementState === 'SWIMMING');
     const _lvl = player.level ?? 1;
     const _xp  = player.xp ?? 0;
     this._cachedPlayerLevel = _lvl;
     this._cachedPlayerXp    = _xp;
-    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
+    this.renderPlayerBars(ctx, ctx.canvas, player.health, player.maxHealth ?? 100, st, maxSt, o2, maxO2, isSwimming, _lvl, _xp, player.statPoints ?? 0, context.combatMode ?? false);
 
     // Hotbar — in ship/helm mode reuses same grid to show weapon groups
     // In ship build mode, show the build schematic hotbar instead
     const helmMode = context.mountKind === 'helm'
-      ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups }
+      ? { activeGroup: context.activeWeaponGroup ?? -1, activeGroups: context.activeWeaponGroups ?? new Set<number>(), playerShip: context.playerShip ?? null, controlGroups: context.controlGroups, rmbAimingGroups: context.rmbAimingGroups }
       : undefined;
     if (this.inLandBuildMode) {
       this.renderLandBuildHotbar(ctx, ctx.canvas, player.inventory.slots);
@@ -3655,6 +3735,9 @@ class HUDElement implements UIElement {
     maxHealth: number,
     stamina: number,
     maxStamina: number,
+    oxygen: number,
+    maxOxygen: number,
+    isSwimming: boolean,
     level = 1,
     xp = 0,
     statPoints = 0,
@@ -3671,7 +3754,9 @@ class HUDElement implements UIElement {
     const XP_BAR_H = 6;
     const GAP      = 3;
     const PANEL_PAD = 4;
-    const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP;
+    // Show the oxygen bar only once it starts depleting (not just on entering water)
+    const showOxygen = oxygen < maxOxygen;
+    const panelH   = PANEL_PAD * 2 + XP_BAR_H + GAP + BAR_H * 2 + GAP + (showOxygen ? BAR_H + GAP : 0);
     const panelY   = hotbarY - panelH - 4;
     const barX     = startX + PANEL_PAD;
     const barW     = totalW - PANEL_PAD * 2;
@@ -3796,6 +3881,42 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillStyle = 'rgba(255,255,255,0.70)';
     ctx.fillText(`${Math.ceil(stamina)}/${maxStamina}`, barX + barW - 4, stY + BAR_H / 2);
+
+    // ── Oxygen bar (only while swimming or oxygen is not full) ─────────────
+    if (showOxygen) {
+      const o2Y    = stY + BAR_H + GAP;
+      const o2Ratio = maxOxygen > 0 ? Math.max(0, Math.min(1, oxygen / maxOxygen)) : 1;
+      const o2Crit  = o2Ratio < 0.25;
+      const o2Warn  = o2Ratio < 0.50;
+      // Pulse the bar border when critically low
+      const o2Pulse = o2Crit ? 0.55 + 0.45 * Math.sin(performance.now() / 250) : 1;
+      // Fill is always fully opaque so the bar level is always readable; pulse only affects the border
+      const o2Color = o2Crit ? '#1e9fff' : o2Warn ? '#2299ee' : '#44bbff';
+
+      ctx.fillStyle = 'rgba(255,255,255,0.08)';
+      ctx.fillRect(barX, o2Y, barW, BAR_H);
+      ctx.fillStyle = o2Color;
+      ctx.fillRect(barX, o2Y, Math.round(barW * o2Ratio), BAR_H);
+      // Change-flash overlay
+      this._tickFlash('bar-o2', o2Ratio);
+      const _o2Fa = this._flashAlpha('bar-o2');
+      if (_o2Fa > 0) {
+        ctx.fillStyle = `rgba(255,255,255,${_o2Fa.toFixed(2)})`;
+        ctx.fillRect(barX, o2Y, barW, BAR_H);
+      }
+      ctx.strokeStyle = o2Crit ? `rgba(30,200,255,${o2Pulse.toFixed(2)})` : 'rgba(255,255,255,0.20)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(barX, o2Y, barW, BAR_H);
+
+      ctx.font = 'bold 9px Georgia, serif';
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = 'rgba(255,255,255,0.80)';
+      ctx.fillText('O₂', barX + 4, o2Y + BAR_H / 2);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = o2Crit ? '#88ddff' : 'rgba(255,255,255,0.70)';
+      ctx.fillText(`${Math.ceil(oxygen)}/${maxOxygen}`, barX + barW - 4, o2Y + BAR_H / 2);
+    }
 
     // ── Combat mode indicator ──────────────────────────────────────────────
     const indicatorW = 114;
@@ -4122,7 +4243,7 @@ class HUDElement implements UIElement {
     canvas: HTMLCanvasElement,
     slots: { item: ItemKind; quantity: number }[],
     activeSlot: number,
-    weaponMode?: { activeGroup: number; activeGroups: Set<number>; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState> },
+    weaponMode?: { activeGroup: number; activeGroups: Set<number>; playerShip: Ship | null; controlGroups?: Map<number, WeaponGroupState>; rmbAimingGroups?: Set<number> },
   ): void {
     const SLOT_SIZE = 48;
     const SLOT_GAP = 4;
@@ -4180,7 +4301,8 @@ class HUDElement implements UIElement {
         const cgroups  = weaponMode.controlGroups ?? new Map<number, WeaponGroupState>();
         const state    = cgroups.get(groupIdx);
         const count    = state?.cannonIds.length ?? 0;
-        const mode     = state?.mode ?? 'haltfire';
+        const rmbAim   = weaponMode.rmbAimingGroups?.has(groupIdx) ?? false;
+        const mode     = rmbAim ? 'aiming' : (state?.mode ?? 'haltfire');
         const modeCol  = MODE_COLORS[mode] ?? '#555';
         const modeLbl  = MODE_LABELS[mode] ?? mode;
         const hasLock  = mode === 'targetfire' && state != null && state.targetId >= 0;
@@ -4728,11 +4850,19 @@ class HUDElement implements UIElement {
 
     const variants = this.getVariantsForKind(popup.kind);
     const activeInfo = this.getVariantTooltipInfo(popup.kind);
-    const ROW_H = 24;
+    const ROW_H  = 24;  // primary row height
+    const PILL_H = 14;  // stat pill line height
     const PAD = 10;
-    const W = 210;
-    const totalRows = 1 + variants.length; // Standard row + one per blueprint
-    const totalH = PAD + totalRows * ROW_H + PAD;
+    const W = 230;
+
+    // Compute heights: each blueprint row with any non-zero stats gets an extra pill line
+    const statNames    = this.qualityStatNamesFn();
+    const hasPills = (bp: { stats: number[]; tier: number }) =>
+      bp.stats.some(s => s !== 0 && s !== 256) || bp.tier >= 1;
+    const totalH = PAD
+      + ROW_H /* Standard row */
+      + variants.reduce((acc, bp) => acc + ROW_H + (hasPills(bp) ? PILL_H : 0), 0)
+      + PAD;
 
     let px = popup.anchorX - W / 2;
     let py = popup.anchorY - totalH - 6;
@@ -4785,20 +4915,23 @@ class HUDElement implements UIElement {
     ctx.textAlign = 'right';
     ctx.fillText('(resources only)', px + W - PAD, stdY + ROW_H / 2);
 
-    // Blueprint rows
+    // Blueprint rows — rowY tracked dynamically because pill lines vary per row
+    let bpCursorY = stdY + ROW_H;
     for (let bi = 0; bi < variants.length; bi++) {
-      const bp   = variants[bi];
-      const rowY = stdY + ROW_H + bi * ROW_H;
-      const col  = this._tierColorCache(bp.tier);
-      const tname = this._tierNameCache(bp.tier);
-      const isSel = activeInfo && this._activeVariantIndex(popup.kind) === bp.index;
+      const bp     = variants[bi];
+      const rowY   = bpCursorY;
+      const col    = this._tierColorCache(bp.tier);
+      const tname  = this._tierNameCache(bp.tier);
+      const isSel  = activeInfo && this._activeVariantIndex(popup.kind) === bp.index;
+      const pills  = hasPills(bp);
+      const thisRowH = ROW_H + (pills ? PILL_H : 0);
 
-      popup.hits.push({ index: bp.index, x: px, y: rowY, w: W, h: ROW_H });
+      popup.hits.push({ index: bp.index, x: px, y: rowY, w: W, h: thisRowH });
 
       if (isSel) {
         ctx.fillStyle = 'rgba(60,40,100,0.25)';
         ctx.beginPath();
-        ctx.roundRect(px + 2, rowY, W - 4, ROW_H, 3);
+        ctx.roundRect(px + 2, rowY, W - 4, thisRowH, 3);
         ctx.fill();
       }
 
@@ -4825,6 +4958,50 @@ class HUDElement implements UIElement {
       ctx.font      = '10px Georgia, serif';
       ctx.fillStyle = bp.crafts > 0 ? '#b0d0b0' : 'rgba(130,130,130,0.6)';
       ctx.fillText(`×${bp.crafts}`, px + PAD + 28 + tnameW + 6, rowY + ROW_H / 2);
+
+      // Stat pills on a secondary line
+      if (pills) {
+        const pillLineY = rowY + ROW_H;
+        let pillX = px + PAD;
+        const maxPillX = px + W - PAD;
+
+        // Per-stat pills (e.g. "D:+12%")
+        for (let si = 0; si < bp.stats.length && pillX < maxPillX - 24; si++) {
+          const lbl = this.statMultLabelFn(bp.stats[si]);
+          if (!lbl) continue;
+          const initial = (statNames[si] ?? '?')[0];
+          const pill = `${initial}:${lbl}`;
+          ctx.font = '9px Georgia, serif';
+          const pillW = ctx.measureText(pill).width + 6;
+          if (pillX + pillW > maxPillX) break;
+          ctx.fillStyle = 'rgba(50,80,50,0.55)';
+          ctx.beginPath();
+          ctx.roundRect(pillX, pillLineY + 2, pillW, PILL_H - 4, 2);
+          ctx.fill();
+          ctx.fillStyle = '#88ee88';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(pill, pillX + 3, pillLineY + PILL_H / 2);
+          pillX += pillW + 3;
+        }
+
+        // Tier bonus pill ("+N% T")
+        if (bp.tier >= 1 && pillX < maxPillX - 20) {
+          const bonusPill = `+${bp.tier * 10}% T`;
+          ctx.font = '9px Georgia, serif';
+          const pillW = ctx.measureText(bonusPill).width + 6;
+          if (pillX + pillW <= maxPillX) {
+            ctx.fillStyle = 'rgba(80,50,10,0.6)';
+            ctx.beginPath();
+            ctx.roundRect(pillX, pillLineY + 2, pillW, PILL_H - 4, 2);
+            ctx.fill();
+            ctx.fillStyle = col;
+            ctx.textBaseline = 'middle';
+            ctx.fillText(bonusPill, pillX + 3, pillLineY + PILL_H / 2);
+          }
+        }
+      }
+
+      bpCursorY += thisRowH;
     }
 
     ctx.restore();
@@ -4852,6 +5029,8 @@ class HUDElement implements UIElement {
   // These are set by UIManager after wiring:
   public tierColorFn: (tier: number) => string = () => '#ffffff';
   public tierNameFn:  (tier: number) => string = () => 'Unknown';
+  public statMultLabelFn: (q8: number) => string | null = () => null;
+  public qualityStatNamesFn: () => readonly string[] = () => [];
   private _tierColorCache(tier: number): string { return this.tierColorFn(tier); }
   private _tierNameCache(tier: number):  string { return this.tierNameFn(tier);  }
 

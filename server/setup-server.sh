@@ -36,14 +36,17 @@ tick_rate=60
 log_level=info
 EOF
 
-cat > /opt/pirate-game/config/auth.env << 'EOF'
+# Generate a cryptographically random JWT secret (64 hex chars = 256 bits).
+# This runs once at setup time; the file is never committed to version control.
+_JWT_SECRET=$(openssl rand -hex 32)
+cat > /opt/pirate-game/config/auth.env << EOF
 AUTH_PORT=3001
-# IMPORTANT: change this to a long random secret before deploying
-JWT_SECRET=change-me-to-a-long-random-secret
+# Auto-generated during setup — do NOT replace with a guessable value.
+JWT_SECRET=${_JWT_SECRET}
 # Comma-separated allowed origins, e.g.: https://yourdomain.com
 CORS_ORIGINS=
 EOF
-echo "⚠️  Edit /opt/pirate-game/config/auth.env and set JWT_SECRET before starting!"
+echo "✅ JWT_SECRET auto-generated (256-bit random) and written to /opt/pirate-game/config/auth.env"
 
 # 4. Create systemd service for the game server (C binary)
 echo "🔧 Creating game server systemd service..."
@@ -276,7 +279,8 @@ echo "  - 3001/tcp: Auth server (loopback only — proxied via nginx /auth/)"
 echo "  - 8081/tcp: Admin panel (loopback only — proxied via nginx /admin/ with Basic Auth)"
 echo ""
 echo "Next steps:"
-echo "1. Edit /opt/pirate-game/config/auth.env — verify JWT_SECRET is set"
+echo "1. Copy JWT_SECRET from /opt/pirate-game/config/auth.env into your GitHub secret AUTH_JWT_SECRET"
+echo "   (run: grep JWT_SECRET /opt/pirate-game/config/auth.env)"
 echo "2. Make sure GitHub secrets are set: AUTH_JWT_SECRET, AUTH_CORS_ORIGINS"
 echo "3. Update VITE_AUTH_URL in deploy-client.yml to use your domain (if not already)"
 echo "4. Push code to main branch — GitHub Actions will deploy both servers"

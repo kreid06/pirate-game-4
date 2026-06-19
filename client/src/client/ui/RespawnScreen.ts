@@ -3,7 +3,7 @@
  * Styled identically to WorldMapScreen, with selectable spawn points and a RESPAWN button.
  */
 
-import { Ship, IslandDef } from '../../sim/Types.js';
+import { Ship, IslandDef, PlacedStructure } from '../../sim/Types.js';
 
 const WORLD_MIN_X = 0;
 const WORLD_MIN_Y = 0;
@@ -14,24 +14,47 @@ const WORLD_H = WORLD_MAX_Y - WORLD_MIN_Y;
 const MAJOR_GRID_STEP = 30_000;
 
 interface SpawnOption {
-  type: 'ship' | 'island' | 'bed';
-  shipId?: number;
+  type: 'island' | 'bed';
   islandId?: number;
   bedId?: number;
+  shipId?: number;
+  moduleId?: number;
   x: number;
   y: number;
   label: string;
 }
 
+export interface RespawnMapShip {
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  rotation: number;
+  beds: { moduleId: number; localX: number; localY: number }[];
+}
+
+export interface RespawnChoice {
+  spawnX: number;
+  spawnY: number;
+  islandId?: number;
+  islandBedId?: number;
+  shipId?: number;
+  moduleId?: number;
+}
+
 export class RespawnScreen {
   public visible: boolean = false;
 
-  /** Called when the player confirms a respawn location.
-   * spawnX/spawnY are the world-space target coords for camera snapping. */
-  public onRespawnConfirmed: ((shipId?: number, worldX?: number, worldY?: number, islandId?: number, spawnX?: number, spawnY?: number, bedRespawn?: boolean) => void) | null = null;
+  /** Called when the player confirms a respawn location. */
+  public onRespawnConfirmed: ((choice: RespawnChoice) => void) | null = null;
 
   private selectedOption: SpawnOption | null = null;
   private spawnOptions: SpawnOption[] = [];
+  /** All same-company ships from server (worldwide, not AOI-limited). */
+  private friendlyFleet: RespawnMapShip[] = [];
+  private _openIslands: IslandDef[] = [];
+  private _openStructures: readonly PlacedStructure[] = [];
+  private _openCompanyId = 0;
 
   // Pan/zoom (same convention as WorldMapScreen — world px per screen px)
   private panX = WORLD_MIN_X + WORLD_W / 2;
@@ -58,24 +81,6 @@ export class RespawnScreen {
   // Position where the player died (world coords), shown as an X on the map
   private _deathPos: { x: number; y: number } | null = null;
 
-  // Stored bed respawn point (set by server bed_used event)
-  private _bedRespawn: { bedId?: number; x: number; y: number; shipId?: number } | null = null;
-
-  /** Called by the app when the server confirms a bed was used.
-   *  Stores the respawn point so it can appear as an option on next death. */
-  setBedRespawn(bedId?: number, x?: number, y?: number, shipId?: number): void {
-    if (shipId) {
-      this._bedRespawn = { shipId, x: x ?? 0, y: y ?? 0 };
-    } else if (bedId !== undefined && x !== undefined && y !== undefined) {
-      this._bedRespawn = { bedId, x, y };
-    }
-  }
-
-  /** Clear a stored bed respawn (e.g. if the bed structure was destroyed). */
-  clearBedRespawn(): void {
-    this._bedRespawn = null;
-  }
-
   // Two-phase fade: border frame first, then map content
   private _fadeStartTime = 0;
   private _borderAlpha = 0;
@@ -87,25 +92,72 @@ export class RespawnScreen {
   /** Duration (ms) for the map content to fade in after the border. */
   private static readonly PHASE_MAP_MS = 500;
 
-  open(ships: Ship[], islands: IslandDef[], localCompanyId: number, deathPos?: { x: number; y: number }): void {
-    this.visible = true;
-    this.selectedOption = null;
+  private static canAccessBed(localCompanyId: number, bedCompanyId: number): boolean {
+    if (bedCompanyId === 0) return true;
+    if (localCompanyId === 0) return false;
+    return bedCompanyId === localCompanyId;
+  }
+
+  private static bedWorldPos(ship: RespawnMapShip, bed: { localX: number; localY: number }): { x: number; y: number } {
+    const cos = Math.cos(ship.rotation);
+    const sin = Math.sin(ship.rotation);
+    return {
+      x: ship.x + (bed.localX * cos - bed.localY * sin),
+      y: ship.y + (bed.localX * sin + bed.localY * cos),
+    };
+  }
+
+  /** Merge live AOI ship positions into the fleet snapshot when available. */
+  private resolvedFleet(nearbyShips: Ship[]): RespawnMapShip[] {
+    return this.friendlyFleet.map(fs => {
+      const live = nearbyShips.find(s => s.id === fs.id);
+      if (!live) return fs;
+      return { ...fs, x: live.position.x, y: live.position.y, rotation: live.rotation };
+    });
+  }
+
+  setFriendlyFleet(ships: RespawnMapShip[]): void {
+    this.friendlyFleet = ships;
+    if (this.visible) {
+      this.rebuildSpawnOptions(this._openStructures, this._openIslands, this._openCompanyId);
+    }
+  }
+
+  private rebuildSpawnOptions(
+    placedStructures: readonly PlacedStructure[] = [],
+    islands: IslandDef[] = [],
+    localCompanyId = 0,
+  ): void {
     this.spawnOptions = [];
 
-    // Friendly ships as spawn options
-    for (const ship of ships) {
-      if (localCompanyId !== 0 && ship.companyId === localCompanyId) {
+    for (const s of placedStructures) {
+      if (s.type !== 'bed') continue;
+      if (!RespawnScreen.canAccessBed(localCompanyId, s.companyId ?? 0)) continue;
+      this.spawnOptions.push({
+        type: 'bed',
+        bedId: s.id,
+        x: s.x,
+        y: s.y,
+        label: `🛏 Island Bed #${s.id}`,
+      });
+    }
+
+    const fleet = this.resolvedFleet([]);
+    for (const ship of fleet) {
+      const shipLabel = ship.name?.trim() ? ship.name : `Ship ${ship.id}`;
+      for (const bed of ship.beds) {
+        const wp = RespawnScreen.bedWorldPos(ship, bed);
         this.spawnOptions.push({
-          type: 'ship',
+          type: 'bed',
           shipId: ship.id,
-          x: ship.position.x,
-          y: ship.position.y,
-          label: `Ship ${ship.id}`,
+          moduleId: bed.moduleId,
+          x: wp.x,
+          y: wp.y,
+          label: `🛏 ${shipLabel} — Bed`,
         });
       }
     }
 
-    // Islands as fallback spawn options
     for (const isl of islands) {
       this.spawnOptions.push({
         type: 'island',
@@ -116,17 +168,32 @@ export class RespawnScreen {
       });
     }
 
-    this.selectedOption = this.spawnOptions[0] ?? null;
-
-    // Add bed respawn option if one is stored (highest priority — shown first)
-    if (this._bedRespawn) {
-      const bedOpt: SpawnOption = this._bedRespawn.shipId
-        ? { type: 'bed', shipId: this._bedRespawn.shipId, x: this._bedRespawn.x, y: this._bedRespawn.y, label: '🛏 Ship Bed' }
-        : { type: 'bed', bedId: this._bedRespawn.bedId,  x: this._bedRespawn.x, y: this._bedRespawn.y, label: '🛏 Bed' };
-      this.spawnOptions.unshift(bedOpt);
-      this.selectedOption = bedOpt;
+    if (this.selectedOption) {
+      const still = this.spawnOptions.find(o =>
+        o.type === this.selectedOption!.type &&
+        o.bedId === this.selectedOption!.bedId &&
+        o.shipId === this.selectedOption!.shipId &&
+        o.moduleId === this.selectedOption!.moduleId &&
+        o.islandId === this.selectedOption!.islandId,
+      );
+      this.selectedOption = still ?? this.spawnOptions[0] ?? null;
+    } else {
+      this.selectedOption = this.spawnOptions[0] ?? null;
     }
+  }
 
+  open(
+    nearbyShips: Ship[],
+    islands: IslandDef[],
+    placedStructures: readonly PlacedStructure[],
+    localCompanyId: number,
+    deathPos?: { x: number; y: number },
+  ): void {
+    this.visible = true;
+    this._openIslands = islands;
+    this._openStructures = placedStructures;
+    this._openCompanyId = localCompanyId;
+    this.rebuildSpawnOptions(placedStructures, islands, localCompanyId);
     this._deathPos = deathPos ?? null;
 
     // Reset zoom to auto-fit on open
@@ -143,6 +210,7 @@ export class RespawnScreen {
     this.visible = false;
     this.dragging = false;
     this._btnBounds = null;
+    this.friendlyFleet = [];
   }
 
   // ── Input handlers (same API as WorldMapScreen) ─────────────────────────────
@@ -157,15 +225,19 @@ export class RespawnScreen {
       const b = this._btnBounds;
       if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
         if (this.selectedOption) {
-          const sx = this.selectedOption.x;
-          const sy = this.selectedOption.y;
-          if (this.selectedOption.type === 'bed') {
-            this.onRespawnConfirmed?.(undefined, undefined, undefined, undefined, sx, sy, true);
-          } else if (this.selectedOption.type === 'ship') {
-            this.onRespawnConfirmed?.(this.selectedOption.shipId, undefined, undefined, undefined, sx, sy);
-          } else {
-            this.onRespawnConfirmed?.(undefined, undefined, undefined, this.selectedOption.islandId, sx, sy);
+          const opt = this.selectedOption;
+          const choice: RespawnChoice = {
+            spawnX: opt.x,
+            spawnY: opt.y,
+          };
+          if (opt.type === 'bed') {
+            if (opt.bedId !== undefined) choice.islandBedId = opt.bedId;
+            if (opt.shipId !== undefined) choice.shipId = opt.shipId;
+            if (opt.moduleId !== undefined) choice.moduleId = opt.moduleId;
+          } else if (opt.islandId !== undefined) {
+            choice.islandId = opt.islandId;
           }
+          this.onRespawnConfirmed?.(choice);
           this.visible = false;
         }
         return true;
@@ -218,8 +290,11 @@ export class RespawnScreen {
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  render(ctx: CanvasRenderingContext2D, ships: Ship[], islands: IslandDef[], localCompanyId: number): void {
+  render(ctx: CanvasRenderingContext2D, nearbyShips: Ship[], islands: IslandDef[], localCompanyId: number): void {
     if (!this.visible) return;
+
+    const fleet = this.resolvedFleet(nearbyShips);
+    const friendlyIds = new Set(fleet.map(s => s.id));
 
     // Isolate ALL canvas state from the game world renderer (hover shadows,
     // globalAlpha, etc. set by RenderSystem must not bleed in here).
@@ -231,11 +306,15 @@ export class RespawnScreen {
 
     try {
 
-    // Keep ship spawn option positions fresh
+    // Keep ship-bed spawn option positions fresh as friendly ships move
     for (const opt of this.spawnOptions) {
-      if (opt.type === 'ship' && opt.shipId !== undefined) {
-        const ship = ships.find(s => s.id === opt.shipId);
-        if (ship) { opt.x = ship.position.x; opt.y = ship.position.y; }
+      if (opt.type !== 'bed' || opt.shipId === undefined || opt.moduleId === undefined) continue;
+      const ship = fleet.find(s => s.id === opt.shipId);
+      const bed = ship?.beds.find(b => b.moduleId === opt.moduleId);
+      if (ship && bed) {
+        const wp = RespawnScreen.bedWorldPos(ship, bed);
+        opt.x = wp.x;
+        opt.y = wp.y;
       }
     }
 
@@ -255,9 +334,6 @@ export class RespawnScreen {
     const youDiedAlpha  = youDiedFadeIn * (1 - this._mapAlpha);
 
     // ── Dark vignette over the live game world ────────────────────────────────
-    // During the death phase the world is still visible underneath; we darken
-    // it progressively as the border fades in. Once the map fades in it gets
-    // covered by the map's own opaque dark overlay.
     const vignetteAlpha = this._borderAlpha * 0.55 * (1 - this._mapAlpha);
     if (vignetteAlpha > 0) {
       ctx.fillStyle = `rgba(0, 0, 8, ${vignetteAlpha})`;
@@ -266,7 +342,6 @@ export class RespawnScreen {
 
     if (this.zoom === 0) {
       this.zoom = this._fitZoom();
-      // Pan to selected option if one exists
       if (this.selectedOption) {
         this.panX = this.selectedOption.x;
         this.panY = this.selectedOption.y;
@@ -285,7 +360,6 @@ export class RespawnScreen {
       this._renderEdgeClouds(ctx, cw, ch, cloudAlpha);
     }
 
-    // pulse drives spawn-option rings AND the respawn button glow
     const pulse = 0.5 + 0.5 * Math.sin(this._pulseT * 3.5);
 
     // ── Map geographic content (fades in during phase 2) ─────────────────────
@@ -293,12 +367,10 @@ export class RespawnScreen {
     ctx.save();
     ctx.globalAlpha = this._mapAlpha;
 
-    // World-space → screen helpers
     const toScreenX = (wx: number) => (wx - this.panX) / this.zoom + cw / 2;
     const toScreenY = (wy: number) => (wy - this.panY) / this.zoom + ch / 2;
     const toScreenLen = (wl: number) => wl / this.zoom;
 
-    // ── Ocean boundary ────────────────────────────────────────────────────────
     const bx = toScreenX(WORLD_MIN_X);
     const by = toScreenY(WORLD_MIN_Y);
     const bw = toScreenLen(WORLD_W);
@@ -309,8 +381,6 @@ export class RespawnScreen {
     ctx.lineWidth = 1.5;
     ctx.strokeRect(bx, by, bw, bh);
 
-    // ── Major grid lines every 30,000 units (3 x 3 active world grid) ──────
-    // Draw this after map fill so grid sits above the map layer.
     {
       ctx.save();
       ctx.strokeStyle = 'rgba(255, 255, 255, 0.14)';
@@ -324,7 +394,6 @@ export class RespawnScreen {
       ctx.restore();
     }
 
-    // ── Islands ───────────────────────────────────────────────────────────────
     for (const isl of islands) {
       ctx.save();
       ctx.beginPath();
@@ -356,12 +425,35 @@ export class RespawnScreen {
       }
     }
 
-    // ── All ships (context) ───────────────────────────────────────────────────
-    for (const ship of ships) {
+    // Friendly fleet markers (worldwide — from respawn_map)
+    for (const ship of fleet) {
+      const sx = toScreenX(ship.x);
+      const sy = toScreenY(ship.y);
+      if (sx < -20 || sx > cw + 20 || sy < -20 || sy > ch + 20) continue;
+      const r = Math.max(4, toScreenLen(40));
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.rotate(ship.rotation + Math.PI / 2);
+      ctx.beginPath();
+      ctx.moveTo(0, -r * 1.4);
+      ctx.lineTo(r * 0.7, r);
+      ctx.lineTo(-r * 0.7, r);
+      ctx.closePath();
+      ctx.fillStyle = '#4488ff';
+      ctx.strokeStyle = '#aaccff';
+      ctx.lineWidth = 1;
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Nearby enemy ships only (friendly ones already drawn from fleet snapshot)
+    for (const ship of nearbyShips) {
+      if (friendlyIds.has(ship.id)) continue;
+      if (localCompanyId !== 0 && ship.companyId === localCompanyId) continue;
       const sx = toScreenX(ship.position.x);
       const sy = toScreenY(ship.position.y);
       if (sx < -20 || sx > cw + 20 || sy < -20 || sy > ch + 20) continue;
-      const isFriendly = localCompanyId !== 0 && ship.companyId === localCompanyId;
       const r = Math.max(4, toScreenLen(40));
       ctx.save();
       ctx.translate(sx, sy);
@@ -371,33 +463,31 @@ export class RespawnScreen {
       ctx.lineTo(r * 0.7, r);
       ctx.lineTo(-r * 0.7, r);
       ctx.closePath();
-      ctx.fillStyle = isFriendly ? '#4488ff' : '#ff4444';
-      ctx.strokeStyle = isFriendly ? '#aaccff' : '#ffaaaa';
+      ctx.fillStyle = '#ff4444';
+      ctx.strokeStyle = '#ffaaaa';
       ctx.lineWidth = 1;
       ctx.fill();
       ctx.stroke();
       ctx.restore();
     }
 
-    // ── Spawn options (selectable) ────────────────────────────────────────────
     for (const opt of this.spawnOptions) {
       const mx = toScreenX(opt.x);
       const my = toScreenY(opt.y);
       const selected = opt === this.selectedOption;
 
       ctx.save();
-      if (opt.type === 'ship') {
+      if (opt.type === 'bed') {
         if (selected) {
-          // Pulsing glow ring
           ctx.beginPath();
           ctx.arc(mx, my, 14 + pulse * 4, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255, 238, 68, ${0.15 + pulse * 0.1})`;
+          ctx.fillStyle = `rgba(170, 120, 255, ${0.15 + pulse * 0.1})`;
           ctx.fill();
         }
         ctx.beginPath();
         ctx.arc(mx, my, selected ? 8 : 5, 0, Math.PI * 2);
-        ctx.fillStyle = selected ? '#ffee44' : '#aaaaff';
-        ctx.strokeStyle = selected ? '#ffffff' : '#6666cc';
+        ctx.fillStyle = selected ? '#cc88ff' : '#8866aa';
+        ctx.strokeStyle = selected ? '#ffffff' : '#554488';
         ctx.lineWidth = selected ? 2 : 1.5;
         ctx.fill();
         ctx.stroke();
@@ -424,7 +514,6 @@ export class RespawnScreen {
       ctx.fillText(opt.label, mx, my - (selected ? 13 : 9));
     }
 
-    // ── Death position marker (treasure-map X) ────────────────────────────────
     if (this._deathPos) {
       const dx = toScreenX(this._deathPos.x);
       const dy = toScreenY(this._deathPos.y);
@@ -432,7 +521,6 @@ export class RespawnScreen {
       const lw = Math.max(2, toScreenLen(14));
       ctx.save();
 
-      // Outer glow pass
       ctx.strokeStyle = 'rgba(180, 60, 0, 0.4)';
       ctx.lineWidth = lw + 4;
       ctx.lineCap = 'round';
@@ -443,7 +531,6 @@ export class RespawnScreen {
       ctx.moveTo(dx + s, dy - s); ctx.lineTo(dx - s, dy + s);
       ctx.stroke();
 
-      // Dark ink shadow (slightly offset, like hand-drawn)
       ctx.shadowBlur = 0;
       ctx.strokeStyle = 'rgba(30, 8, 0, 0.65)';
       ctx.lineWidth = lw + 1.5;
@@ -452,7 +539,6 @@ export class RespawnScreen {
       ctx.moveTo(dx + s + 1.5, dy - s + 1.5); ctx.lineTo(dx - s + 1.5, dy + s + 1.5);
       ctx.stroke();
 
-      // Main aged-parchment red X
       ctx.strokeStyle = '#c0392b';
       ctx.lineWidth = lw;
       ctx.beginPath();
@@ -460,7 +546,6 @@ export class RespawnScreen {
       ctx.moveTo(dx + s, dy - s); ctx.lineTo(dx - s, dy + s);
       ctx.stroke();
 
-      // Circle around the X (treasure map style)
       ctx.strokeStyle = 'rgba(180, 50, 10, 0.7)';
       ctx.lineWidth = Math.max(1, lw * 0.55);
       ctx.setLineDash([Math.max(2, s * 0.35), Math.max(2, s * 0.2)]);
@@ -469,26 +554,6 @@ export class RespawnScreen {
       ctx.stroke();
       ctx.setLineDash([]);
 
-      // Small Georgia, serif-style end-caps on each arm tip
-      const cap = s * 0.22;
-      ctx.strokeStyle = '#c0392b';
-      ctx.lineWidth = Math.max(1.5, lw * 0.7);
-      for (const [ex, ey, angle] of [
-        [dx - s, dy - s, -Math.PI / 4],
-        [dx + s, dy + s, -Math.PI / 4],
-        [dx + s, dy - s, Math.PI / 4],
-        [dx - s, dy + s, Math.PI / 4],
-      ] as [number, number, number][]) {
-        ctx.save();
-        ctx.translate(ex, ey);
-        ctx.rotate(angle);
-        ctx.beginPath();
-        ctx.moveTo(-cap, 0); ctx.lineTo(cap, 0);
-        ctx.stroke();
-        ctx.restore();
-      }
-
-      // Label — weathered Georgia, serif style
       ctx.textAlign = 'center';
       ctx.font = `bold italic ${Math.max(9, Math.min(13, toScreenLen(65)))}px Georgia, serif`;
       ctx.fillStyle = 'rgba(20, 6, 0, 0.6)';
@@ -499,22 +564,17 @@ export class RespawnScreen {
       ctx.restore();
     }
 
-    // ── Scale bar ─────────────────────────────────────────────────────────────
     this._renderScaleBar(ctx, cw, ch);
 
     ctx.restore(); // end map geographic content
-    } // end map geographic block
+    }
 
-    // ── Death border frame — on top of map geography, below HUD ──────────────
     this._renderDeathBorder(ctx, cw, ch, this._borderAlpha);
 
-    // ── Map HUD: banner + RESPAWN button — on top of border ───────────────────
     if (this._mapAlpha > 0) {
     ctx.save();
     ctx.globalAlpha = this._mapAlpha;
 
-    // ── HUD header ────────────────────────────────────────────────────────────
-    // Red "YOU DIED" banner at top
     const bannerH = 64;
     ctx.fillStyle = 'rgba(80, 0, 0, 0.72)';
     ctx.fillRect(0, 0, cw, bannerH);
@@ -528,7 +588,6 @@ export class RespawnScreen {
     ctx.fillStyle = '#778899';
     ctx.fillText('Click a spawn point  •  Drag to pan  •  Scroll to zoom', 16, bannerH - 8);
 
-    // Selected spawn info (top right)
     if (this.selectedOption) {
       ctx.textAlign = 'right';
       ctx.font = '13px Georgia, serif';
@@ -541,14 +600,12 @@ export class RespawnScreen {
     ctx.fillStyle = '#445566';
     ctx.fillText(`zoom ×${(1 / this.zoom * 100).toFixed(0)}%`, cw - 16, bannerH - 8);
 
-    // ── RESPAWN button ────────────────────────────────────────────────────────
     const btnW = 200, btnH = 48;
     const btnX = cw - btnW - 16;
     const btnY = ch - btnH - 16;
     const enabled = this.selectedOption !== null;
 
     ctx.save();
-    // Pulsing glow on button when enabled
     if (enabled) {
       ctx.shadowColor = '#dd5533';
       ctx.shadowBlur = 10 + pulse * 8;
@@ -561,7 +618,6 @@ export class RespawnScreen {
     ctx.fill();
     ctx.stroke();
     ctx.restore();
-    // Explicitly clear shadow so it doesn't affect text or subsequent draws
     ctx.shadowBlur = 0;
     ctx.shadowColor = 'transparent';
 
@@ -572,33 +628,25 @@ export class RespawnScreen {
 
     this._btnBounds = { x: btnX, y: btnY, w: btnW, h: btnH };
 
-    ctx.restore(); // end map HUD
-    } // end map HUD block
+    ctx.restore();
+    }
 
-    // ── Centered "YOU DIED" — fades in immediately, fades out as map appears ──
     if (youDiedAlpha > 0) {
       this._renderYouDied(ctx, cw, ch, youDiedAlpha);
     }
     } finally {
-      ctx.restore(); // restore game-world state
+      ctx.restore();
     }
   }
 
-  // ── Private helpers ─────────────────────────────────────────────────────────
-
-  /** Soft cloud/fog gradient that creeps in from all four edges on death. */
   private _renderEdgeClouds(ctx: CanvasRenderingContext2D, cw: number, ch: number, alpha: number): void {
     if (alpha <= 0) return;
     ctx.save();
 
-    // How far the fog reaches inward (roughly 35% of the smaller dimension)
     const reach = Math.min(cw, ch) * 0.38;
-
-    // Fog colour — dark smoke
     const fog  = (a: number) => `rgba(8, 4, 4, ${a * alpha})`;
     const fog2 = (a: number) => `rgba(18, 8, 8, ${a * alpha})`;
 
-    // Helper: draw one radial cloud blob
     const blob = (x: number, y: number, r: number, innerA: number) => {
       const g = ctx.createRadialGradient(x, y, 0, x, y, r);
       g.addColorStop(0,   fog(innerA));
@@ -610,12 +658,11 @@ export class RespawnScreen {
       ctx.fill();
     };
 
-    // Four edge bands — linear gradients from each edge inward
     const edges: [number, number, number, number][] = [
-      [0, 0, 0, reach],        // top
-      [0, ch, 0, ch - reach],  // bottom
-      [0, 0, reach, 0],        // left
-      [cw, 0, cw - reach, 0],  // right
+      [0, 0, 0, reach],
+      [0, ch, 0, ch - reach],
+      [0, 0, reach, 0],
+      [cw, 0, cw - reach, 0],
     ];
     for (const [x0, y0, x1, y1] of edges) {
       const g = ctx.createLinearGradient(x0, y0, x1, y1);
@@ -626,14 +673,12 @@ export class RespawnScreen {
       ctx.fillRect(0, 0, cw, ch);
     }
 
-    // Corner blobs for extra volume
     const cr = reach * 1.15;
     blob(0,  0,  cr, 0.75);
     blob(cw, 0,  cr, 0.75);
     blob(0,  ch, cr, 0.75);
     blob(cw, ch, cr, 0.75);
 
-    // Scattered mid-edge blobs to break up the uniform gradient
     blob(cw / 2, 0,  reach * 0.9, 0.55);
     blob(cw / 2, ch, reach * 0.9, 0.55);
     blob(0,  ch / 2, reach * 0.9, 0.55);
@@ -642,27 +687,23 @@ export class RespawnScreen {
     ctx.restore();
   }
 
-  /** Ornate nautical border frame drawn around the screen edges on death. */
   private _renderDeathBorder(ctx: CanvasRenderingContext2D, cw: number, ch: number, alpha: number): void {
     if (alpha <= 0) return;
     ctx.save();
     ctx.globalAlpha = alpha;
 
-    const M1 = 14;  // outer border inset (px)
-    const M2 = 30;  // inner border inset (px)
-    const D  = 12;  // corner diamond half-size
+    const M1 = 14;
+    const M2 = 30;
+    const D  = 12;
 
-    // Outer thick border — deep crimson
     ctx.strokeStyle = '#7a0010';
     ctx.lineWidth = 4;
     ctx.strokeRect(M1, M1, cw - M1 * 2, ch - M1 * 2);
 
-    // Inner thin border — dark amber
     ctx.strokeStyle = '#6b4a10';
     ctx.lineWidth = 1.5;
     ctx.strokeRect(M2, M2, cw - M2 * 2, ch - M2 * 2);
 
-    // Tick marks between the two border lines
     ctx.strokeStyle = '#4a0808';
     ctx.lineWidth = 1;
     const tick = 72;
@@ -675,7 +716,6 @@ export class RespawnScreen {
       ctx.beginPath(); ctx.moveTo(cw - M1 - 2, y); ctx.lineTo(cw - M2 + 2, y); ctx.stroke();
     }
 
-    // Corner diamond ornaments
     const corners: [number, number][] = [
       [M2, M2], [cw - M2, M2], [M2, ch - M2], [cw - M2, ch - M2],
     ];
@@ -691,51 +731,26 @@ export class RespawnScreen {
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
-      // Cross-hair through diamond
       ctx.strokeStyle = '#881122';
       ctx.lineWidth = 1;
       ctx.beginPath(); ctx.moveTo(cx - D * 0.55, cy); ctx.lineTo(cx + D * 0.55, cy); ctx.stroke();
       ctx.beginPath(); ctx.moveTo(cx, cy - D * 0.55); ctx.lineTo(cx, cy + D * 0.55); ctx.stroke();
-      // Centre dot
       ctx.fillStyle = '#ff4455';
       ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, Math.PI * 2); ctx.fill();
-    }
-
-    // Smaller diamond ornaments at mid-points of each side
-    const edgeMids: [number, number][] = [
-      [cw / 2, M2], [cw / 2, ch - M2],
-      [M2, ch / 2], [cw - M2, ch / 2],
-    ];
-    const dS = 7;
-    for (const [cx, cy] of edgeMids) {
-      ctx.fillStyle = '#220008';
-      ctx.strokeStyle = '#882233';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(cx,      cy - dS);
-      ctx.lineTo(cx + dS, cy);
-      ctx.lineTo(cx,      cy + dS);
-      ctx.lineTo(cx - dS, cy);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
     }
 
     ctx.restore();
   }
 
-  /** Large centered "YOU DIED" shown during the border phase; fades out as map appears. */
   private _renderYouDied(ctx: CanvasRenderingContext2D, cw: number, ch: number, alpha: number): void {
     if (alpha <= 0) return;
     ctx.save();
     ctx.globalAlpha = alpha;
 
     const cx = cw / 2;
-    // Top-center: sit just below the inner border line (~50px from top)
     const fontSize = Math.min(Math.round(cw * 0.11), 128);
     const cy = 50 + Math.round(fontSize * 0.8);
 
-    // Red glow pass
     ctx.save();
     ctx.shadowColor = '#ff0000';
     ctx.shadowBlur = 48;
@@ -745,7 +760,6 @@ export class RespawnScreen {
     ctx.fillText('YOU DIED', cx, cy);
     ctx.restore();
 
-    // Stroke + fill
     ctx.textAlign = 'center';
     ctx.font = `bold ${fontSize}px Georgia, serif`;
     ctx.strokeStyle = '#330000';
@@ -754,7 +768,6 @@ export class RespawnScreen {
     ctx.fillStyle = '#dd2233';
     ctx.fillText('YOU DIED', cx, cy);
 
-    // Subtitle
     ctx.font = '15px Georgia, serif';
     ctx.fillStyle = '#6e4650';
     ctx.fillText('Choose your respawn location', cx, cy + Math.round(fontSize * 0.55));
@@ -762,12 +775,10 @@ export class RespawnScreen {
     ctx.restore();
   }
 
-  /** Try to select a spawn option within ~20px of the click. Returns true if one was found. */
   private _trySelectNearClick(x: number, y: number): boolean {
     if (this.zoom === 0) return false;
     const wx = this.panX + (x - this._cw / 2) * this.zoom;
     const wy = this.panY + (y - this._ch / 2) * this.zoom;
-    // Threshold: 20 screen px converted to world units
     const threshold = 20 * this.zoom;
     let best: SpawnOption | null = null;
     let bestDist = threshold;

@@ -95,6 +95,7 @@ export interface Player {
   // Enhanced movement data from server (for reconciliation & debugging)
   isMoving?: boolean; // Is player actively moving (from hybrid protocol)
   movementDirection?: Vec2; // Server's stored movement direction (normalized)
+  movementState?: string; // Raw movement state string from server (e.g. 'swimming', 'WALKING')
 
   // Inventory
   inventory: PlayerInventory;
@@ -109,6 +110,8 @@ export interface Player {
   // Stamina
   stamina?: number;    // current stamina (absent = full)
   maxStamina?: number; // max stamina (default 100)
+  oxygen?: number;     // current oxygen (absent = full); depletes while swimming with 0 stamina
+  maxOxygen?: number;  // max oxygen (default 100)
 
   // Survival stats (0–100; 100 = full)
   hunger?: number;   // food level (absent = full)
@@ -465,6 +468,15 @@ export interface DroppedItem {
   x: number;
   y: number;
   remainingMs?: number; // milliseconds until this item despawns (5-min TTL)
+  /** Present when the drop is attached to a ship deck. */
+  shipId?: number;
+  deckLevel?: number;
+  /** Quality blueprint schematic — pickup adds to schematic inventory. */
+  isSchematic?: boolean;
+  crafts?: number;
+  tier?: number;
+  quality?: number;
+  stats?: number[];
 }
 
 /** A player-created company (id >= 100). */
@@ -517,7 +529,7 @@ export const PhysicsConfig = {
  * Module kinds that can be ghost-placed as planning markers.
  * Subset of ModuleKind — only buildable module types.
  */
-export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'chest' | 'bed';
+export type GhostModuleKind = 'plank' | 'cannon' | 'mast' | 'helm' | 'deck' | 'swivel' | 'ramp' | 'hatch_cover' | 'gunport' | 'workbench' | 'chest' | 'bed';
 
 /**
  * A client-local "ghost" placement — a translucent planning marker showing
