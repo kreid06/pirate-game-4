@@ -14806,16 +14806,10 @@ void websocket_server_tick(float dt) {
                 
                 // Check if player is on a ship
                 bool on_ship = (ws_player->parent_ship_id != 0);
-                SimpleShip* player_ship = NULL;
-                if (on_ship) {
-                    // Find the ship
-                    for (int s = 0; s < ship_count; s++) {
-                        if (ships[s].active && ships[s].ship_id == ws_player->parent_ship_id) {
-                            player_ship = &ships[s];
-                            break;
-                        }
-                    }
-                }
+                /* find_ship() uses the g_ship_by_id[] O(1) hash table for IDs < 512,
+                 * avoiding an O(ship_count) linear scan per player per tick. */
+                SimpleShip* player_ship = on_ship
+                    ? find_ship(ws_player->parent_ship_id) : NULL;
                 
                 // Auto-expire stale movement input: if no input received in 500ms, stop the player.
                 // This prevents "stuck key" when a keyup event is dropped (focus loss, network blip, etc.).
@@ -15490,12 +15484,11 @@ void websocket_server_tick(float dt) {
                                 ws_player->on_dock_id = 0;
                                 ws_player->movement_state = PLAYER_STATE_SWIMMING;
                             } else {
-                                float _inv_kg      = player_inventory_weight(ws_player);
-                                float _carry_cap   = 300.0f * (1.0f + (float)ws_player->stat_weight * 0.1f);
-                                float _carry_ratio = (_carry_cap > 0.0f) ? (_inv_kg / _carry_cap) : 0.0f;
-                                float _speed_mult  = fmaxf(0.3f, 1.0f - _carry_ratio * 0.5f);
+                                /* Reuse the inventory weight already hoisted above (same player,
+                                 * same tick — inventory does not change mid-tick). */
+                                float _speed_mult  = fmaxf(0.3f, 1.0f - _ws_carry_r * 0.5f);
                                 float walk_speed_client = SERVER_TO_CLIENT(WALK_MAX_SPEED) * _speed_mult;
-                                if (ws_player->is_sprinting && _carry_ratio < 0.85f) walk_speed_client *= 2.0f;
+                                if (ws_player->is_sprinting && _ws_sprint_ok) walk_speed_client *= 2.0f;
                                 /* Semi-authority: adopt client world position (speed-clamped) when fresh. */
                                 float new_x, new_y;
                                 ws_player_walk_target(ws_player, movement_x, movement_y,
