@@ -55,7 +55,7 @@ import { AudioManager } from './audio/AudioManager.js';
 import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS, computeInventoryWeight } from '../sim/Inventory.js';
-import { tierName, tierColor, itemDisplayName } from '../sim/Quality.js';
+import { tierName, tierColor, itemDisplayName, qualityCostMult } from '../sim/Quality.js';
 import { Vec2 } from '../common/Vec2.js';
 import { ModuleUtils, ShipModule, getModuleFootprint, footprintsOverlap } from '../sim/modules.js';
 import { createCurvedShipHull } from '../sim/ShipUtils.js';
@@ -219,8 +219,8 @@ export class ClientApplication {
   private buildMenuOpen = false;
   private ghostPlacements: GhostPlacement[] = [];
   private pendingGhostKind: GhostModuleKind | null = null;
-  /** Which resource pool to draw from when placing ship modules: 'ship' = ship chest, 'pack' = player pack. */
-  private _buildResourceSource: 'pack' | 'ship' | 'auto' = 'auto';
+  /** Which resource pool to draw from when placing ship modules. */
+  private _buildResourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto';
   /** Ship Plan Menu selection — only set by clicking a row in the left Plan Menu panel.
    *  Kept separate from pendingGhostKind (hotbar) so the two are mutually exclusive,
    *  mirroring how island uses pendingLandBuildKind vs buildSchematicKind. */
@@ -278,6 +278,8 @@ export class ClientApplication {
   private readonly AXE_COOLDOWN_MS = 1000; // matches server AXE_COOLDOWN_MS
   private lastPickaxeMs = 0;
   private readonly PICKAXE_COOLDOWN_MS = 1200; // matches server PICKAXE_COOLDOWN_MS
+  private readonly METAL_SICKLE_COOLDOWN_MS = 950; // matches server metal_sickle cooldown
+  private lastSickleMs = 0;
   /** True when combat mode is active (toggled with Z, or auto-enabled on first attack). */
   private combatMode = false;
   /** Timestamp of last combat action — used for the 10 s auto-disable timer. */
@@ -1365,6 +1367,25 @@ export class ClientApplication {
             this.renderSystem.notifySwordSwing(this.PICKAXE_COOLDOWN_MS * 0.92);
             return;
           }
+          // Metal sickle attack
+          if (activeItem === 'metal_sickle' && player && !player.isMounted) {
+            const now = performance.now();
+            if (now - this.lastSickleMs < this.METAL_SICKLE_COOLDOWN_MS) return;
+            if (!this.combatMode) {
+              this.combatMode = true;
+              this.lastCombatActionMs = now;
+              return;
+            }
+            this.lastSickleMs = now;
+            this.lastCombatActionMs = now;
+            const dir = target
+              ? Math.atan2(target.y - player.position.y, target.x - player.position.x)
+              : player.rotation;
+            this.networkManager.sendAction(action, target);
+            this.renderSystem.spawnSwordArc(player.position, dir, 34);
+            this.renderSystem.notifySwordSwing(this.METAL_SICKLE_COOLDOWN_MS);
+            return;
+          }
           // Pickaxe attack
           if (activeItem === 'pickaxe' && player && !player.isMounted) {
             const now = performance.now();
@@ -1462,9 +1483,10 @@ export class ClientApplication {
 
           // Pick up dropped items before demolish / structure / module interactions
           if (player) {
-            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
+            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(
+              RenderSystem.DROPPED_ITEM_PICKUP_RANGE, player);
             if (nearbyDrops.length > 0) {
-              this._pickupNearestDrop(nearbyDrops);
+              this._pickupNearestDrop(nearbyDrops, player);
               return;
             }
           }
@@ -1536,7 +1558,7 @@ export class ClientApplication {
             }
           }
 
-          // Harvest fiber: hover a fiber plant → press E (no tool required)
+          // Harvest fiber: hover a fiber plant → press E (metal sickle = faster harvest)
           // Falls back to proximity if no plant is hovered (handles cases where
           // a floor tile is placed over the bush and the cursor lands on it instead).
           if (player && player.carrierId === 0 && !this.combatMode) {
@@ -1950,8 +1972,7 @@ export class ClientApplication {
           // hovering a matching plan ghost, consume resources and start construction.
           const hoveredGhost = this.renderSystem.getHoveredLandGhost();
           if (hoveredGhost && this.buildSchematicKind === hoveredGhost.kind) {
-            const entry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === hoveredGhost.kind);
-            const cost = entry?.cost ?? [];
+            const cost = this._scaledLandBuildCost(hoveredGhost.kind);
 
             // Helper: total of an item — checks inventory.resources for bulk resources, slots for others
             const RES_KEYS = ['wood', 'fiber', 'metal', 'stone'];
@@ -2003,8 +2024,9 @@ export class ClientApplication {
             }
 
             // Send placement (starts at 10% HP), but do NOT remove the ghost plan yet
-            const gKind = hoveredGhost.kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
-            this.networkManager.sendPlaceStructure(gKind, hoveredGhost.worldPos.x, hoveredGhost.worldPos.y, hoveredGhost.rotation, true);
+            const gKind = hoveredGhost.kind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed';
+            const landBp = this.uiManager.playerMenu.getVariantForKind(hoveredGhost.kind) ?? undefined;
+            this.networkManager.sendPlaceStructure(gKind, hoveredGhost.worldPos.x, hoveredGhost.worldPos.y, hoveredGhost.rotation, true, landBp);
             // Removal of the ghost plan will happen only on STRUCTURE_PLACED confirmation
             console.log(`🏗️ [SCHEMATIC] Placed ${gKind} from plan — consumed resources (pending server confirmation)`);
             return;
@@ -2015,9 +2037,8 @@ export class ClientApplication {
           // real placement with resource check + consume + under_construction=true flag
           // (server places structure at 10% HP and regenerates to full over time).
           if (this.buildSchematicKind !== null) {
-            const sKind = this.buildSchematicKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag';
-            const sEntry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === sKind);
-            const sCost  = sEntry?.cost ?? [];
+            const sKind = this.buildSchematicKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed';
+            const sCost  = this._scaledLandBuildCost(sKind);
 
             const sRES_KEYS = ['wood', 'fiber', 'metal', 'stone'];
             const _haveItem2 = (item: string): number => {
@@ -2074,7 +2095,8 @@ export class ClientApplication {
               : (sKind === 'workbench' || sKind === 'shipyard' || sKind === 'cannon') ? this.islandBuildRotationDeg
               : sKind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
-            this.networkManager.sendPlaceStructure(this.applyWallVariant(sKind), sPos.x, sPos.y, sRot, true);
+            const landBp = this.uiManager.playerMenu.getVariantForKind(sKind) ?? undefined;
+            this.networkManager.sendPlaceStructure(this.applyWallVariant(sKind), sPos.x, sPos.y, sRot, true, landBp);
             console.log(`🏗️ [SCHEMATIC] Placed ${this.applyWallVariant(sKind)} @ (${sPos.x.toFixed(0)}, ${sPos.y.toFixed(0)}) rot=${sRot} — consumed resources`);
             return;
           }
@@ -2374,11 +2396,19 @@ export class ClientApplication {
         const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
         const pid = this.networkManager.getAssignedPlayerId();
         const player = ws?.players.find(p => p.id === pid);
-        if (!player?.carrierId) return; // only meaningful while on a ship
-        this._buildResourceSource = this._buildResourceSource === 'auto' ? 'ship'
-                                    : this._buildResourceSource === 'ship' ? 'pack' : 'auto';
-        this.uiManager.buildResourceSource = this._buildResourceSource;
-        console.log(`🏗️ [BUILD] Resource source → ${this._buildResourceSource}`);
+        if (!player?.carrierId) return;
+        const yardAvailable  = this._aggregateYardResources() !== null;
+        const chestAvailable = (this.uiManager.getShipChestResources?.() ?? null) !== null;
+        const order: Array<'auto' | 'yard' | 'ship' | 'pack'> = ['auto'];
+        if (yardAvailable)  order.push('yard');
+        if (chestAvailable) order.push('ship');
+        order.push('pack');
+        const idx  = order.indexOf(this._buildResourceSource);
+        const next = order[(idx + 1) % order.length];
+        this._buildResourceSource = next;
+        this.uiManager.buildResourceSource = next;
+        this.uiManager.markResourceSourceToggled();
+        console.log(`🏗️ [BUILD] Resource source → ${next}`);
       };
 
       // Right-click in build menu or island build mode: cancel ghost or remove nearest
@@ -3021,45 +3051,7 @@ export class ClientApplication {
 
       // Supply land-chest resources accessible from a nearby shipyard.
       // Only applies when the player is on a ship within range of a land shipyard.
-      this.uiManager.getShipyardResources = () => {
-        const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
-        if (!ws) return null;
-        const pid    = this.networkManager.getAssignedPlayerId();
-        const player = ws.players.find(p => p.id === pid);
-        if (!player?.carrierId) return null;
-        const ship = ws.ships.find(s => s.id === player.carrierId);
-        if (!ship) return null;
-
-        const YARD_RANGE_SQ = 500 * 500;
-        const structs = this.renderSystem.getPlacedStructures();
-
-        // Find shipyards within range of the ship
-        const nearYards = structs.filter(s => {
-          if (s.type !== 'shipyard') return false;
-          const dx = s.x - ship.position.x;
-          const dy = s.y - ship.position.y;
-          return dx * dx + dy * dy <= YARD_RANGE_SQ;
-        });
-        if (nearYards.length === 0) return null;
-
-        // Aggregate land chest resources near any of those shipyards
-        const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
-        let found = false;
-        for (const yard of nearYards) {
-          for (const s of structs) {
-            if (s.type !== 'chest' || !s.chestResources) continue;
-            const dx = s.x - yard.x;
-            const dy = s.y - yard.y;
-            if (dx * dx + dy * dy > YARD_RANGE_SQ) continue;
-            found = true;
-            totals.wood  += s.chestResources.wood  ?? 0;
-            totals.fiber += s.chestResources.fiber ?? 0;
-            totals.metal += s.chestResources.metal ?? 0;
-            totals.stone += s.chestResources.stone ?? 0;
-          }
-        }
-        return found ? totals : null;
-      };
+      this.uiManager.getShipyardResources = () => this._aggregateYardResources();
 
       // Inventory drag-and-drop swap
       this.uiManager.playerMenu.onSwapRequest = (fromSlot, toSlot) => {
@@ -3644,12 +3636,10 @@ export class ClientApplication {
 
       this.networkManager.onLandChestState = (structureId, chestRes, playerRes, readOnly) => {
         this.landChestMenu.updateChestResources(chestRes);
-        // Keep the cached placed-structure chest contents in sync. The server
-        // only sends land_chest_state to the acting client (no STRUCTURES
-        // rebroadcast), so without this the build resource panel / shipyard
-        // aggregation would show stale chest counts until a reconnect.
         this.renderSystem.updateStructureChestResources(structureId, chestRes);
-        if (!this.landChestMenu.visible) {
+        if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
+          this.shipyardMenu.updateResources(chestRes, playerRes);
+        } else if (!this.landChestMenu.visible) {
           this.landChestMenu.open(structureId, chestRes, readOnly);
         } else {
           this.landChestMenu.setReadOnly(readOnly ?? false);
@@ -3671,10 +3661,20 @@ export class ClientApplication {
         }
       };
 
-      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId, spawnerPlayerId) => {
+      this.shipyardMenu.onTransfer = (structureId, item, quantity, direction) => {
+        this.networkManager.sendLandChestTransfer(structureId, item, quantity, direction);
+      };
+
+      this.networkManager.onShipyardState = (structureId, phase, modulesPlaced, shipSpawned, scaffoldedShipId, spawnerPlayerId, yardResources, playerResources) => {
         this.renderSystem.updateShipyardConstruction(structureId, phase, modulesPlaced, scaffoldedShipId);
+        if (yardResources) {
+          this.renderSystem.updateStructureChestResources(structureId, yardResources);
+        }
         if (this.shipyardMenu.visible && this.shipyardMenu.structureId === structureId) {
           this.shipyardMenu.updateState(phase, modulesPlaced);
+          if (yardResources) {
+            this.shipyardMenu.updateResources(yardResources, playerResources);
+          }
         }
         // Don't auto-open the menu on broadcast — player opens it with E or
         // installs modules by clicking on the skeleton directly.
@@ -5043,7 +5043,7 @@ export class ClientApplication {
       if (this.islandBuildMode) {
         const activeSlotB = localPlayer?.inventory?.activeSlot ?? 0;
         const hotbarKind = localPlayer?.inventory?.slots[activeSlotB]?.item ?? 'wooden_floor';
-        const islandBuildKind = this.applyWallVariant(this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
+        const islandBuildKind = this.applyWallVariant(this.pendingLandBuildKind ?? hotbarKind) as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed';
         const _isWallContext = (this.buildSchematicKind === 'wall' || this.buildSchematicKind === 'door_frame'
           || this.pendingLandBuildKind === 'wall' || this.pendingLandBuildKind === 'door_frame'
           || islandBuildKind === 'wall' || islandBuildKind === 'door_frame');
@@ -5149,6 +5149,8 @@ export class ClientApplication {
       }
       // Shipyard construction menu
       if (this.shipyardMenu.visible) {
+        const yardRes = (localPlayer?.inventory as any)?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+        this.shipyardMenu.updatePlayerResources(yardRes);
         this.shipyardMenu.render(
           this.renderSystem.getContext(),
           this.canvas.width,
@@ -5906,7 +5908,7 @@ export class ClientApplication {
     // Island placement build mode — wooden_floor, workbench, or wall while not on a ship
     // Also activated when pendingLandBuildKind is set (via the land build panel)
     const islandItem = this.pendingLandBuildKind ?? activeItem;
-    const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag', 'chest']);
+    const LAND_BUILDABLE = new Set(['wooden_floor', 'workbench', 'wall', 'door_frame', 'door', 'shipyard', 'wood_ceiling', 'cannon', 'flag_fort', 'company_fortress', 'claim_flag', 'chest', 'bed']);
     const inIslandBuildMode = (player?.carrierId === 0) && LAND_BUILDABLE.has(islandItem);
     // Also active when a build schematic is selected in the hotbar (player may build from plan)
     const inSchematicBuildMode = (player?.carrierId === 0) && this.buildSchematicKind !== null;
@@ -5923,7 +5925,7 @@ export class ClientApplication {
       ? (inIslandBuildMode ? this.applyWallVariant(islandItem) : (inSchematicBuildMode ? this.applyWallVariant(this.buildSchematicKind!) : null))
       : null;
     this.renderSystem.setIslandBuildItem(
-      _previewKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null
+      _previewKind as 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed' | null
     );
     // Push build schematic kind to render system for ghost hover detection
     this.renderSystem.setBuildSchematicKind((player?.carrierId === 0) ? this.buildSchematicKind : null);
@@ -6253,10 +6255,94 @@ export class ClientApplication {
    * Returns true if resources were available and consumed, false (+ flashCancel) if not.
    */
   /** Read-only affordability check — same logic as _consumeShipBuildResources but no deduction. */
+  private _aggregateYardResources(): { wood: number; fiber: number; metal: number; stone: number } | null {
+    const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    if (!ws) return null;
+    const pid    = this.networkManager.getAssignedPlayerId();
+    const player = ws.players.find(p => p.id === pid);
+    if (!player?.carrierId) return null;
+    const ship = ws.ships.find(s => s.id === player.carrierId);
+    if (!ship) return null;
+
+    const YARD_RANGE_SQ = 500 * 500;
+    const structs = this.renderSystem.getPlacedStructures();
+    const nearYards = structs.filter(s => {
+      if (s.type !== 'shipyard') return false;
+      const dx = s.x - ship.position.x;
+      const dy = s.y - ship.position.y;
+      return dx * dx + dy * dy <= YARD_RANGE_SQ;
+    });
+    if (nearYards.length === 0) return null;
+
+    const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    let found = false;
+    for (const yard of nearYards) {
+      if (yard.chestResources) {
+        found = true;
+        totals.wood  += yard.chestResources.wood  ?? 0;
+        totals.fiber += yard.chestResources.fiber ?? 0;
+        totals.metal += yard.chestResources.metal ?? 0;
+        totals.stone += yard.chestResources.stone ?? 0;
+      }
+      for (const s of structs) {
+        if (s.type !== 'chest' || !s.chestResources) continue;
+        const dx = s.x - yard.x;
+        const dy = s.y - yard.y;
+        if (dx * dx + dy * dy > YARD_RANGE_SQ) continue;
+        found = true;
+        totals.wood  += s.chestResources.wood  ?? 0;
+        totals.fiber += s.chestResources.fiber ?? 0;
+        totals.metal += s.chestResources.metal ?? 0;
+        totals.stone += s.chestResources.stone ?? 0;
+      }
+    }
+    return found ? totals : null;
+  }
+
+  private _shipChestTotals(player: { carrierId: number }): { wood: number; fiber: number; metal: number; stone: number } | null {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const ship = ws?.ships.find(s => s.id === player.carrierId);
+    if (!ship) return null;
+    const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    let found = false;
+    for (const mod of ship.modules) {
+      if (mod.moduleData?.kind !== 'chest') continue;
+      found = true;
+      const d = mod.moduleData as { wood?: number; fiber?: number; metal?: number; stone?: number };
+      totals.wood  += d.wood  ?? 0;
+      totals.fiber += d.fiber ?? 0;
+      totals.metal += d.metal ?? 0;
+      totals.stone += d.stone ?? 0;
+    }
+    return found ? totals : null;
+  }
+
+  private _variantCostMult(kind: string): number {
+    const bp = this.uiManager.playerMenu.getVariantSchematic(kind);
+    return bp ? qualityCostMult(bp.tier) : 1;
+  }
+
+  private _scaledShipBuildCost(kind: GhostModuleKind): { wood: number; fiber: number; metal: number; stone: number } {
+    // Placement only — repair/NPC crew always use base BUILD_PANEL_ENTRIES costs.
+    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    const base = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const mult = this._variantCostMult(kind);
+    const scale = (n: number) => (n > 0 ? Math.max(n, Math.ceil(n * mult)) : 0);
+    return { wood: scale(base.wood), fiber: scale(base.fiber), metal: scale(base.metal), stone: scale(base.stone) };
+  }
+
+  private _scaledLandBuildCost(kind: string): Array<{ item: string; qty: number }> {
+    const entry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
+    if (!entry) return [];
+    const mult = this._variantCostMult(kind);
+    const scale = (n: number) => (n > 0 ? Math.max(n, Math.ceil(n * mult)) : 0);
+    return entry.cost.map(c => ({ item: c.item, qty: scale(c.qty) }));
+  }
+
   private _canAffordLandBuild(kind: string | null): boolean {
     if (!kind) return true;
-    const entry = UIManager.LAND_BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
-    if (!entry || !entry.cost.length) return true;
+    const cost = this._scaledLandBuildCost(kind);
+    if (!cost.length) return true;
     const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
     const playerId = this.networkManager.getAssignedPlayerId();
     const player = ws?.players.find(p => p.id === playerId);
@@ -6271,7 +6357,7 @@ export class ClientApplication {
       }
       return total;
     };
-    return entry.cost.every(({ item, qty }) => _have(item) >= qty);
+    return cost.every(({ item, qty }) => _have(item) >= qty);
   }
 
   private _canAffordShipBuild(kind: GhostModuleKind): boolean {
@@ -6279,27 +6365,102 @@ export class ClientApplication {
     const playerId = this.networkManager.getAssignedPlayerId();
     const player = ws?.players.find(p => p.id === playerId);
     if (!player) return false;
-    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
-    const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const cost = this._scaledShipBuildCost(kind);
     if (!cost.wood && !cost.fiber && !cost.metal && !cost.stone) return true;
 
-    if (this._buildResourceSource === 'ship' && player.carrierId) {
-      const ship = ws?.ships.find(s => s.id === player.carrierId);
-      if (!ship) return false;
-      const totals = { wood: 0, fiber: 0, metal: 0, stone: 0 };
-      for (const m of ship.modules.filter(mod => mod.moduleData?.kind === 'chest')) {
-        const d = m.moduleData as any;
-        totals.wood  += d.wood  ?? 0; totals.fiber += d.fiber ?? 0;
-        totals.metal += d.metal ?? 0; totals.stone += d.stone ?? 0;
-      }
-      return totals.wood >= cost.wood && totals.fiber >= cost.fiber
-          && totals.metal >= cost.metal && totals.stone >= cost.stone;
+    const src = this._buildResourceSource;
+    if (src === 'yard') {
+      const yard = this._aggregateYardResources();
+      if (!yard) return false;
+      return yard.wood >= cost.wood && yard.fiber >= cost.fiber
+          && yard.metal >= cost.metal && yard.stone >= cost.stone;
     }
-    // Pack / auto: check player resource pool
-    const res = (player.inventory as any).resources as Record<string, number> | undefined;
-    if (!res) return false;
-    return (res['wood']  ?? 0) >= cost.wood  && (res['fiber'] ?? 0) >= cost.fiber
-        && (res['metal'] ?? 0) >= cost.metal && (res['stone'] ?? 0) >= cost.stone;
+    if (src === 'ship' && player.carrierId) {
+      const chest = this._shipChestTotals(player);
+      if (!chest) return false;
+      return chest.wood >= cost.wood && chest.fiber >= cost.fiber
+          && chest.metal >= cost.metal && chest.stone >= cost.stone;
+    }
+    if (src === 'pack') {
+      const res = (player.inventory as any).resources as Record<string, number> | undefined;
+      if (!res) return false;
+      return (res['wood']  ?? 0) >= cost.wood  && (res['fiber'] ?? 0) >= cost.fiber
+          && (res['metal'] ?? 0) >= cost.metal && (res['stone'] ?? 0) >= cost.stone;
+    }
+    // auto: combined yard + ship chest + pack (matches server res_can_afford_combined)
+    const yard  = this._aggregateYardResources() ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const chest = player.carrierId ? (this._shipChestTotals(player) ?? { wood: 0, fiber: 0, metal: 0, stone: 0 }) : { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const res   = (player.inventory as any).resources as Record<string, number> | undefined;
+    const pack  = { wood: res?.wood ?? 0, fiber: res?.fiber ?? 0, metal: res?.metal ?? 0, stone: res?.stone ?? 0 };
+    const total = {
+      wood:  yard.wood  + chest.wood  + pack.wood,
+      fiber: yard.fiber + chest.fiber + pack.fiber,
+      metal: yard.metal + chest.metal + pack.metal,
+      stone: yard.stone + chest.stone + pack.stone,
+    };
+    return total.wood >= cost.wood && total.fiber >= cost.fiber
+        && total.metal >= cost.metal && total.stone >= cost.stone;
+  }
+
+  /** Drain up to `rem` from shipyard pools + nearby land chests; subtracts taken amounts from `rem`. */
+  private _drainYardPool(rem: { wood: number; fiber: number; metal: number; stone: number }): void {
+    const ws  = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const pid = this.networkManager.getAssignedPlayerId();
+    const player = ws?.players.find(p => p.id === pid);
+    if (!player?.carrierId || (!rem.wood && !rem.fiber && !rem.metal && !rem.stone)) return;
+    const ship = ws?.ships.find(s => s.id === player.carrierId);
+    if (!ship) return;
+
+    const YARD_RANGE_SQ = 500 * 500;
+    const structs = this.renderSystem.getPlacedStructures();
+    const take = (need: number, have: number) => Math.min(need, have);
+
+    for (const yard of structs) {
+      if (yard.type !== 'shipyard') continue;
+      const sdx = yard.x - ship.position.x;
+      const sdy = yard.y - ship.position.y;
+      if (sdx * sdx + sdy * sdy > YARD_RANGE_SQ) continue;
+      if (!yard.chestResources) yard.chestResources = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+      const y = yard.chestResources;
+      const tw = take(rem.wood,  y.wood);  y.wood  -= tw; rem.wood  -= tw;
+      const tf = take(rem.fiber, y.fiber); y.fiber -= tf; rem.fiber -= tf;
+      const tm = take(rem.metal, y.metal); y.metal -= tm; rem.metal -= tm;
+      const ts = take(rem.stone, y.stone); y.stone -= ts; rem.stone -= ts;
+      for (const chest of structs) {
+        if (chest.type !== 'chest' || !chest.chestResources) continue;
+        const dx = chest.x - yard.x;
+        const dy = chest.y - yard.y;
+        if (dx * dx + dy * dy > YARD_RANGE_SQ) continue;
+        const c = chest.chestResources;
+        const cw = take(rem.wood,  c.wood);  c.wood  -= cw; rem.wood  -= cw;
+        const cf = take(rem.fiber, c.fiber); c.fiber -= cf; rem.fiber -= cf;
+        const cm = take(rem.metal, c.metal); c.metal -= cm; rem.metal -= cm;
+        const cs = take(rem.stone, c.stone); c.stone -= cs; rem.stone -= cs;
+        if (!rem.wood && !rem.fiber && !rem.metal && !rem.stone) return;
+      }
+      if (!rem.wood && !rem.fiber && !rem.metal && !rem.stone) return;
+    }
+  }
+
+  /** Optimistically drain the full cost from yard pools (yard-only build source). */
+  private _deductYardResources(cost: { wood: number; fiber: number; metal: number; stone: number }): boolean {
+    const rem = { ...cost };
+    this._drainYardPool(rem);
+    return !rem.wood && !rem.fiber && !rem.metal && !rem.stone;
+  }
+
+  private _drainShipChestPool(rem: { wood: number; fiber: number; metal: number; stone: number }, carrierId: number): void {
+    const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+    const ship = ws?.ships.find(s => s.id === carrierId);
+    if (!ship) return;
+    for (const m of ship.modules.filter(mod => mod.moduleData?.kind === 'chest')) {
+      const d = m.moduleData as { wood?: number; fiber?: number; metal?: number; stone?: number };
+      const tw = Math.min(rem.wood,  d.wood  ?? 0); if (d.wood  !== undefined) d.wood  -= tw; rem.wood  -= tw;
+      const tf = Math.min(rem.fiber, d.fiber ?? 0); if (d.fiber !== undefined) d.fiber -= tf; rem.fiber -= tf;
+      const tm = Math.min(rem.metal, d.metal ?? 0); if (d.metal !== undefined) d.metal -= tm; rem.metal -= tm;
+      const ts = Math.min(rem.stone, d.stone ?? 0); if (d.stone !== undefined) d.stone -= ts; rem.stone -= ts;
+      if (!rem.wood && !rem.fiber && !rem.metal && !rem.stone) return;
+    }
   }
 
   private _consumeShipBuildResources(kind: GhostModuleKind): boolean {
@@ -6308,10 +6469,19 @@ export class ClientApplication {
     const player = ws?.players.find(p => p.id === playerId);
     if (!player) return false;
 
-    const entry = UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind);
-    const cost = entry?.cost ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+    const cost = this._scaledShipBuildCost(kind);
+    const src = this._buildResourceSource;
 
-    if (this._buildResourceSource === 'ship' && player.carrierId) {
+    if (src === 'yard') {
+      if (!this._canAffordShipBuild(kind)) {
+        this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        console.log(`❌ [SHIP BUILD] Yard needs for ${kind}`);
+        return false;
+      }
+      return this._deductYardResources(cost);
+    }
+
+    if (src === 'ship' && player.carrierId) {
       // ── Ship-chest source: aggregate resources across all chest modules ──
       const ship = ws?.ships.find(s => s.id === player.carrierId);
       if (!ship) return false;
@@ -6338,21 +6508,38 @@ export class ClientApplication {
         console.log(`❌ [SHIP BUILD] Ship chest needs for ${kind}: ${need.join(', ')}`);
         return false;
       }
-      // Optimistic client-side deduction from chest module data
       let remWood = cost.wood, remFiber = cost.fiber, remMetal = cost.metal, remStone = cost.stone;
       for (const m of chestMods) {
         const d = m.moduleData as any;
-        const take = (n: number, have: number) => { const t = Math.min(n, have); return t; };
-        const tw = take(remWood,  d.wood  ?? 0); d.wood  = (d.wood  ?? 0) - tw; remWood  -= tw;
-        const tf = take(remFiber, d.fiber ?? 0); d.fiber = (d.fiber ?? 0) - tf; remFiber -= tf;
-        const tm = take(remMetal, d.metal ?? 0); d.metal = (d.metal ?? 0) - tm; remMetal -= tm;
-        const ts = take(remStone, d.stone ?? 0); d.stone = (d.stone ?? 0) - ts; remStone -= ts;
+        const tw = Math.min(remWood,  d.wood  ?? 0); d.wood  = (d.wood  ?? 0) - tw; remWood  -= tw;
+        const tf = Math.min(remFiber, d.fiber ?? 0); d.fiber = (d.fiber ?? 0) - tf; remFiber -= tf;
+        const tm = Math.min(remMetal, d.metal ?? 0); d.metal = (d.metal ?? 0) - tm; remMetal -= tm;
+        const ts = Math.min(remStone, d.stone ?? 0); d.stone = (d.stone ?? 0) - ts; remStone -= ts;
         if (!remWood && !remFiber && !remMetal && !remStone) break;
       }
       return true;
     }
 
-    // ── Pack source (default): player's personal resource pool ──
+    if (src === 'auto') {
+      if (!this._canAffordShipBuild(kind)) {
+        this.renderSystem.flashCancel(this.inputManager.getMouseScreenPosition());
+        console.log(`❌ [SHIP BUILD] Combined pool needs for ${kind}`);
+        return false;
+      }
+      const rem = { ...cost };
+      this._drainYardPool(rem);
+      if (player.carrierId) this._drainShipChestPool(rem, player.carrierId);
+      const res = (player.inventory as any).resources as Record<string, number> | undefined;
+      if (res) {
+        res['wood']  = Math.max(0, (res['wood']  ?? 0) - rem.wood);
+        res['fiber'] = Math.max(0, (res['fiber'] ?? 0) - rem.fiber);
+        res['metal'] = Math.max(0, (res['metal'] ?? 0) - rem.metal);
+        res['stone'] = Math.max(0, (res['stone'] ?? 0) - rem.stone);
+      }
+      return true;
+    }
+
+    // ── Pack source: player's personal resource pool ──
     const res = (player.inventory as any).resources as Record<string, number> | undefined;
     if (!res) return false;
 
@@ -6506,8 +6693,10 @@ export class ClientApplication {
    */
   private _pickupNearestDrop(
     drops?: import('../sim/Types.js').DroppedItem[],
+    player?: import('../sim/Types.js').Player | null,
   ): boolean {
-    const nearby = drops ?? this.renderSystem.getDroppedItemsInRange(80);
+    const nearby = drops ?? this.renderSystem.getDroppedItemsInRange(
+      RenderSystem.DROPPED_ITEM_PICKUP_RANGE, player);
     if (nearby.length === 0) return false;
     const _di = nearby[0];
     if (_di.isSchematic) {
@@ -7102,11 +7291,19 @@ export class ClientApplication {
           }
           // Block all interactions while in any build mode
           if (this.buildMenuOpen || this.explicitBuildMode || this.landBuildMenuOpen) break;
+
+          const wsECheck = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+          const myIdECheck = this.networkManager.getAssignedPlayerId();
+          const meECheck = wsECheck
+            ? (myIdECheck !== null ? wsECheck.players.find(p => p.id === myIdECheck) : null) ?? wsECheck.players[0] ?? null
+            : null;
+
           if (e.repeat) {
             // Hold-E: check if we should open the item picker
-            if (this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {
+            if (meECheck && this._holdEDropTimer > 0 && Date.now() - this._holdEDropTimer >= 500) {
               this._holdEDropTimer = -1; // prevent repeated opens
-              const drops = this.renderSystem.getDroppedItemsInRange(80);
+              const drops = this.renderSystem.getDroppedItemsInRange(
+                RenderSystem.DROPPED_ITEM_PICKUP_RANGE, meECheck);
               if (drops.length > 1) {
                 this.uiManager.openDropPicker(drops);
               }
@@ -7114,18 +7311,14 @@ export class ClientApplication {
             break;
           }
 
-          const wsECheck = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
-          const myIdECheck = this.networkManager.getAssignedPlayerId();
-          const meECheck = wsECheck
-            ? (myIdECheck !== null ? wsECheck.players.find(p => p.id === myIdECheck) : null) ?? wsECheck.players[0] ?? null
-            : null;
           if (!meECheck) break;
 
           // Pick up dropped items — priority over demolish / structure / module radials
           {
-            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(80);
+            const nearbyDrops = this.renderSystem.getDroppedItemsInRange(
+              RenderSystem.DROPPED_ITEM_PICKUP_RANGE, meECheck);
             if (nearbyDrops.length === 1) {
-              this._pickupNearestDrop(nearbyDrops);
+              this._pickupNearestDrop(nearbyDrops, meECheck);
               this._suppressLadderInteract = true;
               this._dropPickupPending = false;
               e.preventDefault();
@@ -7873,8 +8066,11 @@ export class ClientApplication {
       this._ladderHoldWasMounted = false;
 
       // Quick tap with multiple nearby drops: pick nearest unless hold opened the picker
-      if (dropPickupPending && !this.uiManager.isDropPickerOpen()) {
-        this._pickupNearestDrop();
+      if (dropPickupPending && !this.uiManager.isDropPickerOpen) {
+        const ws = this.authoritativeWorldState || this.predictedWorldState || this.demoWorldState;
+        const myId = this.networkManager.getAssignedPlayerId();
+        const me = (myId !== null ? ws?.players.find(p => p.id === myId) : null) ?? ws?.players[0] ?? null;
+        this._pickupNearestDrop(undefined, me);
         return;
       }
 
@@ -7973,10 +8169,14 @@ export class ClientApplication {
             // Tap E on island cannon = mount
             doUse();
           } else if (structType === 'shipyard' && structId !== null) {
-            // Tap E on shipyard = open menu with current local state
             const cst = this.renderSystem.getShipyardConstruction(structId);
-            this.shipyardMenu.open(structId, cst?.phase ?? 'empty', cst?.modulesPlaced ?? []);
-            // Also request latest state from server to keep in sync
+            const yardStruct = this.renderSystem.getPlacedStructureById(structId);
+            const yardRes = yardStruct?.chestResources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+            const ws = this.authoritativeWorldState ?? this.predictedWorldState ?? this.demoWorldState;
+            const myId = this.networkManager.getAssignedPlayerId();
+            const myPlayer = ws && myId !== null ? ws.players.find(p => p.id === myId) : null;
+            const playerRes = myPlayer?.inventory.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+            this.shipyardMenu.open(structId, cst?.phase ?? 'empty', cst?.modulesPlaced ?? [], yardRes, playerRes);
             doUse();
           } else if (structType === 'door') {
             // Tap E on door: if locked by another company, flash cancel with feedback

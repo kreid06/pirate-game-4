@@ -414,7 +414,7 @@ interface PlacePlankMessage extends NetworkMessage {
   shipId: number;
   sectionName: string;
   segmentIndex: number;
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
   bp_index?: number;
 }
 
@@ -446,21 +446,21 @@ interface PlaceMastAtMessage extends NetworkMessage {
   shipId: number;
   localX: number;
   localY: number;
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
 }
 
 interface ReplaceHelmMessage extends NetworkMessage {
   type: MessageType.REPLACE_HELM;
   timestamp: number;
   shipId: number;
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
 }
 
 interface PlaceDeckMessage extends NetworkMessage {
   type: MessageType.PLACE_DECK;
   timestamp: number;
   deck_level?: number;
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
   bp_index?: number;
 }
 
@@ -470,7 +470,7 @@ interface PlaceRampMessage extends NetworkMessage {
   shipId: number;
   snapIndex: number;
   rotation: number;  // ramp facing in radians (0, π/2, π, 3π/2)
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
 }
 
 interface PlaceHatchCoverMessage extends NetworkMessage {
@@ -478,7 +478,7 @@ interface PlaceHatchCoverMessage extends NetworkMessage {
   timestamp: number;
   shipId: number;
   snapIndex: number;
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
 }
 
 interface PlaceGunportMessage extends NetworkMessage {
@@ -486,7 +486,7 @@ interface PlaceGunportMessage extends NetworkMessage {
   timestamp: number;
   shipId: number;
   snapIndex: number; // 0-11 (0-5 = starboard, 6-11 = port)
-  resource_source?: 'pack' | 'ship' | 'auto';
+  resource_source?: 'pack' | 'ship' | 'yard' | 'auto';
 }
 
 interface ToggleGunportMessage extends NetworkMessage {
@@ -569,6 +569,7 @@ interface PlaceStructureMessage extends NetworkMessage {
   y: number;
   rotation?: number;
   under_construction?: boolean;
+  bp_index?: number;
 }
 
 interface StructureInteractMessage extends NetworkMessage {
@@ -854,7 +855,16 @@ export class NetworkManager {
   /** Fired ≈1/s for each flag fort to resync its heal/contested state. */
   public onFlagFortBuildProgress: ((structId: number, hp: number, maxHp: number, contested: boolean, active: boolean, claimPhase: number, claimProgressMs: number, claimTotalMs: number, claimState: number, claimGraceMs: number, targetHp?: number) => void) | null = null;
   /** Fired when the server sends updated ship-construction state for a shipyard. */
-  public onShipyardState: ((structureId: number, phase: 'empty' | 'building', modulesPlaced: string[], shipSpawned?: number, scaffoldedShipId?: number, spawnerPlayerId?: number) => void) | null = null;
+  public onShipyardState: ((
+    structureId: number,
+    phase: 'empty' | 'building',
+    modulesPlaced: string[],
+    shipSpawned?: number,
+    scaffoldedShipId?: number,
+    spawnerPlayerId?: number,
+    yardResources?: { wood: number; fiber: number; metal: number; stone: number },
+    playerResources?: { wood: number; fiber: number; metal: number; stone: number },
+  ) => void) | null = null;
   /** Fired when a shipyard action is rejected (e.g. ship_limit, missing_materials). */
   public onShipyardActionFail: ((reason: string) => void) | null = null;
   /** Fired when the server sends land chest state (after E-key interact or after a transfer). */
@@ -1809,7 +1819,7 @@ export class NetworkManager {
    * Request the server to place a plank in a missing hull slot.
    * Server picks the first destroyed plank (100-109) and restores it, consuming 1 ITEM_PLANK.
    */
-  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
+  sendPlacePlank(shipId: number, sectionName: string, segmentIndex: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: PlacePlankMessage = { type: MessageType.PLACE_PLANK, timestamp: Date.now(), shipId, sectionName, segmentIndex, resource_source: resourceSource };
     if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
@@ -1898,10 +1908,11 @@ export class NetworkManager {
    * The server validates that the player is on an island, has the item, and for
    * workbench that a floor tile is close enough.
    */
-  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed', x: number, y: number, rotationDeg = 0, underConstruction = false): void {
+  sendPlaceStructure(structureType: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed', x: number, y: number, rotationDeg = 0, underConstruction = false, bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: PlaceStructureMessage = { type: MessageType.PLACE_STRUCTURE, timestamp: Date.now(), structure_type: structureType, x, y, rotation: rotationDeg };
     if (underConstruction) msg.under_construction = true;
+    if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
     this.sendMessage(msg);
   }
 
@@ -2038,7 +2049,7 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_CANNON from the player's inventory.
    */
-  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
+  sendPlaceCannonAt(shipId: number, localX: number, localY: number, rotation: number, snapIndex?: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CANNON_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
     if (snapIndex !== undefined && snapIndex >= 0 && snapIndex <= 11) msg.snapIndex = snapIndex;
@@ -2062,7 +2073,7 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates.
    * Consumes 1 ITEM_SAIL from the player's inventory.
    */
-  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
+  sendPlaceMastAt(shipId: number, localX: number, localY: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_MAST_AT, timestamp: Date.now(), shipId, localX, localY, resource_source: resourceSource };
     if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
@@ -2074,7 +2085,7 @@ export class NetworkManager {
    * localX/localY are ship-relative coordinates; rotation is in radians ship-relative.
    * Consumes 1 ITEM_SWIVEL from the player's inventory.
    */
-  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
+  sendPlaceSwivelAt(shipId: number, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_SWIVEL_AT, timestamp: Date.now(), shipId, localX, localY, rotation, resource_source: resourceSource };
     if (deckId !== undefined) msg.deckId = deckId;
@@ -2086,7 +2097,7 @@ export class NetworkManager {
    * Request the server to place a resource chest at a free position on the player's ship or on land.
    * Consumes 1 ITEM_RESOURCE_CHEST from the player's inventory.
    */
-  sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceChestAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_CHEST_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
     if (shipId !== null) msg.shipId = shipId;
@@ -2094,7 +2105,7 @@ export class NetworkManager {
     this.sendMessage(msg);
   }
 
-  sendPlaceBedAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceBedAt(shipId: number | null, localX: number, localY: number, rotation: number, deckId?: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = { type: MessageType.PLACE_BED_AT, timestamp: Date.now(), localX, localY, rotation, resource_source: resourceSource };
     if (shipId !== null) msg.shipId = shipId;
@@ -2108,7 +2119,7 @@ export class NetworkManager {
     localY: number,
     rotation: number,
     deckId?: number,
-    resourceSource: 'pack' | 'ship' | 'auto' = 'auto',
+    resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto',
   ): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: any = {
@@ -2166,7 +2177,7 @@ export class NetworkManager {
    * Request the server to replace the helm if it was destroyed.
    * Consumes 1 ITEM_HELM from the player's inventory.
    */
-  sendReplaceHelm(shipId: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendReplaceHelm(shipId: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.REPLACE_HELM, timestamp: Date.now(), shipId, resource_source: resourceSource });
   }
@@ -2175,7 +2186,7 @@ export class NetworkManager {
    * Request the server to place a missing deck module on the player's ship.
    * Consumes 1 ITEM_DECK from the player's inventory.
    */
-  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto', bpIndex?: number): void {
+  sendPlaceDeck(deckLevel: number = 0, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto', bpIndex?: number): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     const msg: PlaceDeckMessage = { type: MessageType.PLACE_DECK, timestamp: Date.now(), deck_level: deckLevel, resource_source: resourceSource };
     if (bpIndex !== undefined && bpIndex >= 0) msg.bp_index = bpIndex;
@@ -2186,7 +2197,7 @@ export class NetworkManager {
    * Request the server to place a ramp at the given snap-point index on the player's ship.
    * Consumes 1 ITEM_RAMP from the player's inventory.
    */
-  sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceRamp(shipId: number, snapIndex: number, rotation: number = 0, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_RAMP, timestamp: Date.now(), shipId, snapIndex, rotation, resource_source: resourceSource });
   }
@@ -2196,7 +2207,7 @@ export class NetworkManager {
    * Consumes 1 ITEM_WOOD_CEILING from the player's inventory.
    * Mutually exclusive with a ramp at the same snap point.
    */
-  sendPlaceHatchCover(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceHatchCover(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_HATCH_COVER, timestamp: Date.now(), shipId, snapIndex, resource_source: resourceSource });
   }
@@ -2205,7 +2216,7 @@ export class NetworkManager {
    * Request the server to place a gunport door at the given snap-point index (0-11) on the player's ship.
    * Consumes 1 ITEM_DOOR from the player's inventory.
    */
-  sendPlaceGunport(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'auto' = 'auto'): void {
+  sendPlaceGunport(shipId: number, snapIndex: number, resourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto'): void {
     if (this.connectionState !== ConnectionState.CONNECTED || !this.socket) return;
     this.sendMessage({ type: MessageType.PLACE_GUNPORT, timestamp: Date.now(), shipId, snapIndex, resource_source: resourceSource });
   }
@@ -3493,7 +3504,7 @@ export class NetworkManager {
           claimPhaseProgressMs:  typeof s.claim_progress_ms === 'number' && s.claim_phase === 0 ? s.claim_progress_ms : undefined,
           claimPhaseTotalMs:     typeof s.claim_total_ms === 'number' ? s.claim_total_ms : undefined,
           targetHp:              typeof s.target_hp === 'number' ? s.target_hp : undefined,
-          chestResources: s.structure_type === 'chest' ? {
+          chestResources: (s.structure_type === 'chest' || s.structure_type === 'shipyard') ? {
             wood:  s.chest_wood  ?? 0,
             fiber: s.chest_fiber ?? 0,
             metal: s.chest_metal ?? 0,
@@ -3554,7 +3565,7 @@ export class NetworkManager {
           claimPhaseProgressMs: typeof message.claim_progress_ms === 'number' && message.claim_phase === 0 ? message.claim_progress_ms : undefined,
           claimPhaseTotalMs:    typeof message.claim_total_ms === 'number' ? message.claim_total_ms : undefined,
           targetHp:             typeof message.target_hp === 'number' ? message.target_hp : undefined,
-          chestResources: message.structure_type === 'chest' ? {
+          chestResources: (message.structure_type === 'chest' || message.structure_type === 'shipyard') ? {
             wood:  message.chest_wood  ?? 0,
             fiber: message.chest_fiber ?? 0,
             metal: message.chest_metal ?? 0,
@@ -3876,7 +3887,23 @@ export class NetworkManager {
       case 'shipyard_state': {
         const phase = message.phase === 'building' ? 'building' : 'empty' as const;
         const modules: string[] = Array.isArray(message.modules_placed) ? message.modules_placed : [];
-        this.onShipyardState?.(message.structure_id ?? 0, phase, modules, message.ship_spawned, message.scaffolded_ship_id, message.spawner_player_id);
+        const yardResources = {
+          wood:  message.wood  ?? 0,
+          fiber: message.fiber ?? 0,
+          metal: message.metal ?? 0,
+          stone: message.stone ?? 0,
+        };
+        const playerResources = (message.player_wood != null) ? {
+          wood:  message.player_wood  ?? 0,
+          fiber: message.player_fiber ?? 0,
+          metal: message.player_metal ?? 0,
+          stone: message.player_stone ?? 0,
+        } : undefined;
+        this.onShipyardState?.(
+          message.structure_id ?? 0, phase, modules,
+          message.ship_spawned, message.scaffolded_ship_id, message.spawner_player_id,
+          yardResources, playerResources,
+        );
         break;
       }
 

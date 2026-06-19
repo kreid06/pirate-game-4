@@ -2,12 +2,13 @@
  * CraftingMenu.ts
  *
  * Canvas-drawn crafting panel opened when a player presses [E] near a workbench.
- * Features a left-side category sidebar (Weapons, Structures, Tools, Ship) and a
+ * Features a left-side category sidebar (Weapons, Tools) and a
  * scrollable recipe list for the active category.
  */
 
 import { type PlayerInventory, type ItemKind, ITEM_DEFS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon } from '../../sim/Inventory.js';
 import { type SchematicEntry, type ShipSchematicEntry, tierColor, tierName, statMultLabel, itemDisplayName, QUALITY_STAT_NAMES, schematicCraftCost } from '../../sim/Quality.js';
+import { UIManager } from './UIManager.js';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -224,6 +225,20 @@ const RECIPES: Recipe[] = [
     ],
   },
   {
+    id: 'craft_metal_sickle',
+    category: 'Tools',
+    outputName: 'Metal Sickle',
+    outputCount: 1,
+    symbol: '\uD83C\uDF3E',
+    color: '#6a9a70',
+    borderColor: '#3a6848',
+    ingredients: [
+      { label: 'Wood',  count: 2 },
+      { label: 'Metal', count: 10 },
+      { label: 'Fiber', count: 5 },
+    ],
+  },
+  {
     id: 'craft_grapple_hook',
     category: 'Tools',
     outputName: 'Grapple Hook',
@@ -354,10 +369,8 @@ const CONTENT_PAD = 10;
 const SCHEM_ROW_H = 102;
 
 const CATEGORIES: { id: Category; icon: string }[] = [
-  { id: 'Weapons',    icon: '⚔' },
-  { id: 'Tools',      icon: '⛏' },
-  { id: 'Ship',       icon: '⛵' },
-  { id: 'Schematics', icon: '📜' },
+  { id: 'Weapons', icon: '⚔' },
+  { id: 'Tools',   icon: '⛏' },
 ];
 
 /** Craft-tab sidebar for ship workbench — weapons/tools only (modules use schematics). */
@@ -376,6 +389,11 @@ const REPAIR_CATEGORIES: { id: string; itemId: number; label: string; icon: stri
   { id: 'helm',   itemId: 9,  label: 'Helm',   icon: '🎡' },
   { id: 'ramp',   itemId: 37, label: 'Ramp',   icon: '⟋' },
 ];
+
+/** Base ship-chest repair cost by item id — never tier-scaled (mirrors server MODULE_RES_COST). */
+const REPAIR_MODULE_KIND_BY_ITEM: Record<number, string> = {
+  1: 'plank', 13: 'deck', 7: 'cannon', 14: 'swivel', 8: 'mast', 9: 'helm', 37: 'ramp',
+};
 
 const TOP_TAB_H = 36;
 const REPAIR_POOL_SECTION_H = 220;
@@ -1358,7 +1376,7 @@ export class CraftingMenu {
     }
   }
 
-  /** Resource cost chips — green when affordable, red when short (mirrors server craft cost). */
+  /** Resource cost chips for blueprint crafting (tier-scaled). */
   private _drawSchematicCostChips(
     ctx: CanvasRenderingContext2D,
     entry: SchematicEntry,
@@ -1373,6 +1391,45 @@ export class CraftingMenu {
       { label: 'Fiber', cost: cost.fiber, have: resources?.fiber ?? 0 },
       { label: 'Metal', cost: cost.metal, have: resources?.metal ?? 0 },
       { label: 'Stone', cost: cost.stone, have: resources?.stone ?? 0 },
+    ].filter(c => c.cost > 0);
+    if (chips.length === 0) return;
+
+    ctx.font = '10px Georgia, serif';
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    let rx = x;
+    for (const c of chips) {
+      const ok = c.have >= c.cost;
+      const chip = `${c.cost}\u00d7 ${c.label}`;
+      const chipW = ctx.measureText(chip).width + 8;
+      if (rx + chipW > x + maxW) break;
+      ctx.fillStyle = ok ? 'rgba(40,100,40,0.55)' : 'rgba(120,30,30,0.55)';
+      ctx.beginPath();
+      ctx.roundRect(rx, y, chipW, 16, 3);
+      ctx.fill();
+      ctx.fillStyle = ok ? '#88ee88' : '#ee8888';
+      ctx.fillText(chip, rx + 4, y + 3);
+      rx += chipW + 4;
+    }
+  }
+
+  /** Base module repair cost from ship chest — never tier-scaled (mirrors server ship_chest_compute_repair_cost at 100% damage). */
+  private _drawModuleRepairCostChips(
+    ctx: CanvasRenderingContext2D,
+    itemId: number,
+    x: number,
+    y: number,
+    maxW: number,
+    resources?: { wood: number; fiber: number; metal: number; stone: number },
+  ): void {
+    const kind = REPAIR_MODULE_KIND_BY_ITEM[itemId];
+    const entry = kind ? UIManager.BUILD_PANEL_ENTRIES.find(e => e.kind === kind) : undefined;
+    if (!entry) return;
+    const chips: Array<{ label: string; cost: number; have: number }> = [
+      { label: 'Wood',  cost: entry.cost.wood,  have: resources?.wood  ?? 0 },
+      { label: 'Fiber', cost: entry.cost.fiber, have: resources?.fiber ?? 0 },
+      { label: 'Metal', cost: entry.cost.metal, have: resources?.metal ?? 0 },
+      { label: 'Stone', cost: entry.cost.stone, have: resources?.stone ?? 0 },
     ].filter(c => c.cost > 0);
     if (chips.length === 0) return;
 
@@ -1427,7 +1484,7 @@ export class CraftingMenu {
       ctx.fillText(`${entry.crafts} craft${entry.crafts === 1 ? '' : 's'} left`, x + 8, y + 24);
       this._drawSchematicStatLine(ctx, entry, x + 8, y + 38);
     }
-    this._drawSchematicCostChips(ctx, entry, x + 8, y + 54, w - (isDefault ? 8 : REPAIR_POOL_BTN_W) - 8, resources);
+    this._drawModuleRepairCostChips(ctx, entry.item, x + 8, y + 54, w - (isDefault ? 8 : REPAIR_POOL_BTN_W) - 8, resources);
 
     if (isDefault) return;
 
@@ -1505,7 +1562,7 @@ export class CraftingMenu {
     ctx.fillStyle = TEXT_DIM;
     ctx.fillText(`${entry.crafts} craft${entry.crafts === 1 ? '' : 's'} left`, x + 8, y + 24);
     this._drawSchematicStatLine(ctx, entry, x + 8, y + 38);
-    this._drawSchematicCostChips(ctx, entry, x + 8, y + 54, w - 56, resources);
+    this._drawModuleRepairCostChips(ctx, entry.item, x + 8, y + 54, w - 56, resources);
 
     ctx.font = '10px Georgia, serif';
     ctx.fillStyle = GREEN;

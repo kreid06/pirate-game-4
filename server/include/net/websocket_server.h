@@ -347,6 +347,7 @@ typedef enum {
     ITEM_METAL_AXE     = 40,  /* Metal axe — better yield/damage than the stone axe    */
     ITEM_METAL_PICKAXE = 41,  /* Metal pickaxe — better yield/damage than stone one    */
     ITEM_GRAPPLE_HOOK  = 42,  /* Grapple hook — workbench-crafted utility tool         */
+    ITEM_METAL_SICKLE  = 43,  /* Metal sickle — faster fiber harvest than bare hands   */
 
     /* ── Cloth armour set ──────────────────────────────────────────── */
     ITEM_CLOTH_HAT     = 30,  /* helm  slot — 5 armour  */
@@ -577,7 +578,7 @@ typedef struct {
 #define MAX_DOMINATORS 32
     uint32_t dominators[MAX_DOMINATORS];
     uint8_t  dominator_count;
-    /* ── Land chest storage (STRUCT_CHEST only) ─────────────────────────── */
+    /* ── Land chest / shipyard storage ──────────────────────────────────── */
 #define LAND_CHEST_MAX 8192
     uint16_t chest_wood;
     uint16_t chest_fiber;

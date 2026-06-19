@@ -19,7 +19,33 @@
 #define RESPAWN_MS_ROCK    180000u  /* 3 minutes */
 #define RESPAWN_MS_BOULDER 300000u  /* 5 minutes */
 
+#define HARVEST_BASE_WOOD_DAMAGE    10
+#define HARVEST_BASE_WOOD_YIELD     10
+#define HARVEST_BASE_FIBER_DAMAGE   10
+#define HARVEST_BASE_FIBER_YIELD     5
+#define HARVEST_BASE_ROCK_DAMAGE    10
+#define HARVEST_BASE_ROCK_YIELD      3
+#define HARVEST_BASE_STONE_DAMAGE   10
+#define HARVEST_BASE_STONE_YIELD     2
+#define HARVEST_BASE_BOULDER_DAMAGE 20
+#define HARVEST_BASE_BOULDER_YIELD   5
+#define FIBER_HARVEST_DAMAGE_SICKLE 25  /* 2.5× bare-hands damage */
+
+/* Metal axe/pickaxe: 1.5× damage → yield scales the same (same loot per HP). */
+#define HARVEST_METAL_TOOL_MULT_NUM  3
+#define HARVEST_METAL_TOOL_MULT_DEN  2
+
 /* ── Shared harvest helpers ─────────────────────────────────────────────── */
+
+/** Loot per swing scales with damage; total loot per node stays constant. */
+static int harvest_yield_for_damage(int damage, int base_damage, int base_yield) {
+    if (base_damage <= 0) return base_yield;
+    return (damage * base_yield + base_damage / 2) / base_damage;
+}
+
+static int harvest_metal_tool_damage(int base_damage) {
+    return (base_damage * HARVEST_METAL_TOOL_MULT_NUM) / HARVEST_METAL_TOOL_MULT_DEN;
+}
 
 const IslandDef *get_island_for_player(const WebSocketPlayer *player) {
     for (int i = 0; i < ISLAND_COUNT; i++) {
@@ -71,8 +97,6 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
                      "{\"type\":\"harvest_failure\",\"reason\":\"need_axe\"}");
             goto send_and_ret;
         }
-        /* Metal axe bonus: +5 extra wood per swing */
-        (void)equipped; /* referenced below at wood grant */
     }
 
     /* Stamina cost — if depleted, deal the cost as HP damage instead of blocking */
@@ -120,9 +144,14 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
 
     /* Deduct health from the resource and broadcast damage */
     {
+        uint8_t _aslot = player->inventory.active_slot;
+        bool metal_axe = (player->inventory.slots[_aslot].item == ITEM_METAL_AXE);
+        int wood_damage = metal_axe
+            ? harvest_metal_tool_damage(HARVEST_BASE_WOOD_DAMAGE)
+            : HARVEST_BASE_WOOD_DAMAGE;
+
         IslandResource *res = &isl->resources[best_ri];
-        const int WOOD_DAMAGE = 10;
-        res->health -= WOOD_DAMAGE;
+        res->health -= wood_damage;
         if (res->health < 0) res->health = 0;
         if (res->health == 0) {
             island_mark_tree_dead(isl, best_ri);
@@ -135,10 +164,15 @@ void handle_harvest_resource(WebSocketPlayer* player, struct WebSocketClient* cl
         websocket_server_broadcast(dmsg);
     }
 
-    /* Grant wood — metal axe yields 5 extra per swing */
+    /* Grant wood — yield tracks damage dealt */
     {
         uint8_t _aslot = player->inventory.active_slot;
-        int gross_wood = (player->inventory.slots[_aslot].item == ITEM_METAL_AXE) ? 15 : 10;
+        bool metal_axe = (player->inventory.slots[_aslot].item == ITEM_METAL_AXE);
+        int wood_damage = metal_axe
+            ? harvest_metal_tool_damage(HARVEST_BASE_WOOD_DAMAGE)
+            : HARVEST_BASE_WOOD_DAMAGE;
+        int gross_wood = harvest_yield_for_damage(wood_damage,
+            HARVEST_BASE_WOOD_DAMAGE, HARVEST_BASE_WOOD_YIELD);
         int net_wood = claim_apply_harvest_tax(player, player->x, player->y,
                                                gross_wood, ITEM_WOOD);
         if (net_wood <= 0) {
@@ -171,7 +205,7 @@ send_and_ret:;
 
 /**
  * Handle harvest_fiber: player presses E near a fiber plant.
- * Grants 5 ITEM_FIBER if a fiber resource node is within HARVEST_RANGE.
+ * Grants fiber proportional to damage dealt (bare hands or metal sickle).
  */
 void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* client) {
     char response[256];
@@ -202,8 +236,19 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
 
         /* Deduct health and broadcast */
         {
+            int active = player->inventory.active_slot;
+            ItemKind tool = (active >= 0 && active < INVENTORY_SLOTS)
+                ? player->inventory.slots[active].item : ITEM_NONE;
+            bool metal_sickle = (tool == ITEM_METAL_SICKLE
+                && player->inventory.slots[active].quantity > 0);
+            int fiber_damage = metal_sickle
+                ? FIBER_HARVEST_DAMAGE_SICKLE
+                : HARVEST_BASE_FIBER_DAMAGE;
+            int gross_fiber = harvest_yield_for_damage(fiber_damage,
+                HARVEST_BASE_FIBER_DAMAGE, HARVEST_BASE_FIBER_YIELD);
+
             IslandResource *res = &isl->resources[best_ri];
-            res->health -= 10;
+            res->health -= fiber_damage;
             if (res->health < 0) res->health = 0;
             if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_FIBER;
             char dmsg[160];
@@ -211,31 +256,34 @@ void handle_harvest_fiber(WebSocketPlayer* player, struct WebSocketClient* clien
                      "{\"type\":\"resource_damaged\",\"island_id\":%u,\"ri\":%d,\"ox\":%.1f,\"oy\":%.1f,\"hp\":%d,\"maxHp\":%d}",
                      player->on_island_id, best_ri, res->ox, res->oy, res->health, res->max_health);
             websocket_server_broadcast(dmsg);
-        }
-        int net_fiber = claim_apply_harvest_tax(player, player->x, player->y, 5, ITEM_FIBER);
-        if (net_fiber > 0) {
-            int new_fiber = (int)player->res_fiber + net_fiber;
-            if (new_fiber > 9999) new_fiber = 9999;
-            player->res_fiber = (uint16_t)new_fiber;
-        }
 
-        /* 10% chance to also grant 1 wood */
-        int bonus_wood = (rand() % 10 == 0) ? 1 : 0;
-        if (bonus_wood) {
-            int new_wood = (int)player->res_wood + 1;
-            if (new_wood > 9999) new_wood = 9999;
-            player->res_wood = (uint16_t)new_wood;
-        }
+            int net_fiber = claim_apply_harvest_tax(player, player->x, player->y, gross_fiber, ITEM_FIBER);
+            if (net_fiber > 0) {
+                int new_fiber = (int)player->res_fiber + net_fiber;
+                if (new_fiber > 9999) new_fiber = 9999;
+                player->res_fiber = (uint16_t)new_fiber;
+            }
 
-        player_apply_xp(player, PLAYER_XP_PER_FIBER_HARVEST);
-        log_info("🌿 Player %u gathered fiber → +%d fiber (pool=%u) +%u xp%s", player->player_id,
-                 net_fiber, player->res_fiber, PLAYER_XP_PER_FIBER_HARVEST, bonus_wood ? " +1 wood (bonus)" : "");
-        if (bonus_wood) {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_fiber_success\",\"fiber\":%d,\"wood\":1}", net_fiber);
-        } else {
-            snprintf(response, sizeof(response),
-                     "{\"type\":\"harvest_fiber_success\",\"fiber\":%d}", net_fiber);
+            /* 10% chance to also grant 1 wood */
+            int bonus_wood = (rand() % 10 == 0) ? 1 : 0;
+            if (bonus_wood) {
+                int new_wood = (int)player->res_wood + 1;
+                if (new_wood > 9999) new_wood = 9999;
+                player->res_wood = (uint16_t)new_wood;
+            }
+
+            player_apply_xp(player, PLAYER_XP_PER_FIBER_HARVEST);
+            log_info("🌿 Player %u gathered fiber → +%d fiber (pool=%u) +%u xp%s%s", player->player_id,
+                     net_fiber, player->res_fiber, PLAYER_XP_PER_FIBER_HARVEST,
+                     bonus_wood ? " +1 wood (bonus)" : "",
+                     metal_sickle ? " [metal sickle]" : "");
+            if (bonus_wood) {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"harvest_fiber_success\",\"fiber\":%d,\"wood\":1}", net_fiber);
+            } else {
+                snprintf(response, sizeof(response),
+                         "{\"type\":\"harvest_fiber_success\",\"fiber\":%d}", net_fiber);
+            }
         }
     }
 
@@ -314,10 +362,18 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
             goto send_rock_ret;
         }
 
+        int _pkactive = player->inventory.active_slot;
+        bool metal_pick = (player->inventory.slots[_pkactive].item == ITEM_METAL_PICKAXE);
+        int rock_damage = metal_pick
+            ? harvest_metal_tool_damage(HARVEST_BASE_ROCK_DAMAGE)
+            : HARVEST_BASE_ROCK_DAMAGE;
+        int rock_yield = harvest_yield_for_damage(rock_damage,
+            HARVEST_BASE_ROCK_DAMAGE, HARVEST_BASE_ROCK_YIELD);
+
         /* Deduct health and broadcast */
         {
             IslandResource *res = &isl->resources[best_ri];
-            res->health -= 10;
+            res->health -= rock_damage;
             if (res->health < 0) res->health = 0;
             if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_ROCK;
             char dmsg[160];
@@ -328,16 +384,13 @@ void handle_harvest_rock(WebSocketPlayer* player, struct WebSocketClient* client
         }
 
         {
-            int _pkactive = player->inventory.active_slot;
-            int rock_yield = (player->inventory.slots[_pkactive].item == ITEM_METAL_PICKAXE) ? 5 : 3;
             int new_metal = (int)player->res_metal + rock_yield;
             if (new_metal > 9999) new_metal = 9999;
             player->res_metal = (uint16_t)new_metal;
         }
 
         {
-            int _pkactive2 = player->inventory.active_slot;
-            int _ry = (player->inventory.slots[_pkactive2].item == ITEM_METAL_PICKAXE) ? 5 : 3;
+            int _ry = rock_yield;
             player_apply_xp(player, PLAYER_XP_PER_ROCK_HARVEST);
             log_info("⛏ Player %u mined rock → +%d metal (pool=%u) +%u xp", player->player_id, _ry, player->res_metal, PLAYER_XP_PER_ROCK_HARVEST);
             snprintf(response, sizeof(response),
@@ -382,10 +435,14 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
             goto send_stone_ret;
         }
 
+        const int stone_damage = HARVEST_BASE_STONE_DAMAGE;
+        const int gross_stone = harvest_yield_for_damage(stone_damage,
+            HARVEST_BASE_STONE_DAMAGE, HARVEST_BASE_STONE_YIELD);
+
         /* Deduct health and broadcast */
         {
             IslandResource *res = &isl->resources[best_ri];
-            res->health -= 10;
+            res->health -= stone_damage;
             if (res->health < 0) res->health = 0;
             char dmsg[160];
             snprintf(dmsg, sizeof(dmsg),
@@ -394,7 +451,7 @@ void handle_harvest_stone(WebSocketPlayer* player, struct WebSocketClient* clien
             websocket_server_broadcast(dmsg);
         }
 
-        int net_stone = claim_apply_harvest_tax(player, player->x, player->y, 2, ITEM_STONE);
+        int net_stone = claim_apply_harvest_tax(player, player->x, player->y, gross_stone, ITEM_STONE);
         if (net_stone > 0) {
             int new_stone = (int)player->res_stone + net_stone;
             if (new_stone > 9999) new_stone = 9999;
@@ -490,11 +547,18 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             goto send_boulder_ret;
         }
 
+        int _bpkact = player->inventory.active_slot;
+        bool metal_pick = (player->inventory.slots[_bpkact].item == ITEM_METAL_PICKAXE);
+        int boulder_damage = metal_pick
+            ? harvest_metal_tool_damage(HARVEST_BASE_BOULDER_DAMAGE)
+            : HARVEST_BASE_BOULDER_DAMAGE;
+        int boulder_yield = harvest_yield_for_damage(boulder_damage,
+            HARVEST_BASE_BOULDER_DAMAGE, HARVEST_BASE_BOULDER_YIELD);
+
         /* Deduct health and broadcast */
         {
             IslandResource *res = &isl->resources[best_ri];
-            const int BOULDER_DAMAGE = 20;
-            res->health -= BOULDER_DAMAGE;
+            res->health -= boulder_damage;
             if (res->health < 0) res->health = 0;
             if (res->health == 0) res->respawn_at_ms = get_time_ms() + RESPAWN_MS_BOULDER;
             char dmsg[160];
@@ -504,24 +568,22 @@ void handle_harvest_boulder(WebSocketPlayer* player, struct WebSocketClient* cli
             websocket_server_broadcast(dmsg);
         }
 
-        /* Grant stone or metal — metal pickaxe yields +3 extra */
-        int _bpkact = player->inventory.active_slot;
-        int boulder_bonus = (player->inventory.slots[_bpkact].item == ITEM_METAL_PICKAXE) ? 3 : 0;
         const char *item_name = (best_type == RES_BOULDER) ? "metal" : "stone";
         if (best_type == RES_BOULDER) {
-            int new_metal = (int)player->res_metal + 5 + boulder_bonus;
+            int new_metal = (int)player->res_metal + boulder_yield;
             if (new_metal > 9999) new_metal = 9999;
             player->res_metal = (uint16_t)new_metal;
         } else {
-            int new_stone = (int)player->res_stone + 5 + boulder_bonus;
+            int new_stone = (int)player->res_stone + boulder_yield;
             if (new_stone > 9999) new_stone = 9999;
             player->res_stone = (uint16_t)new_stone;
         }
 
         player_apply_xp(player, PLAYER_XP_PER_BOULDER_HARVEST);
-        log_info("⛏️  Player %u mined boulder → +5 %s +%u xp", player->player_id, item_name, PLAYER_XP_PER_BOULDER_HARVEST);
+        log_info("⛏️  Player %u mined boulder → +%d %s +%u xp",
+                 player->player_id, boulder_yield, item_name, PLAYER_XP_PER_BOULDER_HARVEST);
         snprintf(response, sizeof(response),
-                 "{\"type\":\"harvest_boulder_success\",\"%s\":5}", item_name);
+                 "{\"type\":\"harvest_boulder_success\",\"%s\":%d}", item_name, boulder_yield);
     }
 
 send_boulder_ret:;

@@ -242,7 +242,7 @@ export interface PlacedStructure {
    *  and never recovers; the auto-repair heals current `hp` up to `targetHp` (not maxHp).
    *  Render "REPAIRING" label whenever `hp < targetHp`. Defaults to maxHp when absent. */
   targetHp?: number;
-  /** Land chest resource storage (STRUCT_CHEST only). Present in STRUCTURES snapshot. */
+  /** Land chest / shipyard resource storage. Present for chest and shipyard types. */
   chestResources?: { wood: number; fiber: number; metal: number; stone: number };
   /** Shipwreck only: highest loot quality tier among remaining blueprints (0..6).
    *  Used to color the salvage glint. Absent when the wreck holds no blueprints. */

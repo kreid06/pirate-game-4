@@ -521,28 +521,48 @@ static void __attribute__((unused)) res_grant(WebSocketPlayer *p, int resource, 
 #define RES_METAL_ID 2
 #define RES_STONE_ID 3
 
-/** Returns true if the player has enough resources for `type`. */
-static bool res_can_afford(const WebSocketPlayer *p, ModuleTypeId type) {
-    if (!ship_module_cost_valid(type)) return true;
-    return p->res_wood  >= MODULE_RES_COST[type].wood
-        && p->res_fiber >= MODULE_RES_COST[type].fiber
-        && p->res_metal >= MODULE_RES_COST[type].metal
-        && p->res_stone >= MODULE_RES_COST[type].stone;
+/** Quality-scaled resource cost when placing from a schematic blueprint variant. */
+static float bp_placement_cost_mult(WebSocketPlayer *player, const char *payload, uint8_t expected_item) {
+    const char *_pbp = strstr(payload, "\"bp_index\":");
+    int _bpi = -1;
+    if (_pbp) sscanf(_pbp + 11, "%d", &_bpi);
+    if (_bpi >= 0 && _bpi < (int)player->schematic_count) {
+        PlayerBlueprint *_bp = &player->schematics[_bpi];
+        if (_bp->crafts_remaining > 0 && expected_item != ITEM_NONE && _bp->item == expected_item)
+            return quality_craft_cost_mult(quality_from_q8(_bp->quality.quality_q8));
+    }
+    return 1.0f;
 }
 
-/** Deducts the resource cost of `type` from the player's resource pool. */
-static void res_consume(WebSocketPlayer *p, ModuleTypeId type) {
-    if (!ship_module_cost_valid(type)) return;
-    p->res_wood  -= MODULE_RES_COST[type].wood;
-    p->res_fiber -= MODULE_RES_COST[type].fiber;
-    p->res_metal -= MODULE_RES_COST[type].metal;
-    p->res_stone -= MODULE_RES_COST[type].stone;
+static void module_placement_cost(WebSocketPlayer *player, const char *payload,
+                                  ModuleTypeId type, uint8_t expected_item,
+                                  ShipModuleResourceCost *out) {
+    /* Quality tier scaling applies to schematic placement only — not repair. */
+    module_compute_scaled_cost(type, bp_placement_cost_mult(player, payload, expected_item), out);
 }
 
-/** Returns true if player pack + ship chests + shipyard land chests together can afford `type`.
- *  Used when no specific resource group is selected (auto / combined mode). */
-static bool res_can_afford_combined(const WebSocketPlayer *p, const SimpleShip *s, ModuleTypeId type) {
-    if (!ship_module_cost_valid(type)) return true;
+/** Returns true if the player pack can afford `cost`. */
+static bool res_can_afford_cost(const WebSocketPlayer *p, const ShipModuleResourceCost *cost) {
+    if (!cost) return true;
+    return p->res_wood  >= cost->wood
+        && p->res_fiber >= cost->fiber
+        && p->res_metal >= cost->metal
+        && p->res_stone >= cost->stone;
+}
+
+/** Deducts `cost` from the player's resource pool. */
+static void res_consume_cost(WebSocketPlayer *p, const ShipModuleResourceCost *cost) {
+    if (!cost) return;
+    p->res_wood  -= cost->wood;
+    p->res_fiber -= cost->fiber;
+    p->res_metal -= cost->metal;
+    p->res_stone -= cost->stone;
+}
+
+/** Returns true if player pack + ship chests + shipyard land chests together can afford `cost`. */
+static bool res_can_afford_combined_cost(const WebSocketPlayer *p, const SimpleShip *s,
+                                         const ShipModuleResourceCost *cost) {
+    if (!cost) return true;
     uint32_t wood  = p->res_wood;
     uint32_t fiber = p->res_fiber;
     uint32_t metal = p->res_metal;
@@ -566,6 +586,11 @@ static bool res_can_afford_combined(const WebSocketPlayer *p, const SimpleShip *
             float sdx = s->x - placed_structures[si].x;
             float sdy = s->y - placed_structures[si].y;
             if (sdx*sdx + sdy*sdy > YR*YR) continue;
+            /* Shipyard's own resource pool */
+            wood  += placed_structures[si].chest_wood;
+            fiber += placed_structures[si].chest_fiber;
+            metal += placed_structures[si].chest_metal;
+            stone += placed_structures[si].chest_stone;
             for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
                 if (!placed_structures[ci].active) continue;
                 if (placed_structures[ci].type != STRUCT_CHEST) continue;
@@ -579,21 +604,21 @@ static bool res_can_afford_combined(const WebSocketPlayer *p, const SimpleShip *
             }
         }
     }
-    return wood  >= MODULE_RES_COST[type].wood
-        && fiber >= MODULE_RES_COST[type].fiber
-        && metal >= MODULE_RES_COST[type].metal
-        && stone >= MODULE_RES_COST[type].stone;
+    return wood  >= cost->wood
+        && fiber >= cost->fiber
+        && metal >= cost->metal
+        && stone >= cost->stone;
 }
 
-/** Deducts the cost of `type` in priority order: shipyard land chests → ship chests → player pack.
- *  Used when no specific resource group is selected (auto / combined mode). */
-static void res_consume_combined(WebSocketPlayer *p, SimpleShip *s, ModuleTypeId type) {
-    if (!ship_module_cost_valid(type)) return;
-    uint16_t need_wood  = MODULE_RES_COST[type].wood;
-    uint16_t need_fiber = MODULE_RES_COST[type].fiber;
-    uint16_t need_metal = MODULE_RES_COST[type].metal;
-    uint16_t need_stone = MODULE_RES_COST[type].stone;
-    /* 1. Drain shipyard land chests first */
+/** Deducts `cost` in priority order: shipyard land chests → ship chests → player pack. */
+static void res_consume_combined_cost(WebSocketPlayer *p, SimpleShip *s,
+                                      const ShipModuleResourceCost *cost) {
+    if (!cost) return;
+    uint16_t need_wood  = cost->wood;
+    uint16_t need_fiber = cost->fiber;
+    uint16_t need_metal = cost->metal;
+    uint16_t need_stone = cost->stone;
+    /* 1. Drain shipyard own pool, then nearby land chests */
     if (s) {
         const float YR = 50.0f;
         for (uint32_t si = 0; si < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); si++) {
@@ -602,6 +627,11 @@ static void res_consume_combined(WebSocketPlayer *p, SimpleShip *s, ModuleTypeId
             float sdx = s->x - placed_structures[si].x;
             float sdy = s->y - placed_structures[si].y;
             if (sdx*sdx + sdy*sdy > YR*YR) continue;
+            uint16_t take;
+            take = need_wood  <= placed_structures[si].chest_wood  ? need_wood  : placed_structures[si].chest_wood;  placed_structures[si].chest_wood  -= take; need_wood  -= take;
+            take = need_fiber <= placed_structures[si].chest_fiber ? need_fiber : placed_structures[si].chest_fiber; placed_structures[si].chest_fiber -= take; need_fiber -= take;
+            take = need_metal <= placed_structures[si].chest_metal ? need_metal : placed_structures[si].chest_metal; placed_structures[si].chest_metal -= take; need_metal -= take;
+            take = need_stone <= placed_structures[si].chest_stone ? need_stone : placed_structures[si].chest_stone; placed_structures[si].chest_stone -= take; need_stone -= take;
             for (uint32_t ci = 0; ci < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); ci++) {
                 if (!placed_structures[ci].active) continue;
                 if (placed_structures[ci].type != STRUCT_CHEST) continue;
@@ -633,6 +663,104 @@ static void res_consume_combined(WebSocketPlayer *p, SimpleShip *s, ModuleTypeId
     p->res_fiber -= need_fiber;
     p->res_metal -= need_metal;
     p->res_stone -= need_stone;
+}
+
+/** Sum shipyard + nearby land-chest resources within range of `s`. */
+static void yard_pool_totals(const SimpleShip *s,
+                             uint32_t *wood, uint32_t *fiber, uint32_t *metal, uint32_t *stone) {
+    *wood = *fiber = *metal = *stone = 0;
+    if (!s) return;
+    const float YR = 50.0f;
+    for (uint32_t si = 0; si < placed_structure_count; si++) {
+        if (!placed_structures[si].active) continue;
+        if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
+        float sdx = s->x - placed_structures[si].x;
+        float sdy = s->y - placed_structures[si].y;
+        if (sdx*sdx + sdy*sdy > YR*YR) continue;
+        *wood  += placed_structures[si].chest_wood;
+        *fiber += placed_structures[si].chest_fiber;
+        *metal += placed_structures[si].chest_metal;
+        *stone += placed_structures[si].chest_stone;
+        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
+            if (!placed_structures[ci].active) continue;
+            if (placed_structures[ci].type != STRUCT_CHEST) continue;
+            float cdx = placed_structures[ci].x - placed_structures[si].x;
+            float cdy = placed_structures[ci].y - placed_structures[si].y;
+            if (cdx*cdx + cdy*cdy > YR*YR) continue;
+            *wood  += placed_structures[ci].chest_wood;
+            *fiber += placed_structures[ci].chest_fiber;
+            *metal += placed_structures[ci].chest_metal;
+            *stone += placed_structures[ci].chest_stone;
+        }
+    }
+}
+
+/** Returns true if nearby shipyard land chests can afford `cost` alone. */
+static bool res_can_afford_yard_cost(const SimpleShip *s, const ShipModuleResourceCost *cost) {
+    if (!cost) return true;
+    uint32_t wood, fiber, metal, stone;
+    yard_pool_totals(s, &wood, &fiber, &metal, &stone);
+    return wood  >= cost->wood
+        && fiber >= cost->fiber
+        && metal >= cost->metal
+        && stone >= cost->stone;
+}
+
+/** Deducts `cost` from shipyard pools then nearby land chests only. */
+static void res_consume_yard_cost(SimpleShip *s, const ShipModuleResourceCost *cost) {
+    if (!cost || !s) return;
+    uint16_t need_wood  = cost->wood;
+    uint16_t need_fiber = cost->fiber;
+    uint16_t need_metal = cost->metal;
+    uint16_t need_stone = cost->stone;
+    const float YR = 50.0f;
+    for (uint32_t si = 0; si < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); si++) {
+        if (!placed_structures[si].active) continue;
+        if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
+        float sdx = s->x - placed_structures[si].x;
+        float sdy = s->y - placed_structures[si].y;
+        if (sdx*sdx + sdy*sdy > YR*YR) continue;
+        uint16_t take;
+        take = need_wood  <= placed_structures[si].chest_wood  ? need_wood  : placed_structures[si].chest_wood;  placed_structures[si].chest_wood  -= take; need_wood  -= take;
+        take = need_fiber <= placed_structures[si].chest_fiber ? need_fiber : placed_structures[si].chest_fiber; placed_structures[si].chest_fiber -= take; need_fiber -= take;
+        take = need_metal <= placed_structures[si].chest_metal ? need_metal : placed_structures[si].chest_metal; placed_structures[si].chest_metal -= take; need_metal -= take;
+        take = need_stone <= placed_structures[si].chest_stone ? need_stone : placed_structures[si].chest_stone; placed_structures[si].chest_stone -= take; need_stone -= take;
+        for (uint32_t ci = 0; ci < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); ci++) {
+            if (!placed_structures[ci].active) continue;
+            if (placed_structures[ci].type != STRUCT_CHEST) continue;
+            float cdx = placed_structures[ci].x - placed_structures[si].x;
+            float cdy = placed_structures[ci].y - placed_structures[si].y;
+            if (cdx*cdx + cdy*cdy > YR*YR) continue;
+            take = need_wood  <= placed_structures[ci].chest_wood  ? need_wood  : placed_structures[ci].chest_wood;  placed_structures[ci].chest_wood  -= take; need_wood  -= take;
+            take = need_fiber <= placed_structures[ci].chest_fiber ? need_fiber : placed_structures[ci].chest_fiber; placed_structures[ci].chest_fiber -= take; need_fiber -= take;
+            take = need_metal <= placed_structures[ci].chest_metal ? need_metal : placed_structures[ci].chest_metal; placed_structures[ci].chest_metal -= take; need_metal -= take;
+            take = need_stone <= placed_structures[ci].chest_stone ? need_stone : placed_structures[ci].chest_stone; placed_structures[ci].chest_stone -= take; need_stone -= take;
+        }
+    }
+}
+
+static bool module_place_can_afford(WebSocketPlayer *player, const char *payload,
+                                    SimpleShip *res_ship,
+                                    bool ship_only, bool pack_only, bool yard_only,
+                                    ModuleTypeId mod_type, uint8_t item_id) {
+    ShipModuleResourceCost pcost;
+    module_placement_cost(player, payload, mod_type, item_id, &pcost);
+    if (ship_only) return ship_chest_can_afford_cost(res_ship, &pcost);
+    if (pack_only) return res_can_afford_cost(player, &pcost);
+    if (yard_only) return res_can_afford_yard_cost(res_ship, &pcost);
+    return res_can_afford_combined_cost(player, res_ship, &pcost);
+}
+
+static void module_place_consume(WebSocketPlayer *player, const char *payload,
+                                 SimpleShip *res_ship,
+                                 bool ship_only, bool pack_only, bool yard_only,
+                                 ModuleTypeId mod_type, uint8_t item_id) {
+    ShipModuleResourceCost pcost;
+    module_placement_cost(player, payload, mod_type, item_id, &pcost);
+    if (ship_only)       ship_chest_consume_cost(res_ship, &pcost);
+    else if (pack_only)  res_consume_cost(player, &pcost);
+    else if (yard_only)  res_consume_yard_cost(res_ship, &pcost);
+    else                 res_consume_combined_cost(player, res_ship, &pcost);
 }
 
 /** Refund resources to a player for demolishing a ship module.
@@ -1795,6 +1923,7 @@ static const float ITEM_WEIGHT_KG[64] = {
     [40] = 3.0f,  // ITEM_METAL_AXE
     [41] = 4.0f,  // ITEM_METAL_PICKAXE
     [42] = 2.0f,  // ITEM_GRAPPLE_HOOK
+    [43] = 2.5f,  // ITEM_METAL_SICKLE
 };
 
 /** Body mass assumed for every player aboard (kg). */
@@ -5999,7 +6128,8 @@ int websocket_server_update(struct Sim* sim) {
                                             if (hqt >= 0) snprintf(hs_qt_extra, sizeof(hs_qt_extra), ",\"qt\":%d", hqt);
                                         }
                                         format_dominators_extra(&placed_structures[si], hs_dom_extra, sizeof(hs_dom_extra));
-                                        if (placed_structures[si].type == STRUCT_CHEST) {
+                                        if (placed_structures[si].type == STRUCT_CHEST
+                                            || placed_structures[si].type == STRUCT_SHIPYARD) {
                                             snprintf(hs_chest_extra, sizeof(hs_chest_extra),
                                                      ",\"chest_wood\":%u,\"chest_fiber\":%u,\"chest_metal\":%u,\"chest_stone\":%u",
                                                      (unsigned)placed_structures[si].chest_wood,
@@ -7249,6 +7379,12 @@ int websocket_server_update(struct Sim* sim) {
                                                     melee_cooldown_ms = 1100u;
                                                     melee_stamina     = 14u;
                                                     melee_label       = "metal_pickaxe";
+                                                } else if (cur_item == ITEM_METAL_SICKLE) {
+                                                    melee_damage      = 22.0f * (1.0f + 0.1f * (float)player->stat_damage);
+                                                    melee_range       = 34.0f;
+                                                    melee_cooldown_ms = 950u;
+                                                    melee_stamina     = 16u;
+                                                    melee_label       = "metal_sickle";
                                                 } else {
                                                     melee_damage      = 15.0f * (1.0f + 0.1f * (float)player->stat_damage);
                                                     melee_range       = 25.0f;
@@ -8173,10 +8309,11 @@ int websocket_server_update(struct Sim* sim) {
                                 } else {
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_DECK)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_DECK)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_DECK);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_DECK, ITEM_DECK);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -8217,9 +8354,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 sim_ship->modules[sim_ship->module_count++] = new_deck;
                                                 if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                                                     simple->modules[simple->module_count++] = new_deck;
-                                                if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_DECK);
-                                                else if (_pack_only)  res_consume(player, MODULE_TYPE_DECK);
-                                                else                  res_consume_combined(player, _res_ship, MODULE_TYPE_DECK);
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_DECK, ITEM_DECK);
                                                 /* Apply quality blueprint if the player chose a variant */
                                                 {
                                                     const char *_pbp = strstr(payload, "\"bp_index\":");
@@ -8393,10 +8530,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for ramp
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_RAMP)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_RAMP)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_RAMP);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_RAMP, ITEM_RAMP);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -8469,9 +8607,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 ramp_sim->modules[ramp_sim->module_count++]     = nr;
                                                 ramp_simple->modules[ramp_simple->module_count++] = nr;
 
-                                                if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_RAMP);
-                                                else if (_pack_only)  res_consume(player, MODULE_TYPE_RAMP);
-                                                else                  res_consume_combined(player, _res_ship, MODULE_TYPE_RAMP);
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_RAMP, ITEM_RAMP);
 
                                                 log_info("🪜 Player %u placed ramp %u (snap %d) on ship %u",
                                                          player->player_id, new_id, snap_index, ramp_sim->id);
@@ -8501,10 +8639,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for hatch cover
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_HATCH_COVER)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_HATCH_COVER)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_HATCH_COVER);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_HATCH_COVER, ITEM_WOOD_CEILING);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -8571,9 +8710,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 hatch_sim->modules[hatch_sim->module_count++]       = nh;
                                                 hatch_simple->modules[hatch_simple->module_count++] = nh;
 
-                                                if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_HATCH_COVER);
-                                                else if (_pack_only)  res_consume(player, MODULE_TYPE_HATCH_COVER);
-                                                else                  res_consume_combined(player, _res_ship, MODULE_TYPE_HATCH_COVER);
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_HATCH_COVER, ITEM_WOOD_CEILING);
 
                                                 log_info("🪟 Player %u placed hatch cover %u (snap %d) on ship %u",
                                                          player->player_id, new_id, snap_index, hatch_sim->id);
@@ -8603,10 +8742,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for gunport
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_GUNPORT)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_GUNPORT)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_GUNPORT);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_GUNPORT, ITEM_DOOR);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -8698,9 +8838,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 gp_sim->modules[gp_sim->module_count++]       = ng;
                                                 gp_simple->modules[gp_simple->module_count++] = ng;
 
-                                                if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_GUNPORT);
-                                                else if (_pack_only)  res_consume(player, MODULE_TYPE_GUNPORT);
-                                                else                  res_consume_combined(player, _res_ship, MODULE_TYPE_GUNPORT);
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_GUNPORT, ITEM_DOOR);
 
                                                 log_info("🔳 Player %u placed gunport %u (snap %d, x=%.1f y=%.1f) on ship %u",
                                                          player->player_id, new_id, snap_index,
@@ -8950,10 +9090,11 @@ int websocket_server_update(struct Sim* sim) {
                                     /* Check resources */
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_PLANK)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_PLANK)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_PLANK);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_PLANK, ITEM_PLANK);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -9032,9 +9173,9 @@ int websocket_server_update(struct Sim* sim) {
                                                     simple_ship->modules[simple_ship->module_count++] = new_plank;
                                                 ship_plank_clear_wreckage(simple_ship, missing_idx);
                                                 // Consume resources
-                                                if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_PLANK);
-                                                else if (_pack_only)  res_consume(player, MODULE_TYPE_PLANK);
-                                                else                  res_consume_combined(player, _res_ship, MODULE_TYPE_PLANK);
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_PLANK, ITEM_PLANK);
                                                 /* Apply quality blueprint if the player chose a variant */
                                                 {
                                                     const char *_pbp = strstr(payload, "\"bp_index\":");
@@ -9313,10 +9454,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for cannon
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_CANNON)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_CANNON)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_CANNON);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_CANNON, ITEM_CANNON);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -9490,9 +9632,9 @@ int websocket_server_update(struct Sim* sim) {
                                             }
 
                                             // Consume resources
-                                            if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_CANNON);
-                                            else if (_pack_only)  res_consume(player, MODULE_TYPE_CANNON);
-                                            else                  res_consume_combined(player, _res_ship, MODULE_TYPE_CANNON);
+                                            module_place_consume(player, payload, _res_ship,
+                                                _ship_only, _pack_only, _yard_only,
+                                                MODULE_TYPE_CANNON, ITEM_CANNON);
 
                                             // Trigger NPC cannon sector re-dispatch so on-duty gunners
                                             // can immediately adopt the newly placed cannon if it is
@@ -9526,10 +9668,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for mast
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_MAST)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_MAST)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_MAST);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_MAST, ITEM_SAIL);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -9610,9 +9753,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
 
-                                            if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_MAST);
-                                            else if (_pack_only)  res_consume(player, MODULE_TYPE_MAST);
-                                            else                  res_consume_combined(player, _res_ship, MODULE_TYPE_MAST);
+                                            module_place_consume(player, payload, _res_ship,
+                                                _ship_only, _pack_only, _yard_only,
+                                                MODULE_TYPE_MAST, ITEM_SAIL);
 
                                             log_info("⛵ Player %u placed mast %u at (%.1f,%.1f) on ship %u",
                                                      player->player_id, new_id, local_x, local_y, sim_ship->id);
@@ -9641,10 +9784,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for swivel
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_SWIVEL)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_SWIVEL)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_SWIVEL);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_SWIVEL, ITEM_SWIVEL);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -9741,9 +9885,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 }
                                             }
 
-                                            if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_SWIVEL);
-                                            else if (_pack_only)  res_consume(player, MODULE_TYPE_SWIVEL);
-                                            else                  res_consume_combined(player, _res_ship, MODULE_TYPE_SWIVEL);
+                                            module_place_consume(player, payload, _res_ship,
+                                                _ship_only, _pack_only, _yard_only,
+                                                MODULE_TYPE_SWIVEL, ITEM_SWIVEL);
 
                                             log_info("🔫 Player %u placed swivel %u at (%.1f,%.1f) rot=%.2f on ship %u",
                                                      player->player_id, new_id, local_x, local_y, rotation, sw_sim->id);
@@ -9968,10 +10112,11 @@ int websocket_server_update(struct Sim* sim) {
                                     // Resource check for helm
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_HELM)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_HELM)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_HELM);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_HELM, ITEM_HELM);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -10018,9 +10163,9 @@ int websocket_server_update(struct Sim* sim) {
                                                 // (used by NPC helmsmen) can see the new helm.
                                                 if (simple && simple->module_count < MAX_MODULES_PER_SHIP)
                                                     simple->modules[simple->module_count++] = *nh;
-                                                if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_HELM);
-                                                else if (_pack_only)  res_consume(player, MODULE_TYPE_HELM);
-                                                else                  res_consume_combined(player, _res_ship, MODULE_TYPE_HELM);
+                                                module_place_consume(player, payload, _res_ship,
+                                                    _ship_only, _pack_only, _yard_only,
+                                                    MODULE_TYPE_HELM, ITEM_HELM);
                                                 log_info("🔧 Player %u replaced helm %u on ship %u",
                                                          player->player_id, MID(seq, MODULE_OFFSET_HELM), sim_ship->id);
                                                 snprintf(response, sizeof(response),
@@ -10047,10 +10192,11 @@ int websocket_server_update(struct Sim* sim) {
                                 } else {
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_WORKBENCH)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_WORKBENCH)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_WORKBENCH);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_WORKBENCH, ITEM_WORKBENCH);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -10107,9 +10253,9 @@ int websocket_server_update(struct Sim* sim) {
                                         wb_sim->modules[wb_sim->module_count++]       = nw;
                                         wb_simple->modules[wb_simple->module_count++] = nw;
 
-                                        if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_WORKBENCH);
-                                        else if (_pack_only)  res_consume(player, MODULE_TYPE_WORKBENCH);
-                                        else                  res_consume_combined(player, _res_ship, MODULE_TYPE_WORKBENCH);
+                                        module_place_consume(player, payload, _res_ship,
+                                            _ship_only, _pack_only, _yard_only,
+                                            MODULE_TYPE_WORKBENCH, ITEM_WORKBENCH);
 
                                         log_info("🔨 Player %u placed workbench %u at (%.1f,%.1f) rot=%.2f deck=%u on ship %u",
                                                  player->player_id, new_id, local_x, local_y,
@@ -10136,10 +10282,11 @@ int websocket_server_update(struct Sim* sim) {
                                 } else {
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_CHEST)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_CHEST)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_CHEST);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_CHEST, ITEM_NONE);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -10194,9 +10341,9 @@ int websocket_server_update(struct Sim* sim) {
                                         ch_sim->modules[ch_sim->module_count++]       = nch;
                                         ch_simple->modules[ch_simple->module_count++] = nch;
 
-                                        if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_CHEST);
-                                        else if (_pack_only)  res_consume(player, MODULE_TYPE_CHEST);
-                                        else                  res_consume_combined(player, _res_ship, MODULE_TYPE_CHEST);
+                                        module_place_consume(player, payload, _res_ship,
+                                            _ship_only, _pack_only, _yard_only,
+                                            MODULE_TYPE_CHEST, ITEM_NONE);
 
                                         log_info("📦 Player %u placed chest %u at (%.1f,%.1f) deck=%u on ship %u",
                                                  player->player_id, new_id, local_x, local_y,
@@ -10223,10 +10370,11 @@ int websocket_server_update(struct Sim* sim) {
                                 } else {
                                     bool _ship_only = strstr(payload, "\"resource_source\":\"ship\"") != NULL;
                                     bool _pack_only = strstr(payload, "\"resource_source\":\"pack\"") != NULL;
+                                    bool _yard_only = strstr(payload, "\"resource_source\":\"yard\"") != NULL;
                                     SimpleShip* _res_ship = (!_pack_only) ? find_ship(player->parent_ship_id) : NULL;
-                                    bool _res_ok = _ship_only ? ship_chest_can_afford(_res_ship, MODULE_TYPE_BED)
-                                                 : _pack_only ? res_can_afford(player, MODULE_TYPE_BED)
-                                                 :              res_can_afford_combined(player, _res_ship, MODULE_TYPE_BED);
+                                    bool _res_ok = module_place_can_afford(player, payload, _res_ship,
+                                                 _ship_only, _pack_only, _yard_only,
+                                                 MODULE_TYPE_BED, ITEM_BED);
                                     if (!_res_ok) {
                                         strcpy(response, "{\"type\":\"error\",\"message\":\"insufficient_resources\"}");
                                     } else if (!global_sim) {
@@ -10283,9 +10431,9 @@ int websocket_server_update(struct Sim* sim) {
                                             bd_sim->modules[bd_sim->module_count++]       = nbd;
                                             bd_simple->modules[bd_simple->module_count++] = nbd;
 
-                                            if (_ship_only)       ship_chest_consume(_res_ship, MODULE_TYPE_BED);
-                                            else if (_pack_only)  res_consume(player, MODULE_TYPE_BED);
-                                            else                  res_consume_combined(player, _res_ship, MODULE_TYPE_BED);
+                                            module_place_consume(player, payload, _res_ship,
+                                                _ship_only, _pack_only, _yard_only,
+                                                MODULE_TYPE_BED, ITEM_BED);
 
                                             recalc_ship_mass(bd_simple);
                                             log_info("🛏️  Player %u placed bed %u at (%.1f,%.1f) rot=%.2f deck=%u on ship %u",
@@ -12697,7 +12845,8 @@ int websocket_server_update(struct Sim* sim) {
                                             if (qt >= 0) snprintf(qt_extra_s, sizeof(qt_extra_s), ",\"qt\":%d", qt);
                                         }
                                         format_dominators_extra(&placed_structures[si], dom_extra_s, sizeof(dom_extra_s));
-                                        if (placed_structures[si].type == STRUCT_CHEST) {
+                                        if (placed_structures[si].type == STRUCT_CHEST
+                                            || placed_structures[si].type == STRUCT_SHIPYARD) {
                                             snprintf(chest_extra_s, sizeof(chest_extra_s),
                                                      ",\"chest_wood\":%u,\"chest_fiber\":%u,\"chest_metal\":%u,\"chest_stone\":%u",
                                                      (unsigned)placed_structures[si].chest_wood,
@@ -12857,7 +13006,8 @@ int websocket_server_update(struct Sim* sim) {
                                         if (gqt >= 0) snprintf(gs_qt_extra, sizeof(gs_qt_extra), ",\"qt\":%d", gqt);
                                     }
                                     format_dominators_extra(&placed_structures[si], gs_dom_extra, sizeof(gs_dom_extra));
-                                    if (placed_structures[si].type == STRUCT_CHEST) {
+                                    if (placed_structures[si].type == STRUCT_CHEST
+                                        || placed_structures[si].type == STRUCT_SHIPYARD) {
                                         snprintf(gs_chest_extra, sizeof(gs_chest_extra),
                                                  ",\"chest_wood\":%u,\"chest_fiber\":%u,\"chest_metal\":%u,\"chest_stone\":%u",
                                                  (unsigned)placed_structures[si].chest_wood,

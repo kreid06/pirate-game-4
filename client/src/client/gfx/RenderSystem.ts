@@ -1038,6 +1038,8 @@ export class RenderSystem {
   private _cachedCompanies: Company[] = [];
   /** Dropped items in the world (player-dropped inventory items). */
   private _droppedItems: import('../../sim/Types').DroppedItem[] = [];
+  /** Pickup radius — matches server handle_pickup_item distance check. */
+  static readonly DROPPED_ITEM_PICKUP_RANGE = 80;
   /** Maps scaffolded ship entity IDs to the shipyard structure that owns them. */
   private _scaffoldedShips: Map<number, PlacedStructure> = new Map();
   /** Structure currently under the cursor (within hover range of the local player). */
@@ -1085,7 +1087,7 @@ export class RenderSystem {
     ox: number; oy: number; size: number;
   }> = [];
   /** When non-null, draw an island placement ghost at mouseWorldPos for this item kind. */
-  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null = null;
+  private islandBuildKind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed' | null = null;
   /** Active Build Schematic Hotbar selection — used to detect ghost plan hover for construction. */
   private buildSchematicKind: string | null = null;
   /** Rotation (degrees) applied to the island floor/workbench placement ghost. */
@@ -1625,9 +1627,9 @@ export class RenderSystem {
       { ox:  85, oy: -25, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
       { ox:  15, oy:  80, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
       { ox: -90, oy:  38, type: 'wood'  as const, size: 1.0, hp: 100, maxHp: 100 },
-      { ox:  45, oy: -78, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
-      { ox: -28, oy:  32, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
-      { ox:  70, oy:  50, type: 'fiber' as const, size: 1.0, hp:  30, maxHp:  30 },
+      { ox:  45, oy: -78, type: 'fiber' as const, size: 1.0, hp: 150, maxHp: 150 },
+      { ox: -28, oy:  32, type: 'fiber' as const, size: 1.0, hp: 150, maxHp: 150 },
+      { ox:  70, oy:  50, type: 'fiber' as const, size: 1.0, hp: 150, maxHp: 150 },
     ],
   };
 
@@ -3542,7 +3544,7 @@ export class RenderSystem {
     id: number,
     res: { wood: number; fiber: number; metal: number; stone: number },
   ): void {
-    const s = this.placedStructures.find(p => p.id === id && p.type === 'chest');
+    const s = this.placedStructures.find(p => p.id === id && (p.type === 'chest' || p.type === 'shipyard'));
     if (!s) return;
     s.chestResources = { wood: res.wood, fiber: res.fiber, metal: res.metal, stone: res.stone };
   }
@@ -3688,7 +3690,7 @@ export class RenderSystem {
   }
 
   /** Activate island placement ghost for wooden_floor, workbench, wall, door, shipyard, wood_ceiling, cannon, or clear it. */
-  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | null): void {
+  setIslandBuildItem(kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed' | null): void {
     this.islandBuildKind = kind;
   }
 
@@ -3948,7 +3950,7 @@ export class RenderSystem {
       });
     }
 
-    if (kind === 'workbench' || kind === 'cannon') {
+    if (kind === 'workbench' || kind === 'cannon' || kind === 'chest') {
       return bases.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -3957,6 +3959,21 @@ export class RenderSystem {
         const ly = dx * Math.sin(-rad) + dy * Math.cos(-rad);
         return Math.abs(lx) <= HALF && Math.abs(ly) <= HALF;
       });
+    }
+
+    if (kind === 'bed') {
+      const onFloor = bases.some(s => {
+        if (s.type !== 'wooden_floor') return false;
+        const rad = (s.rotation ?? 0) * Math.PI / 180;
+        const dx = px - s.x, dy = py - s.y;
+        const lx = dx * Math.cos(-rad) - dy * Math.sin(-rad);
+        const ly = dx * Math.sin(-rad) + dy * Math.cos(-rad);
+        return Math.abs(lx) <= HALF && Math.abs(ly) <= HALF;
+      });
+      if (!onFloor) return false;
+      return !bases.some(s =>
+        s.type === 'bed' && Math.hypot(s.x - px, s.y - py) < 30
+      );
     }
 
     if (kind === 'door') {
@@ -4277,34 +4294,54 @@ export class RenderSystem {
     return 'world';
   }
 
-  /** Whether the local player can pick up / interact with a dropped item (same deck on ships). */
-  private _canPickupDroppedItem(d: import('../../sim/Types').DroppedItem): boolean {
-    const bucket = this._droppedItemBucket(d);
-    if (!bucket) return false;
-    if (d.shipId && d.deckLevel !== undefined && d.deckLevel !== this._playerDeckLevel) return false;
-    return true;
+  /** Whether the local player can pick up a drop (deck/location rules only — no cursor hover). */
+  private _canPlayerPickupDrop(
+    d: import('../../sim/Types').DroppedItem,
+    player: import('../../sim/Types').Player,
+  ): boolean {
+    const deck = typeof player.deckId === 'number'
+      ? (player.deckId === 0 ? 0 : 1)
+      : this._playerDeckLevel;
+    if (d.shipId) {
+      if (player.carrierId !== d.shipId) return false;
+      if (d.deckLevel !== undefined && d.deckLevel !== deck) return false;
+      return true;
+    }
+    return player.carrierId === 0;
   }
 
   /**
-   * Returns all dropped items within `range` px of the local player.
-   * Items are returned sorted nearest-first.
+   * Returns dropped items within `range` px of the player (proximity — cursor hover not required).
+   * Sorted nearest-first. Pass `player` from world state when calling outside the render pass.
    */
-  getDroppedItemsInRange(range: number = 80): import('../../sim/Types').DroppedItem[] {
-    const player = this._cachedLocalPlayer;
-    if (!player) return [];
+  getDroppedItemsInRange(
+    range: number = RenderSystem.DROPPED_ITEM_PICKUP_RANGE,
+    player?: import('../../sim/Types').Player | null,
+  ): import('../../sim/Types').DroppedItem[] {
+    const p = player ?? this._cachedLocalPlayer;
+    if (!p) return [];
     const range2 = range * range;
     return this._droppedItems
       .filter(d => {
-        if (!this._canPickupDroppedItem(d)) return false;
-        const dx = d.x - player.position.x;
-        const dy = d.y - player.position.y;
+        if (!this._canPlayerPickupDrop(d, p)) return false;
+        const dx = d.x - p.position.x;
+        const dy = d.y - p.position.y;
         return dx * dx + dy * dy <= range2;
       })
       .sort((a, b) => {
-        const dxa = a.x - player.position.x, dya = a.y - player.position.y;
-        const dxb = b.x - player.position.x, dyb = b.y - player.position.y;
+        const dxa = a.x - p.position.x, dya = a.y - p.position.y;
+        const dxb = b.x - p.position.x, dyb = b.y - p.position.y;
         return (dxa * dxa + dya * dya) - (dxb * dxb + dyb * dyb);
       });
+  }
+
+  /** Nearest dropped item in pickup range, or null. */
+  getNearestDroppedItem(
+    range: number = RenderSystem.DROPPED_ITEM_PICKUP_RANGE,
+    player?: import('../../sim/Types').Player | null,
+  ): import('../../sim/Types').DroppedItem | null {
+    const items = this.getDroppedItemsInRange(range, player);
+    return items.length > 0 ? items[0] : null;
   }
 
   private _buildDroppedItemPiles(
@@ -4341,14 +4378,14 @@ export class RenderSystem {
   ): void {
     const ctx = this.ctx;
     const player = this._cachedLocalPlayer;
-    const HOVER_RANGE = 80;
+    const pickupR = RenderSystem.DROPPED_ITEM_PICKUP_RANGE;
     const sx = (pile.cx - camera.position.x) * camera.zoom + ctx.canvas.width  / 2;
     const sy = (pile.cy - camera.position.y) * camera.zoom + ctx.canvas.height / 2;
     const sz = Math.max(0.4, Math.min(1.2, camera.zoom));
 
-    const isNear = player != null && this._canPickupDroppedItem(pile.items[0]) &&
+    const isNear = player != null && this._canPlayerPickupDrop(pile.items[0], player) &&
       (pile.cx - player.position.x) ** 2 + (pile.cy - player.position.y) ** 2
-        <= HOVER_RANGE * HOVER_RANGE;
+        <= pickupR * pickupR;
 
     const schematicItem = pile.items.find(it => it.isSchematic);
     const allSchematics = pile.items.length > 0 && pile.items.every(it => it.isSchematic);
@@ -5970,12 +6007,14 @@ export class RenderSystem {
     const axeEquipped = (() => {
       if (!localPlayer || localPlayer.carrierId !== 0) return false;
       const slot = localPlayer.inventory?.activeSlot ?? 0;
-      return localPlayer.inventory?.slots[slot]?.item === 'axe';
+      const item = localPlayer.inventory?.slots[slot]?.item;
+      return item === 'axe' || item === 'metal_axe';
     })();
     const pickaxeEquipped = (() => {
       if (!localPlayer || localPlayer.carrierId !== 0) return false;
       const slot = localPlayer.inventory?.activeSlot ?? 0;
-      return localPlayer.inventory?.slots[slot]?.item === 'pickaxe';
+      const item = localPlayer.inventory?.slots[slot]?.item;
+      return item === 'pickaxe' || item === 'metal_pickaxe';
     })();
     this._pendingAxeEquipped     = axeEquipped;
     this._pendingPickaxeEquipped = pickaxeEquipped;
@@ -6662,8 +6701,8 @@ export class RenderSystem {
           lx = dx * c - dy * sn;
           ly = dx * sn + dy * c;
         }
-        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'shipyard' ? 170 : half;
-        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'shipyard' ? 445 : half;
+        const hw = s.type === 'workbench' ? 25 * 0.88 : s.type === 'chest' ? 25 * 0.72 : s.type === 'bed' ? 25 * 0.88 : s.type === 'shipyard' ? 170 : half;
+        const hh = s.type === 'workbench' ? 25 * 0.62 : s.type === 'chest' ? 25 * 0.52 : s.type === 'bed' ? 25 * 0.48 : s.type === 'shipyard' ? 445 : half;
         if (Math.abs(lx) <= hw && Math.abs(ly) <= hh) {
           if (s.type === 'shipyard') {
             // For empty shipyard: only highlight the physical U-shaped dock arms,
@@ -6678,8 +6717,8 @@ export class RenderSystem {
               floorHit = null;
               break;
             }
-          } else if (s.type === 'workbench') {
-            // Workbench always wins — stop searching
+          } else if (s.type === 'workbench' || s.type === 'bed') {
+            // Workbench/bed always wins — stop searching
             this._hoveredStructure = s;
             wallHit = null;
             floorHit = null;
@@ -7480,6 +7519,35 @@ export class RenderSystem {
           ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
           ctx.fillText('\u2692', ssp.x, ssp.y);
         }
+      } else if (s.type === 'bed') {
+        const bw = sz * 0.88;
+        const bh = sz * 0.48;
+        const bedTargetHp = typeof s.targetHp === 'number' ? s.targetHp : s.maxHp;
+        const bedIsSchematic = typeof s.targetHp === 'number' && s.hp < s.targetHp;
+        const bedHpFrac = s.maxHp > 0 ? s.hp / s.maxHp : 1;
+        this._blitStructureBase(s, ssp, zoom, camRot, isHovered, isBlocker);
+        if (this.hammerEquipped && bedIsSchematic) {
+          ctx.save();
+          ctx.translate(ssp.x, ssp.y);
+          ctx.rotate(-camRot);
+          ctx.fillStyle = 'rgba(120,200,255,0.22)';
+          ctx.fillRect(-bw / 2, -bh / 2, bw, bh);
+          const bedBuildFrac = Math.max(0, Math.min(1, bedTargetHp > 0 ? s.hp / bedTargetHp : 0));
+          const bedBarW = bw * 0.7; const bedBarH = Math.max(2, 4 * zoom);
+          const bedBarX = -bedBarW / 2; const bedBarY = -bh / 2 - bedBarH - 2;
+          ctx.strokeStyle = '#b0e0ff'; ctx.lineWidth = 1;
+          ctx.strokeRect(bedBarX, bedBarY, bedBarW, bedBarH);
+          ctx.fillStyle = '#55ddff'; ctx.fillRect(bedBarX, bedBarY, bedBarW * bedBuildFrac, bedBarH);
+          ctx.font = `${Math.max(8, Math.round(12 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillStyle = '#b0e0ff';
+          ctx.fillText('\u2692', 0, bedBarY - 2);
+          ctx.restore();
+        }
+        if (this.hammerEquipped && !bedIsSchematic && bedHpFrac < 0.999) {
+          ctx.font = `${Math.max(8, Math.round(11 * zoom))}px Georgia, serif`;
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = 'rgba(255, 180, 60, 0.9)';
+          ctx.fillText('\u2692', ssp.x, ssp.y);
+        }
       }
     } // end for sorted
 
@@ -7540,8 +7608,8 @@ export class RenderSystem {
       const THICK  = 0.18;
       const isWall = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
       // Cannon: base is 30×20 world units, barrel extends 40 upward from centre → total 30×50
-      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
-      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
+      const rawW   = isWall ? sz : s.type === 'workbench' ? sz * 0.88 : s.type === 'chest' ? sz * 0.72 : s.type === 'bed' ? sz * 0.88 : s.type === 'shipyard' ? sz * 6.8 : s.type === 'cannon' ? 30 * zoom : sz;
+      const rawH   = isWall ? sz * THICK : s.type === 'workbench' ? sz * 0.62 : s.type === 'chest' ? sz * 0.52 : s.type === 'bed' ? sz * 0.48 : s.type === 'shipyard' ? sz * 17.8 : s.type === 'cannon' ? 50 * zoom : sz;
 
       // Axis-aligned bounding box after rotation (used for bar/tooltip screen positioning)
       const absC = Math.abs(Math.cos(rotRad)), absS = Math.abs(Math.sin(rotRad));
@@ -7631,6 +7699,7 @@ export class RenderSystem {
                  : s.type === 'company_fortress' ? 'Company Fortress'
                  : s.type === 'claim_flag' ? 'Claiming Flag'
                  : s.type === 'chest' ? 'Chest'
+                 : s.type === 'bed' ? 'Bed'
                  : 'Workbench';
 
       // Determine ownership line text + color
@@ -7673,6 +7742,7 @@ export class RenderSystem {
                            : s.type === 'wreck' ? '[E] to salvage loot'
                            : s.type === 'cannon' ? 'Hold [E] to fire'
                            : s.type === 'chest' ? '[E] to open'
+                           : s.type === 'bed' ? '[E] Travel'
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -7853,8 +7923,8 @@ export class RenderSystem {
           }
 
           const isWall2 = s.type === 'wall' || s.type === 'door_frame' || s.type === 'door';
-          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
-          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
+          const rawW2 = isWall2 ? sz2 : s.type === 'workbench' ? sz2 * 0.88 : s.type === 'chest' ? sz2 * 0.72 : s.type === 'bed' ? sz2 * 0.88 : s.type === 'shipyard' ? sz2 * 6.8 : s.type === 'cannon' ? 30 * zoom : sz2;
+          const rawH2 = isWall2 ? sz2 * THICK : s.type === 'workbench' ? sz2 * 0.62 : s.type === 'chest' ? sz2 * 0.52 : s.type === 'bed' ? sz2 * 0.48 : s.type === 'shipyard' ? sz2 * 17.8 : s.type === 'cannon' ? 50 * zoom : sz2;
 
           ctx.save();
           ctx.globalAlpha = flashAlpha;
@@ -8016,6 +8086,7 @@ export class RenderSystem {
       company_fortress: [30, 30],
       claim_flag:   [10, 10],
       chest:        [20, 14],
+      bed:          [22, 12],
     };
     const DEFAULT_DIMS: [number, number] = [20, 20];
 
@@ -8574,9 +8645,9 @@ export class RenderSystem {
       }
     }
 
-    // Workbench/cannon needs a floor tile whose AABB contains the cursor point
+    // Workbench/cannon/chest/bed needs a floor tile whose AABB contains the cursor point
     let noFloor = false;
-    if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') {
+    if (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon' || this.islandBuildKind === 'chest' || this.islandBuildKind === 'bed') {
       noFloor = !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -8585,6 +8656,12 @@ export class RenderSystem {
         const ly = (mx - s.x) * rs + (my - s.y) * rc;
         return Math.abs(lx) <= 25 && Math.abs(ly) <= 25;
       });
+    }
+    let bedOccupied = false;
+    if (this.islandBuildKind === 'bed') {
+      bedOccupied = this.placedStructures.some(s =>
+        s.type === 'bed' && Math.hypot(s.x - mx, s.y - my) < 30
+      );
     }
 
     // Wall/door_frame needs to be at a floor tile edge midpoint; door panel needs a door_frame
@@ -8741,7 +8818,7 @@ export class RenderSystem {
     const cfSliceAlreadyOwned  = this.islandBuildKind === 'claim_flag' && cfInOwnClaim && cfInEnemyClaim && inMyDominantArea;
 
     // Workbench/cannon on enemy floor: a floor exists under cursor but belongs to a different company
-    const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon') && !noFloor &&
+    const wrongCompany = (this.islandBuildKind === 'workbench' || this.islandBuildKind === 'cannon' || this.islandBuildKind === 'chest' || this.islandBuildKind === 'bed') && !noFloor &&
       !this.placedStructures.some(s => {
         if (s.type !== 'wooden_floor') return false;
         const rad = (s.rotation ?? 0) * Math.PI / 180;
@@ -8754,7 +8831,7 @@ export class RenderSystem {
     // Only floors are rejected for water placement — other types need a floor tile anyway
     const waterBlocked = inWater && this.islandBuildKind === 'wooden_floor';
     this._islandGhostTooFar = tooFar || waterBlocked;
-    const invalid = tooFar || waterBlocked || noFloor || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
+    const invalid = tooFar || waterBlocked || noFloor || bedOccupied || overlaps || blockedByTree || blockedByBoulder || enemyTerritory || wrongCompany || noEdge || wallOccupied || blockedByStructure || noDoorFrame || doorOccupied || noCeilingSupport || ceilingOccupied || cfNotInMyTerritory || cfNotInContestedArea || cfSliceAlreadyOwned;
     const cantAfford = !invalid && !this.landGhostCanAfford;
     const ghostColor  = (invalid || cantAfford) ? 'rgba(220, 60, 40, 0.45)' : 'rgba(100, 220, 100, 0.45)';
     const borderColor = (invalid || cantAfford) ? 'rgba(255, 100, 60, 0.75)' : 'rgba(120, 255, 120, 0.75)';
@@ -9101,6 +9178,20 @@ export class RenderSystem {
       const latchW = bw * 0.20, latchH = bh * 0.22;
       ctx.fillRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
       ctx.strokeRect(msp.x - latchW / 2, msp.y - bh / 2 + lidH - latchH / 2, latchW, latchH);
+    } else if (this.islandBuildKind === 'bed') {
+      const bw = sz * 0.88, bh = sz * 0.48;
+      ctx.setLineDash([Math.max(2, 4 * zoom), Math.max(2, 3 * zoom)]);
+      ctx.beginPath();
+      ctx.roundRect(msp.x - bw / 2, msp.y - bh / 2, bw, bh, 3);
+      ctx.fill();
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(200,160,232,0.55)';
+      ctx.beginPath();
+      ctx.roundRect(msp.x - bw / 2 + 2, msp.y - bh / 2 + 2, bw * 0.32, bh - 4, 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(119,85,170,0.55)';
+      ctx.fillRect(msp.x - bw / 2 + bw * 0.34, msp.y - bh / 2 + 2, bw * 0.54, bh - 4);
     } else {
       ctx.beginPath();
       ctx.rect(msp.x - ghostW / 2, msp.y - ghostH / 2, ghostW, ghostH);
@@ -9112,6 +9203,7 @@ export class RenderSystem {
     // Label above the ghost — for flag_fort and chest, account for their actual top extent
     const labelTopOffset = this.islandBuildKind === 'flag_fort' ? sz * 0.9 * 0.5 + sz * 0.9 * 0.22 + 6
                          : this.islandBuildKind === 'chest' ? sz * 0.56 / 2 + 6
+                         : this.islandBuildKind === 'bed' ? sz * 0.48 / 2 + 6
                          : ghostH / 2 + 6;
     const labelY = msp.y - labelTopOffset;
     ctx.globalAlpha = 1;
@@ -9130,7 +9222,7 @@ export class RenderSystem {
     } else if (blockedByStructure) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('BLOCKED BY STRUCTURE', msp.x, labelY);
-    } else if (overlaps || wallOccupied || doorOccupied || ceilingOccupied) {
+    } else if (overlaps || wallOccupied || doorOccupied || ceilingOccupied || bedOccupied) {
       ctx.fillStyle = '#ff6644';
       ctx.fillText('OCCUPIED', msp.x, labelY);
     } else if (noCeilingSupport) {
@@ -9175,6 +9267,7 @@ export class RenderSystem {
                   : this.islandBuildKind === 'company_fortress' ? 'Company Fortress'
                   : this.islandBuildKind === 'claim_flag' ? 'Claim Flag — Contested Area'
                   : this.islandBuildKind === 'chest' ? 'Chest'
+                  : this.islandBuildKind === 'bed' ? 'Bed'
                   : 'Workbench';
       ctx.fillText(label, msp.x, labelY);
     }

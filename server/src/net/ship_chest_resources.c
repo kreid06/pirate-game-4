@@ -60,12 +60,42 @@ bool ship_chest_is_empty(const SimpleShip *s) {
     return (w + f + me + st) == 0;
 }
 
+static uint16_t scale_module_res_cost(uint16_t base, float mult) {
+    if (base == 0) return 0;
+    uint32_t out = (uint32_t)ceilf((float)base * mult);
+    if (out < (uint32_t)base) out = (uint32_t)base;
+    if (out > 65535u) out = 65535u;
+    return (uint16_t)out;
+}
+
+void module_compute_scaled_cost(ModuleTypeId type, float mult, ShipModuleResourceCost *out) {
+    if (!out) return;
+    out->wood = out->fiber = out->metal = out->stone = 0;
+    if (!ship_module_cost_valid(type)) return;
+    const ShipModuleResourceCost *base = &MODULE_RES_COST[type];
+    out->wood  = scale_module_res_cost(base->wood,  mult);
+    out->fiber = scale_module_res_cost(base->fiber, mult);
+    out->metal = scale_module_res_cost(base->metal, mult);
+    out->stone = scale_module_res_cost(base->stone, mult);
+}
+
+void module_base_cost(ModuleTypeId type, ShipModuleResourceCost *out) {
+    if (!out) return;
+    out->wood = out->fiber = out->metal = out->stone = 0;
+    if (!ship_module_cost_valid(type)) return;
+    *out = MODULE_RES_COST[type];
+}
+
 bool ship_chest_can_afford(const SimpleShip *s, ModuleTypeId type) {
     if (!s) return false;
     if (!ship_module_cost_valid(type)) return true;
+    return ship_chest_can_afford_cost(s, &MODULE_RES_COST[type]);
+}
+
+bool ship_chest_can_afford_cost(const SimpleShip *s, const ShipModuleResourceCost *cost) {
+    if (!s || !cost) return false;
     uint32_t wood, fiber, metal, stone;
     ship_chest_aggregate(s, &wood, &fiber, &metal, &stone);
-    const ShipModuleResourceCost *cost = &MODULE_RES_COST[type];
     return wood  >= cost->wood
         && fiber >= cost->fiber
         && metal >= cost->metal
@@ -90,7 +120,11 @@ static void ship_chest_consume_amounts(SimpleShip *s,
 
 void ship_chest_consume(SimpleShip *s, ModuleTypeId type) {
     if (!s || !ship_module_cost_valid(type)) return;
-    const ShipModuleResourceCost *cost = &MODULE_RES_COST[type];
+    ship_chest_consume_cost(s, &MODULE_RES_COST[type]);
+}
+
+void ship_chest_consume_cost(SimpleShip *s, const ShipModuleResourceCost *cost) {
+    if (!s || !cost) return;
     ship_chest_consume_amounts(s, cost->wood, cost->fiber, cost->metal, cost->stone);
 }
 
@@ -114,11 +148,12 @@ void ship_chest_compute_repair_cost(ModuleTypeId type, float missing_ratio,
     if (!ship_module_cost_valid(type)) return;
     if (missing_ratio <= 0.0f) return;
     if (missing_ratio > 1.0f) missing_ratio = 1.0f;
-    const ShipModuleResourceCost *base = &MODULE_RES_COST[type];
-    if (wood)  *wood  = scale_repair_cost(base->wood,  missing_ratio);
-    if (fiber) *fiber = scale_repair_cost(base->fiber, missing_ratio);
-    if (metal) *metal = scale_repair_cost(base->metal, missing_ratio);
-    if (stone) *stone = scale_repair_cost(base->stone, missing_ratio);
+    ShipModuleResourceCost base;
+    module_base_cost(type, &base);
+    if (wood)  *wood  = scale_repair_cost(base.wood,  missing_ratio);
+    if (fiber) *fiber = scale_repair_cost(base.fiber, missing_ratio);
+    if (metal) *metal = scale_repair_cost(base.metal, missing_ratio);
+    if (stone) *stone = scale_repair_cost(base.stone, missing_ratio);
 }
 
 bool ship_chest_can_afford_repair(const SimpleShip *s, ModuleTypeId type,

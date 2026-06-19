@@ -311,7 +311,7 @@ static int resource_max_health(uint8_t type_id)
         case RES_ROCK:         return  60;
         case RES_BOULDER:      return 400;  /* metal boulder */
         case RES_STONE_BOULDER:return 400;  /* stone boulder */
-        case RES_FIBER:        return  30;
+        case RES_FIBER:        return 150;
         default:               return  50;
     }
 }

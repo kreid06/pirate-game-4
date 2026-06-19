@@ -179,7 +179,7 @@ export class UIManager {
 
   // Island structure build mode overlay state
   private islandBuildState: {
-    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed';
     tooFar: boolean;
     enemyClose: boolean;
     wallVariant?: 'wall' | 'door_frame';
@@ -203,7 +203,7 @@ export class UIManager {
   /** Supplier for land-chest resources accessible from a nearby shipyard — null when not near a shipyard. */
   public getShipyardResources: (() => { wood: number; fiber: number; metal: number; stone: number } | null) | null = null;
   /** Which resource pool is active for ship building: 'ship' = chest, 'pack' = player. Toggled with R. */
-  public buildResourceSource: 'pack' | 'ship' | 'auto' = 'auto';
+  public buildResourceSource: 'pack' | 'ship' | 'yard' | 'auto' = 'auto';
   /** Persistent column display order in the resource panel (left=lowest priority, right=highest). */
   public columnOrder: string[] = ['PACK', 'CHEST', 'YARD'];
   /** Active column header drag state (null when not dragging). */
@@ -251,6 +251,7 @@ export class UIManager {
     { kind: 'wood_ceiling', label: 'Ceiling',       symbol: '\u229e',       color: '#7a5c2a', borderColor: '#4a3410', cost: [{ item: 'wood',  qty: 25  }] },
     { kind: 'workbench',    label: 'Workbench',     symbol: '\u2692',       color: '#6a4a20', borderColor: '#3a2808', cost: [{ item: 'wood',  qty: 12  }] },
     { kind: 'chest',        label: 'Chest',         symbol: '\u229f',       color: '#7a4820', borderColor: '#4a2810', cost: [{ item: 'wood',  qty: 12  }] },
+    { kind: 'bed',          label: 'Bed',           symbol: '\uD83D\uDECF', color: '#4a3060', borderColor: '#2a1840', cost: [{ item: 'wood',  qty: 10  }, { item: 'fiber', qty: 5 }] },
     { kind: 'shipyard',     label: 'Shipyard',      symbol: '\u26F5',       color: '#1e6080', borderColor: '#0f3850', cost: [{ item: 'wood',  qty: 250 }, { item: 'stone', qty: 100 }] },
     { kind: 'cannon',       label: 'Cannon',        symbol: '\u26AB',       color: '#444444', borderColor: '#888888', cost: [{ item: 'wood',  qty: 15  }, { item: 'metal', qty: 25  }] },
     { kind: 'flag_fort',     label: 'Flag Fortress', symbol: '\u2302',      color: '#5a5848', borderColor: '#2a2820', cost: [{ item: 'wood',  qty: 300 }, { item: 'stone', qty: 200 }] },
@@ -379,6 +380,10 @@ export class UIManager {
 
   /** Timestamp of last resource-source toggle (for the pop animation on the active column). */
   private _resourceSourceToggledAt = 0;
+
+  markResourceSourceToggled(): void {
+    this._resourceSourceToggledAt = performance.now();
+  }
 
   /** Flash the resource panel visible for ~3 seconds (call when resources are gained). */
   flashResourcePanel(): void {
@@ -1545,7 +1550,7 @@ export class UIManager {
    * Pass null to hide the overlay.
    */
   setIslandBuildState(state: {
-    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest';
+    kind: 'wooden_floor' | 'workbench' | 'wall' | 'door_frame' | 'door' | 'shipyard' | 'wood_ceiling' | 'cannon' | 'flag_fort' | 'company_fortress' | 'claim_flag' | 'chest' | 'bed';
     tooFar: boolean;
     enemyClose: boolean;
     wallVariant?: 'wall' | 'door_frame';
@@ -2158,12 +2163,13 @@ export class UIManager {
     ctx.textAlign    = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText('RESOURCES', resX + PAD, resY + TITLE_H / 2);
-    // [R] toggle hint — only show when ship build mode is active and CHEST column is present
-    if ((this.buildMenuOpen || this.buildModeState?.active) && chestRes !== null) {
+    // [R] toggle hint — show when ship build mode is active and multiple pools exist
+    if ((this.buildMenuOpen || this.buildModeState?.active) && (chestRes !== null || yardRes !== null)) {
       ctx.font      = '8px monospace';
       ctx.fillStyle = 'rgba(200,180,120,0.6)';
       ctx.textAlign = 'right';
-      const _rHint = this.buildResourceSource === 'ship' ? 'CHEST'
+      const _rHint = this.buildResourceSource === 'yard' ? 'YARD'
+                   : this.buildResourceSource === 'ship' ? 'CHEST'
                    : this.buildResourceSource === 'pack' ? 'PACK' : 'AUTO';
       ctx.fillText(`[R] ${_rHint}`, resX + RES_W - PAD, resY + TITLE_H / 2);
     }
@@ -2179,7 +2185,8 @@ export class UIManager {
     };
 
     // Determine which column index is "active" for building
-    const activeColHeader = this.buildResourceSource === 'ship' ? 'CHEST'
+    const activeColHeader = this.buildResourceSource === 'yard' ? 'YARD'
+                           : this.buildResourceSource === 'ship' ? 'CHEST'
                            : this.buildResourceSource === 'pack' ? 'PACK' : null;
     const activeColIdx = cols.findIndex(c => c.header === activeColHeader);
 

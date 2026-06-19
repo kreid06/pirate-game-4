@@ -304,16 +304,17 @@ export function isDockPointOnSurface(pos: Vec2, dock: PlacedStructure): boolean 
   const ly   = dx * sinN + dy * cosN;
 
   const hasScaffolding = dock.construction?.phase === 'building';
-  const P  = 10;                    // padding ≈ player radius — matches server
+  const P  = 10;                    // padding ≈ player radius (outer edges only) — matches server
   const ai = DOCK_HW - DOCK_ARM_T; // arm inner edge = 120
+  const backTop = -(DOCK_HH - DOCK_BACK_T); // mouth-facing edge of back deck = -395
 
   // Left arm top surface
   if (lx >= -(DOCK_HW + P) && lx <= -(ai - P) && Math.abs(ly) <= DOCK_HH + P) return true;
   // Right arm top surface
   if (lx >=  (ai - P)      && lx <=  (DOCK_HW + P) && Math.abs(ly) <= DOCK_HH + P) return true;
-  // Back wall top surface
+  // Back wall top surface — no mouth-side padding (see dock_physics.c)
   if (Math.abs(lx) <= DOCK_HW + P &&
-      ly >= -(DOCK_HH + P) && ly <= -(DOCK_HH - DOCK_BACK_T - P)) return true;
+      ly >= -(DOCK_HH + P) && ly <= backTop) return true;
   // Interior bay — only walkable when ship is under construction
   if (hasScaffolding && Math.abs(lx) <= ai + P &&
       ly >= -(DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
@@ -330,6 +331,9 @@ export function isDockPointOnSurface(pos: Vec2, dock: PlacedStructure): boolean 
  * @returns             Corrected world-space position
  */
 export function resolveDockCollisions(pos: Vec2, dock: PlacedStructure): Vec2 {
+  // On a walkable deck segment — skip wall OBB pushout (see dock_apply_player_collision).
+  if (isDockPointOnSurface(pos, dock)) return pos;
+
   const rad   = (dock.rotation ?? 0) * Math.PI / 180;
   const cosN  = Math.cos(-rad);
   const sinN  = Math.sin(-rad);

@@ -55,6 +55,7 @@ export type ItemKind =
   | 'bed'
   | 'metal_axe'
   | 'metal_pickaxe'
+  | 'metal_sickle'
   | 'grapple_hook';
 
 // ── Category groups ─────────────────────────────────────────────────────────
@@ -121,8 +122,9 @@ export const ITEM_DEFS: Record<ItemKind, ItemDef> = {
   cloth_gloves:  { kind: 'cloth_gloves',  name: 'Cloth Gloves',  category: 'armor',    maxStack: 1,  color: '#9a8855', borderColor: '#635830', symbol: 'Cg', description: 'Light cloth gloves. +7 armour. Reduces incoming damage.',      weight: 0.3 },
   resource_chest: { kind: 'resource_chest', name: 'Resource Chest', category: 'building', maxStack: 3,  color: '#7a4820', borderColor: '#4a2810', symbol: '\u229f', description: 'A wooden chest for storing resources. Supplies ship auto-repair and land structure upkeep.', weight: 0 },
   bed:           { kind: 'bed',           name: 'Bed',           category: 'utility',  maxStack: 3,  color: '#6a3a8f', borderColor: '#3d1e5e', symbol: '\uD83D\uDECF', description: 'Place on an island floor to set a respawn point. Use on a ship to set ship respawn. 60 s cooldown.', weight: 12 },
-  metal_axe:     { kind: 'metal_axe',     name: 'Metal Axe',     category: 'tool',     maxStack: 1,  color: '#7a9ab0', borderColor: '#4a6878', symbol: '\uD83E\uDE93', description: 'A durable metal axe. Yields more wood per swing than a stone axe.',                            weight: 3   },
-  metal_pickaxe: { kind: 'metal_pickaxe', name: 'Metal Pickaxe', category: 'tool',     maxStack: 1,  color: '#6a8aa0', borderColor: '#3a5868', symbol: '\u26cf',       description: 'A sturdy metal pickaxe. Yields more metal/stone per swing than a stone pickaxe.',           weight: 4   },
+  metal_axe:     { kind: 'metal_axe',     name: 'Metal Axe',     category: 'tool',     maxStack: 1,  color: '#7a9ab0', borderColor: '#4a6878', symbol: '\uD83E\uDE93', description: 'A durable metal axe. Chops trees 1.5× faster with proportionally more wood per swing.',     weight: 3   },
+  metal_pickaxe: { kind: 'metal_pickaxe', name: 'Metal Pickaxe', category: 'tool',     maxStack: 1,  color: '#6a8aa0', borderColor: '#3a5868', symbol: '\u26cf',       description: 'A sturdy metal pickaxe. Mines 1.5× faster with proportionally more ore per swing.',           weight: 4   },
+  metal_sickle:  { kind: 'metal_sickle',  name: 'Metal Sickle',  category: 'tool',     maxStack: 1,  color: '#6a9a70', borderColor: '#3a6848', symbol: '\uD83C\uDF3E', description: 'A sharp metal sickle. Clears fiber bushes 2.5× faster with proportionally more fiber per swing.', weight: 2.5 },
   grapple_hook:  { kind: 'grapple_hook',  name: 'Grapple Hook',  category: 'tool',     maxStack: 1,  color: '#808080', borderColor: '#505050', symbol: '\u2693',       description: 'A metal grappling hook. Craft at a workbench.',                                                 weight: 2   },
 };
 
@@ -175,6 +177,7 @@ export const ITEM_ID_MAP: Record<number, ItemKind> = {
   40: 'metal_axe',
   41: 'metal_pickaxe',
   42: 'grapple_hook',
+  43: 'metal_sickle',
 };
 
 /**

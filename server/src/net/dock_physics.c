@@ -109,15 +109,17 @@ static bool dock_obb_pushout(float cx, float cy, float hx, float hy,
 
 /* True if dock-local point (lx,ly) is on a walkable dock surface. */
 bool dock_point_on_surface(float lx, float ly, bool has_scaffolding) {
-    const float P  = 10.0f;                      /* padding ~ player radius */
+    const float P  = 10.0f;                      /* padding ~ player radius (outer edges only) */
     const float ai = DOCK_HW - DOCK_ARM_T;       /* arm inner edge = 120   */
+    const float back_top = -(DOCK_HH - DOCK_BACK_T); /* mouth-facing edge of back deck = -395 */
     /* Left arm top surface */
     if (lx >= -(DOCK_HW + P) && lx <= -(ai - P) && fabsf(ly) <= DOCK_HH + P) return true;
     /* Right arm top surface */
     if (lx >=  (ai - P)      && lx <=  (DOCK_HW + P) && fabsf(ly) <= DOCK_HH + P) return true;
-    /* Back wall top surface */
+    /* Back wall top surface — no mouth-side padding: +P there extended walkability into
+     * the interior water channel for |lx| < ai, creating dead zones on the base deck. */
     if (fabsf(lx) <= DOCK_HW + P &&
-        ly >= -(DOCK_HH + P) && ly <= -(DOCK_HH - DOCK_BACK_T - P)) return true;
+        ly >= -(DOCK_HH + P) && ly <= back_top) return true;
     /* Interior bay — fully walkable when scaffolding is up */
     if (has_scaffolding && fabsf(lx) <= ai + P &&
         ly >= -(DOCK_HH - DOCK_BACK_T - P) && ly <= DOCK_HH + P) return true;
@@ -131,6 +133,11 @@ void dock_apply_player_collision(const PlacedStructure *sy, float player_r,
                                         bool has_scaffolding, float *wx, float *wy) {
     float lx, ly;
     dock_world_to_local(sy, *wx, *wy, &lx, &ly);
+
+    /* Walkable deck tops sit on/outside the wall OBBs. Padding on isDockPointOnSurface
+     * extends slightly past OBB faces — applying OBB pushout there ejects players walking
+     * from the base onto an arm (feels like invisible walls between the three deck parts). */
+    if (dock_point_on_surface(lx, ly, has_scaffolding)) return;
 
     float ai         = DOCK_HW - DOCK_ARM_T;              /* 120  */
     float arm_cx_l   = -(DOCK_HW - DOCK_ARM_T / 2.0f);   /* -145 */
