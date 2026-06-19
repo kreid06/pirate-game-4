@@ -465,7 +465,8 @@ static float g_wind_angle = 0.0f;
 
 typedef struct SnapShipLut SnapShipLut;
 
-static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out);
+static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
+                                             SnapShipLut* lut);
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
                                            const SnapShipLut* lut);
 static void blob_worker_submit_snapshot(uint32_t current_time);
@@ -2548,11 +2549,14 @@ void detach_dropped_items_from_ship(uint16_t ship_id) {
     }
 }
 
-static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out) {
+static SnapShipLut g_blob_worker_lut;
+static SnapShipLut g_blob_sync_lut;
+
+static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
+                                             SnapShipLut* lut) {
     out->tick = snap->tick;   /* keep positions and tick label paired through async handoff */
-    static SnapShipLut _snap_lut;
-    snap_ship_lut_fill(&_snap_lut, snap);
-    build_ships_blob_from_snapshot(snap, out, &_snap_lut);
+    snap_ship_lut_fill(lut, snap);
+    build_ships_blob_from_snapshot(snap, out, lut);
 
     out->tmb_json[0] = '[';
     int _to = 1;
@@ -2564,7 +2568,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         float _tx = snap->tombstones[_ti].x;
         float _ty = snap->tombstones[_ti].y;
         if (snap->tombstones[_ti].ship_id != 0) {
-            const SimpleShip* _ship = snap_ship_lut_get(&_snap_lut, snap->tombstones[_ti].ship_id);
+            const SimpleShip* _ship = snap_ship_lut_get(lut, snap->tombstones[_ti].ship_id);
             if (_ship) {
                 float _c = cosf(_ship->rotation), _s = sinf(_ship->rotation);
                 _tx = _ship->x + (snap->tombstones[_ti].local_x * _c - snap->tombstones[_ti].local_y * _s);
@@ -2599,7 +2603,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         float _dy = snap->dropped_items[_di].y;
         uint16_t _dship_id = snap->dropped_items[_di].ship_id;
         if (_dship_id != 0) {
-            const SimpleShip* _dship = snap_ship_lut_get(&_snap_lut, _dship_id);
+            const SimpleShip* _dship = snap_ship_lut_get(lut, _dship_id);
             if (_dship) {
                 float _dc = cosf(_dship->rotation), _ds = sinf(_dship->rotation);
                 _dx = _dship->x + (snap->dropped_items[_di].local_x * _dc - snap->dropped_items[_di].local_y * _ds);
@@ -3326,7 +3330,7 @@ static void* blob_worker_main(void* arg) {
         pthread_mutex_unlock(&g_blob_worker.mtx);
 
         uint64_t _t0 = get_time_us();
-        build_shared_blobs_from_snapshot(&local_job, &local_out);
+        build_shared_blobs_from_snapshot(&local_job, &local_out, &g_blob_worker_lut);
         uint64_t _dt = get_time_us() - _t0;
 
         pthread_mutex_lock(&g_blob_worker.mtx);
@@ -13508,7 +13512,7 @@ void websocket_server_send_game_state(void) {
                 memcpy(_snap.world_npcs, world_npcs,
                        (size_t)world_npc_count * sizeof(world_npcs[0]));
             memcpy(_snap.claim_flags, claim_flags, sizeof(claim_flags));
-            build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache);
+            build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache, &g_blob_sync_lut);
             blob_worker_note_fallback_build();
             shared_blob_cache_valid = true;
         }
