@@ -801,6 +801,13 @@ uint32_t npc_island_at(float wx, float wy) {
     return npc_point_on_island_land(wx, wy, &id) ? id : 0;
 }
 
+void npc_ensure_swim_vitals(WorldNpc* npc) {
+    if (!npc) return;
+    /* stamina/oxygen are not persisted yet; saves memset NPCs to zero. */
+    if (npc->max_stamina == 0) { npc->max_stamina = 100; npc->stamina = 100; }
+    if (npc->max_oxygen == 0)  { npc->max_oxygen  = 100; npc->oxygen  = 100; }
+}
+
 void npc_update_island_presence(WorldNpc* npc) {
     if (!npc) return;
 
@@ -845,11 +852,13 @@ void npc_update_island_presence(WorldNpc* npc) {
     }
 
     npc->on_island_id = 0;
+    npc_ensure_swim_vitals(npc);
     npc->in_water     = true;
 }
 
 void npc_restore_persisted_state(WorldNpc* npc) {
     if (!npc || !npc->active) return;
+    npc_ensure_swim_vitals(npc);
 
     if (npc->ship_id == 0) {
         /* Off-ship: local_x/y are world coordinates — keep them aligned. */

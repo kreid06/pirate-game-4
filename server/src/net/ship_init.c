@@ -10,6 +10,7 @@
 #endif
 #include "net/websocket_server_internal.h"
 #include "net/ship_init.h"
+#include "net/npc_world.h"
 #include "net/cannon_fire.h"
 #include "../../../protocol/ship_definitions.h"
 #include "net/module_interactions.h"
@@ -75,6 +76,7 @@ void tick_sinking_ships(void) {
             _enpc->fire_timer_ms = 0;
             /* Reset stamina/oxygen so the NPC has a fair chance to survive
              * and swim to a ship rather than drowning instantly. */
+            npc_ensure_swim_vitals(_enpc);
             _enpc->stamina  = _enpc->max_stamina;
             _enpc->oxygen   = _enpc->max_oxygen;
         }
