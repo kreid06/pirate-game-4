@@ -19,6 +19,7 @@ import {
 import { ITEM_DEFS, ItemKind, HOTBAR_SLOTS, INVENTORY_SLOTS, ITEM_KIND_ID, drawAxeIcon, drawSwordIcon, computeInventoryWeight, PlayerResources } from '../../sim/Inventory.js';
 import { computePlayerCarriedKg, playerCarryCapacityKg } from '../../sim/Grapple.js';
 import { SchematicEntry, tierColor, tierName, statMultLabel, QUALITY_STAT_NAMES, qualityCostMult, MAX_PLAYER_SCHEMATICS } from '../../sim/Quality.js';
+import { SHIP_BUILD_PANEL_ENTRIES } from './buildPanelShared.js';
 
 // ── Shared palette (mirrors CompanyMenu) ─────────────────────────────────────
 
@@ -2522,15 +2523,18 @@ export class PlayerMenu {
     { subTab: 'LAND', kind: 'flag_fort',       name: 'Flag Fort',    symbol: '\u2302',       color: '#5a5848', wood: 300, fiber: 0, metal:  0, stone: 200 },
     { subTab: 'LAND', kind: 'company_fortress',name: 'Fortress',     symbol: '\uD83C\uDFF0', color: '#4a3060', wood: 300, fiber: 0, metal:  0, stone: 200 },
     { subTab: 'LAND', kind: 'claim_flag',      name: 'Claim Flag',   symbol: '\uD83C\uDFF3', color: '#c0a020', wood:   5, fiber: 5, metal:  0, stone:   0 },
-    // SHIP — symbols & colours match BUILD_PANEL_ENTRIES in UIManager
-    { subTab: 'SHIP', kind: 'plank',       name: 'Plank',       symbol: 'P',      color: '#b8832b', wood: 10, fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'deck',        name: 'Deck',        symbol: '\u229F', color: '#8b5e3c', wood: 15, fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'cannon',      name: 'Cannon',      symbol: '\u26AB', color: '#444444', wood: 2,  fiber: 0,  metal: 5, stone: 0 },
-    { subTab: 'SHIP', kind: 'swivel',      name: 'Swivel Gun',  symbol: '\u203A', color: '#7a4a2a', wood: 1,  fiber: 0,  metal: 3, stone: 0 },
-    { subTab: 'SHIP', kind: 'mast',        name: 'Sail / Mast', symbol: '\u26F5', color: '#1e8c6e', wood: 20, fiber: 10, metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'helm',        name: 'Helm',        symbol: 'W',      color: '#6a3d8f', wood: 5,  fiber: 0,  metal: 3, stone: 0 },
-    { subTab: 'SHIP', kind: 'ramp',        name: 'Ramp',        symbol: '/',      color: '#7a5c2a', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
-    { subTab: 'SHIP', kind: 'hatch_cover', name: 'Hatch Cover', symbol: '\u229E', color: '#8b832b', wood: 8,  fiber: 0,  metal: 0, stone: 0 },
+    // SHIP — derived from SHIP_BUILD_PANEL_ENTRIES (buildPanelShared.ts / UIManager)
+    ...SHIP_BUILD_PANEL_ENTRIES.map(e => ({
+      subTab: 'SHIP' as const,
+      kind: e.kind,
+      name: e.label,
+      symbol: e.symbol,
+      color: e.color,
+      wood: e.cost.wood,
+      fiber: e.cost.fiber,
+      metal: e.cost.metal,
+      stone: e.cost.stone,
+    })),
   ];
 
   private _schematicsTab(

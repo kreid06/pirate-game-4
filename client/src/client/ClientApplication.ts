@@ -16,6 +16,7 @@ import { RenderSystem } from './gfx/RenderSystem.js';
 import { Camera } from './gfx/Camera.js';
 import { GLContext } from './gfx/gl/GLContext.js';
 import { GLWorldRenderer } from './gfx/gl/GLWorldRenderer.js';
+import { detectGraphicsBackend, logGraphicsBackendReport } from './gfx/detectGraphicsBackend.js';
 import { DamageTeam } from './gfx/EffectRenderer.js';
 
 // Network System  
@@ -140,6 +141,8 @@ export class ClientApplication {
   private _glBadFrameCount = 0;
   private _glGoodFrameCount = 0;
   private _glNextScaleAdjustAt = 0;
+  /** Set when startup graphics probe suggests software rendering or no WebGL. */
+  private _graphicsBackendWarning: string | null = null;
   private config: ClientConfig;
   private state: ClientState = ClientState.INITIALIZING;
   
@@ -584,6 +587,10 @@ export class ClientApplication {
           this._glRenderer = null;
         }
       }
+
+      const graphicsReport = detectGraphicsBackend(this._glRenderer !== null);
+      logGraphicsBackendReport(graphicsReport);
+      this._graphicsBackendWarning = graphicsReport.warningMessage;
       
       // Initialize Network System
       this.networkManager = new NetworkManager(this.config.network);
@@ -617,6 +624,7 @@ export class ClientApplication {
           this.setLoadingStep(3);
           this.hideLoadingOverlay();
           console.log('🎮 Entered game world (server ack)');
+          this._showGraphicsBackendWarningIfNeeded();
           // Fetch schematics immediately so hotbar variant badges are visible
           // without needing to open the player menu first.
           this.networkManager.sendRequestSchematics();
@@ -5946,8 +5954,16 @@ export class ClientApplication {
         this.setLoadingStep(3);
         this.hideLoadingOverlay();
         console.log('🎮 Entered game world (timeout fallback)');
+        this._showGraphicsBackendWarningIfNeeded();
       }
     }
+  }
+
+  /** One-shot warning when WebGL is missing or a software renderer is detected. */
+  private _showGraphicsBackendWarningIfNeeded(): void {
+    if (!this._graphicsBackendWarning) return;
+    this.renderSystem.showAnnouncement(this._graphicsBackendWarning, 'warning', 7);
+    this._graphicsBackendWarning = null;
   }
   
   /**
