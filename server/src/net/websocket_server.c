@@ -3447,8 +3447,12 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (ship_count > 0)
         memcpy(g_blob_worker.job.ships, ships,
                (size_t)ship_count * sizeof(ships[0]));
-    for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++)
-        copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
+    for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++) {
+        if (players[_bpi].active)
+            copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
+        else
+            g_blob_worker.job.players[_bpi].active = false;
+    }
     g_blob_worker.job.sim_ship_count = 0;
     if (global_sim) {
         uint16_t _ss = global_sim->ship_count;
@@ -13690,8 +13694,12 @@ void websocket_server_send_game_state(void) {
             _snap.ship_count = ship_count;
             if (ship_count > 0)
                 memcpy(_snap.ships, ships, (size_t)ship_count * sizeof(ships[0]));
-            for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++)
-                copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
+            for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++) {
+                if (players[_fbpi].active)
+                    copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
+                else
+                    _snap.players[_fbpi].active = false;
+            }
             _snap.sim_ship_count = 0;
             if (global_sim) {
                 uint16_t _ss = global_sim->ship_count;
@@ -13771,13 +13779,12 @@ void websocket_server_send_game_state(void) {
             if (!_vp || !_vp->active) continue;
 
             float _cx = _vp->x, _cy = _vp->y;
-            if (_vp->parent_ship_id != 0) {
-                for (int _pi = 0; _pi < aoi_ship_count; _pi++) {
-                    if (shared_blob_cache.aoi_ship_id[_pi] == (uint32_t)_vp->parent_ship_id) {
-                        _cx = shared_blob_cache.aoi_ship_px[_pi];
-                        _cy = shared_blob_cache.aoi_ship_py[_pi];
-                        break;
-                    }
+            {
+                int _vslot = (int)(_vp - players);
+                if (_vslot >= 0 && _vslot < WS_MAX_CLIENTS &&
+                    shared_blob_cache.player_entry_active[_vslot]) {
+                    _cx = shared_blob_cache.player_world_x[_vslot];
+                    _cy = shared_blob_cache.player_world_y[_vslot];
                 }
             }
 
