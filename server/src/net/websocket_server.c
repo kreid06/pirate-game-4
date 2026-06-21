@@ -468,7 +468,7 @@ typedef struct SnapShipLut SnapShipLut;
 static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
                                              SnapShipLut* lut);
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
-                                           const SnapShipLut* lut);
+                                           SnapShipLut* lut);
 static void blob_worker_submit_snapshot(uint32_t current_time);
 static bool blob_worker_try_get_output(SharedBlobOutput* out);
 static int blob_worker_start(void);
@@ -502,13 +502,19 @@ int websocket_server_get_placed_structures(PlacedStructure **out_structs, uint32
  * the full 512 KB pointer table twice per blob build. */
 typedef struct SnapShipLut {
     const SimpleShip* ptr[SHIP_ID_LOOKUP_SIZE];
-    uint16_t          touched[MAX_SIMPLE_SHIPS];
+    uint16_t          aoi_idx[SHIP_ID_LOOKUP_SIZE];
+    uint16_t          touched[MAX_SIMPLE_SHIPS + MAX_SHIPS];
     int               touched_count;
 } SnapShipLut;
 
+#define SHIP_AOI_IDX_NONE 0xFFFFu
+
 static void snap_ship_lut_reset(SnapShipLut* lut) {
-    for (int i = 0; i < lut->touched_count; i++)
-        lut->ptr[lut->touched[i]] = NULL;
+    for (int i = 0; i < lut->touched_count; i++) {
+        uint16_t sid = lut->touched[i];
+        lut->ptr[sid] = NULL;
+        lut->aoi_idx[sid] = SHIP_AOI_IDX_NONE;
+    }
     lut->touched_count = 0;
 }
 
@@ -522,6 +528,32 @@ static void snap_ship_lut_insert(SnapShipLut* lut, uint16_t sid, const SimpleShi
 static const SimpleShip* snap_ship_lut_get(const SnapShipLut* lut, uint32_t sid) {
     if (!sid || sid >= SHIP_ID_LOOKUP_SIZE) return NULL;
     return lut->ptr[sid];
+}
+
+static void snap_ship_lut_touch(SnapShipLut* lut, uint16_t sid) {
+    if (!sid) return;
+    for (int i = 0; i < lut->touched_count; i++) {
+        if (lut->touched[i] == sid) return;
+    }
+    if (lut->touched_count < (int)(sizeof(lut->touched) / sizeof(lut->touched[0])))
+        lut->touched[lut->touched_count++] = sid;
+}
+
+static void snap_ship_lut_set_aoi_idx(SnapShipLut* lut, uint16_t sid, uint16_t idx) {
+    if (!sid) return;
+    lut->aoi_idx[sid] = idx;
+    snap_ship_lut_touch(lut, sid);
+}
+
+static bool snap_ship_lut_aoi_pos(const SnapShipLut* lut, const SharedBlobOutput* out,
+                                  uint32_t sid, float* ox, float* oy) {
+    if (!sid || sid >= SHIP_ID_LOOKUP_SIZE) return false;
+    uint16_t idx = lut->aoi_idx[sid];
+    if (idx == SHIP_AOI_IDX_NONE || idx >= (uint16_t)out->aoi_ship_count) return false;
+    if (out->aoi_ship_id[idx] != sid) return false;
+    *ox = out->aoi_ship_px[idx];
+    *oy = out->aoi_ship_py[idx];
+    return true;
 }
 
 static void snap_ship_lut_fill(SnapShipLut* lut, const SharedBlobSnapshot* snap) {
@@ -2747,25 +2779,15 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
 
         /* Effective movement speed multiplier — accounts for carry weight + grapple load. */
         float _snap_inv_kg    = blob_player_inventory_weight(&snap->players[p]);
-        {
-            int _snap_slot = -1;
-            for (int _si = 0; _si < WS_MAX_CLIENTS; _si++) {
-                if (players[_si].active &&
-                    players[_si].player_id == snap->players[p].player_id) {
-                    _snap_slot = _si;
-                    break;
-                }
-            }
-            if (_snap_slot >= 0)
-                _snap_inv_kg = player_grapple_carry_kg(_snap_slot, &players[_snap_slot]);
-        }
+        if (players[p].active && players[p].player_id == snap->players[p].player_id)
+            _snap_inv_kg = player_grapple_carry_kg(p, &players[p]);
         float _snap_carry_cap = 300.0f * (1.0f + (float)snap->players[p].stat_weight * 0.1f);
         float _snap_carry_r   = (_snap_carry_cap > 0.0f) ? (_snap_inv_kg / _snap_carry_cap) : 0.0f;
         float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
         bool  _snap_can_sprint = (_snap_carry_r < 0.85f);
 
         char player_entry[3200];
-        snprintf(player_entry, sizeof(player_entry),
+        int _pelen = snprintf(player_entry, sizeof(player_entry),
                 "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                 "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                 "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
@@ -2810,39 +2832,43 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 _snap_spd_mult, _snap_can_sprint ? "true" : "false",
                 (unsigned)snap->players[p].bucket_fill,
                 inv_buf);
+        if (_pelen < 0) _pelen = 0;
+        if (_pelen >= (int)sizeof(player_entry)) _pelen = (int)sizeof(player_entry) - 1;
         /* Append active grapple state so the client can render the rope.
          * Only included when the hook is in flight or attached. */
         {
             const GrappleHook* _gh = &grapple_hooks[p];
             if (_gh->active && _gh->state != GRAPPLE_IDLE) {
-                int _glen = (int)strlen(player_entry);
                 /* Inject before the closing '}' */
-                if (_glen > 1 && player_entry[_glen - 1] == '}') {
+                if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
                     char _gbuf[128];
-                    snprintf(_gbuf, sizeof(_gbuf),
+                    int _gn = snprintf(_gbuf, sizeof(_gbuf),
                         ",\"grapple_state\":%d,\"grapple_x\":%.1f,\"grapple_y\":%.1f,\"grapple_rope\":%.1f,\"grapple_target\":%d}",
                         (int)_gh->state, _gh->hook_x, _gh->hook_y, _gh->rope_length,
                         (_gh->state == GRAPPLE_ATTACHED) ? _gh->target_type : GRAPPLE_TARGET_NONE);
-                    /* Replace the last '}' with the grapple suffix. */
-                    player_entry[_glen - 1] = '\0';
-                    strncat(player_entry, _gbuf,
-                            sizeof(player_entry) - strlen(player_entry) - 1);
+                    if (_gn > 0) {
+                        int _base = _pelen - 1;
+                        if (_base + _gn < (int)sizeof(player_entry)) {
+                            memcpy(player_entry + _base, _gbuf, (size_t)_gn);
+                            _pelen = _base + _gn;
+                            player_entry[_pelen] = '\0';
+                        }
+                    }
                 }
             }
         }
         /* Capture per-entry for AOI-filtered per-client assembly. */
         {
-            int _pelen = (int)strlen(player_entry);
             if (_pelen > (int)sizeof(out->player_entry[p]) - 1) _pelen = (int)sizeof(out->player_entry[p]) - 1;
             memcpy(out->player_entry[p], player_entry, (size_t)_pelen);
             out->player_entry[p][_pelen] = '\0';
             out->player_entry_len[p] = _pelen;
             float _pwx = snap->players[p].x, _pwy = snap->players[p].y;
             if (snap->players[p].parent_ship_id != 0) {
-                for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
-                    if (out->aoi_ship_id[_asi] == (uint32_t)snap->players[p].parent_ship_id) {
-                        _pwx = out->aoi_ship_px[_asi]; _pwy = out->aoi_ship_py[_asi]; break;
-                    }
+                float _spx, _spy;
+                if (snap_ship_lut_aoi_pos(lut, out, snap->players[p].parent_ship_id, &_spx, &_spy)) {
+                    _pwx = _spx;
+                    _pwy = _spy;
                 }
             }
             out->player_world_x[p] = _pwx;
@@ -2983,10 +3009,10 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
 
         float _nwx = npc->x, _nwy = npc->y;
         if (npc->ship_id != 0) {
-            for (int _asi = 0; _asi < out->aoi_ship_count; _asi++) {
-                if (out->aoi_ship_id[_asi] == (uint32_t)npc->ship_id) {
-                    _nwx = out->aoi_ship_px[_asi]; _nwy = out->aoi_ship_py[_asi]; break;
-                }
+            float _nspx, _nspy;
+            if (snap_ship_lut_aoi_pos(lut, out, npc->ship_id, &_nspx, &_nspy)) {
+                _nwx = _nspx;
+                _nwy = _nspy;
             }
         }
         out->npc_world_x[n] = _nwx;
@@ -2999,7 +3025,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
 }
 
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
-                                           const SnapShipLut* lut) {
+                                           SnapShipLut* lut) {
     int ships_offset = 0;
     out->ships_json[ships_offset++] = '[';
     bool first_ship = true;
@@ -3226,6 +3252,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 out->aoi_ship_id[_idx] = ship->id;
                 out->aoi_ship_start[_idx] = _aoi_s;
                 out->aoi_ship_len[_idx] = n;
+                snap_ship_lut_set_aoi_idx(lut, (uint16_t)ship->id, (uint16_t)_idx);
             }
             first_ship = false;
         }
@@ -3325,6 +3352,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 out->aoi_ship_id[_idx] = snap->ships[s].ship_id;
                 out->aoi_ship_start[_idx] = _aoi_s2;
                 out->aoi_ship_len[_idx] = n2;
+                snap_ship_lut_set_aoi_idx(lut, snap->ships[s].ship_id, (uint16_t)_idx);
             }
             first_ship = false;
         }
@@ -3406,7 +3434,11 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     g_blob_worker.job.tick = global_sim ? global_sim->tick : 0;
     memcpy(g_blob_worker.job.tombstones, tombstones, sizeof(tombstones));
     memcpy(g_blob_worker.job.dropped_items, dropped_items, sizeof(dropped_items));
-    memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies, sizeof(dynamic_companies));
+    if (dynamic_company_count > 0)
+        memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies,
+               (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
+    else
+        memset(g_blob_worker.job.dynamic_companies, 0, sizeof(g_blob_worker.job.dynamic_companies));
     g_blob_worker.job.dynamic_company_count = dynamic_company_count;
     /* Copy only active ship slots (not the full 200-entry array).
      * SimpleShip is ~8-10 KB each; copying 200 entries even when 8 are active
@@ -3415,8 +3447,12 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (ship_count > 0)
         memcpy(g_blob_worker.job.ships, ships,
                (size_t)ship_count * sizeof(ships[0]));
-    for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++)
-        copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
+    for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++) {
+        if (players[_bpi].active)
+            copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
+        else
+            g_blob_worker.job.players[_bpi].active = false;
+    }
     g_blob_worker.job.sim_ship_count = 0;
     if (global_sim) {
         uint16_t _ss = global_sim->ship_count;
@@ -10907,6 +10943,7 @@ int websocket_server_update(struct Sim* sim) {
                                     if (ma_npc_ptr->ship_id == 0 || ma_npc_ptr->in_water) {
                                         /* Off-ship: swim to the hull, then walk aboard */
                                         ma_npc_ptr->ship_id          = 0;
+                                        npc_ensure_swim_vitals(ma_npc_ptr);
                                         ma_npc_ptr->in_water         = true;
                                         ma_npc_ptr->local_x          = ma_npc_ptr->x;
                                         ma_npc_ptr->local_y          = ma_npc_ptr->y;
@@ -10934,6 +10971,7 @@ int websocket_server_update(struct Sim* sim) {
                                     } else {
                                         /* On another ship — detach and swim to the new one */
                                         ma_npc_ptr->ship_id          = 0;
+                                        npc_ensure_swim_vitals(ma_npc_ptr);
                                         ma_npc_ptr->in_water         = true;
                                         ma_npc_ptr->local_x          = ma_npc_ptr->x;
                                         ma_npc_ptr->local_y          = ma_npc_ptr->y;
@@ -11155,6 +11193,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 /* Detach from old ship (if any) and swim to the hull */
                                                 float wx = tp_npc->x;  /* world pos before detach */
                                                 float wy = tp_npc->y;
+                                                npc_ensure_swim_vitals(tp_npc);
                                                 tp_npc->ship_id          = 0;
                                                 tp_npc->in_water         = true;
                                                 tp_npc->local_x          = wx;
@@ -13646,13 +13685,21 @@ void websocket_server_send_game_state(void) {
             _snap.tick = global_sim ? global_sim->tick : 0;
             memcpy(_snap.tombstones, tombstones, sizeof(tombstones));
             memcpy(_snap.dropped_items, dropped_items, sizeof(dropped_items));
-            memcpy(_snap.dynamic_companies, dynamic_companies, sizeof(dynamic_companies));
+            if (dynamic_company_count > 0)
+                memcpy(_snap.dynamic_companies, dynamic_companies,
+                       (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
+            else
+                memset(_snap.dynamic_companies, 0, sizeof(_snap.dynamic_companies));
             _snap.dynamic_company_count = dynamic_company_count;
             _snap.ship_count = ship_count;
             if (ship_count > 0)
                 memcpy(_snap.ships, ships, (size_t)ship_count * sizeof(ships[0]));
-            for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++)
-                copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
+            for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++) {
+                if (players[_fbpi].active)
+                    copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
+                else
+                    _snap.players[_fbpi].active = false;
+            }
             _snap.sim_ship_count = 0;
             if (global_sim) {
                 uint16_t _ss = global_sim->ship_count;
@@ -13732,13 +13779,12 @@ void websocket_server_send_game_state(void) {
             if (!_vp || !_vp->active) continue;
 
             float _cx = _vp->x, _cy = _vp->y;
-            if (_vp->parent_ship_id != 0) {
-                for (int _pi = 0; _pi < aoi_ship_count; _pi++) {
-                    if (shared_blob_cache.aoi_ship_id[_pi] == (uint32_t)_vp->parent_ship_id) {
-                        _cx = shared_blob_cache.aoi_ship_px[_pi];
-                        _cy = shared_blob_cache.aoi_ship_py[_pi];
-                        break;
-                    }
+            {
+                int _vslot = (int)(_vp - players);
+                if (_vslot >= 0 && _vslot < WS_MAX_CLIENTS &&
+                    shared_blob_cache.player_entry_active[_vslot]) {
+                    _cx = shared_blob_cache.player_world_x[_vslot];
+                    _cy = shared_blob_cache.player_world_y[_vslot];
                 }
             }
 
@@ -14240,6 +14286,7 @@ void websocket_server_tick(float dt) {
                     for (int ni = 0; ni < world_npc_count; ni++) {
                         if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
                         dismount_npc(&world_npcs[ni], sinking_ship);
+                        npc_ensure_swim_vitals(&world_npcs[ni]);
                         world_npcs[ni].in_water = true;
                         /* Extinguish any burning NPCs that hit the water */
                         world_npcs[ni].fire_timer_ms = 0;
