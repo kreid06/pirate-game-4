@@ -11195,6 +11195,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 float wy = tp_npc->y;
                                                 npc_ensure_swim_vitals(tp_npc);
                                                 tp_npc->ship_id          = 0;
+                                                npc_ensure_swim_vitals(tp_npc);
                                                 tp_npc->in_water         = true;
                                                 tp_npc->local_x          = wx;
                                                 tp_npc->local_y          = wy;
@@ -14287,6 +14288,8 @@ void websocket_server_tick(float dt) {
                         if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
                         dismount_npc(&world_npcs[ni], sinking_ship);
                         npc_ensure_swim_vitals(&world_npcs[ni]);
+                        world_npcs[ni].stamina  = world_npcs[ni].max_stamina;
+                        world_npcs[ni].oxygen   = world_npcs[ni].max_oxygen;
                         world_npcs[ni].in_water = true;
                         /* Extinguish any burning NPCs that hit the water */
                         world_npcs[ni].fire_timer_ms = 0;

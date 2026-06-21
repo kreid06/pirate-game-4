@@ -9,6 +9,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "net/websocket_server_internal.h"
+#include "net/npc_world.h"
 #include "net/ship_init.h"
 #include "net/npc_world.h"
 #include "net/cannon_fire.h"
@@ -72,13 +73,13 @@ void tick_sinking_ships(void) {
             _enpc->local_x = _enpc->x;
             _enpc->local_y = _enpc->y;
             _enpc->ship_id  = 0;
-            _enpc->in_water = true;
             _enpc->fire_timer_ms = 0;
             /* Reset stamina/oxygen so the NPC has a fair chance to survive
              * and swim to a ship rather than drowning instantly. */
             npc_ensure_swim_vitals(_enpc);
             _enpc->stamina  = _enpc->max_stamina;
             _enpc->oxygen   = _enpc->max_oxygen;
+            _enpc->in_water = true;
         }
 
         /* Destroy in sim */

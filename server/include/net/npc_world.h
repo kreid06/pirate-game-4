@@ -18,7 +18,7 @@ uint32_t npc_island_at(float wx, float wy);
 void npc_update_island_presence(WorldNpc* npc);
 /** Normalize off-ship coords + island state after world_save load. */
 void npc_restore_persisted_state(WorldNpc* npc);
-/** Back-fill stamina/oxygen when max values are 0 (pre-feature saves). */
+/** Back-fill swim vitals when max_stamina/max_oxygen are 0 (pre-feature saves). */
 void npc_ensure_swim_vitals(WorldNpc* npc);
 
 /** Idle crew grid on the upper deck — up to NPC_IDLE_SLOT_MAX positions. */

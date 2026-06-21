@@ -804,8 +804,14 @@ uint32_t npc_island_at(float wx, float wy) {
 void npc_ensure_swim_vitals(WorldNpc* npc) {
     if (!npc) return;
     /* stamina/oxygen are not persisted yet; saves memset NPCs to zero. */
-    if (npc->max_stamina == 0) { npc->max_stamina = 100; npc->stamina = 100; }
-    if (npc->max_oxygen == 0)  { npc->max_oxygen  = 100; npc->oxygen  = 100; }
+    if (npc->max_stamina == 0) {
+        npc->max_stamina = 100;
+        npc->stamina     = 100;
+    }
+    if (npc->max_oxygen == 0) {
+        npc->max_oxygen = 100;
+        npc->oxygen     = 100;
+    }
 }
 
 void npc_update_island_presence(WorldNpc* npc) {
@@ -816,8 +822,11 @@ void npc_update_island_presence(WorldNpc* npc) {
         const float DECK_HALF_LEN = 260.0f;
         const float DECK_HALF_WID =  75.0f;
         bool was_water = npc->in_water;
-        npc->in_water = (fabsf(npc->local_x) > DECK_HALF_LEN ||
-                         fabsf(npc->local_y) > DECK_HALF_WID);
+        bool now_water = (fabsf(npc->local_x) > DECK_HALF_LEN ||
+                          fabsf(npc->local_y) > DECK_HALF_WID);
+        if (!was_water && now_water)
+            npc_ensure_swim_vitals(npc);
+        npc->in_water = now_water;
         if (!was_water && npc->in_water && npc->fire_timer_ms > 0) {
             npc->fire_timer_ms = 0;
             char fx[192];
@@ -858,6 +867,8 @@ void npc_update_island_presence(WorldNpc* npc) {
 
 void npc_restore_persisted_state(WorldNpc* npc) {
     if (!npc || !npc->active) return;
+    npc_ensure_swim_vitals(npc);
+
     npc_ensure_swim_vitals(npc);
 
     if (npc->ship_id == 0) {
