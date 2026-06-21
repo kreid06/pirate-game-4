@@ -10907,6 +10907,7 @@ int websocket_server_update(struct Sim* sim) {
                                     if (ma_npc_ptr->ship_id == 0 || ma_npc_ptr->in_water) {
                                         /* Off-ship: swim to the hull, then walk aboard */
                                         ma_npc_ptr->ship_id          = 0;
+                                        npc_ensure_swim_vitals(ma_npc_ptr);
                                         ma_npc_ptr->in_water         = true;
                                         ma_npc_ptr->local_x          = ma_npc_ptr->x;
                                         ma_npc_ptr->local_y          = ma_npc_ptr->y;
@@ -10934,6 +10935,7 @@ int websocket_server_update(struct Sim* sim) {
                                     } else {
                                         /* On another ship — detach and swim to the new one */
                                         ma_npc_ptr->ship_id          = 0;
+                                        npc_ensure_swim_vitals(ma_npc_ptr);
                                         ma_npc_ptr->in_water         = true;
                                         ma_npc_ptr->local_x          = ma_npc_ptr->x;
                                         ma_npc_ptr->local_y          = ma_npc_ptr->y;
@@ -11156,6 +11158,7 @@ int websocket_server_update(struct Sim* sim) {
                                                 float wx = tp_npc->x;  /* world pos before detach */
                                                 float wy = tp_npc->y;
                                                 tp_npc->ship_id          = 0;
+                                                npc_ensure_swim_vitals(tp_npc);
                                                 tp_npc->in_water         = true;
                                                 tp_npc->local_x          = wx;
                                                 tp_npc->local_y          = wy;
@@ -14240,6 +14243,9 @@ void websocket_server_tick(float dt) {
                     for (int ni = 0; ni < world_npc_count; ni++) {
                         if (!world_npcs[ni].active || world_npcs[ni].ship_id != sunk_id) continue;
                         dismount_npc(&world_npcs[ni], sinking_ship);
+                        npc_ensure_swim_vitals(&world_npcs[ni]);
+                        world_npcs[ni].stamina  = world_npcs[ni].max_stamina;
+                        world_npcs[ni].oxygen   = world_npcs[ni].max_oxygen;
                         world_npcs[ni].in_water = true;
                         /* Extinguish any burning NPCs that hit the water */
                         world_npcs[ni].fire_timer_ms = 0;
