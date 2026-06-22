@@ -28,7 +28,7 @@ server_output.txt
 ################################################################################
 server/player_saves/
 server/data/auth/
-server/data/saves/archive/
+server/data/saves/
 
 ################################################################################
 # Auth service
@@ -49,6 +49,7 @@ server/auth/.vscode/
 server/auth/.idea/
 server/auth/.DS_Store
 server/config/auth.env
+
 ################################################################################
 # Node / JS tooling
 ################################################################################
