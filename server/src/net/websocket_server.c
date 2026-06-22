@@ -57,6 +57,7 @@ static int format_dominators_extra(const PlacedStructure *s, char *buf, int cap)
 }
 
 #include "net/quality.h"
+#include "net/npc_world.h"
 /* Highest loot tier among a wreck's remaining blueprints, or -1 if none. */
 static int wreck_best_tier(const PlacedStructure* w) {
     int best = -1;
@@ -335,6 +336,18 @@ typedef struct {
     uint32_t         bucket_cooldown_until_ms;
 } BlobPlayer;
 
+/* Slim tombstone snapshot — omits PlayerInventory (~300 B/slot) which the
+ * broadcast JSON never serialises (only id/x/y/ownerName/remainingMs). */
+typedef struct {
+    uint32_t id;
+    float    x, y;
+    uint16_t ship_id;
+    float    local_x, local_y;
+    char     owner_name[64];
+    uint32_t spawn_time_ms;
+    bool     active;
+} BlobTombstone;
+
 /* ── Shared GAME_STATE blob serializer worker (incremental threading step) ───
  * Offloads non-authoritative JSON serialization from the main tick thread.
  * The authoritative simulation and send loop remain single-threaded.
@@ -344,7 +357,7 @@ typedef struct {
     uint32_t tick;            /* global_sim->tick at snapshot time — keeps the GAME_STATE
                                * tick label in lock-step with the positions in this snapshot
                                * even though the worker output is consumed a frame later. */
-    Tombstone tombstones[MAX_TOMBSTONES];
+    BlobTombstone tombstones[MAX_TOMBSTONES];
     DroppedItem dropped_items[MAX_DROPPED_ITEMS];
     DynamicCompany dynamic_companies[MAX_DYNAMIC_COMPANIES];
     int dynamic_company_count;
@@ -422,6 +435,36 @@ typedef struct {
         uint8_t  task_locked;
         char     name[48];
     } npc_key[MAX_WORLD_NPCS];
+
+    /* Player dirty-flag cache — mirrors npc_key. Skips ~3 KB snprintf for
+     * stationary/docked players whose state is unchanged tick-to-tick. */
+    struct {
+        uint32_t player_id;
+        float    x, y, rotation;
+        float    velocity_x, velocity_y;
+        bool     is_moving;
+        float    movement_direction_x, movement_direction_y;
+        uint16_t parent_ship_id;
+        float    local_x, local_y;
+        uint8_t  deck_level;
+        uint8_t  movement_state;
+        bool     is_mounted;
+        uint32_t mounted_module_id;
+        uint16_t controlling_ship_id;
+        uint8_t  company_id;
+        uint16_t health, max_health, stamina, max_stamina, oxygen, max_oxygen;
+        uint32_t on_island_id, on_dock_id;
+        uint8_t  player_level;
+        uint32_t player_xp;
+        uint8_t  stat_health, stat_damage, stat_stamina, stat_weight;
+        uint16_t res_wood, res_fiber, res_metal, res_stone;
+        uint8_t  bucket_fill;
+        PlayerInventory inventory;
+        uint8_t  grapple_state;
+        float    grapple_x, grapple_y, grapple_rope;
+        int32_t  grapple_target;
+        char     name[64];
+    } player_key[WS_MAX_CLIENTS];
 } SharedBlobOutput;
 
 typedef struct {
@@ -2089,6 +2132,24 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
     _dst->bucket_cooldown_until_ms = _src->bucket_cooldown_until_ms;
 }
 
+static void copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
+    for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
+        if (!_src[i].active) {
+            _dst[i].active = false;
+            continue;
+        }
+        _dst[i].active        = true;
+        _dst[i].id            = _src[i].id;
+        _dst[i].x             = _src[i].x;
+        _dst[i].y             = _src[i].y;
+        _dst[i].ship_id       = _src[i].ship_id;
+        _dst[i].local_x       = _src[i].local_x;
+        _dst[i].local_y       = _src[i].local_y;
+        memcpy(_dst[i].owner_name, _src[i].owner_name, sizeof(_dst[i].owner_name));
+        _dst[i].spawn_time_ms = _src[i].spawn_time_ms;
+    }
+}
+
 /* Same calculation over a BlobPlayer (slim snapshot copy used by the blob worker). */
 static float blob_player_inventory_weight(const BlobPlayer* p) {
     float w = 0.0f;
@@ -2729,6 +2790,11 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     int _dcc = snap->dynamic_company_count;
     if (_dcc < 0) _dcc = 0;
     if (_dcc > MAX_DYNAMIC_COMPANIES) _dcc = MAX_DYNAMIC_COMPANIES;
+    if (_dcc == 0) {
+        out->co_json[1] = ']';
+        out->co_json[2] = '\0';
+        out->co_len = 2;
+    } else {
     for (int _ci2 = 0; _ci2 < _dcc; _ci2++) {
         if (!snap->dynamic_companies[_ci2].active) continue;
         if (!_cf && _co < (int)sizeof(out->co_json) - 2) out->co_json[_co++] = ',';
@@ -2741,6 +2807,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     if (_co < (int)sizeof(out->co_json) - 1) out->co_json[_co++] = ']';
     out->co_json[_co] = '\0';
     out->co_len = _co;
+    }
 
     /* players_json is not used in the send path — the per-client AOI assembly
      * reads player_entry[] directly (same pattern as npcs_json, skipped above).
@@ -2752,104 +2819,153 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     for (int p = 0; p < WS_MAX_CLIENTS; p++) {
         if (!snap->players[p].active) continue;
 
-        char inv_buf[1024];
-        int inv_off = 0;
-        inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                            ",\"inventory\":{\"slots\":[");
-        for (int s = 0; s < INVENTORY_SLOTS; s++) {
-            if (s > 0 && inv_off < (int)sizeof(inv_buf) - 1)
-                inv_buf[inv_off++] = ',';
+        const GrappleHook* _gh = &grapple_hooks[p];
+        uint8_t  _g_state  = (_gh->active && _gh->state != GRAPPLE_IDLE) ? (uint8_t)_gh->state : 0;
+        float    _g_x      = _g_state ? _gh->hook_x : 0.0f;
+        float    _g_y      = _g_state ? _gh->hook_y : 0.0f;
+        float    _g_rope   = _g_state ? _gh->rope_length : 0.0f;
+        int32_t  _g_target = (_gh->active && _gh->state == GRAPPLE_ATTACHED)
+                             ? (int32_t)_gh->target_type : GRAPPLE_TARGET_NONE;
+        const BlobPlayer* _bp = &snap->players[p];
+        __typeof__(out->player_key[p]) *_pk = &out->player_key[p];
+        bool _dirty = (_pk->player_id            != _bp->player_id            ||
+                       _pk->x                     != _bp->x                     ||
+                       _pk->y                     != _bp->y                     ||
+                       _pk->rotation              != _bp->rotation              ||
+                       _pk->velocity_x            != _bp->velocity_x            ||
+                       _pk->velocity_y            != _bp->velocity_y            ||
+                       _pk->is_moving             != _bp->is_moving             ||
+                       _pk->movement_direction_x  != _bp->movement_direction_x  ||
+                       _pk->movement_direction_y  != _bp->movement_direction_y  ||
+                       _pk->parent_ship_id        != _bp->parent_ship_id        ||
+                       _pk->local_x               != _bp->local_x               ||
+                       _pk->local_y               != _bp->local_y               ||
+                       _pk->deck_level            != _bp->deck_level            ||
+                       _pk->movement_state        != (uint8_t)_bp->movement_state ||
+                       _pk->is_mounted            != _bp->is_mounted            ||
+                       _pk->mounted_module_id     != _bp->mounted_module_id     ||
+                       _pk->controlling_ship_id   != _bp->controlling_ship_id   ||
+                       _pk->company_id            != _bp->company_id            ||
+                       _pk->health                != _bp->health                ||
+                       _pk->max_health            != _bp->max_health            ||
+                       _pk->stamina               != _bp->stamina               ||
+                       _pk->max_stamina           != _bp->max_stamina           ||
+                       _pk->oxygen                != _bp->oxygen                ||
+                       _pk->max_oxygen            != _bp->max_oxygen            ||
+                       _pk->on_island_id          != _bp->on_island_id          ||
+                       _pk->on_dock_id            != _bp->on_dock_id            ||
+                       _pk->player_level          != _bp->player_level          ||
+                       _pk->player_xp             != _bp->player_xp             ||
+                       _pk->stat_health           != _bp->stat_health           ||
+                       _pk->stat_damage           != _bp->stat_damage           ||
+                       _pk->stat_stamina          != _bp->stat_stamina          ||
+                       _pk->stat_weight           != _bp->stat_weight           ||
+                       _pk->res_wood              != _bp->res_wood              ||
+                       _pk->res_fiber             != _bp->res_fiber             ||
+                       _pk->res_metal             != _bp->res_metal             ||
+                       _pk->res_stone             != _bp->res_stone             ||
+                       _pk->bucket_fill           != _bp->bucket_fill           ||
+                       _pk->grapple_state         != _g_state                   ||
+                       _pk->grapple_x             != _g_x                       ||
+                       _pk->grapple_y             != _g_y                       ||
+                       _pk->grapple_rope          != _g_rope                    ||
+                       _pk->grapple_target        != _g_target                  ||
+                       memcmp(&_pk->inventory, &_bp->inventory, sizeof(PlayerInventory)) != 0 ||
+                       strncmp(_pk->name, _bp->name, sizeof(_pk->name)) != 0 ||
+                       out->player_entry_len[p] == 0);
+
+        if (_dirty) {
+            char inv_buf[1024];
+            int inv_off = 0;
             inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                                "[%d,%d]",
-                                (int)snap->players[p].inventory.slots[s].item,
-                                (int)snap->players[p].inventory.slots[s].quantity);
-        }
-        inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
-                            "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
-                            "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
-                            "\"activeSlot\":%d,"
-                            "\"res_wood\":%u,\"res_fiber\":%u,\"res_metal\":%u,\"res_stone\":%u}",
-                            (int)snap->players[p].inventory.equipment.helm,
-                            (int)snap->players[p].inventory.equipment.torso,
-                            (int)snap->players[p].inventory.equipment.legs,
-                            (int)snap->players[p].inventory.equipment.feet,
-                            (int)snap->players[p].inventory.equipment.hands,
-                            (int)snap->players[p].inventory.equipment.shield,
-                            (int)snap->players[p].inventory.active_slot,
-                            (unsigned)snap->players[p].res_wood,
-                            (unsigned)snap->players[p].res_fiber,
-                            (unsigned)snap->players[p].res_metal,
-                            (unsigned)snap->players[p].res_stone);
+                                ",\"inventory\":{\"slots\":[");
+            for (int s = 0; s < INVENTORY_SLOTS; s++) {
+                if (s > 0 && inv_off < (int)sizeof(inv_buf) - 1)
+                    inv_buf[inv_off++] = ',';
+                inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                                    "[%d,%d]",
+                                    (int)snap->players[p].inventory.slots[s].item,
+                                    (int)snap->players[p].inventory.slots[s].quantity);
+            }
+            inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                                "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
+                                "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
+                                "\"activeSlot\":%d,"
+                                "\"res_wood\":%u,\"res_fiber\":%u,\"res_metal\":%u,\"res_stone\":%u}",
+                                (int)snap->players[p].inventory.equipment.helm,
+                                (int)snap->players[p].inventory.equipment.torso,
+                                (int)snap->players[p].inventory.equipment.legs,
+                                (int)snap->players[p].inventory.equipment.feet,
+                                (int)snap->players[p].inventory.equipment.hands,
+                                (int)snap->players[p].inventory.equipment.shield,
+                                (int)snap->players[p].inventory.active_slot,
+                                (unsigned)snap->players[p].res_wood,
+                                (unsigned)snap->players[p].res_fiber,
+                                (unsigned)snap->players[p].res_metal,
+                                (unsigned)snap->players[p].res_stone);
 
-        /* Effective movement speed multiplier — accounts for carry weight + grapple load. */
-        float _snap_inv_kg    = blob_player_inventory_weight(&snap->players[p]);
-        if (players[p].active && players[p].player_id == snap->players[p].player_id)
-            _snap_inv_kg = player_grapple_carry_kg(p, &players[p]);
-        float _snap_carry_cap = 300.0f * (1.0f + (float)snap->players[p].stat_weight * 0.1f);
-        float _snap_carry_r   = (_snap_carry_cap > 0.0f) ? (_snap_inv_kg / _snap_carry_cap) : 0.0f;
-        float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
-        bool  _snap_can_sprint = (_snap_carry_r < 0.85f);
+            float _snap_inv_kg    = blob_player_inventory_weight(&snap->players[p]);
+            if (players[p].active && players[p].player_id == snap->players[p].player_id)
+                _snap_inv_kg = player_grapple_carry_kg(p, &players[p]);
+            float _snap_carry_cap = 300.0f * (1.0f + (float)snap->players[p].stat_weight * 0.1f);
+            float _snap_carry_r   = (_snap_carry_cap > 0.0f) ? (_snap_inv_kg / _snap_carry_cap) : 0.0f;
+            float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
+            bool  _snap_can_sprint = (_snap_carry_r < 0.85f);
 
-        char player_entry[3200];
-        int _pelen = snprintf(player_entry, sizeof(player_entry),
-                "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
-                "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
-                "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
-                "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"deck_level\":%u,\"state\":\"%s\","
-                "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
-                "\"company\":%u,\"health\":%u,\"max_health\":%u,"
-                "\"stamina\":%u,\"max_stamina\":%u,\"oxygen\":%u,\"max_oxygen\":%u,"
-                "\"on_island\":%u,\"on_dock\":%u,"
-                "\"player_level\":%u,\"player_xp\":%u,"
-                "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
-                "\"stat_points\":%u,"
-                "\"speed_mult\":%.4f,\"can_sprint\":%s,"
-                "\"bucket_fill\":%u"
-                "%s}",
-                snap->players[p].player_id, snap->players[p].name[0] ? snap->players[p].name : "Player",
-                snap->players[p].x, snap->players[p].y, snap->players[p].rotation,
-                snap->players[p].velocity_x, snap->players[p].velocity_y,
-                snap->players[p].is_moving ? "true" : "false",
-                snap->players[p].movement_direction_x, snap->players[p].movement_direction_y,
-                snap->players[p].parent_ship_id, snap->players[p].local_x, snap->players[p].local_y,
-                (unsigned)snap->players[p].deck_level,
-                get_state_string(snap->players[p].movement_state),
-                snap->players[p].is_mounted ? "true" : "false",
-                snap->players[p].mounted_module_id,
-                snap->players[p].controlling_ship_id,
-                snap->players[p].company_id,
-                snap->players[p].health, snap->players[p].max_health,
-                snap->players[p].stamina, snap->players[p].max_stamina,
-                snap->players[p].oxygen,  snap->players[p].max_oxygen,
-                snap->players[p].on_island_id, snap->players[p].on_dock_id,
-                (unsigned)snap->players[p].player_level,
-                (unsigned)snap->players[p].player_xp,
-                (unsigned)snap->players[p].stat_health,
-                (unsigned)snap->players[p].stat_damage,
-                (unsigned)snap->players[p].stat_stamina,
-                (unsigned)snap->players[p].stat_weight,
-                (unsigned)((snap->players[p].player_level > 1)
-                    ? (snap->players[p].player_level - 1)
-                      - (snap->players[p].stat_health + snap->players[p].stat_damage
-                         + snap->players[p].stat_stamina + snap->players[p].stat_weight)
-                    : 0),
-                _snap_spd_mult, _snap_can_sprint ? "true" : "false",
-                (unsigned)snap->players[p].bucket_fill,
-                inv_buf);
-        if (_pelen < 0) _pelen = 0;
-        if (_pelen >= (int)sizeof(player_entry)) _pelen = (int)sizeof(player_entry) - 1;
-        /* Append active grapple state so the client can render the rope.
-         * Only included when the hook is in flight or attached. */
-        {
-            const GrappleHook* _gh = &grapple_hooks[p];
-            if (_gh->active && _gh->state != GRAPPLE_IDLE) {
-                /* Inject before the closing '}' */
+            char player_entry[3200];
+            int _pelen = snprintf(player_entry, sizeof(player_entry),
+                    "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
+                    "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
+                    "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
+                    "\"parent_ship\":%u,\"local_x\":%.1f,\"local_y\":%.1f,\"deck_level\":%u,\"state\":\"%s\","
+                    "\"is_mounted\":%s,\"mounted_module_id\":%u,\"controlling_ship\":%u,"
+                    "\"company\":%u,\"health\":%u,\"max_health\":%u,"
+                    "\"stamina\":%u,\"max_stamina\":%u,\"oxygen\":%u,\"max_oxygen\":%u,"
+                    "\"on_island\":%u,\"on_dock\":%u,"
+                    "\"player_level\":%u,\"player_xp\":%u,"
+                    "\"stat_health\":%u,\"stat_damage\":%u,\"stat_stamina\":%u,\"stat_weight\":%u,"
+                    "\"stat_points\":%u,"
+                    "\"speed_mult\":%.4f,\"can_sprint\":%s,"
+                    "\"bucket_fill\":%u"
+                    "%s}",
+                    snap->players[p].player_id, snap->players[p].name[0] ? snap->players[p].name : "Player",
+                    snap->players[p].x, snap->players[p].y, snap->players[p].rotation,
+                    snap->players[p].velocity_x, snap->players[p].velocity_y,
+                    snap->players[p].is_moving ? "true" : "false",
+                    snap->players[p].movement_direction_x, snap->players[p].movement_direction_y,
+                    snap->players[p].parent_ship_id, snap->players[p].local_x, snap->players[p].local_y,
+                    (unsigned)snap->players[p].deck_level,
+                    get_state_string(snap->players[p].movement_state),
+                    snap->players[p].is_mounted ? "true" : "false",
+                    snap->players[p].mounted_module_id,
+                    snap->players[p].controlling_ship_id,
+                    snap->players[p].company_id,
+                    snap->players[p].health, snap->players[p].max_health,
+                    snap->players[p].stamina, snap->players[p].max_stamina,
+                    snap->players[p].oxygen,  snap->players[p].max_oxygen,
+                    snap->players[p].on_island_id, snap->players[p].on_dock_id,
+                    (unsigned)snap->players[p].player_level,
+                    (unsigned)snap->players[p].player_xp,
+                    (unsigned)snap->players[p].stat_health,
+                    (unsigned)snap->players[p].stat_damage,
+                    (unsigned)snap->players[p].stat_stamina,
+                    (unsigned)snap->players[p].stat_weight,
+                    (unsigned)((snap->players[p].player_level > 1)
+                        ? (snap->players[p].player_level - 1)
+                          - (snap->players[p].stat_health + snap->players[p].stat_damage
+                             + snap->players[p].stat_stamina + snap->players[p].stat_weight)
+                        : 0),
+                    _snap_spd_mult, _snap_can_sprint ? "true" : "false",
+                    (unsigned)snap->players[p].bucket_fill,
+                    inv_buf);
+            if (_pelen < 0) _pelen = 0;
+            if (_pelen >= (int)sizeof(player_entry)) _pelen = (int)sizeof(player_entry) - 1;
+            if (_g_state) {
                 if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
                     char _gbuf[128];
                     int _gn = snprintf(_gbuf, sizeof(_gbuf),
                         ",\"grapple_state\":%d,\"grapple_x\":%.1f,\"grapple_y\":%.1f,\"grapple_rope\":%.1f,\"grapple_target\":%d}",
-                        (int)_gh->state, _gh->hook_x, _gh->hook_y, _gh->rope_length,
-                        (_gh->state == GRAPPLE_ATTACHED) ? _gh->target_type : GRAPPLE_TARGET_NONE);
+                        (int)_g_state, _g_x, _g_y, _g_rope, (int)_g_target);
                     if (_gn > 0) {
                         int _base = _pelen - 1;
                         if (_base + _gn < (int)sizeof(player_entry)) {
@@ -2860,59 +2976,112 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                     }
                 }
             }
-        }
-        /* When this player is a grapple target, expose grappler anchor + rope for client prediction. */
-        if (player_is_grapple_target(snap->players[p].player_id)) {
-            for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
-                const GrappleHook* _tgh = &grapple_hooks[_gsi];
-                if (!_tgh->active || _tgh->state != GRAPPLE_ATTACHED ||
-                    _tgh->target_type != GRAPPLE_TARGET_PLAYER ||
-                    _tgh->target_id != snap->players[p].player_id) continue;
-                if (!players[_gsi].active) break;
-                if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
-                    char _tbuf[160];
-                    int _tn = snprintf(_tbuf, sizeof(_tbuf),
-                        ",\"grapple_pulled\":1,\"grapple_anchor_x\":%.1f,\"grapple_anchor_y\":%.1f,\"grapple_rope\":%.1f}",
-                        players[_gsi].x, players[_gsi].y, _tgh->rope_length);
-                    if (_tn > 0) {
-                        int _base = _pelen - 1;
-                        if (_base + _tn < (int)sizeof(player_entry)) {
-                            memcpy(player_entry + _base, _tbuf, (size_t)_tn);
-                            _pelen = _base + _tn;
-                            player_entry[_pelen] = '\0';
+            /* When this player is a grapple target, expose grappler anchor + rope for client prediction. */
+            if (player_is_grapple_target(snap->players[p].player_id)) {
+                for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                    const GrappleHook* _tgh = &grapple_hooks[_gsi];
+                    if (!_tgh->active || _tgh->state != GRAPPLE_ATTACHED ||
+                        _tgh->target_type != GRAPPLE_TARGET_PLAYER ||
+                        _tgh->target_id != snap->players[p].player_id) continue;
+                    if (!players[_gsi].active) break;
+                    if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
+                        char _tbuf[160];
+                        int _tn = snprintf(_tbuf, sizeof(_tbuf),
+                            ",\"grapple_pulled\":1,\"grapple_anchor_x\":%.1f,\"grapple_anchor_y\":%.1f,\"grapple_rope\":%.1f}",
+                            players[_gsi].x, players[_gsi].y, _tgh->rope_length);
+                        if (_tn > 0) {
+                            int _base = _pelen - 1;
+                            if (_base + _tn < (int)sizeof(player_entry)) {
+                                memcpy(player_entry + _base, _tbuf, (size_t)_tn);
+                                _pelen = _base + _tn;
+                                player_entry[_pelen] = '\0';
+                            }
                         }
                     }
+                    break;
                 }
-                break;
             }
-        }
-        /* Capture per-entry for AOI-filtered per-client assembly. */
-        {
             if (_pelen > (int)sizeof(out->player_entry[p]) - 1) _pelen = (int)sizeof(out->player_entry[p]) - 1;
             memcpy(out->player_entry[p], player_entry, (size_t)_pelen);
             out->player_entry[p][_pelen] = '\0';
             out->player_entry_len[p] = _pelen;
-            float _pwx = snap->players[p].x, _pwy = snap->players[p].y;
-            if (snap->players[p].parent_ship_id != 0) {
-                float _spx, _spy;
-                if (snap_ship_lut_aoi_pos(lut, out, snap->players[p].parent_ship_id, &_spx, &_spy)) {
-                    _pwx = _spx;
-                    _pwy = _spy;
-                }
+
+            _pk->player_id            = _bp->player_id;
+            _pk->x                    = _bp->x;
+            _pk->y                    = _bp->y;
+            _pk->rotation             = _bp->rotation;
+            _pk->velocity_x           = _bp->velocity_x;
+            _pk->velocity_y           = _bp->velocity_y;
+            _pk->is_moving            = _bp->is_moving;
+            _pk->movement_direction_x = _bp->movement_direction_x;
+            _pk->movement_direction_y = _bp->movement_direction_y;
+            _pk->parent_ship_id       = _bp->parent_ship_id;
+            _pk->local_x              = _bp->local_x;
+            _pk->local_y              = _bp->local_y;
+            _pk->deck_level           = _bp->deck_level;
+            _pk->movement_state       = (uint8_t)_bp->movement_state;
+            _pk->is_mounted           = _bp->is_mounted;
+            _pk->mounted_module_id    = _bp->mounted_module_id;
+            _pk->controlling_ship_id  = _bp->controlling_ship_id;
+            _pk->company_id           = _bp->company_id;
+            _pk->health               = _bp->health;
+            _pk->max_health           = _bp->max_health;
+            _pk->stamina              = _bp->stamina;
+            _pk->max_stamina          = _bp->max_stamina;
+            _pk->oxygen               = _bp->oxygen;
+            _pk->max_oxygen           = _bp->max_oxygen;
+            _pk->on_island_id         = _bp->on_island_id;
+            _pk->on_dock_id           = _bp->on_dock_id;
+            _pk->player_level         = _bp->player_level;
+            _pk->player_xp            = _bp->player_xp;
+            _pk->stat_health          = _bp->stat_health;
+            _pk->stat_damage          = _bp->stat_damage;
+            _pk->stat_stamina         = _bp->stat_stamina;
+            _pk->stat_weight          = _bp->stat_weight;
+            _pk->res_wood             = _bp->res_wood;
+            _pk->res_fiber            = _bp->res_fiber;
+            _pk->res_metal            = _bp->res_metal;
+            _pk->res_stone            = _bp->res_stone;
+            _pk->bucket_fill          = _bp->bucket_fill;
+            _pk->inventory            = _bp->inventory;
+            _pk->grapple_state        = _g_state;
+            _pk->grapple_x            = _g_x;
+            _pk->grapple_y            = _g_y;
+            _pk->grapple_rope         = _g_rope;
+            _pk->grapple_target       = _g_target;
+            strncpy(_pk->name, _bp->name, sizeof(_pk->name) - 1);
+            _pk->name[sizeof(_pk->name) - 1] = '\0';
+        }
+
+        if (_bp->parent_ship_id != 0) {
+            float _pwx = _bp->x, _pwy = _bp->y;
+            float _spx, _spy;
+            if (snap_ship_lut_aoi_pos(lut, out, _bp->parent_ship_id, &_spx, &_spy)) {
+                _pwx = _spx;
+                _pwy = _spy;
             }
             out->player_world_x[p] = _pwx;
             out->player_world_y[p] = _pwy;
-            out->player_entry_active[p] = true;
+        } else if (_dirty) {
+            out->player_world_x[p] = _bp->x;
+            out->player_world_y[p] = _bp->y;
         }
+        out->player_entry_active[p] = true;
         active_count++;
     }
     out->active_player_count = active_count;
 
     int projectiles_offset = 0;
-    out->projectiles_json[projectiles_offset++] = '[';
-    bool first_projectile = true;
     uint16_t _pc = snap->projectile_count;
     if (_pc > MAX_PROJECTILES) _pc = MAX_PROJECTILES;
+    if (_pc == 0) {
+        out->projectiles_json[0] = '[';
+        out->projectiles_json[1] = ']';
+        out->projectiles_json[2] = '\0';
+        out->projectiles_len = 2;
+    } else {
+    out->projectiles_json[projectiles_offset++] = '[';
+    bool first_projectile = true;
     for (uint16_t p = 0; p < _pc; p++) {
         const struct Projectile* proj = &snap->projectiles[p];
         if (!first_projectile) {
@@ -2933,6 +3102,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         out->projectiles_json[projectiles_offset++] = ']';
     out->projectiles_json[projectiles_offset] = '\0';
     out->projectiles_len = projectiles_offset;
+    }
 
     /* NPC entries: serialise directly into per-entry cache; no combined blob.
      * The old approach wrote all NPCs into npcs_json[32768], but with up to
@@ -3461,7 +3631,7 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     pthread_mutex_lock(&g_blob_worker.mtx);
     g_blob_worker.job.current_time = current_time;
     g_blob_worker.job.tick = global_sim ? global_sim->tick : 0;
-    memcpy(g_blob_worker.job.tombstones, tombstones, sizeof(tombstones));
+    copy_tombstones_to_blob(tombstones, g_blob_worker.job.tombstones);
     memcpy(g_blob_worker.job.dropped_items, dropped_items, sizeof(dropped_items));
     if (dynamic_company_count > 0)
         memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies,
@@ -4548,10 +4718,44 @@ static void grapple_sync_target_world_npc(WorldNpc* npc) {
     npc->target_local_y = npc->local_y;
     npc->velocity_x = 0.0f;
     npc->velocity_y = 0.0f;
+    /* Re-evaluate deck edge / island land so reeled crew are not left in_water. */
+    npc_update_island_presence(npc);
+}
+
+/** Clear swimming/suffocation when a grappled player is pulled onto dry deck or land. */
+static void grapple_refresh_target_swim_state(WebSocketPlayer* tgt,
+                                              const WebSocketPlayer* owner) {
+    if (!tgt || tgt->movement_state != PLAYER_STATE_SWIMMING) return;
+
+    bool on_dry = false;
+    if (tgt->parent_ship_id != 0) {
+        SimpleShip* ship = find_ship(tgt->parent_ship_id);
+        if (ship && !is_outside_deck(ship->ship_id, tgt->local_x, tgt->local_y))
+            on_dry = true;
+    }
+    if (!on_dry && player_try_land_on_island(tgt, tgt->x, tgt->y))
+        on_dry = true;
+    /* Reeled onto the grappler's ship deck (target may still have parent_ship_id=0). */
+    if (!on_dry && owner && owner->parent_ship_id != 0) {
+        SimpleShip* oship = find_ship(owner->parent_ship_id);
+        if (oship) {
+            float lx, ly;
+            ship_world_to_local(oship, tgt->x, tgt->y, &lx, &ly);
+            if (!is_outside_deck(oship->ship_id, lx, ly))
+                on_dry = true;
+        }
+    }
+    if (!on_dry) return;
+
+    tgt->movement_state = PLAYER_STATE_WALKING;
+    tgt->oxygen         = tgt->max_oxygen;
+    tgt->oxygen_accum   = 0.0f;
+    tgt->suffoc_accum   = 0.0f;
 }
 
 /** After entity-target rope constraint moves a grappled player, sync sim + ship-local coords. */
-static void grapple_sync_target_ws_player(WebSocketPlayer* tgt) {
+static void grapple_sync_target_ws_player(WebSocketPlayer* tgt,
+                                          const WebSocketPlayer* owner) {
     if (!tgt) return;
     if (tgt->parent_ship_id != 0) {
         SimpleShip* cur = find_ship(tgt->parent_ship_id);
@@ -4572,6 +4776,7 @@ static void grapple_sync_target_ws_player(WebSocketPlayer* tgt) {
         }
     }
     tgt->client_pos_ms = 0;
+    grapple_refresh_target_swim_state(tgt, owner);
 }
 
 /**
@@ -4930,7 +5135,7 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 if (!tgt || !tgt->active) { grapple_detach(si); break; }
 
                 grapple_apply_entity_rope(gh, owner, &tgt->x, &tgt->y);
-                grapple_sync_target_ws_player(tgt);
+                grapple_sync_target_ws_player(tgt, owner);
                 break;
             }
 
@@ -13732,7 +13937,7 @@ void websocket_server_send_game_state(void) {
             SharedBlobSnapshot _snap;
             _snap.current_time = current_time;
             _snap.tick = global_sim ? global_sim->tick : 0;
-            memcpy(_snap.tombstones, tombstones, sizeof(tombstones));
+            copy_tombstones_to_blob(tombstones, _snap.tombstones);
             memcpy(_snap.dropped_items, dropped_items, sizeof(dropped_items));
             if (dynamic_company_count > 0)
                 memcpy(_snap.dynamic_companies, dynamic_companies,

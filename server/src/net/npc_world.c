@@ -1308,9 +1308,9 @@ void tick_world_npcs(float dt) {
             }
         }
 
-        /* Island land vs open water (off-ship) or deck edge (on-ship). */
-        if (!grappled)
-            npc_update_island_presence(npc);
+        /* Island land vs open water (off-ship) or deck edge (on-ship).
+         * Always refresh — grapple only owns position integration, not in_water. */
+        npc_update_island_presence(npc);
 
         /* ── Passive HP regeneration ──────────────────────────────────────────
          * Same cadence as player regen: +2 HP every 5 s, 10 s combat delay. */
