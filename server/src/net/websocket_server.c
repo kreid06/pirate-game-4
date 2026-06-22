@@ -92,6 +92,10 @@ static int structure_quality_tier(const PlacedStructure* s) {
 #define WS_OPCODE_PING 0x9
 #define WS_OPCODE_PONG 0xA
 
+/* ISLANDS JSON + WebSocket frame buffers. Procedural tree resources push the
+ * payload past 2 MB; keep headroom for future island growth. */
+#define ISLANDS_WS_BUF_SIZE (4 * 1024 * 1024)
+
 // Simple player data structure for movement
 // (Definition in websocket_server.h)
 
@@ -2857,6 +2861,31 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 }
             }
         }
+        /* When this player is a grapple target, expose grappler anchor + rope for client prediction. */
+        if (player_is_grapple_target(snap->players[p].player_id)) {
+            for (int _gsi = 0; _gsi < WS_MAX_CLIENTS; _gsi++) {
+                const GrappleHook* _tgh = &grapple_hooks[_gsi];
+                if (!_tgh->active || _tgh->state != GRAPPLE_ATTACHED ||
+                    _tgh->target_type != GRAPPLE_TARGET_PLAYER ||
+                    _tgh->target_id != snap->players[p].player_id) continue;
+                if (!players[_gsi].active) break;
+                if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
+                    char _tbuf[160];
+                    int _tn = snprintf(_tbuf, sizeof(_tbuf),
+                        ",\"grapple_pulled\":1,\"grapple_anchor_x\":%.1f,\"grapple_anchor_y\":%.1f,\"grapple_rope\":%.1f}",
+                        players[_gsi].x, players[_gsi].y, _tgh->rope_length);
+                    if (_tn > 0) {
+                        int _base = _pelen - 1;
+                        if (_base + _tn < (int)sizeof(player_entry)) {
+                            memcpy(player_entry + _base, _tbuf, (size_t)_tn);
+                            _pelen = _base + _tn;
+                            player_entry[_pelen] = '\0';
+                        }
+                    }
+                }
+                break;
+            }
+        }
         /* Capture per-entry for AOI-filtered per-client assembly. */
         {
             if (_pelen > (int)sizeof(out->player_entry[p]) - 1) _pelen = (int)sizeof(out->player_entry[p]) - 1;
@@ -4658,30 +4687,7 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
             }
 
-            for (int shp = 0; shp < ship_count && !hit && _can_hit_ship; shp++) {
-                if (!ships[shp].active) continue;
-                /* Skip own ship (boarded or scaffolded). */
-                if (_own_ship_id != 0 && (uint32_t)ships[shp].ship_id == _own_ship_id) continue;
-
-                struct Ship* _sim = find_sim_ship((uint32_t)ships[shp].ship_id);
-                if (!_sim || _sim->hull_vertex_count < 3) continue;
-
-                float _lhx, _lhy;
-                bool _hull_hit = grapple_hook_on_hull(&ships[shp], _sim,
-                                                      gh->hook_x, gh->hook_y,
-                                                      &_lhx, &_lhy);
-                if (!_hull_hit) {
-                    _hull_hit = grapple_segment_hull_attach(&ships[shp], _sim,
-                        gh->origin_x, gh->origin_y, gh->hook_x, gh->hook_y,
-                        &_lhx, &_lhy);
-                }
-                if (_hull_hit) {
-                    grapple_attach_to_ship(gh, &ships[shp], _lhx, _lhy, owner);
-                    hit = true;
-                }
-            }
-
-            /* Other players — tip AND rope-line check. */
+            /* Other players — tip AND rope-line check (before ships so deck crew win over hull). */
             for (int pi = 0; pi < WS_MAX_CLIENTS && !hit; pi++) {
                 if (pi == si) continue;
                 if (!players[pi].active) continue;
@@ -4705,13 +4711,10 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 }
             }
 
-            /* World NPCs — tip AND rope-line check.
-             * Requires the same minimum travel as ships so that NPCs standing on
-             * the player's own deck cannot be snagged the moment the hook spawns.
-             * Also skip NPCs that belong to the player's own ship (no self-grapple). */
-            for (int ni = 0; ni < world_npc_count && !hit && _can_hit_ship; ni++) {
+            /* World NPCs — tip AND rope-line check (before ships so deck NPCs win over hull).
+             * Skip NPCs that belong to the player's own ship (no self-grapple). */
+            for (int ni = 0; ni < world_npc_count && !hit; ni++) {
                 if (!world_npcs[ni].active) continue;
-                /* Skip NPCs on the player's own ship. */
                 if (_own_ship_id != 0 && world_npcs[ni].ship_id == _own_ship_id) continue;
                 float ndx = gh->hook_x - world_npcs[ni].x;
                 float ndy = gh->hook_y - world_npcs[ni].y;
@@ -4729,6 +4732,29 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                     gh->target_id   = (uint32_t)ni;
                     gh->hook_x      = world_npcs[ni].x;
                     gh->hook_y      = world_npcs[ni].y;
+                    hit = true;
+                }
+            }
+
+            for (int shp = 0; shp < ship_count && !hit && _can_hit_ship; shp++) {
+                if (!ships[shp].active) continue;
+                /* Skip own ship (boarded or scaffolded). */
+                if (_own_ship_id != 0 && (uint32_t)ships[shp].ship_id == _own_ship_id) continue;
+
+                struct Ship* _sim = find_sim_ship((uint32_t)ships[shp].ship_id);
+                if (!_sim || _sim->hull_vertex_count < 3) continue;
+
+                float _lhx, _lhy;
+                bool _hull_hit = grapple_hook_on_hull(&ships[shp], _sim,
+                                                      gh->hook_x, gh->hook_y,
+                                                      &_lhx, &_lhy);
+                if (!_hull_hit) {
+                    _hull_hit = grapple_segment_hull_attach(&ships[shp], _sim,
+                        gh->origin_x, gh->origin_y, gh->hook_x, gh->hook_y,
+                        &_lhx, &_lhy);
+                }
+                if (_hull_hit) {
+                    grapple_attach_to_ship(gh, &ships[shp], _lhx, _lhy, owner);
                     hit = true;
                 }
             }
@@ -6184,7 +6210,7 @@ int websocket_server_update(struct Sim* sim) {
 
                                     // Send ISLANDS so client can render island geometry
                                     {
-                                        static char hs_islands_buf[2097152];
+                                        static char hs_islands_buf[ISLANDS_WS_BUF_SIZE];
                                         int hsi_pos = 0;
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos,
                                                             "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -6269,16 +6295,22 @@ int websocket_server_update(struct Sim* sim) {
                                             hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
                                         }
                                         hsi_pos += snprintf(hs_islands_buf + hsi_pos, sizeof(hs_islands_buf) - hsi_pos, "]}");
-                                        static char hs_isl_frame[2097152];
-                                        size_t hs_payload = (hsi_pos > (int)(sizeof(hs_islands_buf) - 1)) ? sizeof(hs_islands_buf) - 1 : (size_t)hsi_pos;
+                                        static char hs_isl_frame[ISLANDS_WS_BUF_SIZE + 16];
+                                        if (hsi_pos >= (int)sizeof(hs_islands_buf)) {
+                                            log_error("❌ ISLANDS JSON truncated: need %d bytes, buffer %zu",
+                                                      hsi_pos, sizeof(hs_islands_buf));
+                                        }
+                                        size_t hs_payload = (hsi_pos > (int)(sizeof(hs_islands_buf) - 1))
+                                            ? sizeof(hs_islands_buf) - 1 : (size_t)hsi_pos;
                                         size_t hs_isl_len = websocket_create_frame(
                                             WS_OPCODE_TEXT, hs_islands_buf, hs_payload,
                                             hs_isl_frame, sizeof(hs_isl_frame));
-                                        if (hs_isl_len > 0 && hs_isl_len < sizeof(hs_isl_frame)) {
+                                        if (hs_isl_len > 0 && hs_isl_len <= sizeof(hs_isl_frame)) {
                                             send_all(client->fd, hs_isl_frame, hs_isl_len);
                                             log_info("🏝️  Sent ISLANDS to JSON-handshake player %u (payload=%d bytes)", client->player_id, hsi_pos);
                                         } else {
-                                            log_error("❌ ISLANDS frame creation failed: payload=%d, frame_len=%zu", hsi_pos, hs_isl_len);
+                                            log_error("❌ ISLANDS frame creation failed: payload=%d, frame_len=%zu, buf=%zu",
+                                                      hsi_pos, hs_isl_len, sizeof(hs_isl_frame));
                                         }
                                     }
 
@@ -13156,7 +13188,7 @@ int websocket_server_update(struct Sim* sim) {
                                 }
                                 // Send ISLANDS
                                 {
-                                    static char islands_buf[2097152];
+                                    static char islands_buf[ISLANDS_WS_BUF_SIZE];
                                     int pos = 0;
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
                                                     "{\"type\":\"ISLANDS\",\"islands\":[");
@@ -13176,6 +13208,16 @@ int websocket_server_update(struct Sim* sim) {
                                             }
                                             pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]");
                                         }
+                                        if (isl->grass_vertex_count > 0) {
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, ",\"grassVertices\":[");
+                                            for (int gvi = 0; gvi < isl->grass_vertex_count; gvi++) {
+                                                pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos,
+                                                                "%s{\"x\":%.1f,\"y\":%.1f}",
+                                                                gvi ? "," : "",
+                                                                isl->x + isl->gvx[gvi], isl->y + isl->gvy[gvi]);
+                                            }
+                                            pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]");
+                                        }
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, ",\"resources\":[");
                                         for (int ri = 0; ri < isl->resource_count; ri++) {
                                             const IslandResource *r = &isl->resources[ri];
@@ -13187,16 +13229,22 @@ int websocket_server_update(struct Sim* sim) {
                                         pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
                                     }
                                     pos += snprintf(islands_buf + pos, sizeof(islands_buf) - pos, "]}");
-                                    static char isl_frame[2097152];
-                                    size_t isl_payload = (pos > (int)(sizeof(islands_buf) - 1)) ? sizeof(islands_buf) - 1 : (size_t)pos;
+                                    static char isl_frame[ISLANDS_WS_BUF_SIZE + 16];
+                                    if (pos >= (int)sizeof(islands_buf)) {
+                                        log_error("❌ ISLANDS JSON truncated: need %d bytes, buffer %zu",
+                                                  pos, sizeof(islands_buf));
+                                    }
+                                    size_t isl_payload = (pos > (int)(sizeof(islands_buf) - 1))
+                                        ? sizeof(islands_buf) - 1 : (size_t)pos;
                                     size_t isl_frame_len = websocket_create_frame(
                                         WS_OPCODE_TEXT, islands_buf, isl_payload,
                                         isl_frame, sizeof(isl_frame));
-                                    if (isl_frame_len > 0 && isl_frame_len < sizeof(isl_frame)) {
+                                    if (isl_frame_len > 0 && isl_frame_len <= sizeof(isl_frame)) {
                                         send_all(client->fd, isl_frame, isl_frame_len);
                                         log_info("🏝️  Sent ISLANDS (%d islands) to player %u (payload=%d bytes)", ISLAND_COUNT, player_id, pos);
                                     } else {
-                                        log_error("❌ ISLANDS frame creation failed: payload=%d, frame_len=%zu", pos, isl_frame_len);
+                                        log_error("❌ ISLANDS frame creation failed: payload=%d, frame_len=%zu, buf=%zu",
+                                                  pos, isl_frame_len, sizeof(isl_frame));
                                     }
                                 }
                                 /* Send current placed structures */

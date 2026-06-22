@@ -1103,11 +1103,11 @@ export class RenderSystem {
   private _pendingAxeEquipped     = false;
   private _pendingPickaxeEquipped = false;
   /** Tree node currently under cursor (world coords) — updated each frame in drawIsland. */
-  private _hoveredTree: { wx: number; wy: number } | null = null;
+  private _hoveredTree: { wx: number; wy: number; size: number } | null = null;
   /** Fiber plant currently under cursor (world coords) — updated each frame in drawIsland. */
-  private _hoveredFiberPlant: { wx: number; wy: number } | null = null;
+  private _hoveredFiberPlant: { wx: number; wy: number; size: number } | null = null;
   /** Rock node currently under cursor (world coords) — updated each frame in drawIsland. */
-  private _hoveredRock: { wx: number; wy: number } | null = null;
+  private _hoveredRock: { wx: number; wy: number; size: number } | null = null;
   /** Boulder node currently under cursor (world coords + size) — updated each frame in drawIsland. */
   private _hoveredBoulder: { wx: number; wy: number; size: number } | null = null;
   /** Boulders pending draw — populated by drawIsland, consumed after tree leaves in renderWorld. */
@@ -1712,8 +1712,14 @@ export class RenderSystem {
   }
 
   private decorateIsland(island: RenderIslandInput): RenderIsland {
-    const decorated: RenderIsland = {
+    const normalized: RenderIslandInput = {
       ...island,
+      vertices: island.vertices && island.vertices.length >= 3 ? island.vertices : undefined,
+      grassVertices: island.grassVertices && island.grassVertices.length >= 3 ? island.grassVertices : undefined,
+      shallowVertices: island.shallowVertices && island.shallowVertices.length >= 3 ? island.shallowVertices : undefined,
+    };
+    const decorated: RenderIsland = {
+      ...normalized,
       resourceGrid: { cellSize: RenderSystem.RESOURCE_GRID_CELL, cells: new Map<string, number[]>() },
     };
     this.buildResourceGrid(decorated);
@@ -4123,9 +4129,10 @@ export class RenderSystem {
     if (!this._hoveredTree) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
+    const effR = range * Math.max(1.0, this._hoveredTree.size);
     const dx = this._hoveredTree.wx - player.position.x;
     const dy = this._hoveredTree.wy - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredTree : null;
+    return dx * dx + dy * dy <= effR * effR ? this._hoveredTree : null;
   }
 
   /** Return hovered fiber plant world pos if player is in range and off-ship, else null. */
@@ -4133,9 +4140,10 @@ export class RenderSystem {
     if (!this._hoveredFiberPlant) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
+    const effR = range * Math.max(1.0, this._hoveredFiberPlant.size);
     const dx = this._hoveredFiberPlant.wx - player.position.x;
     const dy = this._hoveredFiberPlant.wy - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredFiberPlant : null;
+    return dx * dx + dy * dy <= effR * effR ? this._hoveredFiberPlant : null;
   }
 
   /**
@@ -4147,16 +4155,17 @@ export class RenderSystem {
   getNearbyFiberPlant(range: number = 50): { wx: number; wy: number } | null {
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
-    const r2 = range * range;
-    let bestD2 = r2;
+    let bestD2 = range * range;
     let best: { wx: number; wy: number } | null = null;
     for (const e of this._pendingAllRes) {
       if (e.res.type !== 'fiber') continue;
       if ((e.res.maxHp ?? 0) > 0 && (e.res.hp ?? 0) <= 0) continue; // depleted (dying)
+      const effR = range * Math.max(1.0, e.res.size ?? 1.0);
       const dx = e.wx - player.position.x;
       const dy = e.wy - player.position.y;
       const d2 = dx * dx + dy * dy;
-      if (d2 <= bestD2) { bestD2 = d2; best = { wx: e.wx, wy: e.wy }; }
+      const effR2 = effR * effR;
+      if (d2 <= effR2 && d2 <= bestD2) { bestD2 = d2; best = { wx: e.wx, wy: e.wy }; }
     }
     return best;
   }
@@ -4166,9 +4175,10 @@ export class RenderSystem {
     if (!this._hoveredRock) return null;
     const player = this._cachedLocalPlayer;
     if (!player || player.carrierId !== 0) return null;
+    const effR = range * Math.max(1.0, this._hoveredRock.size);
     const dx = this._hoveredRock.wx - player.position.x;
     const dy = this._hoveredRock.wy - player.position.y;
-    return dx * dx + dy * dy <= range * range ? this._hoveredRock : null;
+    return dx * dx + dy * dy <= effR * effR ? this._hoveredRock : null;
   }
 
   getHoveredBoulder(): { wx: number; wy: number; size: number } | null {
@@ -5726,6 +5736,13 @@ export class RenderSystem {
     const N = hitDist.length;
     if (N === 0) return;
 
+    // Skip fog when rays are uninitialized (all ~0) — otherwise the mask covers everything.
+    let maxRay = 0;
+    for (let i = 0; i < N; i++) {
+      if (hitDist[i] > maxRay) maxRay = hitDist[i];
+    }
+    if (maxRay < 1) return;
+
     // Read camera state once — avoids two getState() calls that each clone a Vec2.
     const camZoom = camera.zoom;
     const camRot  = camera.rotation;
@@ -6198,9 +6215,10 @@ export class RenderSystem {
 
     for (const isl of this.islands) {
       const preset = RenderSystem.ISLAND_PRESETS[isl.preset] ?? RenderSystem.ISLAND_PRESETS['tropical'];
+      const polyVerts = isl.vertices && isl.vertices.length >= 3 ? isl.vertices : undefined;
       // Visibility check: adapt radius to polygon bound or bump-circle
-      const visR = isl.vertices
-        ? Math.max(...isl.vertices.map(v => Math.hypot(v.x - isl.x, v.y - isl.y))) + 50
+      const visR = polyVerts
+        ? Math.max(...polyVerts.map(v => Math.hypot(v.x - isl.x, v.y - isl.y))) + 50
         : (preset.beachRadius + Math.max(0, ...preset.beachBumps.map(Math.abs)) + 20);
       const wrapOffsets = this.getWrapRenderOffsets(Vec2.from(isl.x, isl.y), camera, visR + 50);
       for (const off of wrapOffsets) {
@@ -6208,7 +6226,7 @@ export class RenderSystem {
         const islandY = isl.y + off.dy;
         if (!camera.isWorldPositionVisible(Vec2.from(islandX, islandY), visR)) continue;
 
-        const shiftedVertices = this.offsetVertices(isl.vertices, off.dx, off.dy);
+        const shiftedVertices = this.offsetVertices(polyVerts, off.dx, off.dy);
         const shiftedGrassVertices = this.offsetVertices(isl.grassVertices, off.dx, off.dy);
         const shiftedShallowVertices = this.offsetVertices(isl.shallowVertices, off.dx, off.dy);
         const shiftedStonePolys = isl.stonePolys?.map(ring => this.offsetVertices(ring, off.dx, off.dy)!);
@@ -6499,17 +6517,17 @@ export class RenderSystem {
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange    = !!(axeEquipped && localPlayer && pdSq <= effR * effR);
           playerNear = !!(localPlayer && playerDist < LEAF_FADE_OUTER);
-          if (isHovered) this._hoveredTree = { wx: wxCanon, wy: wyCanon };
+          if (isHovered) this._hoveredTree = { wx: wxCanon, wy: wyCanon, size: res.size ?? 1.0 };
         } else if (res.type === 'fiber') {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= PLANT_HOVER_SQ; }
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
-          if (isHovered) this._hoveredFiberPlant = { wx: wxCanon, wy: wyCanon };
+          if (isHovered) this._hoveredFiberPlant = { wx: wxCanon, wy: wyCanon, size: res.size ?? 1.0 };
         } else if (res.type === 'rock') {
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= ROCK_HOVER_SQ * (res.size ?? 1.0); }
           const effR = HARVEST_RANGE * Math.max(1.0, res.size ?? 1.0);
           inRange = !!(localPlayer && localPlayer.carrierId === 0 && pdSq <= effR * effR);
-          if (isHovered) this._hoveredRock = { wx: wxCanon, wy: wyCanon };
+          if (isHovered) this._hoveredRock = { wx: wxCanon, wy: wyCanon, size: res.size ?? 1.0 };
         } else if (res.type === 'boulder') {
           const bHoverR = 44 * (res.size ?? 1.0) * zoom;
           if (msp && mayHover) { const hdx = msp.x - sp.x, hdy = msp.y - sp.y; isHovered = hdx*hdx + hdy*hdy <= bHoverR * bHoverR; }
@@ -9243,7 +9261,7 @@ export class RenderSystem {
     const WALL_THICK = 0.18;
     const isWallOrDoor = this.islandBuildKind === 'wall' || this.islandBuildKind === 'door_frame' || this.islandBuildKind === 'door';
     const buildKind    = this.islandBuildKind as string;
-    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling' || buildKind === 'cannon';
+    const isRotatable  = buildKind === 'wooden_floor' || buildKind === 'workbench' || buildKind === 'shipyard' || buildKind === 'wood_ceiling' || buildKind === 'cannon' || buildKind === 'bed';
     const ghostRotRad  = isWallOrDoor ? this._wallGhostRotRad
                        : isRotatable ? effectiveRotDeg * Math.PI / 180 : 0;
     if (ghostRotRad !== 0 || camRot !== 0) {
@@ -16178,6 +16196,11 @@ export class RenderSystem {
       : Math.hypot(localX, localY) < 150;
     if (!isOnShip) return;
 
+    const rotDeg = this.pendingGhostState?.kind === 'bed'
+      ? this.pendingGhostState.rotDeg
+      : 0;
+    const rotRad = (rotDeg * Math.PI) / 180;
+
     const screenPos   = camera.worldToScreen(ship.position);
     const cameraState = camera.getState();
     const zoom        = cameraState.zoom;
@@ -16190,6 +16213,7 @@ export class RenderSystem {
     this.ctx.scale(zoom, zoom);
     this.ctx.rotate(ship.rotation - cameraState.rotation);
     this.ctx.translate(localX, localY);
+    this.ctx.rotate(rotRad);
     this.ctx.globalAlpha *= alpha;
 
     // Bed frame

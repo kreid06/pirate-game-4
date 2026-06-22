@@ -812,7 +812,7 @@ export function getStructureBaseSprite(
     case 'chest':
       return { sprite: getChestSprite(cache, fullOpts), rotRad: 0 };
     case 'bed':
-      return { sprite: getBedSprite(cache, fullOpts), rotRad: 0 };
+      return { sprite: getBedSprite(cache, fullOpts), rotRad: (s.rotation ?? 0) * Math.PI / 180 };
     case 'cannon':
       return { sprite: getCannonBaseSprite(cache, fullOpts), rotRad: (s.rotation ?? 0) * Math.PI / 180 };
     case 'wreck':

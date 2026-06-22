@@ -144,6 +144,10 @@ export interface Player {
   grappleY?: number;          // current world Y of the hook tip
   grappleRopeLength?: number; // current max rope length in px (from server grapple_rope)
   grappleTargetType?: number; // 0=none 1=item 2=ship 3=player 4=npc (only set when ATTACHED)
+  /** Set on players being pulled by another player's grapple hook. */
+  grapplePulled?: boolean;
+  grappleAnchorX?: number;    // grappler world X
+  grappleAnchorY?: number;    // grappler world Y
 
   /** Bucket bail — 0=empty, 1=half, 2=full (server-authoritative). */
   bucketFill?: BucketFillLevel;

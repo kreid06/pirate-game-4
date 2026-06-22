@@ -364,6 +364,8 @@ export class UIManager {
 
   /** Per-resource row flash state: maps resource key → { until, direction } */
   private _resourceRowFlash = new Map<string, { until: number; dir: 'up' | 'down' }>();
+  /** Per-column flash keyed as `${item}:${columnHeader}` (e.g. wood:YARD). */
+  private _resourceCellFlash = new Map<string, { until: number; dir: 'up' | 'down' }>();
 
   /** Timestamp of last resource-source toggle (for the pop animation on the active column). */
   private _resourceSourceToggledAt = 0;
@@ -378,10 +380,12 @@ export class UIManager {
     this._resourceSourceToggledAt = performance.now();
   }
 
-  /** Flash a specific resource row green (up) or red (down) for 1.2 seconds. */
-  flashResourceRow(item: string, dir: 'up' | 'down'): void {
+  /** Flash a specific resource row green (up) or red (down) for 1.2 seconds. Optional col flashes one column only. */
+  flashResourceRow(item: string, dir: 'up' | 'down', col?: string): void {
     this._resourceFlashUntil = Math.max(this._resourceFlashUntil, performance.now() + 3000);
-    this._resourceRowFlash.set(item, { until: performance.now() + 1200, dir });
+    const flash = { until: performance.now() + 1200, dir };
+    if (col) this._resourceCellFlash.set(`${item}:${col}`, flash);
+    else this._resourceRowFlash.set(item, flash);
   }
 
   /** Called when the player confirms a pickup from the drop picker. */
@@ -2293,6 +2297,15 @@ export class UIManager {
       for (let ci = 0; ci < cols.length; ci++) {
         const val = cols[ci].get(item);
         const isActive = ci === activeColIdx;
+        const cellFlash = this._resourceCellFlash.get(`${item}:${cols[ci].header}`);
+        if (cellFlash && performance.now() < cellFlash.until) {
+          const t     = 1 - (cellFlash.until - performance.now()) / 1200;
+          const alpha = 0.55 * (1 - t * t);
+          ctx.fillStyle = cellFlash.dir === 'up' ? `rgba(60,200,80,${alpha.toFixed(2)})` : `rgba(220,60,40,${alpha.toFixed(2)})`;
+          ctx.fillRect(colStartX + ci * COL_W, rowY - ROW_H / 2, COL_W - 1, ROW_H - 1);
+        } else if (cellFlash && performance.now() >= cellFlash.until) {
+          this._resourceCellFlash.delete(`${item}:${cols[ci].header}`);
+        }
         ctx.fillStyle = val > 0 ? (isActive ? '#ffffff' : cols[ci].color) : (isActive ? 'rgba(180,160,140,0.5)' : 'rgba(80,60,40,0.5)');
         ctx.fillText(String(val), colStartX + ci * COL_W + COL_W - 2, rowY);
       }

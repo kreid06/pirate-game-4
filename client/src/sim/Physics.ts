@@ -311,13 +311,13 @@ function updatePlayerWithDetection(
    * deck movement + hull containment. */
   const grapplingOtherShip = isGrapplingOtherShip(player, ships);
 
-  if (carrierShip && player.onDeck && !grapplingOtherShip) {
+  if (carrierShip && player.onDeck && !grapplingOtherShip && !player.grapplePulled) {
     updatePlayerOnDeck(player, carrierShip, inputFrame, dt);
-  } else if ((player.onIslandId ?? 0) > 0) {
+  } else if ((player.onIslandId ?? 0) > 0 && !player.grapplePulled) {
     // On land the server uses DIRECT-position walking (no acceleration/drag), not swim
     // physics. Mirror that here or the prediction constantly diverges from the server.
     updatePlayerOnLand(player, inputFrame, dt, collisionCtx);
-  } else if ((player.onDockId ?? 0) > 0) {
+  } else if ((player.onDockId ?? 0) > 0 && !player.grapplePulled) {
     // Dock/shipyard walking: server uses ws_player_walk_target (semi-authority) + direct
     // position — same model as island walking. Without this the client used swimming
     // physics (acceleration + drag), creating a major physics mismatch and constant rollbacks.
@@ -354,8 +354,36 @@ function updatePlayerWithDetection(
         }
       }
     }
-  } else {
+  } else if (!player.grapplePulled) {
     updatePlayerOffDeck(player, ships, inputFrame, dt);
+  }
+
+  // ── Grapple target constraint — mirrors server grapple_apply_entity_rope ───
+  if (player.grapplePulled &&
+      player.grappleAnchorX !== undefined && player.grappleAnchorY !== undefined) {
+    const ax = player.grappleAnchorX;
+    const ay = player.grappleAnchorY;
+    const tdx  = ax - player.position.x;
+    const tdy  = ay - player.position.y;
+    const tdist = Math.sqrt(tdx * tdx + tdy * tdy);
+    if (tdist >= 0.5 && !inputFrame.grappleReelOut) {
+      let rope = player.grappleRopeLength;
+      if (rope === undefined || rope <= 0) rope = tdist;
+      if (tdist > rope) {
+        const over = tdist - rope;
+        const nx = tdx / tdist;
+        const ny = tdy / tdist;
+        player.position = new Vec2(
+          player.position.x + nx * over,
+          player.position.y + ny * over,
+        );
+      }
+    }
+    // Server zeros target velocity while grappled — block client drift from input.
+    player.velocity = Vec2.zero();
+    if (carrierShip) {
+      player.localPosition = worldPosToShipLocal(player.position, carrierShip);
+    }
   }
 
   // ── Grapple constraint — mirrors server update_grapple_hooks logic ─────────

@@ -609,9 +609,8 @@ void islands_generate_trees(void)
                 float fx = gx + jx;
                 float fy = gy + jy;
 
-                /* Must be inside the grass polygon (shrunk by FIBER_POLY_SCALE search area). */
+                /* Grass interior only — not sand ring, stone, or metal biomes. */
                 if (!inside_grass_poly(isl, fx, fy)) continue;
-                /* Stone/metal biome zones override — no fiber spawns inside them. */
                 if (inside_any_stone_metal_biome(isl, fx, fy)) continue;
 
                 IslandResource *r = &isl->resources[isl->resource_count];
@@ -727,6 +726,24 @@ void islands_generate_trees(void)
                 isl->resource_count++;
             }
         }
+    }
+
+    /* Drop static fiber nodes outside the grass polygon or inside stone/metal biomes. */
+    for (int ii = 0; ii < ISLAND_COUNT; ii++) {
+        IslandDef *isl = &ISLAND_PRESETS[ii];
+        if (isl->vertex_count == 0 || isl->grass_vertex_count == 0) continue;
+        int write = 0;
+        for (int ri = 0; ri < isl->resource_count; ri++) {
+            IslandResource *r = &isl->resources[ri];
+            if (r->type_id == RES_FIBER) {
+                float wx = isl->x + r->ox, wy = isl->y + r->oy;
+                if (!inside_grass_poly(isl, wx, wy)) continue;
+                if (inside_any_stone_metal_biome(isl, wx, wy)) continue;
+            }
+            if (write != ri) isl->resources[write] = isl->resources[ri];
+            write++;
+        }
+        isl->resource_count = write;
     }
 }
 

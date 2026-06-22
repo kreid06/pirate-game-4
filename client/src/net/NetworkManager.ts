@@ -3023,6 +3023,9 @@ export class NetworkManager {
             grappleY: typeof player.grapple_y === 'number' ? player.grapple_y : undefined,
             grappleRopeLength: typeof player.grapple_rope === 'number' ? player.grapple_rope : undefined,
             grappleTargetType: typeof player.grapple_target === 'number' ? player.grapple_target : undefined,
+            grapplePulled: player.grapple_pulled === 1 || player.grapple_pulled === true,
+            grappleAnchorX: typeof player.grapple_anchor_x === 'number' ? player.grapple_anchor_x : undefined,
+            grappleAnchorY: typeof player.grapple_anchor_y === 'number' ? player.grapple_anchor_y : undefined,
             bucketFill: typeof player.bucket_fill === 'number'
               ? (Math.max(0, Math.min(2, player.bucket_fill)) as 0 | 1 | 2)
               : undefined,
@@ -3484,13 +3487,13 @@ export class NetworkManager {
             depletedAt: (r.hp <= 0) ? now : undefined,
             metal:      r.type === 'boulder' ? isInMetalPolys(metalPolys, islX, islY, r.ox ?? 0, r.oy ?? 0) : undefined,
           })),
-          vertices: isl.vertices
+          vertices: isl.vertices?.length >= 3
             ? (isl.vertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
-          grassVertices: isl.grassVertices
+          grassVertices: isl.grassVertices?.length >= 3
             ? (isl.grassVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
-          shallowVertices: isl.shallowVertices
+          shallowVertices: isl.shallowVertices?.length >= 3
             ? (isl.shallowVertices as any[]).map((v: any) => ({ x: v.x ?? 0, y: v.y ?? 0 }))
             : undefined,
           stonePolys: isl.stonePolys

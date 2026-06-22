@@ -212,12 +212,17 @@ export class ClientApplication {
   private _userZoomMul  = 1.0;  // Accumulated scroll-wheel multiplier
   private _aoiBaseZoom  = 1.0;  // AOI-driven base zoom (not including user multiplier)
   private _viewOpenness = 1.0;  // 0=coast, 1=open sea (exponentially smoothed)
-  private _rayHitDist   = new Float32Array(ClientApplication.VIEW_RAY_COUNT); // per-ray hit distance (world units)
+  private _rayHitDist   = (() => {
+    const rays = new Float32Array(ClientApplication.VIEW_RAY_COUNT);
+    rays.fill(ClientApplication.MAX_VIEW_DIST);
+    return rays;
+  })(); // per-ray hit distance (world units)
 
   // Fog ray Web Worker — runs computeViewRays off the main thread.
   // Result arrives async (1-frame lag) which is imperceptible for fog.
   private _fogWorker: Worker | null = null;
   private _fogWorkerReady = false; // true once INIT has been sent
+  private _fogWorkerHasResult = false; // true after first COMPUTE result from worker
   // Throttle fog worker posts to ~30 Hz (every 4th client tick at 120 Hz).
   // The blur(48px) redraw in RenderSystem is skipped when rays are unchanged,
   // so reducing the post rate directly reduces the most expensive canvas op.
@@ -259,6 +264,8 @@ export class ClientApplication {
 
   /** Last known resource pool values — used to detect gains and flash the resource panel. */
   private _prevResources = { wood: 0, fiber: 0, metal: 0, stone: 0 };
+  private _prevYardResources: { wood: number; fiber: number; metal: number; stone: number } | null = null;
+  private _prevChestResources: { wood: number; fiber: number; metal: number; stone: number } | null = null;
 
   // Weapon control groups — 10 user-defined groups (0–9), persistent per session
   private controlGroups: Map<number, WeaponGroupState> = new Map(
@@ -2157,7 +2164,7 @@ export class ClientApplication {
               : { x: worldPos.x, y: worldPos.y };
             const sRot = sKind === 'wooden_floor'
               ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
-              : (sKind === 'workbench' || sKind === 'shipyard' || sKind === 'cannon') ? this.islandBuildRotationDeg
+              : (sKind === 'workbench' || sKind === 'shipyard' || sKind === 'cannon' || sKind === 'bed') ? this.islandBuildRotationDeg
               : sKind === 'wood_ceiling' ? (this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg)
               : 0;
             const landBp = this.uiManager.playerMenu.getVariantForKind(sKind) ?? undefined;
@@ -2170,7 +2177,7 @@ export class ClientApplication {
           // Place a ghost plan marker for the selected plan kind (Plan Menu).
           // Falls back to the equipped hotbar item so holding a land item still works.
           const kind = this.pendingLandBuildKind ?? hotbarKind;
-          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag') {
+          if (kind === 'wooden_floor' || kind === 'workbench' || kind === 'wall' || kind === 'door_frame' || kind === 'door' || kind === 'shipyard' || kind === 'wood_ceiling' || kind === 'cannon' || kind === 'flag_fort' || kind === 'company_fortress' || kind === 'claim_flag' || kind === 'chest' || kind === 'bed') {
             // Compute snap at click time (not from stale render state)
             const pos = kind === 'wooden_floor'
               ? this.renderSystem.computeSnappedPos(worldPos.x, worldPos.y)
@@ -2185,7 +2192,7 @@ export class ClientApplication {
             let rot = 0;
             if (kind === 'wooden_floor') {
               rot = this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg;
-            } else if (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon') {
+            } else if (kind === 'workbench' || kind === 'shipyard' || kind === 'cannon' || kind === 'bed') {
               rot = this.islandBuildRotationDeg;
             } else if (kind === 'wood_ceiling') {
               rot = this.renderSystem.getSnappedBuildRotation() ?? this.islandBuildRotationDeg;
@@ -2240,7 +2247,11 @@ export class ClientApplication {
               kind: capturedKind,
               worldPos: capturedPos,
               rotation: capturedRot,
-              buildAction: () => this.networkManager.sendPlaceStructure(capturedKind, capturedPos.x, capturedPos.y, capturedRot),
+              buildAction: () => {
+                const bp = this.uiManager.playerMenu.getVariantForKind(capturedKind) ?? undefined;
+                const fromSchematic = this.buildSchematicKind !== null;
+                this.networkManager.sendPlaceStructure(capturedKind, capturedPos.x, capturedPos.y, capturedRot, fromSchematic, bp);
+              },
             });
             this.renderSystem.setLandGhostPlacements(this.landGhostEntries);
             this.uiManager.setLandGhostCounts(this._computeLandGhostCounts());
@@ -3383,6 +3394,7 @@ export class ClientApplication {
 
       // Handle ISLANDS: server-defined island layout
       this.networkManager.onIslands = (islands) => {
+        console.log(`🏝️ Received ISLANDS (${islands.length} islands)`);
         this.renderSystem.setIslands(islands);
         this.uiManager.setIslandsForRespawn(islands);
         this.islandEditor?.setIslands(islands);
@@ -3394,6 +3406,10 @@ export class ClientApplication {
         // (Re-)initialise the fog worker with the new island set.
         // Strip resources from the island data — the worker only needs geometry.
         this._fogWorker?.terminate();
+        this._fogWorkerHasResult = false;
+        // Full visibility until the worker (or sync fallback) produces real rays.
+        // Zero-initialized rays make drawFogMask cover the entire screen.
+        this._rayHitDist.fill(ClientApplication.MAX_VIEW_DIST);
         this._fogWorker = new Worker(
           new URL('../workers/FogWorker.ts', import.meta.url),
           { type: 'module' },
@@ -3401,8 +3417,14 @@ export class ClientApplication {
         this._fogWorker.onmessage = (e: MessageEvent<ArrayBuffer>) => {
           // Swap in the worker's result buffer directly — zero copy on the main thread.
           this._rayHitDist = new Float32Array(e.data);
+          this._fogWorkerHasResult = true;
           // Increment version so RenderSystem knows to re-render the fog canvas.
           this.renderSystem.fogRayVersion++;
+        };
+        this._fogWorker.onerror = (err) => {
+          console.warn('[FogWorker] error — falling back to sync fog compute:', err);
+          this._fogWorkerReady = false;
+          this._fogWorkerHasResult = false;
         };
         this._fogWorker.postMessage({
           type: 'INIT',
@@ -3414,6 +3436,21 @@ export class ClientApplication {
           })),
         });
         this._fogWorkerReady = true;
+        this._fogTickCounter = 0;
+        // Bootstrap fog rays immediately so the overlay never sits at zero radius.
+        const assignedId = this.networkManager.getAssignedPlayerId();
+        const bootstrapPlayer = assignedId !== null
+          ? this.predictedWorldState?.players.find(p => p.id === assignedId)
+          : this.predictedWorldState?.players[0];
+        if (bootstrapPlayer) {
+          this.computeViewRays(bootstrapPlayer.position, islands);
+          this.renderSystem.fogRayVersion++;
+          this._fogWorker.postMessage({
+            type: 'COMPUTE',
+            x: bootstrapPlayer.position.x,
+            y: bootstrapPlayer.position.y,
+          });
+        }
       };
 
       // Update a resource's HP when the server broadcasts resource_damaged
@@ -4616,12 +4653,12 @@ export class ClientApplication {
           // need to update at the full 120 Hz client tick rate, and the
           // RenderSystem dirty flag skips the blur(48px) when rays are unchanged.
           this._fogTickCounter++;
-          if (this._fogWorkerReady && this._fogWorker) {
+          if (this._fogWorkerReady && this._fogWorker && this._fogWorkerHasResult) {
             if (this._fogTickCounter % ClientApplication.FOG_POST_EVERY_N_TICKS === 0) {
               this._fogWorker.postMessage({ type: 'COMPUTE', x: player.position.x, y: player.position.y });
             }
           } else {
-            // Fallback: synchronous (before first ISLANDS message, or if worker unavailable).
+            // Sync fallback: before ISLANDS, before first worker result, or after worker error.
             const islands = this.renderSystem.getIslands();
             this.computeViewRays(player.position, islands);
             this.renderSystem.fogRayVersion++;
@@ -5204,15 +5241,39 @@ export class ClientApplication {
         ? worldToRender.players.find(p => p.id === assignedPlayerId) ?? null
         : null;
 
-      // Detect resource gains and flash the resource panel
+      // Detect resource gains and flash the resource panel (pack / chest / yard columns)
       if (localPlayer) {
         const res = (localPlayer.inventory as any)?.resources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
         const prev = this._prevResources;
         for (const key of ['wood', 'fiber', 'metal', 'stone'] as const) {
-          if (res[key] > prev[key]) this.uiManager?.flashResourceRow?.(key, 'up');
-          else if (res[key] < prev[key]) this.uiManager?.flashResourceRow?.(key, 'down');
+          if (res[key] > prev[key]) this.uiManager?.flashResourceRow?.(key, 'up', 'PACK');
+          else if (res[key] < prev[key]) this.uiManager?.flashResourceRow?.(key, 'down', 'PACK');
         }
         this._prevResources = { wood: res.wood, fiber: res.fiber, metal: res.metal, stone: res.stone };
+
+        const yard = this._aggregateYardResources();
+        if (yard) {
+          const prevYard = this._prevYardResources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+          for (const key of ['wood', 'fiber', 'metal', 'stone'] as const) {
+            if (yard[key] > prevYard[key]) this.uiManager?.flashResourceRow?.(key, 'up', 'YARD');
+            else if (yard[key] < prevYard[key]) this.uiManager?.flashResourceRow?.(key, 'down', 'YARD');
+          }
+          this._prevYardResources = { ...yard };
+        } else {
+          this._prevYardResources = null;
+        }
+
+        const chest = this.uiManager.getShipChestResources?.() ?? null;
+        if (chest) {
+          const prevChest = this._prevChestResources ?? { wood: 0, fiber: 0, metal: 0, stone: 0 };
+          for (const key of ['wood', 'fiber', 'metal', 'stone'] as const) {
+            if (chest[key] > prevChest[key]) this.uiManager?.flashResourceRow?.(key, 'up', 'CHEST');
+            else if (chest[key] < prevChest[key]) this.uiManager?.flashResourceRow?.(key, 'down', 'CHEST');
+          }
+          this._prevChestResources = { ...chest };
+        } else {
+          this._prevChestResources = null;
+        }
       }
 
       // Sword cooldown ring: only visible when sword is the active item and player is unmounted
