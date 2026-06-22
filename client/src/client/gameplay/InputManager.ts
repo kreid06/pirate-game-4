@@ -155,6 +155,8 @@ export class InputManager {
   public explicitBuildMode: boolean = false;
   public islandBuildMode: boolean = false;
   public onBuildModeToggle: (() => void) | null = null;
+  /** Called when Y is pressed in ship/land build mode — toggles the left plan menu panel. */
+  public onToggleBuildSidePanel: (() => void) | null = null;
   /** Called when Z is pressed — toggles combat mode. */
   public onCombatModeToggle: (() => void) | null = null;
   public onToggleAllLadders: (() => void) | null = null;
@@ -176,9 +178,10 @@ export class InputManager {
   /** Set to true by ClientApplication when hatch cover build mode is active. */
   public inHatchBuildMode: boolean = false;
 
-  // Build menu (B key — open panel + ghost placement system)
   /** True while the build menu panel is open. Affects right-click and other input. */
   public buildMenuOpen: boolean = false;
+  /** True while the land build menu is open. */
+  public landBuildMenuOpen: boolean = false;
   /** Right-click while build menu or island build mode is active — fires with world position. */
   public onBuildRightClick: ((worldPos: Vec2) => void) | null = null;
   /** Enter key while in island build mode — confirm all pending land ghosts. */
@@ -1318,6 +1321,16 @@ export class InputManager {
         if (this.onBuildModeToggle) this.onBuildModeToggle();
         event.preventDefault();
         break;
+      default: {
+        const toggleBuildPanelKey = this.config.keyBindings.get('toggle_build_panel');
+        if (toggleBuildPanelKey && event.code === toggleBuildPanelKey
+            && this.onToggleBuildSidePanel
+            && (this.buildMenuOpen || this.landBuildMenuOpen)) {
+          this.onToggleBuildSidePanel();
+          event.preventDefault();
+        }
+        break;
+      }
       case 'Enter':
         // Confirm all pending land structure ghosts (island build mode)
         if (this.islandBuildMode && this.onBuildConfirm) {

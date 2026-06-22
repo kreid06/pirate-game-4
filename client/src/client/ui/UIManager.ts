@@ -220,6 +220,8 @@ export class UIManager {
   private buildMenuOpen = false;
   private buildMenuGhosts: GhostPlacement[] = [];
   private buildMenuPending: GhostModuleKind | null = null;
+  /** Left plan-menu panel (ship + land build). Hidden by default; toggle with Y. */
+  public buildSidePanelVisible = false;
   /** Called when player clicks a module type in the left build panel. */
   public onBuildPanelSelect: ((kind: GhostModuleKind) => void) | null = null;
 
@@ -872,12 +874,20 @@ export class UIManager {
 
     // Ghost build menu panel — left side of screen
     if (this.buildMenuOpen) {
-      this.renderBuildMenuPanel(ctx, ctx.canvas);
+      if (!this.buildModeState?.active) {
+        this.renderShipPlanModeBanner(ctx, ctx.canvas);
+      }
+      if (this.buildSidePanelVisible) {
+        this.renderBuildMenuPanel(ctx, ctx.canvas);
+      }
     }
 
     // Land build panel — left side of screen
     if (this.landBuildMenuOpen) {
-      this.renderLandBuildMenuPanel(ctx, ctx.canvas);
+      this.renderLandBuildModeBanner(ctx, ctx.canvas);
+      if (this.buildSidePanelVisible) {
+        this.renderLandBuildMenuPanel(ctx, ctx.canvas);
+      }
     }
 
     // Resource panel — shown independently (flash on gain, hammer, build mode, etc.)
@@ -1567,9 +1577,16 @@ export class UIManager {
 
   /** Open or close the land build panel and track the currently selected kind. */
   setLandBuildMenuState(open: boolean, selectedKind: string | null): void {
+    const wasOpen = this.landBuildMenuOpen;
     this.landBuildMenuOpen = open;
     this._pendingLandBuildKind = selectedKind;
     this.selectedLandKind = selectedKind;
+    if (open && !wasOpen) this.buildSidePanelVisible = false;
+  }
+
+  /** Toggle the left plan-menu panel while ship or land build mode is active. */
+  toggleBuildSidePanel(): void {
+    this.buildSidePanelVisible = !this.buildSidePanelVisible;
   }
 
   /**
@@ -1588,9 +1605,11 @@ export class UIManager {
     ghosts: GhostPlacement[],
     pending: GhostModuleKind | null
   ): void {
+    const wasOpen = this.buildMenuOpen;
     this.buildMenuOpen = open;
     this.buildMenuGhosts = ghosts;
     this.buildMenuPending = pending;
+    if (open && !wasOpen) this.buildSidePanelVisible = false;
   }
 
   /**
@@ -1721,11 +1740,11 @@ export class UIManager {
       }
     }
     // Land build panel (left side) — check before ship build panel
-    if (this.landBuildMenuOpen) {
+    if (this.landBuildMenuOpen && this.buildSidePanelVisible) {
       if (this.handleLandBuildPanelClick(x, y)) return true;
     }
     // Build panel (left side) — check before other panels
-    if (this.buildMenuOpen) {
+    if (this.buildMenuOpen && this.buildSidePanelVisible) {
       if (this.handleBuildPanelClick(x, y)) return true;
     }
     // Build mode item selection buttons (highest priority — always shown when in build mode)
@@ -1924,21 +1943,42 @@ export class UIManager {
   }
 
   /**
-   * Render the land build panel on the left side of the screen.
+   * Top banner for ship plan mode (shown even when the left panel is hidden).
    */
-  private renderLandBuildMenuPanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
-    const W      = UIManager.BUILD_PANEL_W;
-    const EH     = UIManager.BUILD_PANEL_ENTRY_H;
-    const HH     = UIManager.BUILD_PANEL_HEADER_H;
-    const PAD    = 10;
-    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
-    const totalH = HH + entries.length * EH + 8;
-    const px     = 0;
-    const py     = Math.round((canvas.height - totalH) / 2);
-
-    // Top banner
+  private renderShipPlanModeBanner(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
     const BANNER_H = 40;
     const cw = canvas.width;
+    const panelHint = this.buildSidePanelVisible ? '[Y] Hide Plan Menu' : '[Y] Plan Menu';
+    ctx.save();
+    const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
+    bannerGrad.addColorStop(0, '#0a3d2e');
+    bannerGrad.addColorStop(1, '#062618');
+    ctx.fillStyle = bannerGrad;
+    ctx.fillRect(0, 0, cw, BANNER_H);
+    ctx.strokeStyle = '#33cc77';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, BANNER_H);
+    ctx.lineTo(cw, BANNER_H);
+    ctx.stroke();
+    ctx.font = 'bold 18px Georgia, serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#66ee99';
+    ctx.fillText(
+      `\uD83D\uDCCB  PLAN MODE  \u2014  ${panelHint}  |  Hotbar: build  |  [B] Exit  |  [Click] Place Ghost`,
+      cw / 2, BANNER_H / 2
+    );
+    ctx.restore();
+  }
+
+  /**
+   * Top banner for land build mode (shown even when the left panel is hidden).
+   */
+  private renderLandBuildModeBanner(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const BANNER_H = 40;
+    const cw = canvas.width;
+    const panelHint = this.buildSidePanelVisible ? '[Y] Hide Plan Menu' : '[Y] Plan Menu';
     ctx.save();
     const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
     bannerGrad.addColorStop(0, '#3d2800');
@@ -1955,13 +1995,28 @@ export class UIManager {
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     ctx.fillStyle = '#ffcc66';
+    const ghostHint = this._totalLandGhosts > 0
+      ? `  |  [RMB] Remove  |  [Enter] Build All (${this._totalLandGhosts})`
+      : '';
     ctx.fillText(
-      this._totalLandGhosts > 0
-        ? `\uD83C\uDFD7  LAND BUILD  \u2014  Plan Menu: select left \u25B6 click to plan  \u2502  Build Hotbar: select bottom \u25B6 click ghost  \u2502  [B] Exit  \u2502  [RMB] Remove  \u2502  [Enter] Build All (${this._totalLandGhosts})`
-        : '\uD83C\uDFD7  LAND BUILD  \u2014  Plan Menu: select \u25B6 click to place plans  \u2502  Build Hotbar: select \u25B6 click ghost to build  \u2502  [B] Exit',
+      `\uD83C\uDFD7  LAND BUILD  \u2014  ${panelHint}  |  Hotbar: build ghosts  |  [B] Exit${ghostHint}`,
       cw / 2, BANNER_H / 2
     );
     ctx.restore();
+  }
+
+  /**
+   * Render the land build panel on the left side of the screen.
+   */
+  private renderLandBuildMenuPanel(ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement): void {
+    const W      = UIManager.BUILD_PANEL_W;
+    const EH     = UIManager.BUILD_PANEL_ENTRY_H;
+    const HH     = UIManager.BUILD_PANEL_HEADER_H;
+    const PAD    = 10;
+    const entries = UIManager.LAND_BUILD_PANEL_ENTRIES;
+    const totalH = HH + entries.length * EH + 8;
+    const px     = 0;
+    const py     = Math.round((canvas.height - totalH) / 2);
 
     ctx.save();
 
@@ -2662,33 +2717,6 @@ export class UIManager {
     const totalH = HH + entries.length * EH + 8;
     const px     = 0;
     const py     = Math.round((canvas.height - totalH) / 2);
-
-    // ── Plan mode top banner (only when not also in explicit build mode) ──
-    if (!this.buildModeState?.active) {
-      const BANNER_H = 40;
-      const cw = canvas.width;
-      ctx.save();
-      const bannerGrad = ctx.createLinearGradient(0, 0, 0, BANNER_H);
-      bannerGrad.addColorStop(0, '#0a3d2e');
-      bannerGrad.addColorStop(1, '#062618');
-      ctx.fillStyle = bannerGrad;
-      ctx.fillRect(0, 0, cw, BANNER_H);
-      ctx.strokeStyle = '#33cc77';
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(0, BANNER_H);
-      ctx.lineTo(cw, BANNER_H);
-      ctx.stroke();
-      ctx.font = 'bold 18px Georgia, serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#66ee99';
-      ctx.fillText(
-        '📋  PLAN MODE — Select module on left  |  [B] Exit  |  [Click] Place Ghost',
-        cw / 2, BANNER_H / 2
-      );
-      ctx.restore();
-    }
 
     ctx.save();
 

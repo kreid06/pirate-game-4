@@ -950,6 +950,7 @@ export class PauseMenu {
       label: 'Build Mode',
       entries: [
         { keys: ['B'],             label: 'Toggle Build Mode'       },
+        { keys: ['Y'],             label: 'Toggle Plan Menu',        note: 'in build mode' },
         { action: 'destroy_plank', label: 'Destroy Plank'           },
         { keys: ['R'],             label: 'Rotate Piece Right'      },
         { keys: ['Q'],             label: 'Rotate Piece Left'       },

@@ -2470,12 +2470,19 @@ export class ClientApplication {
           } else {
             // On land — open land structure build panel
             this.landBuildMenuOpen = true;
+            this.inputManager.landBuildMenuOpen = true;
             this.uiManager.setLandBuildMenuState(true, this.pendingLandBuildKind);
             console.log('🏗️ [LAND BUILD] OPENED');
           }
         }
         this.syncBuildModeState();
         this.checkBuildMode();
+      };
+
+      this.inputManager.onToggleBuildSidePanel = () => {
+        if (!this.buildMenuOpen && !this.landBuildMenuOpen) return;
+        this.uiManager.toggleBuildSidePanel();
+        console.log(`🏗️ [BUILD] Plan menu ${this.uiManager.buildSidePanelVisible ? 'shown' : 'hidden'}`);
       };
 
       // Build rotation (R/Q key in build modes)
@@ -6173,8 +6180,10 @@ export class ClientApplication {
     this.shipPlanMenuKind   = null;
     this.buildRotationDeg   = 0;
     this.landBuildMenuOpen  = false;
+    this.inputManager.landBuildMenuOpen = false;
     this.pendingLandBuildKind = null;
     this.buildSchematicKind = null;
+    this.uiManager.buildSidePanelVisible = false;
     this.renderSystem.setBuildSchematicKind(null);
     this.uiManager.setLandBuildMenuState(false, null);
     // NOTE: landGhostEntries are intentionally kept alive so the plan persists
@@ -6242,6 +6251,7 @@ export class ClientApplication {
     // Auto-exit land build modes if the player is now on a ship (boarded mid-build)
     if ((player?.carrierId ?? 0) !== 0 && this.landBuildMenuOpen) {
       this.landBuildMenuOpen = false;
+      this.inputManager.landBuildMenuOpen = false;
       this.pendingLandBuildKind = null;
       this.uiManager?.setLandBuildMenuState(false, null);
     }
@@ -6379,6 +6389,8 @@ export class ClientApplication {
     // In explicit build mode inputManager.buildMode must stay true
     if (this.inputManager) {
       this.inputManager.explicitBuildMode = this.explicitBuildMode;
+      this.inputManager.buildMenuOpen = this.buildMenuOpen;
+      this.inputManager.landBuildMenuOpen = this.landBuildMenuOpen;
       if (this.explicitBuildMode || this.buildMenuOpen) this.inputManager.buildMode = true;
     }
   }

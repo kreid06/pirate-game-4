@@ -177,6 +177,7 @@ export const DEFAULT_CLIENT_CONFIG: ClientConfig = {
       // Build mode
       ['destroy_plank',      'KeyQ'],
       ['toggle_plank_bounds','KeyP'],
+      ['toggle_build_panel', 'KeyY'],
       // Debug
       ['toggle_debug',              'KeyL'],
       ['toggle_collision_tracker',  'KeyT'],
