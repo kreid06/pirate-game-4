@@ -4519,10 +4519,44 @@ static void grapple_sync_target_world_npc(WorldNpc* npc) {
     npc->target_local_y = npc->local_y;
     npc->velocity_x = 0.0f;
     npc->velocity_y = 0.0f;
+    /* Re-evaluate deck edge / island land so reeled crew are not left in_water. */
+    npc_update_island_presence(npc);
+}
+
+/** Clear swimming/suffocation when a grappled player is pulled onto dry deck or land. */
+static void grapple_refresh_target_swim_state(WebSocketPlayer* tgt,
+                                              const WebSocketPlayer* owner) {
+    if (!tgt || tgt->movement_state != PLAYER_STATE_SWIMMING) return;
+
+    bool on_dry = false;
+    if (tgt->parent_ship_id != 0) {
+        SimpleShip* ship = find_ship(tgt->parent_ship_id);
+        if (ship && !is_outside_deck(ship->ship_id, tgt->local_x, tgt->local_y))
+            on_dry = true;
+    }
+    if (!on_dry && player_try_land_on_island(tgt, tgt->x, tgt->y))
+        on_dry = true;
+    /* Reeled onto the grappler's ship deck (target may still have parent_ship_id=0). */
+    if (!on_dry && owner && owner->parent_ship_id != 0) {
+        SimpleShip* oship = find_ship(owner->parent_ship_id);
+        if (oship) {
+            float lx, ly;
+            ship_world_to_local(oship, tgt->x, tgt->y, &lx, &ly);
+            if (!is_outside_deck(oship->ship_id, lx, ly))
+                on_dry = true;
+        }
+    }
+    if (!on_dry) return;
+
+    tgt->movement_state = PLAYER_STATE_WALKING;
+    tgt->oxygen         = tgt->max_oxygen;
+    tgt->oxygen_accum   = 0.0f;
+    tgt->suffoc_accum   = 0.0f;
 }
 
 /** After entity-target rope constraint moves a grappled player, sync sim + ship-local coords. */
-static void grapple_sync_target_ws_player(WebSocketPlayer* tgt) {
+static void grapple_sync_target_ws_player(WebSocketPlayer* tgt,
+                                          const WebSocketPlayer* owner) {
     if (!tgt) return;
     if (tgt->parent_ship_id != 0) {
         SimpleShip* cur = find_ship(tgt->parent_ship_id);
@@ -4543,6 +4577,7 @@ static void grapple_sync_target_ws_player(WebSocketPlayer* tgt) {
         }
     }
     tgt->client_pos_ms = 0;
+    grapple_refresh_target_swim_state(tgt, owner);
 }
 
 /**
@@ -4904,7 +4939,7 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                 if (!tgt || !tgt->active) { grapple_detach(si); break; }
 
                 grapple_apply_entity_rope(gh, owner, &tgt->x, &tgt->y);
-                grapple_sync_target_ws_player(tgt);
+                grapple_sync_target_ws_player(tgt, owner);
                 break;
             }
 
