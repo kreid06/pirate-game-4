@@ -231,9 +231,9 @@ IslandDef ISLAND_PRESETS[ISLAND_COUNT] = {
    Spacing = TREE_GRID_SPACING / sqrt(2) ≈ 113 px gives ~2× more fiber than trees. */
 #define FIBER_GRID_SPACING 113.0f
 #define FIBER_JITTER        30.0f
-/* Fiber is scattered over a slightly smaller polygon fraction to keep it
-   interior and away from the rocky/treed edges. */
-#define FIBER_POLY_SCALE    0.70f
+/* Shrink the grass AABB used for fiber grid iteration (1.0 = full extent).
+   Polygon + biome tests still clip sand/stone/metal; this only trims the bbox. */
+#define FIBER_POLY_SCALE    1.0f
 
 /* Rock procedural density settings.
    On grass:  spacing = 160/sqrt(0.5) ≈ 226 px → ~50% of tree count.
@@ -435,6 +435,14 @@ static void biome_bbox(float cx, float cy,
     }
 }
 
+/** Bounding box (world px) of the island grass polygon. */
+static void grass_bbox(const IslandDef *isl,
+                       float *x0, float *y0, float *x1, float *y1)
+{
+    biome_bbox(isl->x, isl->y, isl->gvx, isl->gvy, isl->grass_vertex_count,
+               x0, y0, x1, y1);
+}
+
 void islands_generate_zone_resources(void)
 {
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
@@ -582,21 +590,24 @@ void islands_generate_trees(void)
         unsigned int island_seed = (unsigned int)((unsigned int)isl->id * 1664525u + 1013904223u);
         unsigned int seed = island_seed ^ 0x9E3779B9u;
 
-        /* Bounding box from explicit grass vertices */
-        float half_bound = 0.0f;
-        for (int gi = 0; gi < isl->grass_vertex_count; gi++) {
-            float r = sqrtf(isl->gvx[gi]*isl->gvx[gi] + isl->gvy[gi]*isl->gvy[gi]);
-            if (r > half_bound) half_bound = r;
+        /* Iterate the full grass AABB so elongated shapes (crescents) get
+         * grid coverage on both arms; inside_grass_poly clips the horseshoe void. */
+        float gx0, gy0, gx1, gy1;
+        grass_bbox(isl, &gx0, &gy0, &gx1, &gy1);
+        if (FIBER_POLY_SCALE < 1.0f) {
+            float inset_x = (gx1 - gx0) * (1.0f - FIBER_POLY_SCALE) * 0.5f;
+            float inset_y = (gy1 - gy0) * (1.0f - FIBER_POLY_SCALE) * 0.5f;
+            gx0 += inset_x; gx1 -= inset_x;
+            gy0 += inset_y; gy1 -= inset_y;
         }
-        half_bound *= FIBER_POLY_SCALE;
 
         /* Shift fiber grid origin by half a cell in both axes — this is the
          * primary guarantee that fiber can never land on a tree grid point
          * even if the jitter RNG produced identical values. */
-        float x0 = isl->x - half_bound + FIBER_GRID_SPACING * 0.5f;
-        float x1 = isl->x + half_bound;
-        float y0 = isl->y - half_bound + FIBER_GRID_SPACING * 0.5f;
-        float y1 = isl->y + half_bound;
+        float x0 = gx0 + FIBER_GRID_SPACING * 0.5f;
+        float x1 = gx1;
+        float y0 = gy0 + FIBER_GRID_SPACING * 0.5f;
+        float y1 = gy1;
 
         int added_fiber = 0;
         for (float gx = x0; gx <= x1 && isl->resource_count < ISLAND_MAX_RESOURCES; gx += FIBER_GRID_SPACING) {
@@ -624,7 +635,8 @@ void islands_generate_trees(void)
                 added_fiber++;
             }
         }
-        (void)added_fiber;
+        log_info("[islands] Island %d: placed %d procedural fiber nodes (total resources %d)",
+                 isl->id, added_fiber, isl->resource_count);
     }
 
     /* ── Third pass: procedural rocks for polygon islands ── */
