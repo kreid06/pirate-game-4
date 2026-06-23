@@ -371,6 +371,9 @@ typedef struct {
     WorldNpc world_npcs[MAX_WORLD_NPCS];
     int world_npc_count;
     ClaimFlag claim_flags[MAX_CLAIM_FLAGS];
+    int claim_flag_count;
+    int tombstone_active_count;
+    int dropped_item_active_count;
 } SharedBlobSnapshot;
 
 typedef struct {
@@ -2132,7 +2135,8 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
     _dst->bucket_cooldown_until_ms = _src->bucket_cooldown_until_ms;
 }
 
-static void copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
+static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
+    int active = 0;
     for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
         if (!_src[i].active) {
             _dst[i].active = false;
@@ -2147,7 +2151,22 @@ static void copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) 
         _dst[i].local_y       = _src[i].local_y;
         memcpy(_dst[i].owner_name, _src[i].owner_name, sizeof(_dst[i].owner_name));
         _dst[i].spawn_time_ms = _src[i].spawn_time_ms;
+        active++;
     }
+    return active;
+}
+
+static int copy_dropped_items_to_blob(const DroppedItem *_src, DroppedItem *_dst) {
+    int active = 0;
+    for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
+        if (!_src[i].active) {
+            _dst[i].active = false;
+            continue;
+        }
+        _dst[i] = _src[i];
+        active++;
+    }
+    return active;
 }
 
 /* Same calculation over a BlobPlayer (slim snapshot copy used by the blob worker). */
@@ -2668,6 +2687,11 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     out->tmb_json[0] = '[';
     int _to = 1;
     bool _tf = true;
+    if (snap->tombstone_active_count == 0) {
+        out->tmb_json[1] = ']';
+        out->tmb_json[2] = '\0';
+        out->tmb_len = 2;
+    } else {
     for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
         if (!snap->tombstones[_ti].active) continue;
         uint32_t _age = snap->current_time - snap->tombstones[_ti].spawn_time_ms;
@@ -2691,11 +2715,17 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     if (_to < (int)sizeof(out->tmb_json) - 1) out->tmb_json[_to++] = ']';
     out->tmb_json[_to] = '\0';
     out->tmb_len = _to;
+    }
 
     out->ditem_json[0] = '[';
     int _do = 1;
     bool _df = true;
     bool _ditem_truncated = false;
+    if (snap->dropped_item_active_count == 0) {
+        out->ditem_json[1] = ']';
+        out->ditem_json[2] = '\0';
+        out->ditem_len = 2;
+    } else {
     for (int _di = 0; _di < (int)MAX_DROPPED_ITEMS; _di++) {
         if (!snap->dropped_items[_di].active) continue;
         /* Reserve headroom for one worst-case schematic entry + closing ']'. */
@@ -2783,6 +2813,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     if (_do < (int)sizeof(out->ditem_json) - 1) out->ditem_json[_do++] = ']';
     out->ditem_json[_do] = '\0';
     out->ditem_len = _do;
+    }
 
     out->co_json[0] = '[';
     int _co = 1;
@@ -3213,9 +3244,12 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 _nwx = _nspx;
                 _nwy = _nspy;
             }
+            out->npc_world_x[n] = _nwx;
+            out->npc_world_y[n] = _nwy;
+        } else if (_dirty) {
+            out->npc_world_x[n] = _nwx;
+            out->npc_world_y[n] = _nwy;
         }
-        out->npc_world_x[n] = _nwx;
-        out->npc_world_y[n] = _nwy;
         out->npc_entry_active[n] = true;
     }
     /* npcs_json is unused in the send path; mark empty so stale data is never read. */
@@ -3420,10 +3454,14 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 ship_attr_point_cap(SHIP_ATTR_STURDINESS));
 
             const ClaimFlag* cf = NULL;
-            for (int _fi = 0; _fi < MAX_CLAIM_FLAGS; _fi++) {
-                if (snap->claim_flags[_fi].active && snap->claim_flags[_fi].ship_id == ship->id) {
-                    cf = &snap->claim_flags[_fi];
-                    break;
+            if (snap->claim_flag_count > 0) {
+                int _fl = snap->claim_flag_count;
+                if (_fl > MAX_CLAIM_FLAGS) _fl = MAX_CLAIM_FLAGS;
+                for (int _fi = 0; _fi < _fl; _fi++) {
+                    if (snap->claim_flags[_fi].active && snap->claim_flags[_fi].ship_id == ship->id) {
+                        cf = &snap->claim_flags[_fi];
+                        break;
+                    }
                 }
             }
             if (cf && offset < (int)sizeof(ship_entry) - 200) {
@@ -3631,8 +3669,10 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     pthread_mutex_lock(&g_blob_worker.mtx);
     g_blob_worker.job.current_time = current_time;
     g_blob_worker.job.tick = global_sim ? global_sim->tick : 0;
-    copy_tombstones_to_blob(tombstones, g_blob_worker.job.tombstones);
-    memcpy(g_blob_worker.job.dropped_items, dropped_items, sizeof(dropped_items));
+    g_blob_worker.job.tombstone_active_count =
+        copy_tombstones_to_blob(tombstones, g_blob_worker.job.tombstones);
+    g_blob_worker.job.dropped_item_active_count =
+        copy_dropped_items_to_blob(dropped_items, g_blob_worker.job.dropped_items);
     if (dynamic_company_count > 0)
         memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies,
                (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
@@ -3675,7 +3715,12 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (world_npc_count > 0)
         memcpy(g_blob_worker.job.world_npcs, world_npcs,
                (size_t)world_npc_count * sizeof(world_npcs[0]));
-    memcpy(g_blob_worker.job.claim_flags, claim_flags, sizeof(claim_flags));
+    g_blob_worker.job.claim_flag_count = claim_flag_count;
+    if (claim_flag_count > 0)
+        memcpy(g_blob_worker.job.claim_flags, claim_flags,
+               (size_t)claim_flag_count * sizeof(claim_flags[0]));
+    else
+        memset(g_blob_worker.job.claim_flags, 0, sizeof(g_blob_worker.job.claim_flags));
     g_blob_worker.has_job = true;
     g_blob_worker.jobs_submitted++;
     pthread_cond_signal(&g_blob_worker.cv);
@@ -13937,8 +13982,10 @@ void websocket_server_send_game_state(void) {
             SharedBlobSnapshot _snap;
             _snap.current_time = current_time;
             _snap.tick = global_sim ? global_sim->tick : 0;
-            copy_tombstones_to_blob(tombstones, _snap.tombstones);
-            memcpy(_snap.dropped_items, dropped_items, sizeof(dropped_items));
+            _snap.tombstone_active_count =
+                copy_tombstones_to_blob(tombstones, _snap.tombstones);
+            _snap.dropped_item_active_count =
+                copy_dropped_items_to_blob(dropped_items, _snap.dropped_items);
             if (dynamic_company_count > 0)
                 memcpy(_snap.dynamic_companies, dynamic_companies,
                        (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
@@ -13974,7 +14021,12 @@ void websocket_server_send_game_state(void) {
             if (world_npc_count > 0)
                 memcpy(_snap.world_npcs, world_npcs,
                        (size_t)world_npc_count * sizeof(world_npcs[0]));
-            memcpy(_snap.claim_flags, claim_flags, sizeof(claim_flags));
+            _snap.claim_flag_count = claim_flag_count;
+            if (claim_flag_count > 0)
+                memcpy(_snap.claim_flags, claim_flags,
+                       (size_t)claim_flag_count * sizeof(claim_flags[0]));
+            else
+                memset(_snap.claim_flags, 0, sizeof(_snap.claim_flags));
             build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache, &g_blob_sync_lut);
             blob_worker_note_fallback_build();
             shared_blob_cache_valid = true;
