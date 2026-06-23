@@ -62,12 +62,22 @@ PlacedStructure *shipyard_by_scaffolded_ship(uint32_t ship_id)
 
 PlacedStructure *shipyard_by_id(uint16_t struct_id)
 {
-    if (struct_id == 0 || struct_id >= STRUCT_ID_INDEX_CAP) return NULL;
-    int16_t idx = struct_id_to_idx[struct_id];
-    if (idx < 0) return NULL;
-    PlacedStructure *s = &placed_structures[(uint32_t)idx];
-    if (!s->active || s->type != STRUCT_SHIPYARD) return NULL;
-    return s;
+    if (struct_id == 0) return NULL;
+    if (struct_id < STRUCT_ID_INDEX_CAP) {
+        int16_t idx = struct_id_to_idx[struct_id];
+        if (idx >= 0) {
+            PlacedStructure *s = &placed_structures[(uint32_t)idx];
+            if (s->active && s->type == STRUCT_SHIPYARD && s->id == struct_id)
+                return s;
+        }
+    }
+    /* Fallback: next_structure_id is monotonic and never reused, so ids can
+     * exceed STRUCT_ID_INDEX_CAP on long-running servers. */
+    for (uint32_t i = 0; i < shipyard_count; i++) {
+        PlacedStructure *s = &placed_structures[shipyard_slots[i]];
+        if (s->active && s->id == struct_id) return s;
+    }
+    return NULL;
 }
 
 uint32_t structure_index_shipyard_count(void) { return shipyard_count; }
