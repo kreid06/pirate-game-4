@@ -2,6 +2,7 @@
 #include "sim/types.h"
 #include "net/network.h"
 #include "net/claim.h"
+#include "net/structures.h"
 #include "util/log.h"
 #include "util/time.h"
 #include "sim/world_save.h"
@@ -1394,6 +1395,10 @@ int admin_server_update(struct AdminServer* admin, const struct Sim* sim,
                         int lr = world_load(WORLD_SAVE_DEFAULT_PATH);
                         if (lr == 0) {
                             claim_dominators_sanity_sweep();
+                            /* Rebuild shipyard/chest lookup tables (structure_index)
+                             * and scrub stale scaffolding links — same as server.c
+                             * startup path after world_load(). */
+                            shipyard_scaffolding_sanity_sweep();
                             resp.status_code = 200;
                             resp.content_type = "application/json";
                             resp.body = "{\"ok\":true}";
