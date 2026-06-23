@@ -8,6 +8,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 #include "net/websocket_server_internal.h"
+#include "net/structure_index.h"
 #include "net/websocket_protocol.h"
 #include "net/structures.h"
 #include "net/module_interactions.h"
@@ -1319,6 +1320,8 @@ void handle_place_structure(WebSocketPlayer* player, struct WebSocketClient* cli
     }
     placed_structure_count++;
 
+    structure_index_rebuild();
+
     /* New territorial anchor — invalidate claim-flag section caches so
      * claim flags re-evaluate their contest area next tick. */
     if (stype_enum != STRUCT_CLAIM_FLAG) {
@@ -2423,6 +2426,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
         sy->construction_phase   = CONSTRUCTION_BUILDING;
         sy->construction_company = player->company_id;
         sy->scaffolded_ship_id   = new_ship_id;
+        structure_index_rebuild();
         log_info("⚓ Shipyard %u: skeleton spawned as ship %u", sid, new_ship_id);
 
     } else if (strcmp(action, "add_module") == 0) {
@@ -2453,6 +2457,7 @@ void handle_shipyard_action(WebSocketPlayer* player, struct WebSocketClient* cli
         sy->construction_phase  = CONSTRUCTION_EMPTY;
         sy->modules_placed      = 0;
         sy->scaffolded_ship_id  = 0;
+        structure_index_rebuild();
         char bcast[512];
         build_shipyard_state_json(bcast, sizeof(bcast), sy, released_id, player->player_id, NULL);
         websocket_server_broadcast(bcast);
@@ -2730,6 +2735,7 @@ void destroy_placed_structure(uint32_t structure_id, float hit_x, float hit_y) {
             placed_structures[write++] = placed_structures[read];
     }
     placed_structure_count = write;
+    structure_index_rebuild();
 }
 
 /*
@@ -2799,6 +2805,7 @@ void shipyard_scaffolding_sanity_sweep(void) {
     } else {
         log_info("⚓ [sanity] Shipyard scaffolding OK");
     }
+    structure_index_rebuild();
 }
 
 /*

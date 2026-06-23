@@ -1,4 +1,5 @@
 #include "net/websocket_server_internal.h"
+#include "net/structure_index.h"
 #include "net/dock_physics.h"
 #include "sim/island.h"
 #define _USE_MATH_DEFINES
@@ -312,9 +313,10 @@ void handle_ship_dock_collisions(void) {
      * impulses from wall A to inform the response at wall B. */
     static const int   N_ITER        = 3;
 
-    for (int di = 0; di < (int)placed_structure_count; di++) {
-        PlacedStructure *sy = &placed_structures[di];
-        if (!sy->active || sy->type != STRUCT_SHIPYARD) continue;
+    const uint32_t *yslots = structure_index_shipyard_slots();
+    uint32_t yc = structure_index_shipyard_count();
+    for (uint32_t yi = 0; yi < yc; yi++) {
+        PlacedStructure *sy = &placed_structures[yslots[yi]];
 
         for (uint32_t si = 0; si < global_sim->ship_count; si++) {
             struct Ship *ship = &global_sim->ships[si];
@@ -481,7 +483,7 @@ void handle_ship_dock_collisions(void) {
              * converged answer instead of building up from zero.
              * Dock entity ID is encoded as 0xFF00 | dock_index so it never
              * collides with real entity IDs (which start from 1). */
-            entity_id dock_pseudo_id = (entity_id)(0xFF00u | (uint16_t)di);
+            entity_id dock_pseudo_id = (entity_id)(0xFF00u | (uint16_t)yslots[yi]);
             struct ContactEntry* dock_ce = contact_cache_find(
                 &global_sim->contact_cache, ship->id, dock_pseudo_id);
             if (dock_ce && dock_ce->n_contacts == 3) {

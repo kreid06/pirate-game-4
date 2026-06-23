@@ -1,5 +1,6 @@
 #include "net/websocket_server.h"
 #include "net/websocket_server_internal.h"
+#include "net/structure_index.h"
 #include "net/ship_chest_resources.h"
 #include "net/ship_plank_wreckage.h"
 #include "net/bucket_bail.h"
@@ -678,6 +679,23 @@ static bool res_can_afford_cost(const WebSocketPlayer *p, const ShipModuleResour
         && p->res_stone >= cost->stone;
 }
 
+static void yard_add_nearby_chest_resources(const PlacedStructure *sy, float yr2,
+                                          uint32_t *wood, uint32_t *fiber,
+                                          uint32_t *metal, uint32_t *stone)
+{
+    const uint32_t *cslots = structure_index_chest_slots();
+    uint32_t cc = structure_index_chest_count();
+    for (uint32_t ci = 0; ci < cc; ci++) {
+        PlacedStructure *c = &placed_structures[cslots[ci]];
+        float cdx = c->x - sy->x, cdy = c->y - sy->y;
+        if (cdx * cdx + cdy * cdy > yr2) continue;
+        *wood  += c->chest_wood;
+        *fiber += c->chest_fiber;
+        *metal += c->chest_metal;
+        *stone += c->chest_stone;
+    }
+}
+
 /** Deducts `cost` from the player's resource pool. */
 static void res_consume_cost(WebSocketPlayer *p, const ShipModuleResourceCost *cost) {
     if (!cost) return;
@@ -708,28 +726,18 @@ static bool res_can_afford_combined_cost(const WebSocketPlayer *p, const SimpleS
     /* Add land chest resources from shipyards within range of the ship */
     if (s) {
         const float YR = 50.0f; /* 500 client-px — matches client YARD_RANGE_SQ */
-        for (uint32_t si = 0; si < placed_structure_count; si++) {
-            if (!placed_structures[si].active) continue;
-            if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
-            float sdx = s->x - placed_structures[si].x;
-            float sdy = s->y - placed_structures[si].y;
-            if (sdx*sdx + sdy*sdy > YR*YR) continue;
-            /* Shipyard's own resource pool */
-            wood  += placed_structures[si].chest_wood;
-            fiber += placed_structures[si].chest_fiber;
-            metal += placed_structures[si].chest_metal;
-            stone += placed_structures[si].chest_stone;
-            for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
-                if (!placed_structures[ci].active) continue;
-                if (placed_structures[ci].type != STRUCT_CHEST) continue;
-                float cdx = placed_structures[ci].x - placed_structures[si].x;
-                float cdy = placed_structures[ci].y - placed_structures[si].y;
-                if (cdx*cdx + cdy*cdy > YR*YR) continue;
-                wood  += placed_structures[ci].chest_wood;
-                fiber += placed_structures[ci].chest_fiber;
-                metal += placed_structures[ci].chest_metal;
-                stone += placed_structures[ci].chest_stone;
-            }
+        const float YR2 = YR * YR;
+        const uint32_t *yslots = structure_index_shipyard_slots();
+        uint32_t yc = structure_index_shipyard_count();
+        for (uint32_t yi = 0; yi < yc; yi++) {
+            PlacedStructure *sy = &placed_structures[yslots[yi]];
+            float sdx = s->x - sy->x, sdy = s->y - sy->y;
+            if (sdx * sdx + sdy * sdy > YR2) continue;
+            wood  += sy->chest_wood;
+            fiber += sy->chest_fiber;
+            metal += sy->chest_metal;
+            stone += sy->chest_stone;
+            yard_add_nearby_chest_resources(sy, YR2, &wood, &fiber, &metal, &stone);
         }
     }
     return wood  >= cost->wood
@@ -749,28 +757,28 @@ static void res_consume_combined_cost(WebSocketPlayer *p, SimpleShip *s,
     /* 1. Drain shipyard own pool, then nearby land chests */
     if (s) {
         const float YR = 50.0f;
-        for (uint32_t si = 0; si < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); si++) {
-            if (!placed_structures[si].active) continue;
-            if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
-            float sdx = s->x - placed_structures[si].x;
-            float sdy = s->y - placed_structures[si].y;
-            if (sdx*sdx + sdy*sdy > YR*YR) continue;
+        const float YR2 = YR * YR;
+        const uint32_t *yslots = structure_index_shipyard_slots();
+        uint32_t yc = structure_index_shipyard_count();
+        for (uint32_t yi = 0; yi < yc && (need_wood || need_fiber || need_metal || need_stone); yi++) {
+            PlacedStructure *sy = &placed_structures[yslots[yi]];
+            float sdx = s->x - sy->x, sdy = s->y - sy->y;
+            if (sdx * sdx + sdy * sdy > YR2) continue;
             uint16_t take;
-            take = need_wood  <= placed_structures[si].chest_wood  ? need_wood  : placed_structures[si].chest_wood;  placed_structures[si].chest_wood  -= take; need_wood  -= take;
-            take = need_fiber <= placed_structures[si].chest_fiber ? need_fiber : placed_structures[si].chest_fiber; placed_structures[si].chest_fiber -= take; need_fiber -= take;
-            take = need_metal <= placed_structures[si].chest_metal ? need_metal : placed_structures[si].chest_metal; placed_structures[si].chest_metal -= take; need_metal -= take;
-            take = need_stone <= placed_structures[si].chest_stone ? need_stone : placed_structures[si].chest_stone; placed_structures[si].chest_stone -= take; need_stone -= take;
-            for (uint32_t ci = 0; ci < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); ci++) {
-                if (!placed_structures[ci].active) continue;
-                if (placed_structures[ci].type != STRUCT_CHEST) continue;
-                float cdx = placed_structures[ci].x - placed_structures[si].x;
-                float cdy = placed_structures[ci].y - placed_structures[si].y;
-                if (cdx*cdx + cdy*cdy > YR*YR) continue;
-                uint16_t take;
-                take = need_wood  <= placed_structures[ci].chest_wood  ? need_wood  : placed_structures[ci].chest_wood;  placed_structures[ci].chest_wood  -= take; need_wood  -= take;
-                take = need_fiber <= placed_structures[ci].chest_fiber ? need_fiber : placed_structures[ci].chest_fiber; placed_structures[ci].chest_fiber -= take; need_fiber -= take;
-                take = need_metal <= placed_structures[ci].chest_metal ? need_metal : placed_structures[ci].chest_metal; placed_structures[ci].chest_metal -= take; need_metal -= take;
-                take = need_stone <= placed_structures[ci].chest_stone ? need_stone : placed_structures[ci].chest_stone; placed_structures[ci].chest_stone -= take; need_stone -= take;
+            take = need_wood  <= sy->chest_wood  ? need_wood  : sy->chest_wood;  sy->chest_wood  -= take; need_wood  -= take;
+            take = need_fiber <= sy->chest_fiber ? need_fiber : sy->chest_fiber; sy->chest_fiber -= take; need_fiber -= take;
+            take = need_metal <= sy->chest_metal ? need_metal : sy->chest_metal; sy->chest_metal -= take; need_metal -= take;
+            take = need_stone <= sy->chest_stone ? need_stone : sy->chest_stone; sy->chest_stone -= take; need_stone -= take;
+            const uint32_t *cslots = structure_index_chest_slots();
+            uint32_t cc = structure_index_chest_count();
+            for (uint32_t ci = 0; ci < cc && (need_wood || need_fiber || need_metal || need_stone); ci++) {
+                PlacedStructure *c = &placed_structures[cslots[ci]];
+                float cdx = c->x - sy->x, cdy = c->y - sy->y;
+                if (cdx * cdx + cdy * cdy > YR2) continue;
+                take = need_wood  <= c->chest_wood  ? need_wood  : c->chest_wood;  c->chest_wood  -= take; need_wood  -= take;
+                take = need_fiber <= c->chest_fiber ? need_fiber : c->chest_fiber; c->chest_fiber -= take; need_fiber -= take;
+                take = need_metal <= c->chest_metal ? need_metal : c->chest_metal; c->chest_metal -= take; need_metal -= take;
+                take = need_stone <= c->chest_stone ? need_stone : c->chest_stone; c->chest_stone -= take; need_stone -= take;
             }
         }
     }
@@ -799,27 +807,18 @@ static void yard_pool_totals(const SimpleShip *s,
     *wood = *fiber = *metal = *stone = 0;
     if (!s) return;
     const float YR = 50.0f;
-    for (uint32_t si = 0; si < placed_structure_count; si++) {
-        if (!placed_structures[si].active) continue;
-        if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
-        float sdx = s->x - placed_structures[si].x;
-        float sdy = s->y - placed_structures[si].y;
-        if (sdx*sdx + sdy*sdy > YR*YR) continue;
-        *wood  += placed_structures[si].chest_wood;
-        *fiber += placed_structures[si].chest_fiber;
-        *metal += placed_structures[si].chest_metal;
-        *stone += placed_structures[si].chest_stone;
-        for (uint32_t ci = 0; ci < placed_structure_count; ci++) {
-            if (!placed_structures[ci].active) continue;
-            if (placed_structures[ci].type != STRUCT_CHEST) continue;
-            float cdx = placed_structures[ci].x - placed_structures[si].x;
-            float cdy = placed_structures[ci].y - placed_structures[si].y;
-            if (cdx*cdx + cdy*cdy > YR*YR) continue;
-            *wood  += placed_structures[ci].chest_wood;
-            *fiber += placed_structures[ci].chest_fiber;
-            *metal += placed_structures[ci].chest_metal;
-            *stone += placed_structures[ci].chest_stone;
-        }
+    const float YR2 = YR * YR;
+    const uint32_t *yslots = structure_index_shipyard_slots();
+    uint32_t yc = structure_index_shipyard_count();
+    for (uint32_t yi = 0; yi < yc; yi++) {
+        PlacedStructure *sy = &placed_structures[yslots[yi]];
+        float sdx = s->x - sy->x, sdy = s->y - sy->y;
+        if (sdx * sdx + sdy * sdy > YR2) continue;
+        *wood  += sy->chest_wood;
+        *fiber += sy->chest_fiber;
+        *metal += sy->chest_metal;
+        *stone += sy->chest_stone;
+        yard_add_nearby_chest_resources(sy, YR2, wood, fiber, metal, stone);
     }
 }
 
@@ -842,27 +841,28 @@ static void res_consume_yard_cost(SimpleShip *s, const ShipModuleResourceCost *c
     uint16_t need_metal = cost->metal;
     uint16_t need_stone = cost->stone;
     const float YR = 50.0f;
-    for (uint32_t si = 0; si < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); si++) {
-        if (!placed_structures[si].active) continue;
-        if (placed_structures[si].type != STRUCT_SHIPYARD) continue;
-        float sdx = s->x - placed_structures[si].x;
-        float sdy = s->y - placed_structures[si].y;
-        if (sdx*sdx + sdy*sdy > YR*YR) continue;
+    const float YR2 = YR * YR;
+    const uint32_t *yslots = structure_index_shipyard_slots();
+    uint32_t yc = structure_index_shipyard_count();
+    for (uint32_t yi = 0; yi < yc && (need_wood || need_fiber || need_metal || need_stone); yi++) {
+        PlacedStructure *sy = &placed_structures[yslots[yi]];
+        float sdx = s->x - sy->x, sdy = s->y - sy->y;
+        if (sdx * sdx + sdy * sdy > YR2) continue;
         uint16_t take;
-        take = need_wood  <= placed_structures[si].chest_wood  ? need_wood  : placed_structures[si].chest_wood;  placed_structures[si].chest_wood  -= take; need_wood  -= take;
-        take = need_fiber <= placed_structures[si].chest_fiber ? need_fiber : placed_structures[si].chest_fiber; placed_structures[si].chest_fiber -= take; need_fiber -= take;
-        take = need_metal <= placed_structures[si].chest_metal ? need_metal : placed_structures[si].chest_metal; placed_structures[si].chest_metal -= take; need_metal -= take;
-        take = need_stone <= placed_structures[si].chest_stone ? need_stone : placed_structures[si].chest_stone; placed_structures[si].chest_stone -= take; need_stone -= take;
-        for (uint32_t ci = 0; ci < placed_structure_count && (need_wood || need_fiber || need_metal || need_stone); ci++) {
-            if (!placed_structures[ci].active) continue;
-            if (placed_structures[ci].type != STRUCT_CHEST) continue;
-            float cdx = placed_structures[ci].x - placed_structures[si].x;
-            float cdy = placed_structures[ci].y - placed_structures[si].y;
-            if (cdx*cdx + cdy*cdy > YR*YR) continue;
-            take = need_wood  <= placed_structures[ci].chest_wood  ? need_wood  : placed_structures[ci].chest_wood;  placed_structures[ci].chest_wood  -= take; need_wood  -= take;
-            take = need_fiber <= placed_structures[ci].chest_fiber ? need_fiber : placed_structures[ci].chest_fiber; placed_structures[ci].chest_fiber -= take; need_fiber -= take;
-            take = need_metal <= placed_structures[ci].chest_metal ? need_metal : placed_structures[ci].chest_metal; placed_structures[ci].chest_metal -= take; need_metal -= take;
-            take = need_stone <= placed_structures[ci].chest_stone ? need_stone : placed_structures[ci].chest_stone; placed_structures[ci].chest_stone -= take; need_stone -= take;
+        take = need_wood  <= sy->chest_wood  ? need_wood  : sy->chest_wood;  sy->chest_wood  -= take; need_wood  -= take;
+        take = need_fiber <= sy->chest_fiber ? need_fiber : sy->chest_fiber; sy->chest_fiber -= take; need_fiber -= take;
+        take = need_metal <= sy->chest_metal ? need_metal : sy->chest_metal; sy->chest_metal -= take; need_metal -= take;
+        take = need_stone <= sy->chest_stone ? need_stone : sy->chest_stone; sy->chest_stone -= take; need_stone -= take;
+        const uint32_t *cslots = structure_index_chest_slots();
+        uint32_t cc = structure_index_chest_count();
+        for (uint32_t ci = 0; ci < cc && (need_wood || need_fiber || need_metal || need_stone); ci++) {
+            PlacedStructure *c = &placed_structures[cslots[ci]];
+            float cdx = c->x - sy->x, cdy = c->y - sy->y;
+            if (cdx * cdx + cdy * cdy > YR2) continue;
+            take = need_wood  <= c->chest_wood  ? need_wood  : c->chest_wood;  c->chest_wood  -= take; need_wood  -= take;
+            take = need_fiber <= c->chest_fiber ? need_fiber : c->chest_fiber; c->chest_fiber -= take; need_fiber -= take;
+            take = need_metal <= c->chest_metal ? need_metal : c->chest_metal; c->chest_metal -= take; need_metal -= take;
+            take = need_stone <= c->chest_stone ? need_stone : c->chest_stone; c->chest_stone -= take; need_stone -= take;
         }
     }
 }
@@ -975,10 +975,8 @@ static void sync_simple_ships_from_simulation(void) {
     // For every active shipyard that has a scaffolded_ship_id, snap the sim
     // ship's position/rotation to the dock center and zero its velocities so
     // it never drifts away during construction.
-    for (int pi = 0; pi < MAX_PLACED_STRUCTURES; pi++) {
-        PlacedStructure* sy = &placed_structures[pi];
-        if (!sy->active) continue;
-        if (sy->type != STRUCT_SHIPYARD) continue;
+    for (uint32_t yi = 0; yi < structure_index_shipyard_count(); yi++) {
+        PlacedStructure* sy = &placed_structures[structure_index_shipyard_slots()[yi]];
         if (sy->scaffolded_ship_id == 0) continue;
 
         struct Ship* sim_ship = find_sim_ship(sy->scaffolded_ship_id);
@@ -4927,14 +4925,9 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
             /* Resolve which ship ID the player is currently associated with (boarded or scaffold). */
             uint32_t _own_ship_id = (uint32_t)owner->parent_ship_id;
             if (_own_ship_id == 0 && owner->on_dock_id != 0) {
-                for (int _dsi = 0; _dsi < (int)placed_structure_count; _dsi++) {
-                    PlacedStructure* _ds = &placed_structures[_dsi];
-                    if (_ds->active && _ds->id == owner->on_dock_id &&
-                        _ds->type == STRUCT_SHIPYARD && _ds->scaffolded_ship_id != 0) {
-                        _own_ship_id = _ds->scaffolded_ship_id;
-                        break;
-                    }
-                }
+                PlacedStructure *_ds = shipyard_by_id(owner->on_dock_id);
+                if (_ds && _ds->scaffolded_ship_id != 0)
+                    _own_ship_id = _ds->scaffolded_ship_id;
             }
 
             /* Other players — tip AND rope-line check (before ships so deck crew win over hull). */
@@ -9525,13 +9518,8 @@ int websocket_server_update(struct Sim* sim) {
                                 /* Accept both on-deck (parent_ship_id) and on-scaffold (on_dock_id) */
                                 uint16_t target_ship_id = player ? player->parent_ship_id : 0;
                                 if (player && target_ship_id == 0 && player->on_dock_id != 0) {
-                                    for (int _pdi = 0; _pdi < (int)placed_structure_count; _pdi++) {
-                                        if (placed_structures[_pdi].active &&
-                                            placed_structures[_pdi].id == player->on_dock_id) {
-                                            target_ship_id = placed_structures[_pdi].scaffolded_ship_id;
-                                            break;
-                                        }
-                                    }
+                                    PlacedStructure *_pdy = shipyard_by_id(player->on_dock_id);
+                                    if (_pdy) target_ship_id = _pdy->scaffolded_ship_id;
                                 }
                                 if (!player || target_ship_id == 0) {
                                     strcpy(response, "{\"type\":\"error\",\"message\":\"not_on_ship\"}");
@@ -14068,7 +14056,7 @@ void websocket_server_send_game_state(void) {
 #define PER_GS_BUF   524288  /* 512 KB per-client full GAME_STATE  */
         static char per_ship_json_pool[WS_MAX_CLIENTS][PER_SHIP_BUF];
         static char per_gs_pool[WS_MAX_CLIENTS][PER_GS_BUF];
-        static int  per_gs_len[WS_MAX_CLIENTS];
+        static size_t per_gs_len[WS_MAX_CLIENTS];
         static int  send_client_idx[WS_MAX_CLIENTS];
         static char per_frame[PER_GS_BUF + 14];
         uint64_t _send_loop_t0_us = get_time_us();
@@ -14094,7 +14082,9 @@ void websocket_server_send_game_state(void) {
                 }
             }
 
-            const float _view_r  = 5000.0f;
+            float _view_r = 5000.0f; /* client px — open-sea default (MAX_VIEW_DIST) */
+            if (_vp->view_radius > 0.0f)
+                _view_r = SERVER_TO_CLIENT(_vp->view_radius);
             const float _view_r2 = _view_r * _view_r;
 
             char* per_ship_json = per_ship_json_pool[_send_count];
@@ -14119,15 +14109,16 @@ void websocket_server_send_game_state(void) {
             per_ship_json[_soff] = '\0';
 
             char* per_gs = per_gs_pool[_send_count];
-            int _goff = 0;
-            /* _GS: safe snprintf accumulator — always guards against _goff going
-             * past PER_GS_BUF so that PER_GS_BUF - _goff is never negative (which
-             * when cast to size_t would be a huge positive, causing a buffer overrun
-             * and the 4x -Warray-bounds= GCC warnings). */
+            size_t _goff = 0;
+            /* _GS/_MC1: size_t offset with hard cap so PER_GS_BUF - _goff never wraps. */
 #define _GS(fmt, ...) do { \
     if (_goff < PER_GS_BUF - 1) { \
         int _gs_n = snprintf(per_gs + _goff, (size_t)(PER_GS_BUF - _goff), fmt, ##__VA_ARGS__); \
-        if (_gs_n > 0) { _goff += _gs_n; if (_goff >= PER_GS_BUF) _goff = PER_GS_BUF - 1; } \
+        if (_gs_n > 0) { \
+            size_t _gs_add = (size_t)_gs_n; \
+            if (_goff + _gs_add >= (size_t)(PER_GS_BUF - 1)) _goff = (size_t)(PER_GS_BUF - 1); \
+            else _goff += _gs_add; \
+        } \
     } \
 } while(0)
             /* Stamp the tick of the SNAPSHOT the cached ship/blob JSON was built from,
@@ -14141,10 +14132,16 @@ void websocket_server_send_game_state(void) {
                 shared_blob_cache.tick ? shared_blob_cache.tick
                                        : (global_sim ? global_sim->tick : (current_time / TICK_DURATION_MS)),
                 current_time);
-#define _MC1(buf, len) do { if (_goff + (len) < PER_GS_BUF - 1) { memcpy(per_gs + _goff, (buf), (size_t)(len)); _goff += (len); } } while(0)
+#define _MC1(buf, len) do { \
+    size_t _mc_len = (size_t)(len); \
+    if (_mc_len > 0 && _goff + _mc_len < (size_t)(PER_GS_BUF - 1)) { \
+        memcpy(per_gs + _goff, (buf), _mc_len); \
+        _goff += _mc_len; \
+    } \
+} while(0)
             _MC1(per_ship_json, _soff);
             /* Players: AOI-filtered per-client (skip players outside view radius). */
-            if (_goff + 12 < PER_GS_BUF) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
+            if (_goff + 12 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
             {
                 bool _ppf = true;
                 for (int _p = 0; _p < WS_MAX_CLIENTS; _p++) {
@@ -14152,19 +14149,19 @@ void websocket_server_send_game_state(void) {
                     float _pdx = shared_blob_cache.player_world_x[_p] - _cx;
                     float _pdy = shared_blob_cache.player_world_y[_p] - _cy;
                     if (_pdx*_pdx + _pdy*_pdy > _view_r2) continue;
-                    if (!_ppf && _goff < PER_GS_BUF - 1) per_gs[_goff++] = ',';
+                    if (!_ppf && _goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ',';
                     int _plen = shared_blob_cache.player_entry_len[_p];
-                    if (_plen > 0 && _goff + _plen < PER_GS_BUF - 2) {
+                    if (_plen > 0 && _goff + (size_t)_plen < (size_t)(PER_GS_BUF - 2)) {
                         memcpy(per_gs + _goff, shared_blob_cache.player_entry[_p], (size_t)_plen);
-                        _goff += _plen; _ppf = false;
+                        _goff += (size_t)_plen; _ppf = false;
                     }
                 }
-                if (_goff < PER_GS_BUF - 1) per_gs[_goff++] = ']';
+                if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
             }
             _GS(",\"projectiles\":");
             _MC1(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
             /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
-            if (_goff + 9 < PER_GS_BUF) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
+            if (_goff + 9 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
             {
                 bool _npf = true;
                 int _ncount = shared_blob_cache.npc_entry_count;
@@ -14175,14 +14172,14 @@ void websocket_server_send_game_state(void) {
                     float _ndx = shared_blob_cache.npc_world_x[_n] - _cx;
                     float _ndy = shared_blob_cache.npc_world_y[_n] - _cy;
                     if (_ndx*_ndx + _ndy*_ndy > _view_r2) continue;
-                    if (!_npf && _goff < PER_GS_BUF - 1) per_gs[_goff++] = ',';
+                    if (!_npf && _goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ',';
                     int _nlen = shared_blob_cache.npc_entry_len[_n];
-                    if (_nlen > 0 && _goff + _nlen < PER_GS_BUF - 2) {
+                    if (_nlen > 0 && _goff + (size_t)_nlen < (size_t)(PER_GS_BUF - 2)) {
                         memcpy(per_gs + _goff, shared_blob_cache.npc_entry[_n], (size_t)_nlen);
-                        _goff += _nlen; _npf = false;
+                        _goff += (size_t)_nlen; _npf = false;
                     }
                 }
-                if (_goff < PER_GS_BUF - 1) per_gs[_goff++] = ']';
+                if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
             }
             _GS(",\"tombstones\":");
             _MC1(shared_blob_cache.tmb_json, shared_blob_cache.tmb_len);
@@ -14196,7 +14193,7 @@ void websocket_server_send_game_state(void) {
                 g_wind_angle,
                 global_sim ? global_sim->wind_power : 0.5f);
 #undef _GS
-            if (_goff < PER_GS_BUF - 1) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
+            if (_goff < (size_t)(PER_GS_BUF - 1)) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
             per_gs_len[_send_count] = _goff;
 
             send_client_idx[_send_count] = _ci;
@@ -14233,8 +14230,8 @@ void websocket_server_send_game_state(void) {
                 int _ci = send_client_idx[_si];
                 struct WebSocketClient* _client = &ws_server.clients[_ci];
                 char* per_gs = per_gs_pool[_si];
-                int _goff = per_gs_len[_si];
-                size_t _flen = websocket_create_frame(WS_OPCODE_TEXT, per_gs, (size_t)_goff,
+                size_t _goff = per_gs_len[_si];
+                size_t _flen = websocket_create_frame(WS_OPCODE_TEXT, per_gs, _goff,
                                                       per_frame, sizeof(per_frame));
                 if (_flen > 0) {
                     ssize_t _sent = send(_client->fd, per_frame, _flen, 0);
@@ -14801,6 +14798,7 @@ void websocket_server_tick(float dt) {
                         wr->wreck_expires_ms     = get_time_ms() + 900000u; /* 15 min */
                         snprintf(wr->placer_name, sizeof(wr->placer_name), "chest_ruin");
                         placed_structure_count++;
+                        structure_index_rebuild();
                         char wbcast[256];
                         snprintf(wbcast, sizeof(wbcast),
                             "{\"type\":\"wreck_spawned\",\"id\":%u,\"x\":%.1f,\"y\":%.1f"
@@ -15883,25 +15881,14 @@ void websocket_server_tick(float dt) {
                         PlacedStructure *_zdock = NULL;
                         SimpleShip      *_zship = NULL;
                         if (ws_player->on_dock_id != 0) {
-                            for (int _zdi = 0; _zdi < (int)placed_structure_count; _zdi++) {
-                                PlacedStructure *_zd = &placed_structures[_zdi];
-                                if (_zd->active && _zd->id == ws_player->on_dock_id &&
-                                    _zd->type == STRUCT_SHIPYARD && _zd->scaffolded_ship_id != 0) {
-                                    _zdock = _zd;
-                                    _zship = find_ship(_zd->scaffolded_ship_id);
-                                    break;
-                                }
-                            }
+                            _zdock = shipyard_by_id(ws_player->on_dock_id);
+                            if (_zdock && _zdock->scaffolded_ship_id != 0)
+                                _zship = find_ship(_zdock->scaffolded_ship_id);
+                            else
+                                _zdock = NULL;
                         } else if (on_ship && player_ship) {
-                            for (int _zdi = 0; _zdi < (int)placed_structure_count; _zdi++) {
-                                PlacedStructure *_zd = &placed_structures[_zdi];
-                                if (_zd->active && _zd->type == STRUCT_SHIPYARD &&
-                                    _zd->scaffolded_ship_id == (uint32_t)ws_player->parent_ship_id) {
-                                    _zdock = _zd;
-                                    _zship = player_ship;
-                                    break;
-                                }
-                            }
+                            _zdock = shipyard_by_scaffolded_ship((uint32_t)ws_player->parent_ship_id);
+                            if (_zdock) _zship = player_ship;
                         }
                         if (_zdock && _zship) {
                             // ===== SHIPYARD ZONE MOVEMENT (ship-local coords) =====
@@ -16119,10 +16106,9 @@ void websocket_server_tick(float dt) {
                                 // Dismount player — try dock first
                                 {
                                     bool _onto_dock = false;
-                                    for (int _dki = 0; _dki < (int)placed_structure_count && !_onto_dock; _dki++) {
-                                        PlacedStructure *_dks = &placed_structures[_dki];
-                                        if (!_dks->active || _dks->type != STRUCT_SHIPYARD) continue;
-                                        if (_dks->scaffolded_ship_id != (uint32_t)player_ship->ship_id) continue;
+                                    PlacedStructure *_dks =
+                                        shipyard_by_scaffolded_ship((uint32_t)player_ship->ship_id);
+                                    if (_dks) {
                                         bool _dkhs = (_dks->construction_phase == CONSTRUCTION_BUILDING);
                                         float _dklx, _dkly;
                                         dock_world_to_local(_dks, ws_player->x, ws_player->y, &_dklx, &_dkly);
@@ -16342,13 +16328,7 @@ void websocket_server_tick(float dt) {
                             }
                         } else if (ws_player->on_dock_id != 0) {
                             // ===== DOCK WALKING (WORLD COORDINATES) =====
-                            PlacedStructure *dock_sy = NULL;
-                            for (int _di = 0; _di < (int)placed_structure_count; _di++) {
-                                if (placed_structures[_di].active &&
-                                    placed_structures[_di].id == ws_player->on_dock_id) {
-                                    dock_sy = &placed_structures[_di]; break;
-                                }
-                            }
+                            PlacedStructure *dock_sy = shipyard_by_id(ws_player->on_dock_id);
                             if (!dock_sy || dock_sy->type != STRUCT_SHIPYARD) {
                                 ws_player->on_dock_id = 0;
                                 ws_player->movement_state = PLAYER_STATE_SWIMMING;
@@ -16478,16 +16458,12 @@ void websocket_server_tick(float dt) {
                          * for dock players in the shipyard zone (scaffold on pinned ship). */
                         sim_player->velocity.x = 0;
                         sim_player->velocity.y = 0;
-                        for (int _zdi = 0; _zdi < (int)placed_structure_count; _zdi++) {
-                            PlacedStructure *_zd = &placed_structures[_zdi];
-                            if (_zd->active && _zd->id == ws_player->on_dock_id &&
-                                _zd->type == STRUCT_SHIPYARD && _zd->scaffolded_ship_id != 0) {
-                                SimpleShip *_zs = find_ship(_zd->scaffolded_ship_id);
-                                if (_zs) {
-                                    ship_world_to_local(_zs, ws_player->x, ws_player->y,
-                                                        &ws_player->local_x, &ws_player->local_y);
-                                }
-                                break;
+                        PlacedStructure *_zd = shipyard_by_id(ws_player->on_dock_id);
+                        if (_zd && _zd->scaffolded_ship_id != 0) {
+                            SimpleShip *_zs = find_ship(_zd->scaffolded_ship_id);
+                            if (_zs) {
+                                ship_world_to_local(_zs, ws_player->x, ws_player->y,
+                                                    &ws_player->local_x, &ws_player->local_y);
                             }
                         }
                     } else if (!on_ship) {
@@ -16614,9 +16590,10 @@ void websocket_server_tick(float dt) {
                     if (ws_player->on_dock_id == 0) {
                         /* Try to step onto a dock surface (through stair gaps) */
                         if (ws_player->on_island_id == 0) {
-                            for (int _di = 0; _di < (int)placed_structure_count; _di++) {
-                                PlacedStructure *_dk = &placed_structures[_di];
-                                if (!_dk->active || _dk->type != STRUCT_SHIPYARD) continue;
+                            const uint32_t *yslots = structure_index_shipyard_slots();
+                            uint32_t yc = structure_index_shipyard_count();
+                            for (uint32_t yi = 0; yi < yc; yi++) {
+                                PlacedStructure *_dk = &placed_structures[yslots[yi]];
                                 float _dlx, _dly;
                                 dock_world_to_local(_dk, wx, wy, &_dlx, &_dly);
                                 bool _hs = (_dk->construction_phase == CONSTRUCTION_BUILDING);
@@ -16633,9 +16610,10 @@ void websocket_server_tick(float dt) {
                         }
                         /* OBB pushout: keep swimming players outside dock walls */
                         if (ws_player->on_dock_id == 0 && ws_player->on_island_id == 0) {
-                            for (int _di = 0; _di < (int)placed_structure_count; _di++) {
-                                PlacedStructure *_dk = &placed_structures[_di];
-                                if (!_dk->active || _dk->type != STRUCT_SHIPYARD) continue;
+                            const uint32_t *yslots = structure_index_shipyard_slots();
+                            uint32_t yc = structure_index_shipyard_count();
+                            for (uint32_t yi = 0; yi < yc; yi++) {
+                                PlacedStructure *_dk = &placed_structures[yslots[yi]];
                                 bool _hs = (_dk->construction_phase == CONSTRUCTION_BUILDING);
                                 float _ox = ws_player->x, _oy = ws_player->y;
                                 float _nx = _ox, _ny = _oy;
@@ -16660,13 +16638,7 @@ void websocket_server_tick(float dt) {
                         }
                     } else {
                         /* On dock — verify still on surface each tick */
-                        PlacedStructure *_dk = NULL;
-                        for (int _di = 0; _di < (int)placed_structure_count; _di++) {
-                            if (placed_structures[_di].active &&
-                                placed_structures[_di].id == ws_player->on_dock_id) {
-                                _dk = &placed_structures[_di]; break;
-                            }
-                        }
+                        PlacedStructure *_dk = shipyard_by_id(ws_player->on_dock_id);
                         if (!_dk || _dk->type != STRUCT_SHIPYARD) {
                             ws_player->on_dock_id = 0;
                             ws_player->movement_state = PLAYER_STATE_SWIMMING;
