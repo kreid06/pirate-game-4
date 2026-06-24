@@ -216,6 +216,14 @@ typedef struct {
 
 static Tombstone tombstones[MAX_TOMBSTONES];
 static uint32_t  next_tombstone_id = 1;
+static int       tombstone_live_count = 0;
+
+static void tombstone_deactivate(Tombstone* t) {
+    if (t && t->active) {
+        t->active = false;
+        if (tombstone_live_count > 0) tombstone_live_count--;
+    }
+}
 
 // ── Dropped items (manually dropped by players) ──────────────────────────────
 #define MAX_DROPPED_ITEMS  256u
@@ -239,6 +247,19 @@ typedef struct {
 
 static DroppedItem dropped_items[MAX_DROPPED_ITEMS];
 static uint32_t    next_dropped_item_id = 1;
+static int         dropped_item_live_count = 0;
+
+static void dropped_item_activate(DroppedItem* di) {
+    di->active = true;
+    dropped_item_live_count++;
+}
+
+static void dropped_item_deactivate(DroppedItem* di) {
+    if (di && di->active) {
+        di->active = false;
+        if (dropped_item_live_count > 0) dropped_item_live_count--;
+    }
+}
 
 /* ── Grapple hook system ──────────────────────────────────────────────────────
  * Each connected player slot has one grapple hook entry.  Hooks travel as
@@ -480,7 +501,9 @@ typedef struct {
     bool has_job;
     bool has_output;
     SharedBlobSnapshot job;
-    SharedBlobOutput output;
+    SharedBlobOutput output_bufs[2];
+    int output_read_idx;
+    int worker_write_idx;
     uint64_t jobs_submitted;
     uint64_t jobs_completed;
     uint64_t fallback_sync_builds;
@@ -526,7 +549,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
                                            SnapShipLut* lut);
 static void blob_worker_submit_snapshot(uint32_t current_time);
-static bool blob_worker_try_get_output(SharedBlobOutput* out);
+static const SharedBlobOutput* blob_worker_peek_output(void);
 static int blob_worker_start(void);
 static void blob_worker_stop(void);
 static void blob_worker_note_fallback_build(void);
@@ -946,7 +969,28 @@ static void update_mounted_players_on_ship(uint16_t ship_id) {
 // Full definition lives after find_ship_by_id (below).
 #define SIM_SHIP_ID_SIZE 512
 static struct Ship* g_sim_ship_by_id[SIM_SHIP_ID_SIZE]; // zero-init by C
+static uint32_t     g_sim_ship_lut_touched[MAX_SHIPS];
+static int          g_sim_ship_lut_touched_count = 0;
 struct Ship* find_sim_ship(uint32_t id);          // forward declaration
+
+static void sim_ship_lut_reset(void) {
+    for (int i = 0; i < g_sim_ship_lut_touched_count; i++) {
+        uint32_t sid = g_sim_ship_lut_touched[i];
+        if (sid > 0 && sid < SIM_SHIP_ID_SIZE)
+            g_sim_ship_by_id[sid] = NULL;
+    }
+    g_sim_ship_lut_touched_count = 0;
+}
+
+static void sim_ship_lut_insert(uint32_t sid, struct Ship* ship) {
+    if (sid == 0 || sid >= SIM_SHIP_ID_SIZE || !ship) return;
+    g_sim_ship_by_id[sid] = ship;
+    for (int i = 0; i < g_sim_ship_lut_touched_count; i++) {
+        if (g_sim_ship_lut_touched[i] == sid) return;
+    }
+    if (g_sim_ship_lut_touched_count < MAX_SHIPS)
+        g_sim_ship_lut_touched[g_sim_ship_lut_touched_count++] = sid;
+}
 
 // ── find_sim_ship definition ─────────────────────────────────────────────────
 struct Ship* find_sim_ship(uint32_t id) {
@@ -969,11 +1013,10 @@ static void sync_simple_ships_from_simulation(void) {
     if (!global_sim || global_sim->ship_count == 0) return;
 
     // Rebuild sim-ship cache once per tick so all subsequent callers get O(1) lookups.
-    memset(g_sim_ship_by_id, 0, sizeof(g_sim_ship_by_id));
+    sim_ship_lut_reset();
     for (uint32_t ci = 0; ci < global_sim->ship_count; ci++) {
         uint32_t sid = (uint32_t)global_sim->ships[ci].id;
-        if (sid > 0 && sid < SIM_SHIP_ID_SIZE)
-            g_sim_ship_by_id[sid] = &global_sim->ships[ci];
+        sim_ship_lut_insert(sid, &global_sim->ships[ci]);
     }
 
     // ── Pin scaffolded ships to their shipyard before syncing ──────────────
@@ -2139,6 +2182,8 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
 }
 
 static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
+    if (tombstone_live_count == 0)
+        return 0;
     int active = 0;
     for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
         if (!_src[i].active) {
@@ -2160,6 +2205,8 @@ static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
 }
 
 static int copy_dropped_items_to_blob(const DroppedItem *_src, DroppedItem *_dst) {
+    if (dropped_item_live_count == 0)
+        return 0;
     int active = 0;
     for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
         if (!_src[i].active) {
@@ -3271,6 +3318,17 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
     bool first_ship = true;
     out->aoi_ship_count = 0;
 
+    const ClaimFlag* claim_by_ship_id[SIM_SHIP_ID_SIZE] = {0};
+    if (snap->claim_flag_count > 0) {
+        int _fl = snap->claim_flag_count;
+        if (_fl > MAX_CLAIM_FLAGS) _fl = MAX_CLAIM_FLAGS;
+        for (int _fi = 0; _fi < _fl; _fi++) {
+            const ClaimFlag* _cf = &snap->claim_flags[_fi];
+            if (_cf->active && _cf->ship_id > 0 && _cf->ship_id < SIM_SHIP_ID_SIZE)
+                claim_by_ship_id[_cf->ship_id] = _cf;
+        }
+    }
+
     if (snap->sim_ship_count > 0) {
         uint16_t _ssc = snap->sim_ship_count;
         if (_ssc > MAX_SHIPS) _ssc = MAX_SHIPS;
@@ -3461,16 +3519,8 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 ship_attr_point_cap(SHIP_ATTR_STURDINESS));
 
             const ClaimFlag* cf = NULL;
-            if (snap->claim_flag_count > 0) {
-                int _fl = snap->claim_flag_count;
-                if (_fl > MAX_CLAIM_FLAGS) _fl = MAX_CLAIM_FLAGS;
-                for (int _fi = 0; _fi < _fl; _fi++) {
-                    if (snap->claim_flags[_fi].active && snap->claim_flags[_fi].ship_id == ship->id) {
-                        cf = &snap->claim_flags[_fi];
-                        break;
-                    }
-                }
-            }
+            if (ship->id > 0 && ship->id < SIM_SHIP_ID_SIZE)
+                cf = claim_by_ship_id[ship->id];
             if (cf && offset < (int)sizeof(ship_entry) - 200) {
                 if (offset > 0 && ship_entry[offset - 1] == '}') offset--;
                 offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
@@ -3610,7 +3660,6 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
 static void* blob_worker_main(void* arg) {
     (void)arg;
     SharedBlobSnapshot local_job;
-    SharedBlobOutput local_out;
 
     pthread_mutex_lock(&g_blob_worker.mtx);
     while (g_blob_worker.running) {
@@ -3621,14 +3670,17 @@ static void* blob_worker_main(void* arg) {
 
         local_job = g_blob_worker.job;
         g_blob_worker.has_job = false;
+        int write_idx = g_blob_worker.worker_write_idx;
         pthread_mutex_unlock(&g_blob_worker.mtx);
 
         uint64_t _t0 = get_time_us();
-        build_shared_blobs_from_snapshot(&local_job, &local_out, &g_blob_worker_lut);
+        build_shared_blobs_from_snapshot(&local_job, &g_blob_worker.output_bufs[write_idx],
+                                         &g_blob_worker_lut);
         uint64_t _dt = get_time_us() - _t0;
 
         pthread_mutex_lock(&g_blob_worker.mtx);
-        g_blob_worker.output = local_out;
+        g_blob_worker.output_read_idx = write_idx;
+        g_blob_worker.worker_write_idx = 1 - write_idx;
         g_blob_worker.has_output = true;
         g_blob_worker.jobs_completed++;
         g_blob_worker.last_build_us = _dt;
@@ -3734,16 +3786,14 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     pthread_mutex_unlock(&g_blob_worker.mtx);
 }
 
-static bool blob_worker_try_get_output(SharedBlobOutput* out) {
-    bool ok = false;
-    if (!g_blob_worker.started || !out) return false;
+static const SharedBlobOutput* blob_worker_peek_output(void) {
+    const SharedBlobOutput* p = NULL;
+    if (!g_blob_worker.started) return NULL;
     pthread_mutex_lock(&g_blob_worker.mtx);
-    if (g_blob_worker.has_output) {
-        *out = g_blob_worker.output;
-        ok = true;
-    }
+    if (g_blob_worker.has_output)
+        p = &g_blob_worker.output_bufs[g_blob_worker.output_read_idx];
     pthread_mutex_unlock(&g_blob_worker.mtx);
-    return ok;
+    return p;
 }
 
 static void blob_worker_note_fallback_build(void) {
@@ -3900,6 +3950,7 @@ void player_die(WebSocketPlayer* player) {
         t->inventory      = player->inventory;  /* full struct copy */
         t->spawn_time_ms  = get_time_ms();
         t->active         = true;
+        tombstone_live_count++;
 
         /* Broadcast tombstone_spawned ─────────────────────────────────── */
         char msg[1024];
@@ -4024,7 +4075,7 @@ static void handle_collect_tombstone(WebSocketPlayer* player,
     if (t->inventory.equipment.shield != ITEM_NONE) craft_grant(player, t->inventory.equipment.shield, 1);
 
     /* Remove tombstone and broadcast */
-    t->active = false;
+    tombstone_deactivate(t);
     char msg[128];
     snprintf(msg, sizeof(msg),
         "{\"type\":\"tombstone_collected\",\"id\":%u,\"playerId\":%u}",
@@ -4163,7 +4214,7 @@ static void handle_tombstone_take_slot(WebSocketPlayer* player,
     }
 
     if (!any_left) {
-        t->active = false;
+        tombstone_deactivate(t);
         char msg[128];
         snprintf(msg, sizeof(msg),
             "{\"type\":\"tombstone_collected\",\"id\":%u,\"playerId\":%u}",
@@ -4306,7 +4357,7 @@ static void handle_drop_item(WebSocketPlayer* player,
     di->quantity      = isl->quantity;
     place_dropped_item_at_player(di, player);
     di->spawn_time_ms = get_time_ms();
-    di->active        = true;
+    dropped_item_activate(di);
     isl->item     = ITEM_NONE;
     isl->quantity = 0;
     char resp[128];
@@ -4363,7 +4414,7 @@ static void handle_drop_schematic(WebSocketPlayer* player,
     di->quantity         = 1;
     place_dropped_item_at_player(di, player);
     di->spawn_time_ms    = get_time_ms();
-    di->active           = true;
+    dropped_item_activate(di);
     di->is_schematic     = true;
     di->crafts_remaining = dropped.crafts_remaining;
     di->quality          = dropped.quality;
@@ -4448,7 +4499,7 @@ static void handle_drop_resources(WebSocketPlayer* player,
     di->quantity     = (uint16_t)amount;
     place_dropped_item_at_player(di, player);
     di->spawn_time_ms = get_time_ms();
-    di->active       = true;
+    dropped_item_activate(di);
 
     char resp[128];
     snprintf(resp, sizeof(resp),
@@ -4502,7 +4553,7 @@ static void handle_pickup_item(WebSocketPlayer* player,
             ws_send_text(client->fd, "{\"type\":\"error\",\"message\":\"schematic_inventory_full\"}");
             return;
         }
-        di->active = false;
+        dropped_item_deactivate(di);
         send_schematic_list(player, client);
         char resp[128];
         snprintf(resp, sizeof(resp),
@@ -4525,7 +4576,7 @@ static void handle_pickup_item(WebSocketPlayer* player,
             int new_val = (int)*res_field + (int)di->quantity;
             if (new_val > 9999) new_val = 9999;
             *res_field = (uint16_t)new_val;
-            di->active = false;
+            dropped_item_deactivate(di);
             char resp[128];
             snprintf(resp, sizeof(resp),
                 "{\"type\":\"message_ack\",\"status\":\"item_picked_up\",\"slot\":-1}");
@@ -4572,7 +4623,7 @@ static void handle_pickup_item(WebSocketPlayer* player,
         player->inventory.slots[free_slot].item     = (ItemKind)di->item_kind;
         player->inventory.slots[free_slot].quantity = di->quantity;
     }
-    di->active = false;
+    dropped_item_deactivate(di);
     char resp[128];
     snprintf(resp, sizeof(resp),
         "{\"type\":\"message_ack\",\"status\":\"item_picked_up\",\"slot\":%d}", free_slot);
@@ -5114,7 +5165,7 @@ static void update_grapple_hooks(float dt, uint32_t now_ms)
                                 }
                             }
                         }
-                        dropped_items[di].active = false;
+                        dropped_item_deactivate(&dropped_items[di]);
                     }
                     grapple_detach(si);
                 } else if (idist > gh->rope_length) {
@@ -13965,20 +14016,25 @@ void websocket_server_send_game_state(void) {
         /* ── Pre-build shared blobs (players, projectiles, NPCs, tombstones,
          * dropped items, companies) in worker with synchronous fallback.
          */
-        static SharedBlobOutput shared_blob_cache;
-        static bool shared_blob_cache_valid = false;
+        static const SharedBlobOutput* shared_blob_ptr = NULL;
+        static bool shared_blob_ptr_valid = false;
+        static SharedBlobOutput shared_blob_fallback;
         blob_worker_submit_snapshot(current_time);
-        if (blob_worker_try_get_output(&shared_blob_cache)) {
-            shared_blob_cache_valid = true;
+        {
+            const SharedBlobOutput* worker_out = blob_worker_peek_output();
+            if (worker_out) {
+                shared_blob_ptr = worker_out;
+                shared_blob_ptr_valid = true;
+            }
         }
         /* If the worker hasn't produced output yet (very first frame or still building),
-         * use the stale shared_blob_cache from the previous frame rather than doing a
+         * use the stale shared_blob_ptr from the previous frame rather than doing a
          * synchronous rebuild on the main thread.  A 1-tick (~33 ms) stale frame is
          * completely imperceptible to players, while the sync fallback blocked the main
          * loop for 2-5 ms and caused measurable ping spikes during heavy fleet fights.
-         * The fallback only triggers on the very first tick (shared_blob_cache_valid==false)
+         * The fallback only triggers on the very first tick (shared_blob_ptr_valid==false)
          * when no prior frame exists yet — everything after that uses the worker output. */
-        if (!shared_blob_cache_valid) {
+        if (!shared_blob_ptr_valid) {
             /* First-ever tick: no stale frame available yet.  Only pay the sync cost once. */
             SharedBlobSnapshot _snap;
             _snap.current_time = current_time;
@@ -14028,19 +14084,21 @@ void websocket_server_send_game_state(void) {
                        (size_t)claim_flag_count * sizeof(claim_flags[0]));
             else
                 memset(_snap.claim_flags, 0, sizeof(_snap.claim_flags));
-            build_shared_blobs_from_snapshot(&_snap, &shared_blob_cache, &g_blob_sync_lut);
+            build_shared_blobs_from_snapshot(&_snap, &shared_blob_fallback, &g_blob_sync_lut);
             blob_worker_note_fallback_build();
-            shared_blob_cache_valid = true;
+            shared_blob_ptr = &shared_blob_fallback;
+            shared_blob_ptr_valid = true;
         }
 
         g_ship_json_last_us = get_time_us() - _ship_build_t0_us;
         if (g_ship_json_last_us > g_ship_json_max_us) g_ship_json_max_us = g_ship_json_last_us;
 
-        const char* ships_json = shared_blob_cache.ships_json;
-        int aoi_ship_count = shared_blob_cache.aoi_ship_count;
+        const SharedBlobOutput* blobs = shared_blob_ptr;
+        const char* ships_json = blobs->ships_json;
+        int aoi_ship_count = blobs->aoi_ship_count;
 
         // Adaptive tick rate based on activity
-        int active_count = shared_blob_cache.active_player_count;
+        int active_count = blobs->active_player_count;
 
         // Lock to physics tick rate (30 Hz) whenever any player is online.
         // Dropping below 30 Hz creates inter-packet gaps larger than one physics tick,
@@ -14089,9 +14147,9 @@ void websocket_server_send_game_state(void) {
             {
                 int _vslot = (int)(_vp - players);
                 if (_vslot >= 0 && _vslot < WS_MAX_CLIENTS &&
-                    shared_blob_cache.player_entry_active[_vslot]) {
-                    _cx = shared_blob_cache.player_world_x[_vslot];
-                    _cy = shared_blob_cache.player_world_y[_vslot];
+                    blobs->player_entry_active[_vslot]) {
+                    _cx = blobs->player_world_x[_vslot];
+                    _cy = blobs->player_world_y[_vslot];
                 }
             }
 
@@ -14105,16 +14163,16 @@ void websocket_server_send_game_state(void) {
             int _soff = 1;
             bool _sfirst = true;
             for (int _si = 0; _si < aoi_ship_count; _si++) {
-                float _dx = shared_blob_cache.aoi_ship_px[_si] - _cx, _dy = shared_blob_cache.aoi_ship_py[_si] - _cy;
+                float _dx = blobs->aoi_ship_px[_si] - _cx, _dy = blobs->aoi_ship_py[_si] - _cy;
                 if (_dx * _dx + _dy * _dy > _view_r2) continue;
                 if (!_sfirst && _soff < PER_SHIP_BUF - 1)
                     per_ship_json[_soff++] = ',';
                 int _room = PER_SHIP_BUF - _soff - 2;
-                if (shared_blob_cache.aoi_ship_len[_si] > 0 && shared_blob_cache.aoi_ship_len[_si] <= _room) {
+                if (blobs->aoi_ship_len[_si] > 0 && blobs->aoi_ship_len[_si] <= _room) {
                     memcpy(per_ship_json + _soff,
-                           ships_json + shared_blob_cache.aoi_ship_start[_si],
-                           (size_t)shared_blob_cache.aoi_ship_len[_si]);
-                    _soff += shared_blob_cache.aoi_ship_len[_si];
+                           ships_json + blobs->aoi_ship_start[_si],
+                           (size_t)blobs->aoi_ship_len[_si]);
+                    _soff += blobs->aoi_ship_len[_si];
                 }
                 _sfirst = false;
             }
@@ -14142,7 +14200,7 @@ void websocket_server_send_game_state(void) {
              * by the client as a persistent ~30 Hz jitter no client interpolation can fix.
              * Pairing positions with their own tick keeps interpolation exact. */
             _GS("{\"type\":\"GAME_STATE\",\"tick\":%u,\"timestamp\":%u,\"ships\":",
-                shared_blob_cache.tick ? shared_blob_cache.tick
+                blobs->tick ? blobs->tick
                                        : (global_sim ? global_sim->tick : (current_time / TICK_DURATION_MS)),
                 current_time);
 #define _MC1(buf, len) do { \
@@ -14160,14 +14218,14 @@ void websocket_server_send_game_state(void) {
             {
                 bool _ppf = true;
                 for (int _p = 0; _p < WS_MAX_CLIENTS; _p++) {
-                    if (!shared_blob_cache.player_entry_active[_p]) continue;
-                    float _pdx = shared_blob_cache.player_world_x[_p] - _cx;
-                    float _pdy = shared_blob_cache.player_world_y[_p] - _cy;
+                    if (!blobs->player_entry_active[_p]) continue;
+                    float _pdx = blobs->player_world_x[_p] - _cx;
+                    float _pdy = blobs->player_world_y[_p] - _cy;
                     if (_pdx*_pdx + _pdy*_pdy > _view_r2) continue;
                     if (!_ppf && _goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ',';
-                    int _plen = shared_blob_cache.player_entry_len[_p];
+                    int _plen = blobs->player_entry_len[_p];
                     if (_plen > 0 && _goff + (size_t)_plen < (size_t)(PER_GS_BUF - 2)) {
-                        memcpy(per_gs + _goff, shared_blob_cache.player_entry[_p], (size_t)_plen);
+                        memcpy(per_gs + _goff, blobs->player_entry[_p], (size_t)_plen);
                         _goff += (size_t)_plen; _ppf = false;
                     }
                 }
@@ -14175,25 +14233,25 @@ void websocket_server_send_game_state(void) {
             }
             size_t _sec_players = _goff - _sec_players_start;
             _GS(",\"projectiles\":");
-            _MC1(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
-            size_t _sec_proj = (size_t)shared_blob_cache.projectiles_len;
+            _MC1(blobs->projectiles_json, blobs->projectiles_len);
+            size_t _sec_proj = (size_t)blobs->projectiles_len;
             /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
             size_t _sec_npcs_start = _goff;
             if (_goff + 9 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
             {
                 bool _npf = true;
-                int _ncount = shared_blob_cache.npc_entry_count;
+                int _ncount = blobs->npc_entry_count;
                 if (_ncount < 0) _ncount = 0;
                 if (_ncount > MAX_WORLD_NPCS) _ncount = MAX_WORLD_NPCS;
                 for (int _n = 0; _n < _ncount; _n++) {
-                    if (!shared_blob_cache.npc_entry_active[_n]) continue;
-                    float _ndx = shared_blob_cache.npc_world_x[_n] - _cx;
-                    float _ndy = shared_blob_cache.npc_world_y[_n] - _cy;
+                    if (!blobs->npc_entry_active[_n]) continue;
+                    float _ndx = blobs->npc_world_x[_n] - _cx;
+                    float _ndy = blobs->npc_world_y[_n] - _cy;
                     if (_ndx*_ndx + _ndy*_ndy > _view_r2) continue;
                     if (!_npf && _goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ',';
-                    int _nlen = shared_blob_cache.npc_entry_len[_n];
+                    int _nlen = blobs->npc_entry_len[_n];
                     if (_nlen > 0 && _goff + (size_t)_nlen < (size_t)(PER_GS_BUF - 2)) {
-                        memcpy(per_gs + _goff, shared_blob_cache.npc_entry[_n], (size_t)_nlen);
+                        memcpy(per_gs + _goff, blobs->npc_entry[_n], (size_t)_nlen);
                         _goff += (size_t)_nlen; _npf = false;
                     }
                 }
@@ -14201,14 +14259,14 @@ void websocket_server_send_game_state(void) {
             }
             size_t _sec_npcs = _goff - _sec_npcs_start;
             _GS(",\"tombstones\":");
-            _MC1(shared_blob_cache.tmb_json, shared_blob_cache.tmb_len);
-            size_t _sec_tmb = (size_t)shared_blob_cache.tmb_len;
+            _MC1(blobs->tmb_json, blobs->tmb_len);
+            size_t _sec_tmb = (size_t)blobs->tmb_len;
             _GS(",\"droppedItems\":");
-            _MC1(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
-            size_t _sec_ditem = (size_t)shared_blob_cache.ditem_len;
+            _MC1(blobs->ditem_json, blobs->ditem_len);
+            size_t _sec_ditem = (size_t)blobs->ditem_len;
             _GS(",\"companies\":");
-            _MC1(shared_blob_cache.co_json, shared_blob_cache.co_len);
-            size_t _sec_co = (size_t)shared_blob_cache.co_len;
+            _MC1(blobs->co_json, blobs->co_len);
+            size_t _sec_co = (size_t)blobs->co_len;
 #undef _MC1
             /* World wind — included every tick so late-joining clients get it immediately. */
             _GS(",\"windAngle\":%.4f,\"windStrength\":%.3f",
@@ -17321,7 +17379,7 @@ void websocket_server_tick(float dt) {
                 if (!tombstones[ti].active) continue;
                 uint32_t age = current_time - tombstones[ti].spawn_time_ms;
                 if (age >= TOMBSTONE_TTL_MS) {
-                    tombstones[ti].active = false;
+                    tombstone_deactivate(&tombstones[ti]);
                     char dm[128];
                     snprintf(dm, sizeof(dm),
                         "{\"type\":\"tombstone_despawned\",\"id\":%u}", tombstones[ti].id);
@@ -17342,7 +17400,7 @@ void websocket_server_tick(float dt) {
                 if (!dropped_items[di].active) continue;
                 uint32_t age = current_time - dropped_items[di].spawn_time_ms;
                 if (age >= DROPPED_ITEM_TTL_MS) {
-                    dropped_items[di].active = false;
+                    dropped_item_deactivate(&dropped_items[di]);
                     log_info("📦  Dropped item %u expired (5-min TTL)", dropped_items[di].id);
                 }
             }
