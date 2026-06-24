@@ -9965,6 +9965,17 @@ export class RenderSystem {
       this.queueRenderItem(3, 'plank-status', _da(() => this.drawPlankStatusIcons(ship, camera)), 2);
     }
 
+    // Grapple ropes/hooks/charge aim — layer 4 above planks and deck cover
+    for (const player of renderPlayers) {
+      if (player.health <= 0) continue;
+      const _hasGrappleVis =
+        ((player.grappleState ?? 0) > 0 && player.grappleX !== undefined && player.grappleY !== undefined)
+        || (player.id === this.localPlayerId && this.grappleChargeProgress > 0);
+      if (_hasGrappleVis) {
+        this.queueRenderItem(4, `grapple-${player.id}`, () => this.drawPlayerGrappleVisuals(player, worldState, camera), 8);
+      }
+    }
+
     // Burning module fire overlays — drawn above module graphics
     for (const ship of renderShips) {
       const _da = (fn: () => void): (() => void) => this._lowerDeckShipId === ship.id
@@ -17688,6 +17699,168 @@ export class RenderSystem {
     
     this.ctx.restore();
   }
+
+  /** Grapple rope, hook, boarding ring, and charge aim — layer 4+ so hooks draw over deck/planks. */
+  private drawPlayerGrappleVisuals(player: Player, worldState: WorldState, camera: Camera): void {
+    if (player.health <= 0) return;
+    if (!camera.isWorldPositionVisible(player.position, 50)) return;
+
+    const screenPos = camera.worldToScreen(player.position);
+    const cameraState = camera.getState();
+    const scaledRadius = player.radius * cameraState.zoom;
+    const zoom = cameraState.zoom;
+
+    const _isOtherPlayer = player.id !== this.localPlayerId;
+    const _playerDeckAlpha = (_isOtherPlayer && player.deckId !== this._playerDeckLevel) ? 0.25 : 1.0;
+
+    const ATTACHED = 2;
+    if (player.grappleState && player.grappleX !== undefined && player.grappleY !== undefined) {
+      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
+
+      this.ctx.save();
+      this.ctx.globalAlpha = _playerDeckAlpha;
+      this.ctx.strokeStyle = player.grappleState === ATTACHED ? '#c68642' : '#a06030';
+      this.ctx.lineWidth = Math.max(1.5, 2 * zoom);
+      this.ctx.beginPath();
+      this.ctx.moveTo(screenPos.x, screenPos.y);
+      this.ctx.lineTo(hookScreen.x, hookScreen.y);
+      this.ctx.stroke();
+
+      const hookR = Math.max(4, 5 * zoom);
+      this.ctx.fillStyle   = player.grappleState === ATTACHED ? '#e8a840' : '#cccccc';
+      this.ctx.strokeStyle = '#333333';
+      this.ctx.lineWidth   = 1.5;
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, hookR, 0, Math.PI * 2);
+      this.ctx.fill();
+      this.ctx.stroke();
+      this.ctx.restore();
+    }
+
+    // ── Grapple boarding progress bar (local player only) ────────────────
+    if (player.id === this.localPlayerId &&
+        this.grappleBoardingProgress > 0 &&
+        player.grappleX !== undefined && player.grappleY !== undefined) {
+      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
+      const prog = this.grappleBoardingProgress;
+
+      this.ctx.save();
+      const boardR   = Math.max(18, 22 * zoom);
+      const boardThk = Math.max(3, 4 * zoom);
+
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, boardR, 0, Math.PI * 2);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+      this.ctx.lineWidth   = boardThk;
+      this.ctx.stroke();
+
+      const r = Math.round(50  + 205 * prog);
+      const g = Math.round(220 - 20  * prog);
+      const b = Math.round(50  - 50  * prog);
+      this.ctx.beginPath();
+      this.ctx.arc(hookScreen.x, hookScreen.y, boardR,
+        -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2);
+      this.ctx.strokeStyle = `rgb(${r},${g},${b})`;
+      this.ctx.lineWidth   = boardThk;
+      this.ctx.stroke();
+
+      const fontSize = Math.max(9, 11 * zoom);
+      this.ctx.font      = `bold ${fontSize}px monospace`;
+      this.ctx.fillStyle = `rgb(${r},${g},${b})`;
+      this.ctx.textAlign = 'center';
+      this.ctx.fillText('BOARDING', hookScreen.x, hookScreen.y + boardR + fontSize + 2);
+
+      this.ctx.restore();
+    }
+
+    // ── Grapple wind-up charge indicator (local player only) ──────────────
+    if (player.id === this.localPlayerId && this.grappleChargeProgress > 0) {
+      const charge = this.grappleChargeProgress;
+      const now    = performance.now();
+
+      const r = Math.round(charge < 0.5 ? 160 + 95 * (charge * 2) : 255);
+      const g = Math.round(charge < 0.5 ? 160 + 40 * (charge * 2) : Math.max(30, 200 - 170 * ((charge - 0.5) * 2)));
+      const b = Math.round(120 * (1 - charge));
+      const chargeColor = `rgb(${r},${g},${b})`;
+
+      this.ctx.save();
+
+      const arcR         = scaledRadius + Math.max(4, 5 * zoom);
+      const arcThickness = Math.max(2.5, 3.5 * zoom);
+      this.ctx.beginPath();
+      this.ctx.arc(screenPos.x, screenPos.y, arcR, 0, Math.PI * 2);
+      this.ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+      this.ctx.lineWidth   = arcThickness;
+      this.ctx.stroke();
+      this.ctx.beginPath();
+      this.ctx.arc(
+        screenPos.x, screenPos.y, arcR,
+        -Math.PI / 2,
+        -Math.PI / 2 + Math.PI * 2 * charge
+      );
+      this.ctx.strokeStyle  = chargeColor;
+      this.ctx.lineWidth    = arcThickness;
+      this.ctx.shadowColor  = chargeColor;
+      this.ctx.shadowBlur   = 5;
+      this.ctx.stroke();
+      this.ctx.shadowBlur = 0;
+
+      const aim = this.grappleAimWorldPos;
+      if (aim) {
+        const aimScreen = camera.worldToScreen(Vec2.from(aim.x, aim.y));
+        const adx = aimScreen.x - screenPos.x;
+        const ady = aimScreen.y - screenPos.y;
+        const rawDist = Math.sqrt(adx * adx + ady * ady);
+        const ux = rawDist > 0.5 ? adx / rawDist : 1;
+        const uy = rawDist > 0.5 ? ady / rawDist : 0;
+
+        const lineLen = this.grappleProjectedRange * zoom;
+        const startX = screenPos.x + ux * (scaledRadius + 2);
+        const startY = screenPos.y + uy * (scaledRadius + 2);
+        const tipX   = screenPos.x + ux * lineLen;
+        const tipY   = screenPos.y + uy * lineLen;
+
+        const dashLen   = 8;
+        const gapLen    = 6;
+        const dashCycle = dashLen + gapLen;
+        this.ctx.setLineDash([dashLen, gapLen]);
+        this.ctx.lineDashOffset = -(now / 30) % dashCycle;
+        this.ctx.strokeStyle    = chargeColor;
+        this.ctx.lineWidth      = Math.max(1.5, 2 * zoom);
+        this.ctx.shadowColor    = chargeColor;
+        this.ctx.shadowBlur     = 4;
+        this.ctx.beginPath();
+        this.ctx.moveTo(startX, startY);
+        this.ctx.lineTo(tipX, tipY);
+        this.ctx.stroke();
+        this.ctx.setLineDash([]);
+        this.ctx.shadowBlur = 0;
+
+        const tipR = Math.max(3, 4 * zoom);
+        this.ctx.beginPath();
+        this.ctx.arc(tipX, tipY, tipR, 0, Math.PI * 2);
+        this.ctx.fillStyle   = chargeColor;
+        this.ctx.shadowColor = chargeColor;
+        this.ctx.shadowBlur  = 6;
+        this.ctx.fill();
+        this.ctx.shadowBlur = 0;
+
+        if (charge >= 0.1) {
+          const pct = Math.round(charge * 100);
+          const fs  = Math.max(10, Math.round(11 * zoom));
+          this.ctx.font         = `bold ${fs}px sans-serif`;
+          this.ctx.textAlign    = 'center';
+          this.ctx.fillStyle    = chargeColor;
+          this.ctx.shadowColor  = 'rgba(0,0,0,0.9)';
+          this.ctx.shadowBlur   = 4;
+          this.ctx.fillText(`${pct}%`, tipX, tipY - tipR - 4);
+          this.ctx.shadowBlur = 0;
+        }
+      }
+
+      this.ctx.restore();
+    }
+  }
   
   private drawPlayer(player: Player, worldState: WorldState, camera: Camera): void {
     // Dead players are not rendered (includes local player while respawn screen is up)
@@ -17825,179 +17998,6 @@ export class RenderSystem {
       // Draw the name text
       this.ctx.fillStyle = '#ffffff';
       this.ctx.fillText(player.name, screenPos.x, nameY);
-    }
-
-    // ── Grapple hook rope + tip ────────────────────────────────────────────
-    // Rendered only when the hook is actively flying (1) or attached (2).
-    if (player.grappleState && player.grappleX !== undefined && player.grappleY !== undefined) {
-      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
-      const zoom = camera.zoom;
-      const FLYING   = 1;
-      const ATTACHED = 2;
-
-      // Rope — solid line from player to hook
-      this.ctx.save();
-      this.ctx.globalAlpha = _playerDeckAlpha;
-      this.ctx.strokeStyle = player.grappleState === ATTACHED ? '#c68642' : '#a06030';
-      this.ctx.lineWidth = Math.max(1.5, 2 * zoom);
-      this.ctx.beginPath();
-      this.ctx.moveTo(screenPos.x, screenPos.y);
-      this.ctx.lineTo(hookScreen.x, hookScreen.y);
-      this.ctx.stroke();
-
-      // Hook tip — small filled circle + a tiny claw shape
-      const hookR = Math.max(4, 5 * zoom);
-      this.ctx.fillStyle   = player.grappleState === ATTACHED ? '#e8a840' : '#cccccc';
-      this.ctx.strokeStyle = '#333333';
-      this.ctx.lineWidth   = 1.5;
-      this.ctx.beginPath();
-      this.ctx.arc(hookScreen.x, hookScreen.y, hookR, 0, Math.PI * 2);
-      this.ctx.fill();
-      this.ctx.stroke();
-      this.ctx.restore();
-    }
-
-    // ── Grapple boarding progress bar (local player only) ────────────────
-    // Arc ring near the hook tip fills clockwise as boarding progresses.
-    if (player.id === this.localPlayerId &&
-        this.grappleBoardingProgress > 0 &&
-        player.grappleX !== undefined && player.grappleY !== undefined) {
-      const hookScreen = camera.worldToScreen(Vec2.from(player.grappleX, player.grappleY));
-      const zoom = camera.zoom;
-      const prog = this.grappleBoardingProgress;
-
-      this.ctx.save();
-      const boardR   = Math.max(18, 22 * zoom);
-      const boardThk = Math.max(3, 4 * zoom);
-
-      // Faint track ring
-      this.ctx.beginPath();
-      this.ctx.arc(hookScreen.x, hookScreen.y, boardR, 0, Math.PI * 2);
-      this.ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-      this.ctx.lineWidth   = boardThk;
-      this.ctx.stroke();
-
-      // Filled arc — clockwise from 12 o'clock, colour shifts green→gold
-      const r = Math.round(50  + 205 * prog);
-      const g = Math.round(220 - 20  * prog);
-      const b = Math.round(50  - 50  * prog);
-      this.ctx.beginPath();
-      this.ctx.arc(hookScreen.x, hookScreen.y, boardR,
-        -Math.PI / 2, -Math.PI / 2 + prog * Math.PI * 2);
-      this.ctx.strokeStyle = `rgb(${r},${g},${b})`;
-      this.ctx.lineWidth   = boardThk;
-      this.ctx.stroke();
-
-      // "BOARDING" label underneath
-      const fontSize = Math.max(9, 11 * zoom);
-      this.ctx.font      = `bold ${fontSize}px monospace`;
-      this.ctx.fillStyle = `rgb(${r},${g},${b})`;
-      this.ctx.textAlign = 'center';
-      this.ctx.fillText('BOARDING', hookScreen.x, hookScreen.y + boardR + fontSize + 2);
-
-      this.ctx.restore();
-    }
-
-    // ── Grapple wind-up charge indicator (local player only) ──────────────
-    // Shown while the player holds LMB to charge a grapple shot.
-    //   1. Small radial arc ring around the player — fills clockwise as charge builds
-    //   2. Directional aim line toward the mouse — grows to the projected range
-    if (player.id === this.localPlayerId && this.grappleChargeProgress > 0) {
-      const charge = this.grappleChargeProgress;
-      const zoom   = camera.zoom;
-      const now    = performance.now();
-
-      // Lerp colour: gray(0%) → orange(50%) → gold-red(100%)
-      const r = Math.round(charge < 0.5 ? 160 + 95 * (charge * 2) : 255);
-      const g = Math.round(charge < 0.5 ? 160 + 40 * (charge * 2) : Math.max(30, 200 - 170 * ((charge - 0.5) * 2)));
-      const b = Math.round(120 * (1 - charge));
-      const chargeColor = `rgb(${r},${g},${b})`;
-
-      this.ctx.save();
-
-      // 1. Compact arc ring just outside the player circle
-      const arcR         = scaledRadius + Math.max(4, 5 * zoom);
-      const arcThickness = Math.max(2.5, 3.5 * zoom);
-      // Faint track
-      this.ctx.beginPath();
-      this.ctx.arc(screenPos.x, screenPos.y, arcR, 0, Math.PI * 2);
-      this.ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-      this.ctx.lineWidth   = arcThickness;
-      this.ctx.stroke();
-      // Charged arc — clockwise from 12 o'clock
-      this.ctx.beginPath();
-      this.ctx.arc(
-        screenPos.x, screenPos.y, arcR,
-        -Math.PI / 2,
-        -Math.PI / 2 + Math.PI * 2 * charge
-      );
-      this.ctx.strokeStyle  = chargeColor;
-      this.ctx.lineWidth    = arcThickness;
-      this.ctx.shadowColor  = chargeColor;
-      this.ctx.shadowBlur   = 5;
-      this.ctx.stroke();
-      this.ctx.shadowBlur = 0;
-
-      // 2. Aim line — draw only when we have a valid aim target
-      const aim = this.grappleAimWorldPos;
-      if (aim) {
-        const aimScreen = camera.worldToScreen(Vec2.from(aim.x, aim.y));
-        const adx = aimScreen.x - screenPos.x;
-        const ady = aimScreen.y - screenPos.y;
-        const rawDist = Math.sqrt(adx * adx + ady * ady);
-        const ux = rawDist > 0.5 ? adx / rawDist : 1;
-        const uy = rawDist > 0.5 ? ady / rawDist : 0;
-
-        // Line length grows with charge (screen pixels)
-        const lineLen = this.grappleProjectedRange * zoom;
-        // Start just outside the player circle
-        const startX = screenPos.x + ux * (scaledRadius + 2);
-        const startY = screenPos.y + uy * (scaledRadius + 2);
-        const tipX   = screenPos.x + ux * lineLen;
-        const tipY   = screenPos.y + uy * lineLen;
-
-        // Traveling dash effect — dashes appear to scroll toward the tip
-        const dashLen   = 8;
-        const gapLen    = 6;
-        const dashCycle = dashLen + gapLen;
-        this.ctx.setLineDash([dashLen, gapLen]);
-        this.ctx.lineDashOffset = -(now / 30) % dashCycle;
-        this.ctx.strokeStyle    = chargeColor;
-        this.ctx.lineWidth      = Math.max(1.5, 2 * zoom);
-        this.ctx.shadowColor    = chargeColor;
-        this.ctx.shadowBlur     = 4;
-        this.ctx.beginPath();
-        this.ctx.moveTo(startX, startY);
-        this.ctx.lineTo(tipX, tipY);
-        this.ctx.stroke();
-        this.ctx.setLineDash([]);
-        this.ctx.shadowBlur = 0;
-
-        // Hook tip — small filled circle at the projected landing point
-        const tipR = Math.max(3, 4 * zoom);
-        this.ctx.beginPath();
-        this.ctx.arc(tipX, tipY, tipR, 0, Math.PI * 2);
-        this.ctx.fillStyle   = chargeColor;
-        this.ctx.shadowColor = chargeColor;
-        this.ctx.shadowBlur  = 6;
-        this.ctx.fill();
-        this.ctx.shadowBlur = 0;
-
-        // Charge percentage label just above the tip
-        if (charge >= 0.1) {
-          const pct = Math.round(charge * 100);
-          const fs  = Math.max(10, Math.round(11 * zoom));
-          this.ctx.font         = `bold ${fs}px sans-serif`;
-          this.ctx.textAlign    = 'center';
-          this.ctx.fillStyle    = chargeColor;
-          this.ctx.shadowColor  = 'rgba(0,0,0,0.9)';
-          this.ctx.shadowBlur   = 4;
-          this.ctx.fillText(`${pct}%`, tipX, tipY - tipR - 4);
-          this.ctx.shadowBlur = 0;
-        }
-      }
-
-      this.ctx.restore();
     }
 
     this.ctx.restore();

@@ -26,6 +26,35 @@ static bool occ_taken_by_other(const NpcOccEntry* buf, int cnt,
     return false;
 }
 
+/** True when a plank slot has a live module (not destroyed / zero HP). */
+static bool npc_plank_slot_intact(const struct Ship* sim_ship, uint8_t ship_seq, int slot) {
+    if (!sim_ship || slot < 0 || slot >= 10) return false;
+    uint16_t expected = MID(ship_seq, MODULE_OFFSET_PLANK(slot));
+    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
+        const ShipModule* mod = &sim_ship->modules[m];
+        if ((uint32_t)mod->id != (uint32_t)expected) continue;
+        if (mod->state_bits & MODULE_STATE_DESTROYED) return false;
+        if (mod->health <= 0) return false;
+        return true;
+    }
+    return false;
+}
+
+/** First missing plank slot that is not blocked by wreckage, or -1. */
+static int npc_find_missing_plank_slot(const struct Ship* sim_ship, SimpleShip* simple,
+                                       uint8_t ship_seq,
+                                       const NpcOccEntry* occ_buf, int occ_cnt,
+                                       uint16_t npc_id, uint16_t ship_id) {
+    for (int k = 0; k < 10; k++) {
+        if (npc_plank_slot_intact(sim_ship, ship_seq, k)) continue;
+        if (simple && ship_plank_wreckage_blocks(simple, k)) continue;
+        uint32_t plank_mid = MID(ship_seq, MODULE_OFFSET_PLANK(k));
+        if (occ_taken_by_other(occ_buf, occ_cnt, npc_id, ship_id, plank_mid)) continue;
+        return k;
+    }
+    return -1;
+}
+
 /** Sync a sim-layer module back into the SimpleShip mirror. */
 static void npc_sync_module_to_simple(SimpleShip* simple, const ShipModule* mod) {
     if (!simple || !mod) return;
@@ -1128,20 +1157,8 @@ void tick_world_npcs(float dt) {
                         log_info("🔨 NPC %u (%s) interrupted — redirecting to replace missing deck",
                                  npc->id, npc->name);
                     } else {
-                    // Check for missing planks first
-                    bool present[10] = {false};
-                    for (uint8_t m = 0; m < intr_ship->module_count; m++) {
-                        uint16_t mid = intr_ship->modules[m].id;
-                        if (MODULE_OFFSET_IS_PLANK(MID_OFFSET(mid))) present[MID_OFFSET(mid) - MODULE_OFFSET_PLANK_BASE] = true;
-                    }
-                    int intr_missing = -1;
-                    for (int k = 0; k < 10; k++) {
-                        if (present[k]) continue;
-                        if (_intr_ss && ship_plank_wreckage_blocks(_intr_ss, k)) continue;
-                        uint32_t pmid_k = MID(_intr_seq, MODULE_OFFSET_PLANK(k));
-                        if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, pmid_k))
-                            { intr_missing = k; break; }
-                    }
+                    int intr_missing = npc_find_missing_plank_slot(
+                        intr_ship, _intr_ss, _intr_seq, occ_buf, occ_cnt, npc->id, npc->ship_id);
                     if (intr_missing >= 0) {
                         uint32_t intr_plank_mid = MID(_intr_seq, MODULE_OFFSET_PLANK(intr_missing));
                         if (_intr_ss && npc_repair_job_affordable(_intr_ss, intr_ship, intr_plank_mid)) {
@@ -1157,12 +1174,13 @@ void tick_world_npcs(float dt) {
                                  npc->id, npc->name, npc->assigned_weapon_id);
                         }
                     } else {
-                        // Check for damaged modules
+                        // Check for damaged modules (planks are replace-only, not repaired)
                         ShipModule* intr_mod = NULL;
                         ShipModule* intr_stack = NULL;
                         float intr_worst = 1.0f, intr_stack_r = 1.0f;
                         for (uint8_t m = 0; m < intr_ship->module_count; m++) {
                             ShipModule* mod = &intr_ship->modules[m];
+                            if (mod->type_id == MODULE_TYPE_PLANK) continue;
                             if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
                             if (mod->max_health == 0) continue;
                             float ratio = (float)mod->health / (float)mod->max_health;
@@ -1467,14 +1485,9 @@ void tick_world_npcs(float dt) {
 
                 // If it's a plank slot that's empty, place a new plank first
                 if (MODULE_OFFSET_IS_PLANK(MID_OFFSET((uint16_t)target_id))) {
-                    bool module_exists = false;
-                    for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                        if ((uint32_t)sim_ship->modules[m].id == target_id) {
-                            module_exists = true; break;
-                        }
-                    }
+                    int idx = (int)(MID_OFFSET((uint16_t)target_id) - MODULE_OFFSET_PLANK_BASE);
+                    bool module_exists = npc_plank_slot_intact(sim_ship, simple ? simple->ship_seq : (uint8_t)(npc->ship_id & 0xFF), idx);
                     if (!module_exists && sim_ship->module_count < MAX_MODULES_PER_SHIP) {
-                        int idx = (int)(MID_OFFSET((uint16_t)target_id) - MODULE_OFFSET_PLANK_BASE);
                         if (simple && ship_plank_wreckage_blocks(simple, idx)) {
                             still_working = true;
                         } else {
@@ -1497,16 +1510,24 @@ void tick_world_npcs(float dt) {
                         if (simple)
                             ship_plank_clear_wreckage(simple, idx);
                         }
+                    } else if (module_exists) {
+                        /* Planks are replace-only — never upgrade/repair an existing plank. */
+                        still_working = false;
                     }
                 }
 
-                if (simple)
+                /* Pool schematics apply on placement only — not when healing modules. */
+                if (!MODULE_OFFSET_IS_PLANK(MID_OFFSET((uint16_t)target_id)))
                     npc_try_apply_pool_schematic_on_repair(simple, sim_ship, target_id);
 
                 // Now repair the module (whether freshly placed or already present)
                 for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                     ShipModule* mod = &sim_ship->modules[m];
                     if ((uint32_t)mod->id != target_id) continue;
+                    if (mod->type_id == MODULE_TYPE_PLANK) {
+                        /* Heal a freshly placed plank only (10% → full); skip existing planks. */
+                        if (mod->health >= (int32_t)mod->max_health) break;
+                    }
                     if (mod->state_bits & MODULE_STATE_DESTROYED) break;
 
                     // Initiate passive regen
@@ -1592,20 +1613,9 @@ void tick_world_npcs(float dt) {
                 }
             }
 
-            // --- 1. Check for missing planks (highest priority) ------------------
-            bool present[10] = {false};
-            for (uint8_t m = 0; m < sim_ship->module_count; m++) {
-                uint16_t mid = sim_ship->modules[m].id;
-                if (MODULE_OFFSET_IS_PLANK(MID_OFFSET(mid))) present[MID_OFFSET(mid) - MODULE_OFFSET_PLANK_BASE] = true;
-            }
-            int missing_idx = -1;
-            for (int k = 0; k < 10; k++) {
-                if (present[k]) continue;
-                if (_idle_ss && ship_plank_wreckage_blocks(_idle_ss, k)) continue;
-                uint32_t plank_mid_k = MID(_idle_seq, MODULE_OFFSET_PLANK(k));
-                if (!occ_taken_by_other(occ_buf, occ_cnt, npc->id, npc->ship_id, plank_mid_k))
-                    { missing_idx = k; break; }
-            }
+            // --- 1. Check for missing planks (replace-only; wreckage blocks placement) ---
+            int missing_idx = npc_find_missing_plank_slot(
+                sim_ship, _idle_ss, _idle_seq, occ_buf, occ_cnt, npc->id, npc->ship_id);
 
             if (missing_idx >= 0) {
                 uint32_t plank_mid = MID(_idle_seq, MODULE_OFFSET_PLANK(missing_idx));
@@ -1628,7 +1638,7 @@ void tick_world_npcs(float dt) {
                 }
             }
 
-            // --- 2. Check for damaged modules ------------------------------------
+            // --- 2. Check for damaged modules (planks are replace-only, not repaired) ---
             // First pass: prefer a module NOT already claimed by another NPC.
             // If everything damaged is taken, fall back to stacking on the worst one.
             ShipModule* target_mod  = NULL;
@@ -1637,6 +1647,7 @@ void tick_world_npcs(float dt) {
             float stack_ratio  = 1.0f;
             for (uint8_t m = 0; m < sim_ship->module_count; m++) {
                 ShipModule* mod = &sim_ship->modules[m];
+                if (mod->type_id == MODULE_TYPE_PLANK) continue;
                 if (mod->state_bits & MODULE_STATE_DESTROYED) continue;
                 if (mod->max_health == 0) continue;
                 float ratio = (float)mod->health / (float)mod->max_health;
