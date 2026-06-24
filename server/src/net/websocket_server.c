@@ -2906,7 +2906,11 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                        _pk->grapple_target        != _g_target                  ||
                        memcmp(&_pk->inventory, &_bp->inventory, sizeof(PlayerInventory)) != 0 ||
                        strncmp(_pk->name, _bp->name, sizeof(_pk->name)) != 0 ||
-                       out->player_entry_len[p] == 0);
+                       out->player_entry_len[p] == 0 ||
+                       /* Grapple targets need fresh grapple_anchor_* every tick: the
+                        * grappler can move while the target stays put (slack rope),
+                        * and anchor coords are not in _pk otherwise. */
+                       player_is_grapple_target(_bp->player_id));
 
         if (_dirty) {
             char inv_buf[1024];
