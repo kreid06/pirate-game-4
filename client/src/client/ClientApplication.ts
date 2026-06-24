@@ -64,7 +64,7 @@ import { logout } from './auth/AuthService.js';
 import { AudioManager } from './audio/AudioManager.js';
 
 // Core Simulation Types
-import { WorldState, Ship, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN, SHIP_TYPE_GHOST } from '../sim/Types.js';
+import { WorldState, Ship, Player, InputFrame, WeaponGroupState, WeaponGroupMode, COMPANY_SOLO, COMPANY_UNCLAIMED, IslandDef, NPC_STATE_AT_GUN, SHIP_TYPE_GHOST } from '../sim/Types.js';
 import { GhostPlacement, GhostModuleKind, LandGhostPlacement } from '../sim/Types.js';
 import { createEmptyInventory, ITEM_KIND_ID, ITEM_ID_MAP, ITEM_DEFS, STRUCTURE_COSTS, computeInventoryWeight } from '../sim/Inventory.js';
 import { isGrappleEncumbered, playerCarryCapacityKg, computePlayerCarriedKg } from '../sim/Grapple.js';
@@ -165,6 +165,13 @@ export class ClientApplication {
    *  by both updateClient (camera follow, up to 5×) and renderFrame (rendering).
    *  Avoids up to 6 O(buffer-size) scans of the snapshot buffer per display frame. */
   private _frameInterpolatedState: WorldState | null = null;
+  /** Reusable hybrid render world — avoids per-frame players.slice() / spread in renderFrame. */
+  private _hybridRenderWorld: WorldState | null = null;
+  private _hybridPlayersScratch: Player[] = [];
+  private _hybridShipsScratch: Ship[] = [];
+  private _hybridLocalPlayer: Player | null = null;
+  private _hybridLocalShip: Ship | null = null;
+  private _hybridSourceRef: WorldState | null = null;
   /** Wall-clock time of the previous render frame (ms) — for smooth-error-correction decay. */
   private _lastRenderTime = 0;
   /** Single bound game-loop reference to avoid allocating a closure every frame. */
@@ -223,11 +230,11 @@ export class ClientApplication {
   private _fogWorker: Worker | null = null;
   private _fogWorkerReady = false; // true once INIT has been sent
   private _fogWorkerHasResult = false; // true after first COMPUTE result from worker
-  // Throttle fog worker posts to ~30 Hz (every 4th client tick at 120 Hz).
-  // The blur(48px) redraw in RenderSystem is skipped when rays are unchanged,
-  // so reducing the post rate directly reduces the most expensive canvas op.
+  // Throttle fog worker posts to ~20 Hz (every 6th client tick at 120 Hz).
+  // RenderSystem skips the blur redraw when rays are unchanged; lowering post rate
+  // reduces raycast CPU with minimal visible lag (fog still interpolates via smooth openness).
   private _fogTickCounter = 0;
-  private static readonly FOG_POST_EVERY_N_TICKS = 4; // 120 Hz / 4 = 30 Hz
+  private static readonly FOG_POST_EVERY_N_TICKS = 6; // 120 Hz / 6 = 20 Hz
   private explicitBuildMode = false;
   private buildSelectedItem: 'cannon' | 'sail' | 'swivel' = 'cannon';
   private buildRotationDeg = 0;
@@ -387,6 +394,10 @@ export class ClientApplication {
   private frameCount = 0;
   private fpsTimer = 0;
   private currentFPS = 0;
+  /** Rolling frame times for p50/p95 — exposed via window.__frameAuditStats */
+  private readonly _frameMsRing: number[] = [];
+  private readonly _frameMsRingCap = 120;
+  private _hitchCountSession = 0;
   private lastRenderLogTime = 0;
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
   private swordLastAttackMs = 0;
@@ -4446,6 +4457,7 @@ export class ClientApplication {
     
     // Cap delta time to prevent spiral of death
     const clampedDelta = Math.min(deltaTime, 100); // Max 100ms
+    this.recordFrameAudit(clampedDelta);
     this.updateAdaptiveGLScale(clampedDelta, currentTime);
     this.accumulator += clampedDelta;
     
@@ -4656,7 +4668,7 @@ export class ClientApplication {
           // --- Dynamic view-range / AOI ---
           // Cast rays against island coastlines to compute per-direction visibility
           // distances. Used for the fog mask (RenderSystem) and server AOI hint.
-          // Worker posts are throttled to ~30 Hz (every N ticks) — fog doesn't
+          // Worker posts are throttled to ~20 Hz (every N ticks) — fog doesn't
           // need to update at the full 120 Hz client tick rate, and the
           // RenderSystem dirty flag skips the blur(48px) when rays are unchanged.
           this._fogTickCounter++;
@@ -4952,6 +4964,89 @@ export class ClientApplication {
 
     this._updateBucketDumpHint();
   }
+
+  /** Reset hybrid-world source tracking at the start of each render frame. */
+  private _resetHybridRenderSource(): void {
+    this._hybridSourceRef = null;
+  }
+
+  /** Copy `base` into reusable scratch buffers once per frame (first patch only). */
+  private _ensureHybridWorld(base: WorldState): WorldState {
+    if (this._hybridSourceRef !== base) {
+      this._hybridSourceRef = base;
+      if (!this._hybridRenderWorld) {
+        this._hybridRenderWorld = { ...base };
+      } else {
+        Object.assign(this._hybridRenderWorld, base);
+      }
+      const srcP = base.players;
+      const dstP = this._hybridPlayersScratch;
+      if (dstP.length !== srcP.length) dstP.length = srcP.length;
+      for (let i = 0; i < srcP.length; i++) dstP[i] = srcP[i];
+      const srcS = base.ships;
+      const dstS = this._hybridShipsScratch;
+      if (dstS.length !== srcS.length) dstS.length = srcS.length;
+      for (let i = 0; i < srcS.length; i++) dstS[i] = srcS[i];
+      this._hybridRenderWorld.players = dstP;
+      this._hybridRenderWorld.ships = dstS;
+    }
+    return this._hybridRenderWorld!;
+  }
+
+  private _setHybridLocalPlayer(
+    localIdx: number,
+    stateBase: Player,
+    rotation: number,
+    position: Vec2,
+    velocity: Vec2,
+  ): void {
+    if (!this._hybridLocalPlayer) {
+      this._hybridLocalPlayer = { ...stateBase, rotation, position, velocity };
+    } else {
+      Object.assign(this._hybridLocalPlayer, stateBase);
+      this._hybridLocalPlayer.rotation = rotation;
+      this._hybridLocalPlayer.position = position;
+      this._hybridLocalPlayer.velocity = velocity;
+    }
+    this._hybridPlayersScratch[localIdx] = this._hybridLocalPlayer;
+  }
+
+  private _setHybridLocalShip(
+    shipIdx: number,
+    baseShip: Ship,
+    position: Vec2,
+    velocity: Vec2,
+    rotation: number,
+    angularVelocity: number,
+  ): void {
+    if (!this._hybridLocalShip) {
+      this._hybridLocalShip = { ...baseShip, position, velocity, rotation, angularVelocity };
+    } else {
+      Object.assign(this._hybridLocalShip, baseShip);
+      this._hybridLocalShip.position = position;
+      this._hybridLocalShip.velocity = velocity;
+      this._hybridLocalShip.rotation = rotation;
+      this._hybridLocalShip.angularVelocity = angularVelocity;
+    }
+    this._hybridShipsScratch[shipIdx] = this._hybridLocalShip;
+  }
+
+  private _updateHybridLocalPlayerPosition(playerIdx: number, position: Vec2): void {
+    const hybrid = this._hybridRenderWorld;
+    if (!hybrid) return;
+    const current = hybrid.players[playerIdx];
+    if (this._hybridLocalPlayer && current === this._hybridLocalPlayer) {
+      this._hybridLocalPlayer.position = position;
+      return;
+    }
+    if (!this._hybridLocalPlayer) {
+      this._hybridLocalPlayer = { ...current, position };
+    } else {
+      Object.assign(this._hybridLocalPlayer, current);
+      this._hybridLocalPlayer.position = position;
+    }
+    this._hybridPlayersScratch[playerIdx] = this._hybridLocalPlayer;
+  }
   
   /**
    * Render a frame with interpolation
@@ -4973,6 +5068,7 @@ export class ClientApplication {
     // Build hybrid world: predicted local player + interpolated other entities
     const assignedPlayerId = this.networkManager.getAssignedPlayerId();
     let worldToRender = interpolatedState || this.predictedWorldState || this.authoritativeWorldState || this.demoWorldState;
+    this._resetHybridRenderSource();
     
     // Only use hybrid rendering if prediction is enabled
     const predictionEnabled = this.config.prediction.enablePrediction;
@@ -5008,17 +5104,10 @@ export class ClientApplication {
         // (e.g. standing on an island next to a docked ship), which would otherwise make the
         // player sprite flicker green/red. Server flags are stable, so use them for rendering.
         const stateBase = interpolatedPlayer ?? predictedPlayer;
-        const renderPlayer = {
-          ...stateBase,
-          rotation: currentRotation,
-          position: predPos,
-          velocity: predVel,
-        };
 
         if (localIdx >= 0) {
-          const newPlayers = interpolatedState.players.slice();
-          newPlayers[localIdx] = renderPlayer;
-          worldToRender = { ...interpolatedState, players: newPlayers };
+          worldToRender = this._ensureHybridWorld(interpolatedState);
+          this._setHybridLocalPlayer(localIdx, stateBase, currentRotation, predPos, predVel);
         } else {
           worldToRender = interpolatedState;
         }
@@ -5071,15 +5160,19 @@ export class ClientApplication {
               ? prevShip.angularVelocity + (predictedShip.angularVelocity - prevShip.angularVelocity) * shipAlpha
               : predictedShip.angularVelocity;
 
-            const newShips = worldToRender.ships.slice();
-            newShips[shipIdx] = {
-              ...worldToRender.ships[shipIdx], // keep server data (modules, health, etc.)
-              position:        renderPos,
-              velocity:        renderVel,
-              rotation:        renderRot,
-              angularVelocity: renderAngVel,
-            };
-            worldToRender = { ...worldToRender, ships: newShips };
+            if (interpolatedState) {
+              worldToRender = this._ensureHybridWorld(interpolatedState);
+            } else {
+              worldToRender = this._ensureHybridWorld(worldToRender);
+            }
+            this._setHybridLocalShip(
+              shipIdx,
+              worldToRender.ships[shipIdx],
+              renderPos,
+              renderVel,
+              renderRot,
+              renderAngVel,
+            );
 
             // Re-anchor the local player to the RENDERED ship pose. The player's predicted
             // world position was computed against the prediction engine's own ship copy,
@@ -5101,9 +5194,7 @@ export class ClientApplication {
                 renderPos.x + anchor.x * cosR - anchor.y * sinR,
                 renderPos.y + anchor.x * sinR + anchor.y * cosR,
               ).add(_renderErrorOffset);
-              const newPlayers = worldToRender.players.slice();
-              newPlayers[myPlayerIdx] = { ...myPlayer, position: anchoredPos };
-              worldToRender = { ...worldToRender, players: newPlayers };
+              this._updateHybridLocalPlayerPosition(myPlayerIdx, anchoredPos);
             }
           }
         }
@@ -5140,9 +5231,9 @@ export class ClientApplication {
               interpShip.position.x + anchor.x * cosR - anchor.y * sinR,
               interpShip.position.y + anchor.x * sinR + anchor.y * cosR,
             ).add(_renderErrorOffset);
-            const newPlayers = worldToRender.players.slice();
-            newPlayers[myPlayerIdx] = { ...myPlayer, position: anchoredPos };
-            worldToRender = { ...worldToRender, players: newPlayers };
+            const hybridBase = interpolatedState ?? worldToRender;
+            worldToRender = this._ensureHybridWorld(hybridBase);
+            this._updateHybridLocalPlayerPosition(myPlayerIdx, anchoredPos);
           }
         }
       }
@@ -5347,6 +5438,12 @@ export class ClientApplication {
         this.networkManager.mapHeight,
       );
 
+      // Tie fog internal resolution to adaptive GL scale (same load heuristic).
+      this.renderSystem.fogRenderScale = this._glRenderer ? this._glScale : 0.5;
+
+      this.renderSystem.perfTimingsEnabled =
+        this.config.debug.enabled && this.config.debug.showPerformanceStats;
+
       // Render game world with hybrid state
       if (this._glRenderer) {
         const camState = this.camera.getState();
@@ -5354,6 +5451,7 @@ export class ClientApplication {
       }
       this.renderSystem.altKeyHeld = this.inputManager?.altKeyHeld ?? false;
       this.renderSystem.renderWorld(worldToRender, this.camera, alpha);
+      this._patchFrameAuditRenderTimings();
       if (this._glRenderer) {
         this.renderSystem.endGLFrame();
       }
@@ -9173,22 +9271,22 @@ export class ClientApplication {
 
     if (nowMs < this._glNextScaleAdjustAt) return;
 
-    if (this._glBadFrameCount >= 20 && this._glScale > this._glScaleMin) {
+    if (this._glBadFrameCount >= 15 && this._glScale > this._glScaleMin) {
       this._glScale = Math.max(this._glScaleMin, this._glScale - 0.05);
       this.applyGLCanvasScale();
       this._glBadFrameCount = 0;
       this._glGoodFrameCount = 0;
-      this._glNextScaleAdjustAt = nowMs + 1500;
+      this._glNextScaleAdjustAt = nowMs + 1200;
       console.log(`[GL] Adaptive scale lowered to ${Math.round(this._glScale * 100)}%`);
       return;
     }
 
-    if (this._glGoodFrameCount >= 180 && this._glScale < this._glScaleMax) {
+    if (this._glGoodFrameCount >= 120 && this._glScale < this._glScaleMax) {
       this._glScale = Math.min(this._glScaleMax, this._glScale + 0.05);
       this.applyGLCanvasScale();
       this._glBadFrameCount = 0;
       this._glGoodFrameCount = 0;
-      this._glNextScaleAdjustAt = nowMs + 2500;
+      this._glNextScaleAdjustAt = nowMs + 2000;
       console.log(`[GL] Adaptive scale raised to ${Math.round(this._glScale * 100)}%`);
     }
   }
@@ -9203,13 +9301,52 @@ export class ClientApplication {
     // Update FPS every second
     if (this.fpsTimer >= 1000) {
       this.currentFPS = Math.round((this.frameCount * 1000) / this.fpsTimer);
-      const avgFrameTime = this.fpsTimer / this.frameCount;
-      
-
-      
       this.frameCount = 0;
       this.fpsTimer = 0;
     }
+  }
+
+  /** Rolling frame-time stats for FPS audits (see docs/CLIENT_FPS_OPTIMIZATION_PROMPT.md). */
+  private recordFrameAudit(deltaMs: number): void {
+    this._frameMsRing.push(deltaMs);
+    if (this._frameMsRing.length > this._frameMsRingCap) {
+      this._frameMsRing.shift();
+    }
+    const targetFps = Math.max(30, this.config.graphics.targetFPS);
+    const budgetMs = 1000 / targetFps;
+    if (deltaMs > budgetMs * 2) {
+      this._hitchCountSession++;
+      if (this.config.debug.enabled && this.config.debug.showPerformanceStats) {
+        console.warn(
+          `[FRAME] hitch ${deltaMs.toFixed(1)}ms (budget ${budgetMs.toFixed(1)}ms, target ${targetFps} FPS)`
+        );
+      }
+    }
+    if (typeof window === 'undefined') return;
+    const sorted = [...this._frameMsRing].sort((a, b) => a - b);
+    const pct = (q: number) =>
+      sorted.length ? sorted[Math.floor((sorted.length - 1) * q)] : 0;
+    (window as unknown as { __frameAuditStats?: Record<string, number> }).__frameAuditStats = {
+      frameMsLast: deltaMs,
+      frameMsP50: pct(0.5),
+      frameMsP95: pct(0.95),
+      hitchCount: this._hitchCountSession,
+      fps: this.currentFPS,
+      glScalePct: this._glRenderer ? Math.round(this._glScale * 100) : 0,
+    };
+  }
+
+  /** Merge last-frame render pass timings into __frameAuditStats (debug HUD). */
+  private _patchFrameAuditRenderTimings(): void {
+    if (typeof window === 'undefined') return;
+    if (!this.config.debug.enabled || !this.config.debug.showPerformanceStats) return;
+    const w = window as unknown as { __frameAuditStats?: Record<string, number> };
+    if (!w.__frameAuditStats) return;
+    const pt = this.renderSystem.getLastPerfTimings();
+    w.__frameAuditStats.renderIslandMs = pt.island;
+    w.__frameAuditStats.renderQueueMs = pt.queue;
+    w.__frameAuditStats.renderExecuteMs = pt.execute;
+    w.__frameAuditStats.renderFogMs = pt.fog;
   }
   
   /**

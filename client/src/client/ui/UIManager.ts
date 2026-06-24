@@ -3598,8 +3598,9 @@ class HUDElement implements UIElement {
     const _hbY  = ctx.canvas.height - _hbH - 8;
     // Player bars sit above the hotbar (same constants as renderPlayerBars)
     const _barsH = 4 * 2 + 6 + 3 + 10 * 2 + 3; // PPPAD*2 + XP_H + GAP + BAR_H*2 + GAP = 40
+    const _statsExtra = context.config?.debug?.showPerformanceStats ? 26 : 0;
     const BOX_W  = 220;
-    const BOX_H  = _hbH + _barsH + 4 + 16; // 76 + 40 + 4 + 16 = 136 (extra row for deck info)
+    const BOX_H  = _hbH + _barsH + 4 + 16 + _statsExtra;
     const BX     = Math.max(8, _hbX - BOX_W - 6);
     const BY     = _hbY - _barsH - 4;
 
@@ -3624,24 +3625,48 @@ class HUDElement implements UIElement {
     const glText  = glScale > 0 ? `  GL ${glDc}dc @${glScale}%` : '  Canvas 2D';
     ctx.fillText(`Ping ${ping}ms${glText}`, BX + 10, BY + 28);
 
+    if (context.config?.debug?.showPerformanceStats && typeof window !== 'undefined') {
+      const fa = (window as unknown as { __frameAuditStats?: Record<string, number> }).__frameAuditStats;
+      if (fa) {
+        ctx.font = '11px Georgia, serif';
+        ctx.fillStyle = '#cccccc';
+        ctx.fillText(
+          `p95 ${fa.frameMsP95?.toFixed(1) ?? '?'}ms  hitches ${fa.hitchCount ?? 0}`,
+          BX + 10,
+          BY + 42
+        );
+        const qi = fa.renderQueueMs ?? 0;
+        const ex = fa.renderExecuteMs ?? 0;
+        const fg = fa.renderFogMs ?? 0;
+        const isl = fa.renderIslandMs ?? 0;
+        if (qi + ex + fg + isl > 0) {
+          ctx.fillText(
+            `pass isl/q/ex/fog ${isl.toFixed(0)}/${qi.toFixed(0)}/${ex.toFixed(0)}/${fg.toFixed(0)}ms`,
+            BX + 10,
+            BY + 54
+          );
+        }
+      }
+    }
+
     // Divider
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.lineWidth   = 1;
     ctx.beginPath();
-    ctx.moveTo(BX + 8, BY + 46); ctx.lineTo(BX + BOX_W - 8, BY + 46);
+    ctx.moveTo(BX + 8, BY + 46 + _statsExtra); ctx.lineTo(BX + BOX_W - 8, BY + 46 + _statsExtra);
     ctx.stroke();
 
     // Position
     ctx.font      = '13px Georgia, serif';
     ctx.fillStyle = '#aaffcc';
-    ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52);
+    ctx.fillText(`Pos  ${player.position.x.toFixed(1)}, ${player.position.y.toFixed(1)}`, BX + 10, BY + 52 + _statsExtra);
 
     // Ship info OR island info depending on where the player is
     if (player.onIslandId > 0) {
       const island = context.worldState.islands?.find(i => i.id === player.onIslandId);
       const preset = island ? (island.preset.charAt(0).toUpperCase() + island.preset.slice(1)) : '?';
       ctx.fillStyle = '#aaffaa';
-      ctx.fillText(`Island #${player.onIslandId}  ${preset}`, BX + 10, BY + 68);
+      ctx.fillText(`Island #${player.onIslandId}  ${preset}`, BX + 10, BY + 68 + _statsExtra);
       if (island) {
         const live = (type: IslandResource['type']) =>
           island.resources.filter(r => r.type === type && (r.hp ?? 0) > 0).length;
@@ -3655,24 +3680,24 @@ class HUDElement implements UIElement {
         if (rock)    parts.push(`${rock}Rk`);
         if (boulder) parts.push(`${boulder}Bo`);
         ctx.fillStyle = '#88cc88';
-        ctx.fillText(parts.length ? `Res: ${parts.join('  ')}` : 'No resources', BX + 10, BY + 82);
+        ctx.fillText(parts.length ? `Res: ${parts.join('  ')}` : 'No resources', BX + 10, BY + 82 + _statsExtra);
       }
     } else {
       const _deckLabel = player.onDeck
         ? (player.deckId === 0 ? 'Lower deck' : 'Upper deck')
         : 'Off ship';
       ctx.fillStyle = '#cccccc';
-      ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '\u2014'}  ${_deckLabel}`, BX + 10, BY + 68);
+      ctx.fillText(`Ship ${player.onDeck ? `#${player.carrierId}` : '\u2014'}  ${_deckLabel}`, BX + 10, BY + 68 + _statsExtra);
     }
 
     // Velocity
     ctx.fillStyle = '#bbbbbb';
-    ctx.fillText(`Vel  ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 84);
+    ctx.fillText(`Vel  ${player.velocity.x.toFixed(1)}, ${player.velocity.y.toFixed(1)}`, BX + 10, BY + 84 + _statsExtra);
 
     // Network bandwidth
     const ns = context.networkStats;
     ctx.fillStyle = '#aaaaaa';
-    ctx.fillText(`\u2191${(ns.bytesSent / 1024).toFixed(1)}KB \u2193${(ns.bytesReceived / 1024).toFixed(1)}KB loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 100);
+    ctx.fillText(`\u2191${(ns.bytesSent / 1024).toFixed(1)}KB \u2193${(ns.bytesReceived / 1024).toFixed(1)}KB loss ${ns.packetLoss.toFixed(1)}%`, BX + 10, BY + 100 + _statsExtra);
 
     ctx.restore();
 

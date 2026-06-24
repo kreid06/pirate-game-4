@@ -253,9 +253,14 @@ export class SpriteAtlas {
   private static readonly _BOULDER_SIZE = 160;
   private static readonly _BOULDER_R    = 52;
   private static readonly _BOULDER_TONES = [
-    { body: '#797975', shadow: '#44443f', hi: '#aaaaa4', crack: '#55554f', moss: '#5a7040' },
-    { body: '#8a7860', shadow: '#504030', hi: '#b09880', crack: '#60503a', moss: '#607848' },
-    { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038' },
+    // Stone (0–2)
+    { body: '#797975', shadow: '#44443f', hi: '#aaaaa4', crack: '#55554f', moss: '#5a7040', metal: false },
+    { body: '#8a7860', shadow: '#504030', hi: '#b09880', crack: '#60503a', moss: '#607848', metal: false },
+    { body: '#585858', shadow: '#303030', hi: '#888888', crack: '#404040', moss: '#4a6038', metal: false },
+    // Metal/iron (3–5) — matches RenderSystem.BOULDER_TONES metal range
+    { body: '#4a5260', shadow: '#252b35', hi: '#7a8898', crack: '#303840', moss: '#384858', metal: true },
+    { body: '#3e4a58', shadow: '#202830', hi: '#6a7a8a', crack: '#2a3240', moss: '#2e3e50', metal: true },
+    { body: '#525a6a', shadow: '#2a3040', hi: '#8090a4', crack: '#363e50', moss: '#404e60', metal: true },
   ];
   private static readonly _BOULDER_SHAPES: [number, number, number][] = [
     [1.00, 0.72,  0.0 ],
@@ -284,15 +289,20 @@ export class SpriteAtlas {
           ctx.fillStyle = hovered ? tone.hi : tone.body; ctx.fill();
           ctx.strokeStyle = hovered ? '#ffe090' : tone.shadow; ctx.lineWidth = hovered ? 3 : 2; ctx.stroke();
           ctx.beginPath(); ctx.ellipse(cx - R * sx * 0.28, cy - R * sy * 0.28, R * sx * 0.38, R * sy * 0.26, rot - 0.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.fill();
+          ctx.fillStyle = tone.metal ? 'rgba(160,200,255,0.28)' : 'rgba(255,255,255,0.22)'; ctx.fill();
           ctx.beginPath(); ctx.arc(cx - R * sx * 0.35, cy - R * sy * 0.38, R * 0.08, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.40)'; ctx.fill();
-          for (let m = 0; m < 3; m++) {
-            const ma = rot + m * 0.7 + 0.3;
-            const mx = cx + Math.cos(ma) * R * sx * 0.55;
-            const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
-            ctx.beginPath(); ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
-            ctx.fillStyle = tone.moss; ctx.fill();
+          ctx.fillStyle = tone.metal ? 'rgba(180,220,255,0.55)' : 'rgba(255,255,255,0.40)'; ctx.fill();
+          if (tone.metal) {
+            ctx.beginPath(); ctx.ellipse(cx - R * sx * 0.18, cy - R * sy * 0.22, R * sx * 0.15, R * sy * 0.06, rot - 0.3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(190,220,255,0.35)'; ctx.fill();
+          } else {
+            for (let m = 0; m < 3; m++) {
+              const ma = rot + m * 0.7 + 0.3;
+              const mx = cx + Math.cos(ma) * R * sx * 0.55;
+              const my = cy + R * sy * 0.48 + Math.sin(ma) * R * sy * 0.12;
+              ctx.beginPath(); ctx.ellipse(mx, my, R * 0.14, R * 0.08, ma, 0, Math.PI * 2);
+              ctx.fillStyle = tone.moss; ctx.fill();
+            }
           }
           ctx.strokeStyle = tone.crack; ctx.lineWidth = 1.5; ctx.lineCap = 'round';
           ctx.beginPath(); ctx.moveTo(cx - R * sx * 0.10, cy - R * sy * 0.30); ctx.lineTo(cx + R * sx * 0.28, cy + R * sy * 0.32); ctx.stroke();

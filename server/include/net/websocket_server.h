@@ -776,6 +776,27 @@ struct WebSocketStats {
     uint16_t port;
 };
 
+/** Live perf counters for admin / regression monitoring. */
+struct WebSocketPerfSnapshot {
+    uint64_t blob_last_build_us;
+    uint64_t blob_max_build_us;
+    uint64_t send_build_last_us;
+    uint64_t send_build_max_us;
+    uint64_t send_dispatch_last_us;
+    uint64_t send_loop_last_us;
+    uint64_t rr_deferred_last;
+    uint64_t send_eagain_last;
+    size_t gs_total_last;
+    size_t gs_total_max;
+    size_t gs_ships_last;
+    size_t gs_players_last;
+    size_t gs_npcs_last;
+    size_t gs_proj_last;
+    size_t gs_tmb_last;
+    size_t gs_ditem_last;
+    size_t gs_co_last;
+};
+
 /**
  * Initialize WebSocket server for browser clients
  * @param port Port to listen on (e.g., 8082 for browser clients)
@@ -849,6 +870,9 @@ void websocket_server_broadcast(const char* message);
  * @return 0 on success, -1 on error
  */
 int websocket_server_get_stats(struct WebSocketStats* stats);
+
+/** Fill live blob/send/payload counters (safe to call from admin thread). */
+void websocket_server_get_perf_snapshot(struct WebSocketPerfSnapshot* out);
 
 /**
  * Get WebSocket ships data for admin panel

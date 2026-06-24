@@ -258,17 +258,52 @@ int admin_api_network_stats(struct HttpResponse* resp, const struct NetworkManag
 int admin_api_performance(struct HttpResponse* resp, const struct Sim* sim) {
     if (!resp || !sim) return -1;
 
-    // Simulate performance metrics for now
+    struct WebSocketPerfSnapshot perf;
+    websocket_server_get_perf_snapshot(&perf);
+
     int len = snprintf(json_buffer, sizeof(json_buffer),
         "{\n"
-        "  \"cpu_usage\": 45.2,\n"
-        "  \"memory_usage\": 128.5,\n"
-        "  \"tick_time_avg\": 0.89,\n"
-        "  \"tick_time_max\": 2.34,\n"
-        "  \"fps\": 30,\n"
-        "  \"heap_size\": 4096,\n"
-        "  \"active_threads\": 1\n"
-        "}\n"
+        "  \"tick\": %u,\n"
+        "  \"ship_count\": %u,\n"
+        "  \"player_count\": %u,\n"
+        "  \"blob_last_build_us\": %llu,\n"
+        "  \"blob_max_build_us\": %llu,\n"
+        "  \"send_build_last_us\": %llu,\n"
+        "  \"send_build_max_us\": %llu,\n"
+        "  \"send_dispatch_last_us\": %llu,\n"
+        "  \"send_loop_last_us\": %llu,\n"
+        "  \"rr_deferred_last\": %llu,\n"
+        "  \"send_eagain_last\": %llu,\n"
+        "  \"gs_total_last\": %zu,\n"
+        "  \"gs_total_max\": %zu,\n"
+        "  \"gs_ships_last\": %zu,\n"
+        "  \"gs_players_last\": %zu,\n"
+        "  \"gs_npcs_last\": %zu,\n"
+        "  \"gs_proj_last\": %zu,\n"
+        "  \"gs_tmb_last\": %zu,\n"
+        "  \"gs_ditem_last\": %zu,\n"
+        "  \"gs_co_last\": %zu\n"
+        "}\n",
+        sim->tick,
+        sim->ship_count,
+        sim->player_count,
+        (unsigned long long)perf.blob_last_build_us,
+        (unsigned long long)perf.blob_max_build_us,
+        (unsigned long long)perf.send_build_last_us,
+        (unsigned long long)perf.send_build_max_us,
+        (unsigned long long)perf.send_dispatch_last_us,
+        (unsigned long long)perf.send_loop_last_us,
+        (unsigned long long)perf.rr_deferred_last,
+        (unsigned long long)perf.send_eagain_last,
+        perf.gs_total_last,
+        perf.gs_total_max,
+        perf.gs_ships_last,
+        perf.gs_players_last,
+        perf.gs_npcs_last,
+        perf.gs_proj_last,
+        perf.gs_tmb_last,
+        perf.gs_ditem_last,
+        perf.gs_co_last
     );
     
     resp->status_code = 200;

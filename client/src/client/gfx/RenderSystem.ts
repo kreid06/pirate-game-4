@@ -18,7 +18,7 @@ import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
 import { ClientState } from '../ClientApplication.js';
 import { RadialMenu } from '../ui/RadialMenu.js';
-import { GLWorldRenderer, PlayerColorState } from './gl/GLWorldRenderer.js';
+import { GLWorldRenderer } from './gl/GLWorldRenderer.js';
 import {
   StructureSpriteCache,
   blitStructureSprite,
@@ -304,14 +304,28 @@ export class RenderSystem {
   public fogRayHitDist: Float32Array | null = null;
   /** Off-screen canvas reused for fog-mask compositing. */
   private _fogCanvas: HTMLCanvasElement | null = null;
+  /** Internal fog raster scale (0.25–1). Set from ClientApplication._glScale each frame. */
+  public fogRenderScale = 0.5;
   /** Camera state captured when the fog canvas was last rendered.
-   *  Used for dirty-detection so we skip the expensive blur(48px) redraw
+   *  Used for dirty-detection so we skip the expensive blur pass
    *  when neither the ray data nor the camera has changed since last frame. */
   private _fogLastRayVersion = -1;
   private _fogLastCamX = NaN;
   private _fogLastCamY = NaN;
   private _fogLastZoom = NaN;
   private _fogLastRot  = NaN;
+  private _fogLastRenderScale = NaN;
+  /** Reused ship list for fog-visible filtering (avoids .filter() alloc per frame). */
+  private _visibleShipsScratch: import('../../sim/Types.js').Ship[] = [];
+  private _visiblePlayersScratch: import('../../sim/Types.js').Player[] = [];
+  private _visibleCannonballsScratch: import('../../sim/Types.js').Cannonball[] = [];
+  /** Pooled wrap-seam entity copies — reset each buildWrappedRenderCopies call. */
+  private _wrapGhostEntities: Array<Record<string, unknown>> = [];
+  private _wrapGhostPositions: Vec2[] = [];
+  private _wrapGhostIdx = 0;
+  /** When true, record ms for island / queue / execute / fog passes (see getLastPerfTimings). */
+  public perfTimingsEnabled = false;
+  private _perfMs = { island: 0, queue: 0, execute: 0, fog: 0 };
   /** Monotonic counter incremented by ClientApplication whenever the fog
    *  worker delivers a new ray set. RenderSystem compares this to skip
    *  redundant fog redraws at render-frame rate (60-120 Hz). */
@@ -396,6 +410,9 @@ export class RenderSystem {
   // Key = "<shipId>:<plankHealthBuckets>" — re-baked only when a plank's damage bucket changes.
   // Replaces 48× fillRect/strokeRect per ship per frame with a single drawImage().
   private _shipPlankSprites: Map<number, { canvas: OffscreenCanvas; key: string; ox: number; oy: number }> = new Map();
+
+  // Hull + planks drawn in one queue pass for the standard above-deck view (one transform
+  // setup, two aligned blits from existing per-layer caches). Not used on lower-deck view.
 
   // Per-ship upper-deck-cover OffscreenCanvas cache (base layer without flood tint).
   // Key = "<shipId>:<deckHealthBucket>" — re-baked only when deck damage bucket changes.
@@ -1769,6 +1786,68 @@ export class RenderSystem {
     return offsets;
   }
 
+  /** Returns ships visible in the current fog fan (carrier always included). Reuses scratch buffer. */
+  private _collectFogVisibleShips(
+    ships: readonly import('../../sim/Types.js').Ship[],
+    carrierId: number,
+    camera: Camera,
+  ): import('../../sim/Types.js').Ship[] {
+    const out = this._visibleShipsScratch;
+    out.length = 0;
+    for (const s of ships) {
+      const always = s.id === carrierId;
+      if (!this._shouldRenderEntityAt(s.position.x, s.position.y, this._hullRadius(s), camera, always)) continue;
+      out.push(s);
+    }
+    return out;
+  }
+
+  /** Camera frustum + renderDistance + fog gate for queueWorldObjects. */
+  private _shouldRenderEntityAt(
+    wx: number,
+    wy: number,
+    margin: number,
+    camera: Camera,
+    alwaysInclude: boolean,
+  ): boolean {
+    if (!camera.isWorldPositionVisible(Vec2.from(wx, wy), margin)) return false;
+    if (alwaysInclude) return true;
+    const rd = this.config.renderDistance;
+    if (rd > 0) {
+      const cam = camera.getState().position;
+      const limit = rd + margin;
+      const dx = wx - cam.x;
+      const dy = wy - cam.y;
+      if (dx * dx + dy * dy > limit * limit) return false;
+    }
+    return this.fogVisibleAt(wx, wy, margin);
+  }
+
+  private _collectVisiblePlayers(players: readonly Player[], camera: Camera): Player[] {
+    const out = this._visiblePlayersScratch;
+    out.length = 0;
+    for (const p of players) {
+      if (p.health <= 0 && p.id !== this.localPlayerId) continue;
+      const always = p.id === this.localPlayerId;
+      if (!this._shouldRenderEntityAt(p.position.x, p.position.y, 80, camera, always)) continue;
+      out.push(p);
+    }
+    return out;
+  }
+
+  private _collectVisibleCannonballs(
+    cannonballs: readonly Cannonball[],
+    camera: Camera,
+  ): Cannonball[] {
+    const out = this._visibleCannonballsScratch;
+    out.length = 0;
+    for (const cb of cannonballs) {
+      if (!this._shouldRenderEntityAt(cb.position.x, cb.position.y, cb.radius + 20, camera, false)) continue;
+      out.push(cb);
+    }
+    return out;
+  }
+
   private buildWrappedRenderCopies<T extends { position: Vec2 }>(
     entities: readonly T[],
     camera: Camera,
@@ -1776,6 +1855,8 @@ export class RenderSystem {
     skipGhosts?: (entity: T) => boolean,
   ): T[] {
     const out: T[] = [];
+    this._wrapGhostIdx = 0;
+
     for (const entity of entities) {
       out.push(entity);
       if (skipGhosts?.(entity)) continue;
@@ -1783,13 +1864,32 @@ export class RenderSystem {
       const offsets = this.getWrapRenderOffsets(entity.position, camera, margin);
       for (let i = 1; i < offsets.length; i++) {
         const off = offsets[i];
-        out.push({
-          ...entity,
-          position: Vec2.from(entity.position.x + off.dx, entity.position.y + off.dy),
-        } as T);
+        out.push(this._makeWrapGhostCopy(entity, off.dx, off.dy));
       }
     }
     return out;
+  }
+
+  /** Pooled shallow copy with offset position for world-wrap seam rendering. */
+  private _makeWrapGhostCopy<T extends { position: Vec2 }>(entity: T, dx: number, dy: number): T {
+    const idx = this._wrapGhostIdx++;
+    let pos = this._wrapGhostPositions[idx];
+    if (!pos) {
+      pos = Vec2.from(0, 0);
+      this._wrapGhostPositions[idx] = pos;
+    }
+    pos.x = entity.position.x + dx;
+    pos.y = entity.position.y + dy;
+
+    let slot = this._wrapGhostEntities[idx];
+    if (!slot) {
+      slot = { ...entity, position: pos };
+      this._wrapGhostEntities[idx] = slot;
+    } else {
+      Object.assign(slot, entity);
+      slot.position = pos;
+    }
+    return slot as T;
   }
 
   /**
@@ -1918,6 +2018,11 @@ export class RenderSystem {
 
   /** GL draw-call count from the last frame (for perf HUD). 0 if GL is not active. */
   get glDrawCallCount(): number { return this._gl?.drawCallCount ?? 0; }
+
+  /** Last-frame render pass durations (ms) when perfTimingsEnabled was true. */
+  getLastPerfTimings(): Readonly<{ island: number; queue: number; execute: number; fog: number }> {
+    return this._perfMs;
+  }
   
   /**
    * Spawn a floating damage number at a world position
@@ -5440,7 +5545,11 @@ export class RenderSystem {
     // Draw background elements
     this.drawWater(camera);
     if (this.config.showGrid) this.drawGrid(camera);
-    this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
+    {
+      const _t0 = this.perfTimingsEnabled ? performance.now() : 0;
+      this.drawIsland(camera); // drawPlacedStructures is called inside, between trunk and leaf passes
+      if (this.perfTimingsEnabled) this._perfMs.island = performance.now() - _t0;
+    }
     this.drawIslandBuildGhost(camera);
     if (this.landBuildModeActive) this.drawLandGhostPlacements(camera);
     
@@ -5459,10 +5568,18 @@ export class RenderSystem {
     }
 
     // Queue all game objects for layered rendering
-    this.queueWorldObjects(worldState, camera, interpolationAlpha);
+    {
+      const _t0 = this.perfTimingsEnabled ? performance.now() : 0;
+      this.queueWorldObjects(worldState, camera, interpolationAlpha);
+      if (this.perfTimingsEnabled) this._perfMs.queue = performance.now() - _t0;
+    }
     
     // Execute render queue in layer order
-    this.executeRenderQueue();
+    {
+      const _t0 = this.perfTimingsEnabled ? performance.now() : 0;
+      this.executeRenderQueue();
+      if (this.perfTimingsEnabled) this._perfMs.execute = performance.now() - _t0;
+    }
 
     // ── Fiber bushes — above players, below tree leaves ──────────────────────
     const { zoom, rotation: _deferCamRot } = camera.getState();
@@ -5535,7 +5652,11 @@ export class RenderSystem {
     // Grapeshot / canister hit-scan tracers
     this.drawGrapeshotTracers(camera);
     // Directional fog mask (after world geometry and effects, before HUD)
-    this.drawFogMask(camera);
+    {
+      const _t0 = this.perfTimingsEnabled ? performance.now() : 0;
+      this.drawFogMask(camera);
+      if (this.perfTimingsEnabled) this._perfMs.fog = performance.now() - _t0;
+    }
     this.drawBucketDumpHint(camera);
     // Screen-space announcement banners (on top of everything)
     this.effectRenderer.renderAnnouncements(this.canvas);
@@ -5752,63 +5873,75 @@ export class RenderSystem {
     const TWO_PI = Math.PI * 2;
     const { width, height } = this.canvas;
 
+    // Raster fog at reduced resolution (tied to fogRenderScale / GL adaptive scale).
+    const fogScale = Math.max(0.25, Math.min(1, this.fogRenderScale));
+    const fw = Math.max(1, Math.ceil(width  * fogScale));
+    const fh = Math.max(1, Math.ceil(height * fogScale));
+    const fcX = cx * fogScale;
+    const fcY = cy * fogScale;
+    const blurPx = Math.max(8, Math.round(48 * fogScale));
+
     // Ensure the off-screen fog canvas matches the current resolution
-    if (!this._fogCanvas || this._fogCanvas.width !== width || this._fogCanvas.height !== height) {
+    if (!this._fogCanvas || this._fogCanvas.width !== fw || this._fogCanvas.height !== fh) {
       this._fogCanvas = document.createElement('canvas');
-      this._fogCanvas.width  = width;
-      this._fogCanvas.height = height;
+      this._fogCanvas.width  = fw;
+      this._fogCanvas.height = fh;
       // Force a full redraw on resize
       this._fogLastRayVersion = -1;
     }
 
-    // Skip the expensive blur(48px) redraw when nothing has changed.
+    // Skip the expensive blur redraw when nothing has changed.
     // The fog rays update at ~30 Hz (worker cadence); the render loop runs at
     // 60-120 Hz, so most frames can just re-blit the cached fog canvas.
     //
     // Zoom dead-zone: ignore sub-3% zoom changes when scrolling.  Without this,
     // every frame of a smooth pinch/scroll triggers a full fog re-rasterise
-    // (the blur(48px) filter pass) which is the single most expensive canvas
+    // (the blur filter pass) which is the single most expensive canvas
     // operation in the renderer.  A 3% zoom delta is imperceptible in fog shape.
     const FOG_ZOOM_EPSILON = 0.03;
     const zoomChanged = Math.abs(camZoom - this._fogLastZoom) > FOG_ZOOM_EPSILON * Math.max(camZoom, this._fogLastZoom);
-    const camMoved = cx   !== this._fogLastCamX || cy   !== this._fogLastCamY
-                  || zoomChanged || camRot  !== this._fogLastRot;
+    const scaleChanged = Math.abs(fogScale - this._fogLastRenderScale) > 0.01;
+    const camMoved = Math.round(fcX) !== Math.round(this._fogLastCamX)
+                  || Math.round(fcY) !== Math.round(this._fogLastCamY)
+                  || zoomChanged || camRot  !== this._fogLastRot
+                  || scaleChanged;
     const raysDirty = this.fogRayVersion !== this._fogLastRayVersion;
 
     if (!raysDirty && !camMoved) {
       // Nothing changed — blit the already-rendered fog canvas directly.
       this.ctx.save();
       this.ctx.globalAlpha = 0.68;
-      this.ctx.drawImage(this._fogCanvas, 0, 0);
+      this.ctx.drawImage(this._fogCanvas, 0, 0, fw, fh, 0, 0, width, height);
       this.ctx.restore();
       return;
     }
 
     // Record the camera/ray state for next frame's dirty check.
     this._fogLastRayVersion = this.fogRayVersion;
-    this._fogLastCamX = cx;
-    this._fogLastCamY = cy;
+    this._fogLastCamX = Math.round(fcX);
+    this._fogLastCamY = Math.round(fcY);
     this._fogLastZoom = camZoom;
     this._fogLastRot  = camRot;
+    this._fogLastRenderScale = fogScale;
 
     const fc   = this._fogCanvas;
     const fctx = fc.getContext('2d')!;
 
     // --- Step 1: Fill with opaque dark fog ---
     fctx.globalCompositeOperation = 'source-over';
-    fctx.clearRect(0, 0, width, height);
+    fctx.clearRect(0, 0, fw, fh);
     fctx.fillStyle = '#000612'; // deep navy-black
-    fctx.fillRect(0, 0, width, height);
+    fctx.fillRect(0, 0, fw, fh);
 
-    // Helper: trace the visibility fan polygon on the fog canvas
+    // Helper: trace the visibility fan polygon on the fog canvas (scaled coords)
     const tracePolygon = (scale: number) => {
       fctx.beginPath();
-      fctx.moveTo(cx, cy);
+      fctx.moveTo(fcX, fcY);
       for (let i = 0; i <= N; i++) {
         const idx   = i % N;
         const angle = idx * TWO_PI / N - camRot;
-        const dist  = hitDist[idx] * camZoom * scale;
-        fctx.lineTo(cx + Math.cos(angle) * dist, cy + Math.sin(angle) * dist);
+        const dist  = hitDist[idx] * camZoom * scale * fogScale;
+        fctx.lineTo(fcX + Math.cos(angle) * dist, fcY + Math.sin(angle) * dist);
       }
       fctx.closePath();
     };
@@ -5820,17 +5953,17 @@ export class RenderSystem {
     fctx.fill();
 
     // --- Step 3: Soft feather — blurred erase extends the clear zone outward ---
-    fctx.filter = 'blur(48px)';
+    fctx.filter = `blur(${blurPx}px)`;
     tracePolygon(1.0);
     fctx.fill();
     fctx.filter = 'none';
 
     fctx.globalCompositeOperation = 'source-over';
 
-    // --- Step 4: Blit onto main canvas at 68% opacity ---
+    // --- Step 4: Blit onto main canvas at 68% opacity (upscale from internal buffer) ---
     this.ctx.save();
     this.ctx.globalAlpha = 0.68;
-    this.ctx.drawImage(fc, 0, 0);
+    this.ctx.drawImage(fc, 0, 0, fw, fh, 0, 0, width, height);
     this.ctx.restore();
   }
 
@@ -9481,6 +9614,8 @@ export class RenderSystem {
     // this._localCompanyId is updated there; no second find() needed.
 
     // ── Sinking ghost management ────────────────────────────────────────────
+    const _localCarrierId = this._cachedLocalPlayer?.carrierId ?? 0;
+
     // Track every live ship so we can detect despawns frame-to-frame.
     const currentShipIds = new Set<number>();
     for (const ship of worldState.ships) {
@@ -9513,6 +9648,8 @@ export class RenderSystem {
     const wakeCutoff = wakeNow - this.SHIP_WAKE_TRAIL_DURATION_MS;
     for (const ship of worldState.ships) {
       if (ship.shipType === SHIP_TYPE_GHOST) continue;
+      if (ship.id !== _localCarrierId
+          && !this.fogVisibleAt(ship.position.x, ship.position.y, this._hullRadius(ship))) continue;
       const speed = Math.hypot(ship.velocity.x, ship.velocity.y);
       if (speed < 6) continue;
 
@@ -9596,24 +9733,22 @@ export class RenderSystem {
 
     // Visual-only wrap ghosts for seam visibility.
     // Canonical world objects remain unchanged for collisions and gameplay.
-    const _localCarrierId = this._cachedLocalPlayer?.carrierId ?? 0;
     // Filter ships by fog visibility. The carrier ship (if any) is always included
     // so the player never loses their own ship when at the fog boundary.
     const renderShips = this.buildWrappedRenderCopies(
-      worldState.ships.filter(s => s.id === _localCarrierId || this.fogVisibleAt(s.position.x, s.position.y, this._hullRadius(s))),
+      this._collectFogVisibleShips(worldState.ships, _localCarrierId, camera),
       camera, 520
     );
     const renderPlayers = this.buildWrappedRenderCopies(
-      // Dead players (health ≤ 0) are hidden from the world — they're either
-      // awaiting respawn or are stale zombie entries (e.g. from a page reload).
-      // The local player is excluded from this filter so camera/prediction
-      // keep working while the respawn screen is shown.
-      worldState.players.filter(p => p.health > 0 || p.id === this.localPlayerId),
+      this._collectVisiblePlayers(worldState.players, camera),
       camera,
       80,
       (p) => p.id === this.localPlayerId,
-    ).filter(p => p.id === this.localPlayerId || this.fogVisibleAt(p.position.x, p.position.y));
-    const renderCannonballs = this.buildWrappedRenderCopies(worldState.cannonballs, camera, 40);
+    );
+    const renderCannonballs = this.buildWrappedRenderCopies(
+      this._collectVisibleCannonballs(worldState.cannonballs, camera),
+      camera, 40,
+    );
     
     // Render order (from lowest to highest):
     // 0: water, gridlines (drawn before this queue)
@@ -9731,10 +9866,14 @@ export class RenderSystem {
       }
     }
 
+    const _camZoom = camera.getState().zoom;
+
     // Queue ship wakes + hulls (layer 1)
     for (const ship of renderShips) {
       this.queueRenderItem(1, 'ship-wake', () => this.drawShipWake(ship, camera), -2);
-      this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
+      if (!this._canUseShipStaticComposite(ship, _camZoom)) {
+        this.queueRenderItem(1, 'ship-hull', () => this.drawShipHull(ship, camera));
+      }
       this.queueRenderItem(1, `lower-deck-floor-${ship.id}`, () => this.drawLowerDeckFloor(ship, camera), 1);
       // Ghost fog aura: drawn at layer 0.5 (below hull, like water surface wisps)
       if (ship.shipType === SHIP_TYPE_GHOST) {
@@ -9753,9 +9892,11 @@ export class RenderSystem {
       }
       // Upper-deck cover: solid hull fill at layer 2 — paints over lower-deck cannons,
       // gunports, and any other layer-1 content so nothing bleeds through plank gaps.
+      // Skipped when the L3 static composite draws hull+planks (would double the deck).
       if (ship.shipType !== SHIP_TYPE_GHOST
           && ship.modules.some(m => m.kind === 'deck' && m.deckId === 1)
-          && this._lowerDeckShipId !== ship.id) {
+          && this._lowerDeckShipId !== ship.id
+          && !this._canUseShipStaticComposite(ship, _camZoom)) {
         this.queueRenderItem(2, `upper-deck-cover-${ship.id}`, () => this.drawUpperDeckCover(ship, camera));
       }
     }
@@ -9797,7 +9938,11 @@ export class RenderSystem {
     // Queue ship planks (layer 3 — ghost ships have no physical planks, purely hull-fade driven)
     for (const ship of renderShips) {
       if (ship.shipType !== SHIP_TYPE_GHOST) {
-        this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+        if (this._canUseShipStaticComposite(ship, _camZoom)) {
+          this.queueRenderItem(3, `ship-static-${ship.id}`, () => this.drawShipStaticComposite(ship, camera));
+        } else {
+          this.queueRenderItem(3, 'ship-planks', () => this.drawShipPlanks(ship, camera));
+        }
         this.queueRenderItem(3, `deck-flood-${ship.id}`, () => this.drawShipDeckFloodOverlays(ship, camera), 2);
       }
       // Ghost deck effects (runic circle + crew silhouettes) drawn above planks
@@ -10114,7 +10259,7 @@ export class RenderSystem {
     for (const npc of (worldState.npcs || [])) {
       const _npcShip = npc.shipId ? worldState.ships.find(s => s.id === npc.shipId) : null;
       const _npcCheckPos = _npcShip?.position ?? npc.position;
-      if (!this.fogVisibleAt(_npcCheckPos.x, _npcCheckPos.y)) continue;
+      if (!this._shouldRenderEntityAt(_npcCheckPos.x, _npcCheckPos.y, 60, camera, false)) continue;
       if (npc.shipId && npc.deckLevel === 0) {
         // Lower-deck NPC: render at layer 1 (below planks) so they're visible from the lower
         // deck and naturally hidden from above by the upper-deck cover at layer 2.
@@ -11049,71 +11194,7 @@ export class RenderSystem {
 
     // Hover highlight + quality-tier overlay pass for placed planks
     if (!isGhostShip) {
-      const _hoveredId = this.hoveredModule?.module?.id;
-      for (const plank of planks) {
-        if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
-        const plankData = plank.moduleData;
-        if (plankData.health <= 0) continue;
-
-        const isHovered = plank.id === _hoveredId;
-        const _qt = plank.qualityTier;
-        const _hasQT = typeof _qt === 'number' && _qt >= 1;
-
-        if (!isHovered && !_hasQT) continue;
-
-        const isCurved = plankData.isCurved || false;
-        const pos = plank.localPos;
-        const rot = plank.localRot;
-        const length = plankData.length;
-        const width  = plankData.width;
-
-        this.ctx.save();
-
-        if (isHovered) {
-          // Hover glow: semi-transparent white border highlight
-          const _hlCol = _hasQT ? tierColor(_qt!) : '#aaccff';
-          this.ctx.shadowColor = _hlCol;
-          this.ctx.shadowBlur  = 8;
-          this.ctx.strokeStyle = _hlCol;
-          this.ctx.lineWidth   = 2;
-          this.ctx.globalAlpha = 0.55;
-          if (isCurved && plankData.curveData) {
-            this.drawCurvedPlank(plankData.curveData, width, 'transparent', _hlCol);
-          } else {
-            this.ctx.save();
-            this.ctx.translate(pos.x, pos.y);
-            this.ctx.rotate(rot);
-            this.ctx.strokeRect(-length / 2, -width / 2, length, width);
-            this.ctx.restore();
-          }
-          this.ctx.globalAlpha = 1.0;
-          this.ctx.shadowBlur  = 0;
-        }
-
-        if (_hasQT) {
-          // Quality-tier tint: subtle coloured inner highlight
-          const _col = tierColor(_qt!);
-          const _h = _col.replace('#', '');
-          const _r = parseInt(_h.substring(0, 2), 16);
-          const _g = parseInt(_h.substring(2, 4), 16);
-          const _b = parseInt(_h.substring(4, 6), 16);
-          const _tintA = isHovered ? 0.28 : 0.15;
-          const _tintFill = `rgba(${_r},${_g},${_b},${_tintA})`;
-          this.ctx.globalAlpha = 1.0;
-          if (isCurved && plankData.curveData) {
-            this.drawCurvedPlank(plankData.curveData, width * 0.55, _tintFill, 'transparent');
-          } else {
-            this.ctx.save();
-            this.ctx.translate(pos.x, pos.y);
-            this.ctx.rotate(rot);
-            this.ctx.fillStyle = _tintFill;
-            this.ctx.fillRect(-length / 2 + 2, -width / 2 + 1, length - 4, width - 2);
-            this.ctx.restore();
-          }
-        }
-
-        this.ctx.restore();
-      }
+      this._drawShipPlankDynamicOverlays(ship, planks);
     }
     // Release hull clip.
     this.ctx.restore();
@@ -11927,6 +12008,136 @@ export class RenderSystem {
     const entry = { canvas, key, ox, oy };
     this._shipPlankSprites.set(ship.id, entry);
     return entry;
+  }
+
+  /** Standard above-deck view: one cached blit for hull + planks (not lower-deck or high-zoom). */
+  private _canUseShipStaticComposite(ship: Ship, zoom: number): boolean {
+    if (ship.shipType === SHIP_TYPE_GHOST) return false;
+    if (!ship.modules.some(m => m.kind === 'deck')) return false;
+    if (this._lowerDeckShipId === ship.id) return false;
+    if (zoom > 3) return false;
+    return true;
+  }
+
+  /**
+   * Draw cached hull + planks in one pass (two aligned blits, one transform setup).
+   * Reuses per-layer OffscreenCanvas caches; dynamic overlays drawn on top.
+   */
+  private drawShipStaticComposite(ship: Ship, camera: Camera): void {
+    if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
+
+    const { phase1Alpha } = this.computeSinkState(ship);
+    if (phase1Alpha <= 0) return;
+
+    const hasUpperDeck = ship.modules.some(m => m.kind === 'deck' && m.deckId === 1);
+    const hasDeck = ship.modules.some(m => m.kind === 'deck');
+    const topDeck = ship.modules.find(m => m.kind === 'deck' && m.deckId === 1)
+                 ?? ship.modules.find(m => m.kind === 'deck');
+    const baseHullColor = hasUpperDeck ? '#DEB887' : '#A87040';
+    const dmd = topDeck?.moduleData as any;
+    let fillColor = baseHullColor;
+    if (dmd && typeof dmd.health === 'number' && typeof dmd.maxHealth === 'number' && dmd.maxHealth > 0) {
+      fillColor = this.darkenByDamage(baseHullColor, Math.max(0, dmd.health / dmd.maxHealth));
+    }
+
+    const planks = ship.modules.filter(m => m.kind === 'plank');
+    const plankBaseColor  = hasUpperDeck ? '#8B7355' : '#6B5232';
+    const plankStrokeBase = hasUpperDeck ? '#4A3020' : '#3A2010';
+
+    const hullSprite = this._getShipHullSprite(ship, hasUpperDeck, hasDeck, fillColor);
+    if (!hullSprite) {
+      this.drawShipHull(ship, camera);
+      this.drawShipPlanks(ship, camera);
+      return;
+    }
+    const plankSprite = this._getShipPlankSprite(ship, planks, plankBaseColor, plankStrokeBase, false);
+
+    this.ctx.save();
+    const _deckAlpha = this._lowerDeckShipId === ship.id ? this._upperDeckFade : 1.0;
+    if (phase1Alpha * _deckAlpha < 1) this.ctx.globalAlpha = phase1Alpha * _deckAlpha;
+
+    const screenPos = camera.worldToScreen(ship.position);
+    const cameraState = camera.getState();
+    this.ctx.translate(screenPos.x, screenPos.y);
+    this.ctx.scale(cameraState.zoom, cameraState.zoom);
+    this.ctx.rotate(ship.rotation - cameraState.rotation);
+
+    // Each layer keeps its own bake origin so hull and planks stay aligned in ship space.
+    this.ctx.drawImage(hullSprite.canvas, -hullSprite.ox, -hullSprite.oy);
+    if (plankSprite) {
+      this.ctx.drawImage(plankSprite.canvas, -plankSprite.ox, -plankSprite.oy);
+    }
+
+    this._drawShipPlankDynamicOverlays(ship, planks);
+
+    this.ctx.restore();
+  }
+
+  /** Hover glow + quality-tier tint for placed planks (not baked into static caches). */
+  private _drawShipPlankDynamicOverlays(ship: Ship, planks: Ship['modules']): void {
+    const _hoveredId = this.hoveredModule?.module?.id;
+    for (const plank of planks) {
+      if (!plank.moduleData || plank.moduleData.kind !== 'plank') continue;
+      const plankData = plank.moduleData;
+      if (plankData.health <= 0) continue;
+
+      const isHovered = plank.id === _hoveredId;
+      const _qt = plank.qualityTier;
+      const _hasQT = typeof _qt === 'number' && _qt >= 1;
+
+      if (!isHovered && !_hasQT) continue;
+
+      const isCurved = plankData.isCurved || false;
+      const pos = plank.localPos;
+      const rot = plank.localRot;
+      const length = plankData.length;
+      const width  = plankData.width;
+
+      this.ctx.save();
+
+      if (isHovered) {
+        const _hlCol = _hasQT ? tierColor(_qt!) : '#aaccff';
+        this.ctx.shadowColor = _hlCol;
+        this.ctx.shadowBlur  = 8;
+        this.ctx.strokeStyle = _hlCol;
+        this.ctx.lineWidth   = 2;
+        this.ctx.globalAlpha = 0.55;
+        if (isCurved && plankData.curveData) {
+          this.drawCurvedPlank(plankData.curveData, width, 'transparent', _hlCol);
+        } else {
+          this.ctx.save();
+          this.ctx.translate(pos.x, pos.y);
+          this.ctx.rotate(rot);
+          this.ctx.strokeRect(-length / 2, -width / 2, length, width);
+          this.ctx.restore();
+        }
+        this.ctx.globalAlpha = 1.0;
+        this.ctx.shadowBlur  = 0;
+      }
+
+      if (_hasQT) {
+        const _col = tierColor(_qt!);
+        const _h = _col.replace('#', '');
+        const _r = parseInt(_h.substring(0, 2), 16);
+        const _g = parseInt(_h.substring(2, 4), 16);
+        const _b = parseInt(_h.substring(4, 6), 16);
+        const _tintA = isHovered ? 0.28 : 0.15;
+        const _tintFill = `rgba(${_r},${_g},${_b},${_tintA})`;
+        this.ctx.globalAlpha = 1.0;
+        if (isCurved && plankData.curveData) {
+          this.drawCurvedPlank(plankData.curveData, width * 0.55, _tintFill, 'transparent');
+        } else {
+          this.ctx.save();
+          this.ctx.translate(pos.x, pos.y);
+          this.ctx.rotate(rot);
+          this.ctx.fillStyle = _tintFill;
+          this.ctx.fillRect(-length / 2 + 2, -width / 2 + 1, length - 4, width - 2);
+          this.ctx.restore();
+        }
+      }
+
+      this.ctx.restore();
+    }
   }
   
   private getQuadraticPoint(
@@ -17497,9 +17708,8 @@ export class RenderSystem {
     this.ctx.save();
     this.ctx.globalAlpha = _playerDeckAlpha;
 
-    // Draw player circle
-    // Color: Green if on deck, Blue if mounted, Red if swimming
-    // Enemy-company players are always tinted red regardless of mount state.
+    // Draw player circle (Canvas 2D — must stay on the overlay canvas for correct
+    // layer order vs islands/ships; the GL canvas sits beneath the entire 2D stack).
     const isEnemyPlayer = this._localCompanyId !== 0 && player.companyId !== 0
       && player.companyId !== this._localCompanyId;
     if (isEnemyPlayer) {

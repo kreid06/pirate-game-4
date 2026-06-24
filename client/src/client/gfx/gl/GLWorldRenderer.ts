@@ -147,10 +147,11 @@ export class GLWorldRenderer {
     toneIdx: number, shapeIdx: number,
     hovered: boolean,
     alpha: number,
+    angle = 0,
   ): void {
     const uv  = this._atlas.getUV(SpriteAtlas.keyRock(toneIdx, shapeIdx, hovered));
     const dim = ROCK_WORLD_W;
-    this._batch.draw({ x: wx, y: wy, w: dim, h: dim, angle: 0,
+    this._batch.draw({ x: wx, y: wy, w: dim, h: dim, angle,
       u0: uv.u0, v0: uv.v0, u1: uv.u1, v1: uv.v1,
       r: alpha, g: alpha, b: alpha, a: alpha,
       texture: this._atlas.texture });

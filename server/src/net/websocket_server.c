@@ -509,6 +509,11 @@ static uint64_t g_send_eagain_max  = 0;
 static uint64_t g_send_error_last  = 0;    /* hard send errors (client disconnected) */
 static uint64_t g_send_error_max   = 0;
 
+/* Last/max GAME_STATE payload section sizes (bytes, last client built per tick). */
+static size_t g_gs_total_last = 0, g_gs_total_max = 0;
+static size_t g_gs_ships_last = 0, g_gs_players_last = 0, g_gs_npcs_last = 0;
+static size_t g_gs_proj_last = 0, g_gs_tmb_last = 0, g_gs_ditem_last = 0, g_gs_co_last = 0;
+
 /* World wind — 20-minute clockwise cycle.
  * Angle is in radians, 0 = North, increasing clockwise.
  * Strongest at N/S (|cos|=1) and weakest at E/W (|cos|=0). */
@@ -13930,6 +13935,10 @@ void websocket_server_send_game_state(void) {
                  (unsigned long long)g_rr_deferred_last,   (unsigned long long)g_rr_deferred_max,
                  (unsigned long long)g_send_eagain_last,   (unsigned long long)g_send_eagain_max,
                  (unsigned long long)g_send_error_last,    (unsigned long long)g_send_error_max);
+        log_info("📦 gs payload stats: total=%zu/%zub ships=%zu players=%zu npcs=%zu proj=%zu tmb=%zu ditem=%zu co=%zu",
+                 g_gs_total_last, g_gs_total_max,
+                 g_gs_ships_last, g_gs_players_last, g_gs_npcs_last,
+                 g_gs_proj_last, g_gs_tmb_last, g_gs_ditem_last, g_gs_co_last);
         last_debug_time = current_time;
     }
     
@@ -14140,7 +14149,9 @@ void websocket_server_send_game_state(void) {
     } \
 } while(0)
             _MC1(per_ship_json, _soff);
+            size_t _sec_ships = (size_t)_soff;
             /* Players: AOI-filtered per-client (skip players outside view radius). */
+            size_t _sec_players_start = _goff;
             if (_goff + 12 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
             {
                 bool _ppf = true;
@@ -14158,9 +14169,12 @@ void websocket_server_send_game_state(void) {
                 }
                 if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
             }
+            size_t _sec_players = _goff - _sec_players_start;
             _GS(",\"projectiles\":");
             _MC1(shared_blob_cache.projectiles_json, shared_blob_cache.projectiles_len);
+            size_t _sec_proj = (size_t)shared_blob_cache.projectiles_len;
             /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
+            size_t _sec_npcs_start = _goff;
             if (_goff + 9 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
             {
                 bool _npf = true;
@@ -14181,12 +14195,16 @@ void websocket_server_send_game_state(void) {
                 }
                 if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
             }
+            size_t _sec_npcs = _goff - _sec_npcs_start;
             _GS(",\"tombstones\":");
             _MC1(shared_blob_cache.tmb_json, shared_blob_cache.tmb_len);
+            size_t _sec_tmb = (size_t)shared_blob_cache.tmb_len;
             _GS(",\"droppedItems\":");
             _MC1(shared_blob_cache.ditem_json, shared_blob_cache.ditem_len);
+            size_t _sec_ditem = (size_t)shared_blob_cache.ditem_len;
             _GS(",\"companies\":");
             _MC1(shared_blob_cache.co_json, shared_blob_cache.co_len);
+            size_t _sec_co = (size_t)shared_blob_cache.co_len;
 #undef _MC1
             /* World wind — included every tick so late-joining clients get it immediately. */
             _GS(",\"windAngle\":%.4f,\"windStrength\":%.3f",
@@ -14195,6 +14213,16 @@ void websocket_server_send_game_state(void) {
 #undef _GS
             if (_goff < (size_t)(PER_GS_BUF - 1)) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
             per_gs_len[_send_count] = _goff;
+
+            g_gs_total_last = _goff;
+            if (_goff > g_gs_total_max) g_gs_total_max = _goff;
+            g_gs_ships_last    = _sec_ships;
+            g_gs_players_last  = _sec_players;
+            g_gs_npcs_last     = _sec_npcs;
+            g_gs_proj_last     = _sec_proj;
+            g_gs_tmb_last      = _sec_tmb;
+            g_gs_ditem_last    = _sec_ditem;
+            g_gs_co_last       = _sec_co;
 
             send_client_idx[_send_count] = _ci;
             _send_count++;
@@ -14377,6 +14405,32 @@ void websocket_server_broadcast(const char* message) {
             }
         }
     }
+}
+
+void websocket_server_get_perf_snapshot(struct WebSocketPerfSnapshot* out) {
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    if (g_blob_worker.started) {
+        pthread_mutex_lock(&g_blob_worker.mtx);
+        out->blob_last_build_us = g_blob_worker.last_build_us;
+        out->blob_max_build_us  = g_blob_worker.max_build_us;
+        pthread_mutex_unlock(&g_blob_worker.mtx);
+    }
+    out->send_build_last_us    = g_send_build_last_us;
+    out->send_build_max_us     = g_send_build_max_us;
+    out->send_dispatch_last_us = g_send_dispatch_last_us;
+    out->send_loop_last_us     = g_send_loop_last_us;
+    out->rr_deferred_last      = g_rr_deferred_last;
+    out->send_eagain_last      = g_send_eagain_last;
+    out->gs_total_last         = g_gs_total_last;
+    out->gs_total_max          = g_gs_total_max;
+    out->gs_ships_last         = g_gs_ships_last;
+    out->gs_players_last       = g_gs_players_last;
+    out->gs_npcs_last          = g_gs_npcs_last;
+    out->gs_proj_last          = g_gs_proj_last;
+    out->gs_tmb_last           = g_gs_tmb_last;
+    out->gs_ditem_last         = g_gs_ditem_last;
+    out->gs_co_last            = g_gs_co_last;
 }
 
 int websocket_server_get_stats(struct WebSocketStats* stats) {

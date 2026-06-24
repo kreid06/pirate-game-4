@@ -813,6 +813,9 @@ export class NetworkManager {
   public mapWrap: boolean = true;
   /** Average AOI view radius (client world units) from the latest ray cast. Set by ClientApplication each frame. */
   public viewRadius: number = 0;
+  /** Rolling GAME_STATE cadence/size stats — exposed as window.__networkAuditStats during play. */
+  private _gameStateAudit = { count: 0, lastBytes: 0, lastArrivalMs: 0, interArrivalMs: [] as number[], lastTick: 0 };
+  private _lastGameStateAt = 0;
   /** Fired when the server broadcasts a resource_damaged event. */
   public onResourceDamaged: ((islandId: number, ox: number, oy: number, hp: number, maxHp: number) => void) | null = null;
   /** Fired when a depleted resource respawns (resource_respawned event). */
@@ -2536,6 +2539,7 @@ export class NetworkManager {
             try {
               const stateJson = data.substring(11); // Remove "GAME_STATE:" prefix
               const gameState = JSON.parse(stateJson);
+              this.recordGameStateAudit(stateJson.length, gameState.tick ?? 0);
               message = {
                 type: 'GAME_STATE',
                 ...gameState,
@@ -2614,6 +2618,35 @@ export class NetworkManager {
     });
   }
   
+  private recordGameStateAudit(byteLen: number, tick: number): void {
+    const now = performance.now();
+    if (this._lastGameStateAt > 0) {
+      const gap = now - this._lastGameStateAt;
+      this._gameStateAudit.lastArrivalMs = gap;
+      const arr = this._gameStateAudit.interArrivalMs;
+      arr.push(gap);
+      if (arr.length > 120) arr.shift();
+    }
+    this._lastGameStateAt = now;
+    this._gameStateAudit.count++;
+    this._gameStateAudit.lastBytes = byteLen;
+    this._gameStateAudit.lastTick = tick;
+    if (typeof window !== 'undefined') {
+      const gaps = this._gameStateAudit.interArrivalMs;
+      const sorted = [...gaps].sort((a, b) => a - b);
+      const pct = (q: number) => (sorted.length ? sorted[Math.floor((sorted.length - 1) * q)] : 0);
+      (window as unknown as { __networkAuditStats?: Record<string, number> }).__networkAuditStats = {
+        count: this._gameStateAudit.count,
+        lastBytes: byteLen,
+        lastArrivalMs: this._gameStateAudit.lastArrivalMs,
+        interArrivalP50Ms: pct(0.5),
+        interArrivalP95Ms: pct(0.95),
+        pingMs: this.stats.ping,
+        lastTick: tick,
+      };
+    }
+  }
+
   private handleMessage(message: any): void {
     switch (message.type) {
       case MessageType.WORLD_STATE:
