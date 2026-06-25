@@ -624,17 +624,6 @@ static void snap_ship_lut_set_aoi_idx(SnapShipLut* lut, uint16_t sid, uint16_t i
     snap_ship_lut_touch(lut, sid);
 }
 
-static bool snap_ship_lut_aoi_pos(const SnapShipLut* lut, const SharedBlobOutput* out,
-                                  uint32_t sid, float* ox, float* oy) {
-    if (!sid || sid >= SHIP_ID_LOOKUP_SIZE) return false;
-    uint16_t idx = lut->aoi_idx[sid];
-    if (idx == SHIP_AOI_IDX_NONE || idx >= (uint16_t)out->aoi_ship_count) return false;
-    if (out->aoi_ship_id[idx] != sid) return false;
-    *ox = out->aoi_ship_px[idx];
-    *oy = out->aoi_ship_py[idx];
-    return true;
-}
-
 static void snap_ship_lut_fill(SnapShipLut* lut, const SharedBlobSnapshot* snap) {
     snap_ship_lut_reset(lut);
     int _lsc = snap->ship_count;
