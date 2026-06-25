@@ -624,17 +624,6 @@ static void snap_ship_lut_set_aoi_idx(SnapShipLut* lut, uint16_t sid, uint16_t i
     snap_ship_lut_touch(lut, sid);
 }
 
-static bool snap_ship_lut_aoi_pos(const SnapShipLut* lut, const SharedBlobOutput* out,
-                                  uint32_t sid, float* ox, float* oy) {
-    if (!sid || sid >= SHIP_ID_LOOKUP_SIZE) return false;
-    uint16_t idx = lut->aoi_idx[sid];
-    if (idx == SHIP_AOI_IDX_NONE || idx >= (uint16_t)out->aoi_ship_count) return false;
-    if (out->aoi_ship_id[idx] != sid) return false;
-    *ox = out->aoi_ship_px[idx];
-    *oy = out->aoi_ship_py[idx];
-    return true;
-}
-
 static void snap_ship_lut_fill(SnapShipLut* lut, const SharedBlobSnapshot* snap) {
     snap_ship_lut_reset(lut);
     int _lsc = snap->ship_count;
@@ -3138,19 +3127,12 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             _pk->name[sizeof(_pk->name) - 1] = '\0';
         }
 
-        if (_bp->parent_ship_id != 0) {
-            float _pwx = _bp->x, _pwy = _bp->y;
-            float _spx, _spy;
-            if (snap_ship_lut_aoi_pos(lut, out, _bp->parent_ship_id, &_spx, &_spy)) {
-                _pwx = _spx;
-                _pwy = _spy;
-            }
-            out->player_world_x[p] = _pwx;
-            out->player_world_y[p] = _pwy;
-        } else if (_dirty) {
-            out->player_world_x[p] = _bp->x;
-            out->player_world_y[p] = _bp->y;
-        }
+        /* AOI must use the entity's true world position from the snapshot.
+         * Using ship center (aoi_ship_px/py) made deck-edge crew invisible when the
+         * viewer was within range of the player but just outside range of the hull
+         * midpoint — common at max view distance on large ships. */
+        out->player_world_x[p] = _bp->x;
+        out->player_world_y[p] = _bp->y;
         out->player_entry_active[p] = true;
         active_count++;
     }
@@ -3291,19 +3273,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             _k->name[sizeof(_k->name) - 1] = '\0';
         }
 
-        float _nwx = npc->x, _nwy = npc->y;
-        if (npc->ship_id != 0) {
-            float _nspx, _nspy;
-            if (snap_ship_lut_aoi_pos(lut, out, npc->ship_id, &_nspx, &_nspy)) {
-                _nwx = _nspx;
-                _nwy = _nspy;
-            }
-            out->npc_world_x[n] = _nwx;
-            out->npc_world_y[n] = _nwy;
-        } else if (_dirty) {
-            out->npc_world_x[n] = _nwx;
-            out->npc_world_y[n] = _nwy;
-        }
+        out->npc_world_x[n] = npc->x;
+        out->npc_world_y[n] = npc->y;
         out->npc_entry_active[n] = true;
     }
     /* npcs_json is unused in the send path; mark empty so stale data is never read. */
