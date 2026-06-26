@@ -51,7 +51,9 @@ static int format_dominators_extra(const PlacedStructure *s, char *buf, int cap)
     if (!s || s->dominator_count == 0) { if (cap > 0) buf[0] = '\0'; return 0; }
     int n = snprintf(buf, cap, ",\"dominators\":[");
     for (int i = 0; i < s->dominator_count && n < cap - 16; i++) {
-        n += snprintf(buf + n, cap - n, "%s%u", i ? "," : "", s->dominators[i]);
+        if (i > 0 && n < cap - 1)
+            buf[n++] = ',';
+        n += snprintf(buf + n, (size_t)(cap - n), "%u", s->dominators[i]);
     }
     n += snprintf(buf + n, cap - n, "]");
     return n;
@@ -2216,6 +2218,8 @@ static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
         memcpy(_dst[i].owner_name, _src[i].owner_name, sizeof(_dst[i].owner_name));
         _dst[i].spawn_time_ms = _src[i].spawn_time_ms;
         active++;
+        if (active >= tombstone_live_count)
+            break;
     }
     return active;
 }
@@ -2231,6 +2235,8 @@ static int copy_dropped_items_to_blob(const DroppedItem *_src, DroppedItem *_dst
         }
         _dst[i] = _src[i];
         active++;
+        if (active >= dropped_item_live_count)
+            break;
     }
     return active;
 }
@@ -2758,6 +2764,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         out->tmb_json[2] = '\0';
         out->tmb_len = 2;
     } else {
+    int _tmb_done = 0;
     for (int _ti = 0; _ti < (int)MAX_TOMBSTONES; _ti++) {
         if (!snap->tombstones[_ti].active) continue;
         uint32_t _age = snap->current_time - snap->tombstones[_ti].spawn_time_ms;
@@ -2777,6 +2784,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
             snap->tombstones[_ti].id, _tx, _ty, snap->tombstones[_ti].owner_name, _rem);
         _tf = false;
+        if (++_tmb_done >= snap->tombstone_active_count)
+            break;
     }
     if (_to < (int)sizeof(out->tmb_json) - 1) out->tmb_json[_to++] = ']';
     out->tmb_json[_to] = '\0';
@@ -2792,6 +2801,7 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         out->ditem_json[2] = '\0';
         out->ditem_len = 2;
     } else {
+    int _ditem_done = 0;
     for (int _di = 0; _di < (int)MAX_DROPPED_ITEMS; _di++) {
         if (!snap->dropped_items[_di].active) continue;
         /* Reserve headroom for one worst-case schematic entry + closing ']'. */
@@ -2871,6 +2881,8 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         }
         _do += _dn;
         _df = false;
+        if (++_ditem_done >= snap->dropped_item_active_count)
+            break;
     }
     if (_ditem_truncated) {
         log_warn("📦  droppedItems JSON truncated at %d bytes (cap %zu)",
@@ -3542,10 +3554,15 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             }
 
             int _aoi_s = ships_offset;
-            int n = snprintf(out->ships_json + ships_offset,
-                             sizeof(out->ships_json) - (size_t)(ships_offset < (int)sizeof(out->ships_json) ? ships_offset : (int)sizeof(out->ships_json)-1),
-                             "%s", ship_entry);
-            if (n > 0) ships_offset += n;
+            int n = 0;
+            if (offset > 0) {
+                size_t _gs_room = sizeof(out->ships_json) - (size_t)ships_offset;
+                if ((size_t)offset < _gs_room) {
+                    memcpy(out->ships_json + ships_offset, ship_entry, (size_t)offset);
+                    n = offset;
+                    ships_offset += n;
+                }
+            }
             if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
             if (out->aoi_ship_count < MAX_SHIPS && n > 0) {
                 int _idx = out->aoi_ship_count++;
@@ -3644,10 +3661,15 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             }
             offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
             int _aoi_s2 = ships_offset;
-            int n2 = snprintf(out->ships_json + ships_offset,
-                              sizeof(out->ships_json) - (size_t)(ships_offset < (int)sizeof(out->ships_json) ? ships_offset : (int)sizeof(out->ships_json)-1),
-                              "%s", ship_entry);
-            if (n2 > 0) ships_offset += n2;
+            int n2 = 0;
+            if (offset > 0) {
+                size_t _gs_room = sizeof(out->ships_json) - (size_t)ships_offset;
+                if ((size_t)offset < _gs_room) {
+                    memcpy(out->ships_json + ships_offset, ship_entry, (size_t)offset);
+                    n2 = offset;
+                    ships_offset += n2;
+                }
+            }
             if (ships_offset >= (int)sizeof(out->ships_json) - 1) ships_offset = (int)sizeof(out->ships_json) - 1;
             if (out->aoi_ship_count < MAX_SHIPS && n2 > 0) {
                 int _idx = out->aoi_ship_count++;
@@ -3745,8 +3767,6 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (dynamic_company_count > 0)
         memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies,
                (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
-    else
-        memset(g_blob_worker.job.dynamic_companies, 0, sizeof(g_blob_worker.job.dynamic_companies));
     g_blob_worker.job.dynamic_company_count = dynamic_company_count;
     /* Copy only active ship slots (not the full 200-entry array).
      * SimpleShip is ~8-10 KB each; copying 200 entries even when 8 are active
@@ -3758,7 +3778,7 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++) {
         if (players[_bpi].active)
             copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
-        else
+        else if (g_blob_worker.job.players[_bpi].active)
             g_blob_worker.job.players[_bpi].active = false;
     }
     g_blob_worker.job.sim_ship_count = 0;
@@ -3788,8 +3808,6 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (claim_flag_count > 0)
         memcpy(g_blob_worker.job.claim_flags, claim_flags,
                (size_t)claim_flag_count * sizeof(claim_flags[0]));
-    else
-        memset(g_blob_worker.job.claim_flags, 0, sizeof(g_blob_worker.job.claim_flags));
     g_blob_worker.has_job = true;
     g_blob_worker.jobs_submitted++;
     pthread_cond_signal(&g_blob_worker.cv);
@@ -14058,8 +14076,6 @@ void websocket_server_send_game_state(void) {
             if (dynamic_company_count > 0)
                 memcpy(_snap.dynamic_companies, dynamic_companies,
                        (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
-            else
-                memset(_snap.dynamic_companies, 0, sizeof(_snap.dynamic_companies));
             _snap.dynamic_company_count = dynamic_company_count;
             _snap.ship_count = ship_count;
             if (ship_count > 0)
@@ -14094,8 +14110,6 @@ void websocket_server_send_game_state(void) {
             if (claim_flag_count > 0)
                 memcpy(_snap.claim_flags, claim_flags,
                        (size_t)claim_flag_count * sizeof(claim_flags[0]));
-            else
-                memset(_snap.claim_flags, 0, sizeof(_snap.claim_flags));
             build_shared_blobs_from_snapshot(&_snap, &shared_blob_fallback, &g_blob_sync_lut);
             blob_worker_note_fallback_build();
             shared_blob_ptr = &shared_blob_fallback;
