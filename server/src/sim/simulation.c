@@ -1259,38 +1259,56 @@ entity_id sim_create_projectile(struct Sim* sim, Vec2Q16 position, Vec2Q16 veloc
     return id;
 }
 
-// Entity lookup functions
-struct Ship* sim_get_ship(struct Sim* sim, entity_id id) {
-    if (!sim) return NULL;
-    
-    for (uint16_t i = 0; i < sim->ship_count; i++) {
-        if (sim->ships[i].id == id) {
-            return &sim->ships[i];
-        }
+// Entity lookup functions — arrays are kept sorted by id each tick (insertion sort).
+static struct Ship* sim_find_ship_sorted(struct Sim* sim, entity_id id) {
+    int lo = 0, hi = (int)sim->ship_count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        entity_id mid_id = sim->ships[mid].id;
+        if (mid_id == id) return &sim->ships[mid];
+        if (mid_id < id) lo = mid + 1;
+        else hi = mid - 1;
     }
     return NULL;
+}
+
+static struct Player* sim_find_player_sorted(struct Sim* sim, entity_id id) {
+    int lo = 0, hi = (int)sim->player_count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        entity_id mid_id = sim->players[mid].id;
+        if (mid_id == id) return &sim->players[mid];
+        if (mid_id < id) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return NULL;
+}
+
+static struct Projectile* sim_find_projectile_sorted(struct Sim* sim, entity_id id) {
+    int lo = 0, hi = (int)sim->projectile_count - 1;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        entity_id mid_id = sim->projectiles[mid].id;
+        if (mid_id == id) return &sim->projectiles[mid];
+        if (mid_id < id) lo = mid + 1;
+        else hi = mid - 1;
+    }
+    return NULL;
+}
+
+struct Ship* sim_get_ship(struct Sim* sim, entity_id id) {
+    if (!sim) return NULL;
+    return sim_find_ship_sorted(sim, id);
 }
 
 struct Player* sim_get_player(struct Sim* sim, entity_id id) {
     if (!sim) return NULL;
-    
-    for (uint16_t i = 0; i < sim->player_count; i++) {
-        if (sim->players[i].id == id) {
-            return &sim->players[i];
-        }
-    }
-    return NULL;
+    return sim_find_player_sorted(sim, id);
 }
 
 struct Projectile* sim_get_projectile(struct Sim* sim, entity_id id) {
     if (!sim) return NULL;
-    
-    for (uint16_t i = 0; i < sim->projectile_count; i++) {
-        if (sim->projectiles[i].id == id) {
-            return &sim->projectiles[i];
-        }
-    }
-    return NULL;
+    return sim_find_projectile_sorted(sim, id);
 }
 
 void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
@@ -1347,8 +1365,7 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
     // Handle action buttons
     if (cmd->actions & PLAYER_ACTION_FIRE_CANNON) {
         // Fire cannon if player has one equipped
-        struct Player* player = sim_get_player(sim, cmd->player_id);
-        if (player && player->ship_id != INVALID_ENTITY_ID) {
+        if (player->ship_id != INVALID_ENTITY_ID) {
             // Find the ship the player is on
             struct Ship* ship = sim_get_ship(sim, player->ship_id);
             if (ship) {
@@ -1370,7 +1387,6 @@ void sim_process_input(struct Sim* sim, const struct InputCmd* cmd) {
     
     if (cmd->actions & PLAYER_ACTION_JUMP) {
         // Handle player jump
-        struct Player* player = sim_get_player(sim, cmd->player_id);
         if (player) {
             // Add vertical velocity for jump
             player->velocity.y = q16_add_sat(player->velocity.y, Q16_FROM_INT(5)); // 5 m/s upward
