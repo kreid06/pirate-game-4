@@ -2200,8 +2200,6 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
 }
 
 static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
-    if (tombstone_live_count == 0)
-        return 0;
     int active = 0;
     for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
         if (!_src[i].active) {
@@ -2218,15 +2216,11 @@ static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
         memcpy(_dst[i].owner_name, _src[i].owner_name, sizeof(_dst[i].owner_name));
         _dst[i].spawn_time_ms = _src[i].spawn_time_ms;
         active++;
-        if (active >= tombstone_live_count)
-            break;
     }
     return active;
 }
 
 static int copy_dropped_items_to_blob(const DroppedItem *_src, DroppedItem *_dst) {
-    if (dropped_item_live_count == 0)
-        return 0;
     int active = 0;
     for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
         if (!_src[i].active) {
@@ -2235,8 +2229,6 @@ static int copy_dropped_items_to_blob(const DroppedItem *_src, DroppedItem *_dst
         }
         _dst[i] = _src[i];
         active++;
-        if (active >= dropped_item_live_count)
-            break;
     }
     return active;
 }
