@@ -55,7 +55,7 @@ static int format_dominators_extra(const PlacedStructure *s, char *buf, int cap)
             buf[n++] = ',';
         n += snprintf(buf + n, (size_t)(cap - n), "%u", s->dominators[i]);
     }
-    n += snprintf(buf + n, cap - n, "]");
+    n += snprintf(buf + n, (size_t)(cap - n), "]");
     return n;
 }
 
@@ -413,11 +413,11 @@ typedef struct {
     int      aoi_ship_start[MAX_SHIPS];
     int      aoi_ship_len[MAX_SHIPS];
     int      aoi_ship_count;
-    char tmb_json[4096];
+    char tmb_json[8192];    /* 8 KB — MAX_TOMBSTONES (64) × ~120 B with ownerName[64] */
     char ditem_json[65536]; /* 64 KB — MAX_DROPPED_ITEMS (256) × ~220 B schematic entries */
-    char co_json[1024];
+    char co_json[8192];     /* 8 KB — MAX_DYNAMIC_COMPANIES (64) × ~85 B */
     char players_json[65536];
-    char projectiles_json[32768];
+    char projectiles_json[65536]; /* 64 KB — MAX_PROJECTILES (500) × ~95 B */
     char npcs_json[32768];
     int  tmb_len;
     int  ditem_len;
@@ -506,7 +506,9 @@ typedef struct {
     bool started;
     bool has_job;
     bool has_output;
-    SharedBlobSnapshot job;
+    SharedBlobSnapshot job_bufs[2];
+    int job_write_idx;
+    int job_read_idx;
     SharedBlobOutput output_bufs[2];
     int output_read_idx;
     int worker_write_idx;
@@ -2771,10 +2773,17 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                 _ty = _ship->y + (snap->tombstones[_ti].local_x * _s + snap->tombstones[_ti].local_y * _c);
             }
         }
+        if (_to >= (int)sizeof(out->tmb_json) - 128)
+            break;
         if (!_tf && _to < (int)sizeof(out->tmb_json) - 2) out->tmb_json[_to++] = ',';
-        _to += snprintf(out->tmb_json + _to, sizeof(out->tmb_json) - _to,
-            "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
-            snap->tombstones[_ti].id, _tx, _ty, snap->tombstones[_ti].owner_name, _rem);
+        {
+            int _tn = snprintf(out->tmb_json + _to, sizeof(out->tmb_json) - (size_t)_to,
+                "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"ownerName\":\"%s\",\"remainingMs\":%u}",
+                snap->tombstones[_ti].id, _tx, _ty, snap->tombstones[_ti].owner_name, _rem);
+            if (_tn < 0 || (size_t)_tn >= sizeof(out->tmb_json) - (size_t)_to)
+                break;
+            _to += _tn;
+        }
         _tf = false;
         if (++_tmb_done >= snap->tombstone_active_count)
             break;
@@ -2898,11 +2907,18 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     } else {
     for (int _ci2 = 0; _ci2 < _dcc; _ci2++) {
         if (!snap->dynamic_companies[_ci2].active) continue;
+        if (_co >= (int)sizeof(out->co_json) - 96)
+            break;
         if (!_cf && _co < (int)sizeof(out->co_json) - 2) out->co_json[_co++] = ',';
-        _co += snprintf(out->co_json + _co, sizeof(out->co_json) - _co,
-            "{\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
-            snap->dynamic_companies[_ci2].id, snap->dynamic_companies[_ci2].name,
-            snap->dynamic_companies[_ci2].founder_id);
+        {
+            int _cn = snprintf(out->co_json + _co, sizeof(out->co_json) - (size_t)_co,
+                "{\"id\":%u,\"name\":\"%s\",\"founderId\":%u}",
+                snap->dynamic_companies[_ci2].id, snap->dynamic_companies[_ci2].name,
+                snap->dynamic_companies[_ci2].founder_id);
+            if (_cn < 0 || (size_t)_cn >= sizeof(out->co_json) - (size_t)_co)
+                break;
+            _co += _cn;
+        }
         _cf = false;
     }
     if (_co < (int)sizeof(out->co_json) - 1) out->co_json[_co++] = ']';
@@ -3184,7 +3200,12 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     } else {
     out->projectiles_json[projectiles_offset++] = '[';
     bool first_projectile = true;
+    bool _proj_truncated = false;
     for (uint16_t p = 0; p < _pc; p++) {
+        if (projectiles_offset >= (int)sizeof(out->projectiles_json) - 128) {
+            _proj_truncated = true;
+            break;
+        }
         const struct Projectile* proj = &snap->projectiles[p];
         if (!first_projectile) {
             if (projectiles_offset < (int)sizeof(out->projectiles_json) - 1)
@@ -3194,11 +3215,22 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         float proj_y = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->position.y));
         float proj_vx = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.x));
         float proj_vy = SERVER_TO_CLIENT(Q16_TO_FLOAT(proj->velocity.y));
-        projectiles_offset += snprintf(out->projectiles_json + projectiles_offset,
-                                       sizeof(out->projectiles_json) - projectiles_offset,
-                                       "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"vy\":%.1f,\"type\":%u,\"owner\":%u}",
-                                       proj->id, proj_x, proj_y, proj_vx, proj_vy, proj->type, proj->owner_id);
+        {
+            int _pn = snprintf(out->projectiles_json + projectiles_offset,
+                               sizeof(out->projectiles_json) - (size_t)projectiles_offset,
+                               "{\"id\":%u,\"x\":%.1f,\"y\":%.1f,\"vx\":%.1f,\"vy\":%.1f,\"type\":%u,\"owner\":%u}",
+                               proj->id, proj_x, proj_y, proj_vx, proj_vy, proj->type, proj->owner_id);
+            if (_pn < 0 || (size_t)_pn >= sizeof(out->projectiles_json) - (size_t)projectiles_offset) {
+                _proj_truncated = true;
+                break;
+            }
+            projectiles_offset += _pn;
+        }
         first_projectile = false;
+    }
+    if (_proj_truncated) {
+        log_warn("📦  projectiles JSON truncated at %d bytes (cap %zu)",
+                 projectiles_offset, sizeof(out->projectiles_json));
     }
     if (projectiles_offset < (int)sizeof(out->projectiles_json) - 1)
         out->projectiles_json[projectiles_offset++] = ']';
@@ -3683,7 +3715,6 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
 
 static void* blob_worker_main(void* arg) {
     (void)arg;
-    SharedBlobSnapshot local_job;
 
     pthread_mutex_lock(&g_blob_worker.mtx);
     while (g_blob_worker.running) {
@@ -3692,13 +3723,13 @@ static void* blob_worker_main(void* arg) {
         }
         if (!g_blob_worker.running) break;
 
-        local_job = g_blob_worker.job;
+        const SharedBlobSnapshot* job = &g_blob_worker.job_bufs[g_blob_worker.job_read_idx];
         g_blob_worker.has_job = false;
         int write_idx = g_blob_worker.worker_write_idx;
         pthread_mutex_unlock(&g_blob_worker.mtx);
 
         uint64_t _t0 = get_time_us();
-        build_shared_blobs_from_snapshot(&local_job, &g_blob_worker.output_bufs[write_idx],
+        build_shared_blobs_from_snapshot(job, &g_blob_worker.output_bufs[write_idx],
                                          &g_blob_worker_lut);
         uint64_t _dt = get_time_us() - _t0;
 
@@ -3750,56 +3781,59 @@ static void blob_worker_stop(void) {
 static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (!g_blob_worker.started) return;
     pthread_mutex_lock(&g_blob_worker.mtx);
-    g_blob_worker.job.current_time = current_time;
-    g_blob_worker.job.tick = global_sim ? global_sim->tick : 0;
-    g_blob_worker.job.tombstone_active_count =
-        copy_tombstones_to_blob(tombstones, g_blob_worker.job.tombstones);
-    g_blob_worker.job.dropped_item_active_count =
-        copy_dropped_items_to_blob(dropped_items, g_blob_worker.job.dropped_items);
+    SharedBlobSnapshot* job = &g_blob_worker.job_bufs[g_blob_worker.job_write_idx];
+    job->current_time = current_time;
+    job->tick = global_sim ? global_sim->tick : 0;
+    job->tombstone_active_count =
+        copy_tombstones_to_blob(tombstones, job->tombstones);
+    job->dropped_item_active_count =
+        copy_dropped_items_to_blob(dropped_items, job->dropped_items);
     if (dynamic_company_count > 0)
-        memcpy(g_blob_worker.job.dynamic_companies, dynamic_companies,
+        memcpy(job->dynamic_companies, dynamic_companies,
                (size_t)dynamic_company_count * sizeof(dynamic_companies[0]));
-    g_blob_worker.job.dynamic_company_count = dynamic_company_count;
+    job->dynamic_company_count = dynamic_company_count;
     /* Copy only active ship slots (not the full 200-entry array).
      * SimpleShip is ~8-10 KB each; copying 200 entries even when 8 are active
      * was wasting ~1.6 MB of memcpy bandwidth per tick on the hot path. */
-    g_blob_worker.job.ship_count = ship_count;
+    job->ship_count = ship_count;
     if (ship_count > 0)
-        memcpy(g_blob_worker.job.ships, ships,
+        memcpy(job->ships, ships,
                (size_t)ship_count * sizeof(ships[0]));
     for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++) {
         if (players[_bpi].active)
-            copy_player_to_blob(&players[_bpi], &g_blob_worker.job.players[_bpi]);
-        else if (g_blob_worker.job.players[_bpi].active)
-            g_blob_worker.job.players[_bpi].active = false;
+            copy_player_to_blob(&players[_bpi], &job->players[_bpi]);
+        else if (job->players[_bpi].active)
+            job->players[_bpi].active = false;
     }
-    g_blob_worker.job.sim_ship_count = 0;
+    job->sim_ship_count = 0;
     if (global_sim) {
         uint16_t _ss = global_sim->ship_count;
         if (_ss > MAX_SHIPS) _ss = MAX_SHIPS;
-        g_blob_worker.job.sim_ship_count = _ss;
-        memcpy(g_blob_worker.job.sim_ships, global_sim->ships,
+        job->sim_ship_count = _ss;
+        memcpy(job->sim_ships, global_sim->ships,
                (size_t)_ss * sizeof(struct Ship));
     }
-    g_blob_worker.job.projectile_count = 0;
+    job->projectile_count = 0;
     if (global_sim) {
         uint16_t _pc = global_sim->projectile_count;
         if (_pc > MAX_PROJECTILES) _pc = MAX_PROJECTILES;
-        g_blob_worker.job.projectile_count = _pc;
-        memcpy(g_blob_worker.job.projectiles, global_sim->projectiles,
+        job->projectile_count = _pc;
+        memcpy(job->projectiles, global_sim->projectiles,
                (size_t)_pc * sizeof(struct Projectile));
     }
     /* Copy only active NPC slots (not the full 512-entry array).
      * WorldNpc is ~420 B each; copying all 512 even when 80 are active
      * was wasting ~215 KB per tick. */
-    g_blob_worker.job.world_npc_count = world_npc_count;
+    job->world_npc_count = world_npc_count;
     if (world_npc_count > 0)
-        memcpy(g_blob_worker.job.world_npcs, world_npcs,
+        memcpy(job->world_npcs, world_npcs,
                (size_t)world_npc_count * sizeof(world_npcs[0]));
-    g_blob_worker.job.claim_flag_count = claim_flag_count;
+    job->claim_flag_count = claim_flag_count;
     if (claim_flag_count > 0)
-        memcpy(g_blob_worker.job.claim_flags, claim_flags,
+        memcpy(job->claim_flags, claim_flags,
                (size_t)claim_flag_count * sizeof(claim_flags[0]));
+    g_blob_worker.job_read_idx = g_blob_worker.job_write_idx;
+    g_blob_worker.job_write_idx = 1 - g_blob_worker.job_write_idx;
     g_blob_worker.has_job = true;
     g_blob_worker.jobs_submitted++;
     pthread_cond_signal(&g_blob_worker.cv);
@@ -14235,8 +14269,12 @@ void websocket_server_send_game_state(void) {
             if (_goff + 12 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"players\":[" , 12); _goff += 12; }
             {
                 bool _ppf = true;
-                for (int _p = 0; _p < WS_MAX_CLIENTS; _p++) {
-                    if (!blobs->player_entry_active[_p]) continue;
+                int _pac = blobs->player_active_slot_count;
+                if (_pac < 0) _pac = 0;
+                if (_pac > WS_MAX_CLIENTS) _pac = WS_MAX_CLIENTS;
+                for (int _pai = 0; _pai < _pac; _pai++) {
+                    int _p = (int)blobs->player_active_slots[_pai];
+                    if (_p < 0 || _p >= WS_MAX_CLIENTS || !blobs->player_entry_active[_p]) continue;
                     float _pdx = blobs->player_world_x[_p] - _cx;
                     float _pdy = blobs->player_world_y[_p] - _cy;
                     if (_pdx*_pdx + _pdy*_pdy > _view_r2) continue;
@@ -14258,11 +14296,12 @@ void websocket_server_send_game_state(void) {
             if (_goff + 9 < (size_t)(PER_GS_BUF - 1)) { memcpy(per_gs + _goff, ",\"npcs\":[" , 9); _goff += 9; }
             {
                 bool _npf = true;
-                int _ncount = blobs->npc_entry_count;
-                if (_ncount < 0) _ncount = 0;
-                if (_ncount > MAX_WORLD_NPCS) _ncount = MAX_WORLD_NPCS;
-                for (int _n = 0; _n < _ncount; _n++) {
-                    if (!blobs->npc_entry_active[_n]) continue;
+                int _nac = blobs->npc_active_slot_count;
+                if (_nac < 0) _nac = 0;
+                if (_nac > MAX_WORLD_NPCS) _nac = MAX_WORLD_NPCS;
+                for (int _nai = 0; _nai < _nac; _nai++) {
+                    int _n = (int)blobs->npc_active_slots[_nai];
+                    if (_n < 0 || _n >= MAX_WORLD_NPCS || !blobs->npc_entry_active[_n]) continue;
                     float _ndx = blobs->npc_world_x[_n] - _cx;
                     float _ndy = blobs->npc_world_y[_n] - _cy;
                     if (_ndx*_ndx + _ndy*_ndy > _view_r2) continue;
