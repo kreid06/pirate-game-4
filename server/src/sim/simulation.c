@@ -2268,6 +2268,9 @@ void handle_projectile_collisions(struct Sim* sim) {
     while (i < sim->projectile_count) {
         struct Projectile* proj = &sim->projectiles[i];
         bool removed = false;
+        struct Ship* firing_ship = NULL;
+        if (proj->firing_ship_id != INVALID_ENTITY_ID)
+            firing_ship = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
 
         /* Liquid flame flies through hull/planks/modules — fire effects are applied
          * in the websocket_server entity-scan loop each tick.  Skip all geometric
@@ -2284,10 +2287,7 @@ void handle_projectile_collisions(struct Sim* sim) {
             }
 
             // Ghost ships are immune to projectiles fired by other ghost ships
-            if (ship->company_id == 99 && proj->firing_ship_id != INVALID_ENTITY_ID) {
-                struct Ship* shooter = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
-                if (shooter && shooter->company_id == 99) continue;
-            }
+            if (ship->company_id == 99 && firing_ship && firing_ship->company_id == 99) continue;
 
             // Cannonballs hit all ships including allies — no friendly-fire skip
 
@@ -2321,7 +2321,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     }
                     ship->hull_health = hull_hp;
                     if (proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        struct Ship* attacker = firing_ship;
                         if (attacker) attacker->level_stats.xp += 5u;
                     }
                     memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
@@ -2410,7 +2410,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                     }
 
                     if (center_hit && proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                        struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                        struct Ship* attacker = firing_ship;
                         if (attacker)
                             attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                     }
@@ -2554,7 +2554,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                                 ev->shooter_ship_id = proj->firing_ship_id;
                             }
                             if (proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                                struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                                struct Ship* attacker = firing_ship;
                                 if (attacker)
                                     attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
                             }
@@ -2574,7 +2574,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                                 ev->shooter_ship_id = proj->firing_ship_id;
                             }
                             if (proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                                struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                                struct Ship* attacker = firing_ship;
                                 if (attacker)
                                     attacker->level_stats.xp += 10u + (uint32_t)(plank_damage_dealt / 100.0f);
                             }
@@ -2668,7 +2668,7 @@ void handle_projectile_collisions(struct Sim* sim) {
                             ev->shooter_ship_id = proj->firing_ship_id;
                         }
                         if (proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            struct Ship* attacker = firing_ship;
                             if (attacker)
                                 attacker->level_stats.xp += 10u + (uint32_t)(deck_dmg / 100.0f);
                         }
@@ -2795,7 +2795,7 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                         /* Award XP to the attacker ship (skip if target is a ghost) */
                         if (proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            struct Ship* attacker = firing_ship;
                             if (attacker)
                                 attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                         }
@@ -2823,7 +2823,7 @@ void handle_projectile_collisions(struct Sim* sim) {
 
                         /* Award XP to the attacker ship (skip if target is a ghost) */
                         if (proj->firing_ship_id != INVALID_ENTITY_ID && ship->company_id != 99 /*COMPANY_GHOST*/) {
-                            struct Ship* attacker = sim_get_ship(sim, (entity_id)proj->firing_ship_id);
+                            struct Ship* attacker = firing_ship;
                             if (attacker)
                                 attacker->level_stats.xp += 10u + (uint32_t)(damage_dealt / 100.0f);
                         }

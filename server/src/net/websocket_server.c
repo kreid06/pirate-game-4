@@ -398,6 +398,10 @@ typedef struct {
     int claim_flag_count;
     int tombstone_active_count;
     int dropped_item_active_count;
+    uint8_t  player_active_slots[WS_MAX_CLIENTS];
+    int      player_active_slot_count;
+    uint16_t npc_active_slots[MAX_WORLD_NPCS];
+    int      npc_active_slot_count;
 } SharedBlobSnapshot;
 
 typedef struct {
@@ -2935,8 +2939,12 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     for (int _pai = 0; _pai < out->player_active_slot_count; _pai++)
         out->player_entry_active[out->player_active_slots[_pai]] = false;
     out->player_active_slot_count = 0;
-    for (int p = 0; p < WS_MAX_CLIENTS; p++) {
-        if (!snap->players[p].active) continue;
+    int _snap_pac = snap->player_active_slot_count;
+    if (_snap_pac < 0) _snap_pac = 0;
+    if (_snap_pac > WS_MAX_CLIENTS) _snap_pac = WS_MAX_CLIENTS;
+    for (int _pai = 0; _pai < _snap_pac; _pai++) {
+        int p = (int)snap->player_active_slots[_pai];
+        if (p < 0 || p >= WS_MAX_CLIENTS || !snap->players[p].active) continue;
 
         const GrappleHook* _gh = &grapple_hooks[p];
         uint8_t  _g_state  = (_gh->active && _gh->state != GRAPPLE_IDLE) ? (uint8_t)_gh->state : 0;
@@ -3000,17 +3008,17 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
         if (_dirty) {
             char inv_buf[1024];
             int inv_off = 0;
-            inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+            inv_off += snprintf(inv_buf + inv_off, (size_t)(sizeof(inv_buf) - (size_t)inv_off),
                                 ",\"inventory\":{\"slots\":[");
             for (int s = 0; s < INVENTORY_SLOTS; s++) {
                 if (s > 0 && inv_off < (int)sizeof(inv_buf) - 1)
                     inv_buf[inv_off++] = ',';
-                inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+                inv_off += snprintf(inv_buf + inv_off, (size_t)(sizeof(inv_buf) - (size_t)inv_off),
                                     "[%d,%d]",
                                     (int)snap->players[p].inventory.slots[s].item,
                                     (int)snap->players[p].inventory.slots[s].quantity);
             }
-            inv_off += snprintf(inv_buf + inv_off, sizeof(inv_buf) - inv_off,
+            inv_off += snprintf(inv_buf + inv_off, (size_t)(sizeof(inv_buf) - (size_t)inv_off),
                                 "],\"equip\":{\"helm\":%d,\"torso\":%d,\"legs\":%d,"
                                 "\"feet\":%d,\"hands\":%d,\"shield\":%d},"
                                 "\"activeSlot\":%d,"
@@ -3250,11 +3258,13 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     for (int _nai = 0; _nai < out->npc_active_slot_count; _nai++)
         out->npc_entry_active[out->npc_active_slots[_nai]] = false;
     out->npc_active_slot_count = 0;
-    int _wnc = snap->world_npc_count;
-    if (_wnc < 0) _wnc = 0;
-    if (_wnc > MAX_WORLD_NPCS) _wnc = MAX_WORLD_NPCS;
-    out->npc_entry_count = _wnc;
-    for (int n = 0; n < _wnc; n++) {
+    int _snap_nac = snap->npc_active_slot_count;
+    if (_snap_nac < 0) _snap_nac = 0;
+    if (_snap_nac > MAX_WORLD_NPCS) _snap_nac = MAX_WORLD_NPCS;
+    out->npc_entry_count = _snap_nac;
+    for (int _nai = 0; _nai < _snap_nac; _nai++) {
+        int n = (int)snap->npc_active_slots[_nai];
+        if (n < 0 || n >= MAX_WORLD_NPCS) continue;
         const WorldNpc* npc = &snap->world_npcs[n];
         if (!npc->active) continue;
 
@@ -3430,14 +3440,14 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     ship_entry[offset++] = ',';
                 const ShipModule* module = &ship->modules[m];
                 if (module->type_id == MODULE_TYPE_PLANK) {
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"qt\":%d,\"qd\":%u}",
                                                         module->id, module->type_id,
                         (int)module->health, (int)module->target_health, (int)module->max_health,
                         module_quality_tier(module),
                         (unsigned)module->quality.stat_mult_q8[STAT_DURABILITY]);
                 } else if (module->type_id == MODULE_TYPE_DECK) {
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"health\":%d,\"maxHealth\":%d,\"targetHealth\":%d,\"stateBits\":%u,\"deck_id\":%u,\"qt\":%d,\"qd\":%u}",
                                                         module->id, module->type_id,
                         (int)module->health, (int)module->max_health, (int)module->target_health,
@@ -3453,7 +3463,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                         float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
                         float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                         float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f,\"fiberFireIntensity\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d,\"qse\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
@@ -3463,7 +3473,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->quality.stat_mult_q8[STAT_SAIL_EFFECTIVENESS]);
                     } else if (module->type_id == MODULE_TYPE_CANNON) {
                         float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"gunportSnapIdx\":%u,\"qt\":%d,\"qw\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot, aim_direction,
@@ -3474,7 +3484,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->quality.stat_mult_q8[STAT_WEAPON_DAMAGE]);
                     } else if (module->type_id == MODULE_TYPE_SWIVEL) {
                         float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d,\"qw\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot, aim_dir,
@@ -3484,7 +3494,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->quality.stat_mult_q8[STAT_WEAPON_DAMAGE]);
                     } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                         float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u,\"health\":%d,\"targetHealth\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot, wheel_rot,
@@ -3493,7 +3503,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (int)module->health, (int)module->target_health, (int)module->max_health,
                             (unsigned)module->deck_id);
                     } else if (module->type_id == MODULE_TYPE_GUNPORT) {
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"isOpen\":%s,\"state\":%u,\"deck_id\":%u,\"snapIndex\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot,
@@ -3502,7 +3512,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             (unsigned)module->deck_id,
                             (unsigned)module->data.gunport.snap_idx);
                     } else if (module->type_id == MODULE_TYPE_CHEST) {
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u"
                             ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u}",
                                                         module->id, module->type_id,
@@ -3517,7 +3527,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                                module->type_id == MODULE_TYPE_DECK) {
                         /* Planks and decks send quality tier + durability multiplier so the
                          * client can display blueprint quality in hover tooltips and menus. */
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u,\"qt\":%d,\"qd\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot, (unsigned)module->state_bits,
@@ -3526,7 +3536,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                             module_quality_tier(module),
                             (unsigned)module->quality.stat_mult_q8[STAT_DURABILITY]);
                     } else {
-                        offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                        offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                             "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u,\"health\":%d,\"maxHealth\":%d,\"deck_id\":%u}",
                                                         module->id, module->type_id,
                             module_x, module_y, module_rot, (unsigned)module->state_bits,
@@ -3538,7 +3548,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
 
             uint32_t cur_xp = ship->level_stats.xp;
             uint32_t cur_tp = (uint32_t)ship_level_total_points(&ship->level_stats);
-            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+            offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                 "],\"levelStats\":{"
                 "\"weight\":%u,\"resistance\":%u,\"damage\":%u,\"crew\":%u,\"sturdiness\":%u,"
                 "\"xp\":%u,\"maxCrew\":%u,"
@@ -3567,7 +3577,7 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 cf = g_claim_by_ship_id[ship->id];
             if (cf && offset < (int)sizeof(ship_entry) - 200) {
                 if (offset > 0 && ship_entry[offset - 1] == '}') offset--;
-                offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                     ",\"claimFlag\":{\"planterId\":%u,\"planterCompany\":%u,"
                     "\"progressMs\":%.0f,\"totalMs\":%u,\"contested\":%s,"
                     "\"localX\":%.1f,\"localY\":%.1f}}",
@@ -3639,35 +3649,35 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     float wind_eff   = Q16_TO_FLOAT(module->data.mast.wind_efficiency);
                     float fh         = Q16_TO_FLOAT(module->data.mast.fiber_health);
                     float fhmax      = Q16_TO_FLOAT(module->data.mast.fiber_max_health);
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"openness\":%u,\"sailAngle\":%.3f,\"windEfficiency\":%.3f,\"fiberHealth\":%.0f,\"fiberMaxHealth\":%.0f}",
                                                         module->id, module->type_id,
                         module_x, module_y, module_rot, module->data.mast.openness, sail_angle, wind_eff,
                         fh, fhmax);
                 } else if (module->type_id == MODULE_TYPE_CANNON) {
                     float aim_direction = Q16_TO_FLOAT(module->data.cannon.aim_direction);
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
                                                         module->id, module->type_id,
                         module_x, module_y, module_rot, aim_direction,
                         (unsigned)module->state_bits);
                 } else if (module->type_id == MODULE_TYPE_SWIVEL) {
                     float aim_dir = Q16_TO_FLOAT(module->data.swivel.aim_direction);
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"aimDir\":%.3f,\"state\":%u}",
                                                         module->id, module->type_id,
                         module_x, module_y, module_rot, aim_dir,
                         (unsigned)module->state_bits);
                 } else if (module->type_id == MODULE_TYPE_HELM || module->type_id == MODULE_TYPE_STEERING_WHEEL) {
                     float wheel_rot = Q16_TO_FLOAT(module->data.helm.wheel_rotation);
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"wheelRot\":%.3f,\"occupied\":%s,\"state\":%u}",
                                                         module->id, module->type_id,
                         module_x, module_y, module_rot, wheel_rot,
                         (module->data.helm.occupied_by != 0) ? "true" : "false",
                         (unsigned)module->state_bits);
                 } else if (module->type_id == MODULE_TYPE_CHEST) {
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u"
                         ",\"wood\":%u,\"fiber\":%u,\"metal\":%u,\"stone\":%u}",
                                                         module->id, module->type_id,
@@ -3677,13 +3687,13 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                         (unsigned)module->data.chest.metal,
                         (unsigned)module->data.chest.stone);
                 } else {
-                    offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset,
+                    offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
                         "{\"id\":%u,\"typeId\":%u,\"x\":%.1f,\"y\":%.1f,\"rotation\":%.2f,\"state\":%u}",
                                                         module->id, module->type_id,
                         module_x, module_y, module_rot, (unsigned)module->state_bits);
                 }
             }
-            offset += snprintf(ship_entry + offset, sizeof(ship_entry) - offset, "]}");
+            offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset, "]}");
             int _aoi_s2 = ships_offset;
             int n2 = 0;
             if (offset > 0) {
@@ -3799,10 +3809,13 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (ship_count > 0)
         memcpy(job->ships, ships,
                (size_t)ship_count * sizeof(ships[0]));
+    job->player_active_slot_count = 0;
     for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++) {
-        if (players[_bpi].active)
+        if (players[_bpi].active) {
             copy_player_to_blob(&players[_bpi], &job->players[_bpi]);
-        else if (job->players[_bpi].active)
+            if (job->player_active_slot_count < WS_MAX_CLIENTS)
+                job->player_active_slots[job->player_active_slot_count++] = (uint8_t)_bpi;
+        } else if (job->players[_bpi].active)
             job->players[_bpi].active = false;
     }
     job->sim_ship_count = 0;
@@ -3825,9 +3838,16 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
      * WorldNpc is ~420 B each; copying all 512 even when 80 are active
      * was wasting ~215 KB per tick. */
     job->world_npc_count = world_npc_count;
-    if (world_npc_count > 0)
+    job->npc_active_slot_count = 0;
+    if (world_npc_count > 0) {
         memcpy(job->world_npcs, world_npcs,
                (size_t)world_npc_count * sizeof(world_npcs[0]));
+        for (int _nai = 0; _nai < world_npc_count; _nai++) {
+            if (!job->world_npcs[_nai].active) continue;
+            if (job->npc_active_slot_count < MAX_WORLD_NPCS)
+                job->npc_active_slots[job->npc_active_slot_count++] = (uint16_t)_nai;
+        }
+    }
     job->claim_flag_count = claim_flag_count;
     if (claim_flag_count > 0)
         memcpy(job->claim_flags, claim_flags,
@@ -14106,10 +14126,13 @@ void websocket_server_send_game_state(void) {
             _snap.ship_count = ship_count;
             if (ship_count > 0)
                 memcpy(_snap.ships, ships, (size_t)ship_count * sizeof(ships[0]));
+            _snap.player_active_slot_count = 0;
             for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++) {
-                if (players[_fbpi].active)
+                if (players[_fbpi].active) {
                     copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
-                else
+                    if (_snap.player_active_slot_count < WS_MAX_CLIENTS)
+                        _snap.player_active_slots[_snap.player_active_slot_count++] = (uint8_t)_fbpi;
+                } else
                     _snap.players[_fbpi].active = false;
             }
             _snap.sim_ship_count = 0;
@@ -14129,9 +14152,16 @@ void websocket_server_send_game_state(void) {
                        (size_t)_pc * sizeof(struct Projectile));
             }
             _snap.world_npc_count = world_npc_count;
-            if (world_npc_count > 0)
+            _snap.npc_active_slot_count = 0;
+            if (world_npc_count > 0) {
                 memcpy(_snap.world_npcs, world_npcs,
                        (size_t)world_npc_count * sizeof(world_npcs[0]));
+                for (int _nai = 0; _nai < world_npc_count; _nai++) {
+                    if (!_snap.world_npcs[_nai].active) continue;
+                    if (_snap.npc_active_slot_count < MAX_WORLD_NPCS)
+                        _snap.npc_active_slots[_snap.npc_active_slot_count++] = (uint16_t)_nai;
+                }
+            }
             _snap.claim_flag_count = claim_flag_count;
             if (claim_flag_count > 0)
                 memcpy(_snap.claim_flags, claim_flags,
