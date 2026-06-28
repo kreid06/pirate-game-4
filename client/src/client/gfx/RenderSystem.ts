@@ -320,6 +320,17 @@ export class RenderSystem {
   private _visibleShipsScratch: import('../../sim/Types.js').Ship[] = [];
   private _visiblePlayersScratch: import('../../sim/Types.js').Player[] = [];
   private _visibleCannonballsScratch: import('../../sim/Types.js').Cannonball[] = [];
+  /** Reused wrap-copy output lists (ships / players / cannonballs). */
+  private _wrapResultShips: import('../../sim/Types.js').Ship[] = [];
+  private _wrapResultPlayers: Player[] = [];
+  private _wrapResultCannonballs: import('../../sim/Types.js').Cannonball[] = [];
+  /** Cached camera frustum + render-distance gate for queueWorldObjects. */
+  private _cullBoundsMinX = 0;
+  private _cullBoundsMinY = 0;
+  private _cullBoundsMaxX = 0;
+  private _cullBoundsMaxY = 0;
+  private _cullCamX = 0;
+  private _cullCamY = 0;
   /** Pooled wrap-seam entity copies — reset each buildWrappedRenderCopies call. */
   private _wrapGhostEntities: Array<Record<string, unknown>> = [];
   private _wrapGhostPositions: Vec2[] = [];
@@ -1803,22 +1814,35 @@ export class RenderSystem {
     return out;
   }
 
+  /** Refresh scalar cull bounds once per queueWorldObjects (avoids per-entity allocs). */
+  private _refreshEntityCullBounds(camera: Camera): void {
+    const b = camera.getWorldBoundsRect();
+    this._cullBoundsMinX = b.minX;
+    this._cullBoundsMinY = b.minY;
+    this._cullBoundsMaxX = b.maxX;
+    this._cullBoundsMaxY = b.maxY;
+    this._cullCamX = camera.positionX;
+    this._cullCamY = camera.positionY;
+  }
+
   /** Camera frustum + renderDistance + fog gate for queueWorldObjects. */
   private _shouldRenderEntityAt(
     wx: number,
     wy: number,
     margin: number,
-    camera: Camera,
+    _camera: Camera,
     alwaysInclude: boolean,
   ): boolean {
-    if (!camera.isWorldPositionVisible(Vec2.from(wx, wy), margin)) return false;
+    if (wx < this._cullBoundsMinX - margin || wx > this._cullBoundsMaxX + margin ||
+        wy < this._cullBoundsMinY - margin || wy > this._cullBoundsMaxY + margin) {
+      return false;
+    }
     if (alwaysInclude) return true;
     const rd = this.config.renderDistance;
     if (rd > 0) {
-      const cam = camera.getState().position;
       const limit = rd + margin;
-      const dx = wx - cam.x;
-      const dy = wy - cam.y;
+      const dx = wx - this._cullCamX;
+      const dy = wy - this._cullCamY;
       if (dx * dx + dy * dy > limit * limit) return false;
     }
     return this.fogVisibleAt(wx, wy, margin);
@@ -1854,8 +1878,10 @@ export class RenderSystem {
     camera: Camera,
     margin: number,
     skipGhosts?: (entity: T) => boolean,
+    outScratch?: T[],
   ): T[] {
-    const out: T[] = [];
+    const out = outScratch ?? [];
+    out.length = 0;
     this._wrapGhostIdx = 0;
 
     for (const entity of entities) {
@@ -9611,6 +9637,8 @@ export class RenderSystem {
     // Clear render queue buckets
     for (const b of this.renderBuckets) b.length = 0;
 
+    this._refreshEntityCullBounds(camera);
+
     // Cache local player's company for enemy-coloring this frame (already set at renderWorld entry)
     // this._localCompanyId is updated there; no second find() needed.
 
@@ -9738,17 +9766,18 @@ export class RenderSystem {
     // so the player never loses their own ship when at the fog boundary.
     const renderShips = this.buildWrappedRenderCopies(
       this._collectFogVisibleShips(worldState.ships, _localCarrierId, camera),
-      camera, 520
+      camera, 520, undefined, this._wrapResultShips,
     );
     const renderPlayers = this.buildWrappedRenderCopies(
       this._collectVisiblePlayers(worldState.players, camera),
       camera,
       80,
       (p) => p.id === this.localPlayerId,
+      this._wrapResultPlayers,
     );
     const renderCannonballs = this.buildWrappedRenderCopies(
       this._collectVisibleCannonballs(worldState.cannonballs, camera),
-      camera, 40,
+      camera, 40, undefined, this._wrapResultCannonballs,
     );
     
     // Render order (from lowest to highest):

@@ -210,7 +210,17 @@ function parseClientConfigFromUrl(): Partial<ClientConfig> {
   if (params.has('debug')) {
     config.debug = {
       ...DEFAULT_CLIENT_CONFIG.debug,
-      enabled: params.get('debug') === 'true'
+      enabled: params.get('debug') === 'true',
+    };
+  }
+
+  // Extended perf HUD: ?debug=true&perfstats=true
+  if (params.get('perfstats') === 'true') {
+    config.debug = {
+      ...DEFAULT_CLIENT_CONFIG.debug,
+      ...config.debug,
+      enabled: true,
+      showPerformanceStats: true,
     };
   }
   

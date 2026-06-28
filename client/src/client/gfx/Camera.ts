@@ -237,14 +237,38 @@ export class Camera {
   }
   
   /**
+   * World-space viewport AABB as scalars — no Vec2 allocation (hot culling path).
+   */
+  getWorldBoundsRect(): { minX: number; minY: number; maxX: number; maxY: number } {
+    const topLeft = this.screenToWorld(Vec2.zero());
+    const topRight = this.screenToWorld(Vec2.from(this.viewport.width, 0));
+    const bottomLeft = this.screenToWorld(Vec2.from(0, this.viewport.height));
+    const bottomRight = this.screenToWorld(Vec2.from(this.viewport.width, this.viewport.height));
+
+    let minX = topLeft.x, minY = topLeft.y, maxX = topLeft.x, maxY = topLeft.y;
+    for (const point of [topRight, bottomLeft, bottomRight]) {
+      minX = Math.min(minX, point.x);
+      minY = Math.min(minY, point.y);
+      maxX = Math.max(maxX, point.x);
+      maxY = Math.max(maxY, point.y);
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  /**
    * Check if a world position is visible
    */
   isWorldPositionVisible(worldPos: Vec2, margin: number = 0): boolean {
-    const bounds = this.getWorldBounds();
-    return worldPos.x >= bounds.min.x - margin &&
-           worldPos.x <= bounds.max.x + margin &&
-           worldPos.y >= bounds.min.y - margin &&
-           worldPos.y <= bounds.max.y + margin;
+    return this.isWorldPositionVisibleAt(worldPos.x, worldPos.y, margin);
+  }
+
+  /** Scalar variant — avoids Vec2 allocation in entity culling loops. */
+  isWorldPositionVisibleAt(wx: number, wy: number, margin: number = 0): boolean {
+    const b = this.getWorldBoundsRect();
+    return wx >= b.minX - margin &&
+           wx <= b.maxX + margin &&
+           wy >= b.minY - margin &&
+           wy <= b.maxY + margin;
   }
   
   /**
