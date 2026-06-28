@@ -42,4 +42,15 @@ bool bucket_apply_dump(WebSocketPlayer* player, struct Ship* ship,
                        uint8_t req_deck,
                        char* response, size_t resp_len);
 
+/* NPC bucket bailer — no inventory/minigame; auto full scoop on arrival. */
+bool bucket_npc_can_fill(const WorldNpc* npc, const struct Ship* ship);
+bool bucket_npc_is_valid_dump_zone(const WorldNpc* npc, const struct Ship* ship);
+void bucket_npc_find_scoop_target(const WorldNpc* npc, const struct Ship* ship,
+                                  float* out_x, float* out_y, uint8_t* out_deck);
+void bucket_npc_find_dump_target(const WorldNpc* npc, const struct Ship* ship,
+                                 float* out_x, float* out_y);
+bool bucket_npc_try_open_nearby_gunport(WorldNpc* npc, struct Ship* ship);
+bool bucket_npc_apply_fill(WorldNpc* npc, struct Ship* ship);
+bool bucket_npc_apply_dump(WorldNpc* npc, struct Ship* ship);
+
 #endif /* BUCKET_BAIL_H */

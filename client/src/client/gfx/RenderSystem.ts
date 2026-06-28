@@ -63,6 +63,7 @@ const NPC_TASK_COLORS: Record<string, string> = {
   Sails:   '#5aafff',
   Cannons: '#ffaa44',
   Repairs: '#55dd66',
+  Buckets: '#44bbee',
   Combat:  '#aa44ff',
   Idle:    '#DAA520',
 };

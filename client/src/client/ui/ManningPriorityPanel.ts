@@ -12,6 +12,7 @@ import { Npc } from '../../sim/Types.js';
 
 export type ManningTask   = 'Sails' | 'Gunners' | 'Repairs' | 'Combat';
 export type RepairTarget  = 'Deck' | 'Planks' | 'Sails' | 'Weapons' | 'Steering' | 'Misc';
+export type RepairCrewGroup = 'Repairs' | 'Buckets';
 
 /** NPC state constants (mirror server WorldNpcState) */
 const NPC_STATE_AT_GUN = 2;
@@ -33,6 +34,13 @@ const REPAIR_COLORS: Record<RepairTarget, string> = {
   Misc:     '#999999',
 };
 
+const REPAIR_CREW_COLORS: Record<RepairCrewGroup, string> = {
+  Repairs: '#55dd66',
+  Buckets: '#44bbee',
+};
+
+const REPAIR_CREW_GROUPS: RepairCrewGroup[] = ['Repairs', 'Buckets'];
+
 interface HitArea {
   x: number; y: number; w: number; h: number;
   action: () => void;
@@ -50,6 +58,13 @@ export class ManningPriorityPanel {
     ['Repairs', []],
     ['Combat',  []],
   ]);
+
+  // Repair crew subgroup — splits the Repairs crew task into repair vs bucket duty.
+  private repairCrewNpcs: Map<RepairCrewGroup, number[]> = new Map([
+    ['Repairs', []],
+    ['Buckets', []],
+  ]);
+  private repairCrewSentAssignment: Map<number, RepairCrewGroup> = new Map();
 
   private hitAreas: HitArea[] = [];
 
@@ -83,7 +98,9 @@ export class ManningPriorityPanel {
     this._currentShipId = shipId;
     this._localCompanyId = localCompanyId;
     this.lastSentAssignment.clear();
+    this.repairCrewSentAssignment.clear();
     for (const list of this.taskNpcs.values()) list.length = 0;
+    for (const list of this.repairCrewNpcs.values()) list.length = 0;
     this.lastTaskMap.clear();
     if (shipId === 0) return;
 
@@ -92,15 +109,20 @@ export class ManningPriorityPanel {
     // Seed task lists from the server-authoritative NPC role field.
     // role 1 = Gunner  → Gunners
     // role 3 = Rigger  → Sails
-    // role 4 = Repairer → Repairs
-    // role 0/2 (None/Helmsman) → unassigned/Idle
+    // role 4 = Repairer → Repairs crew + Repairs subgroup
+    // role 5 = Bucket bailer → Repairs crew + Buckets subgroup
     for (const npc of shipNpcs) {
       if (npc.role === 1) {
         this.taskNpcs.get('Gunners')?.push(npc.id);
       } else if (npc.role === 3) {
         this.taskNpcs.get('Sails')?.push(npc.id);
-      } else if (npc.role === 4) {
+      } else if (npc.role === 4 || npc.role === 5) {
         this.taskNpcs.get('Repairs')?.push(npc.id);
+        if (npc.role === 5) {
+          this.repairCrewNpcs.get('Buckets')?.push(npc.id);
+        } else {
+          this.repairCrewNpcs.get('Repairs')?.push(npc.id);
+        }
       }
       // role 0 (None) / role 2 (Helmsman) → unassigned
     }
@@ -109,7 +131,12 @@ export class ManningPriorityPanel {
     const npcById = new Map(shipNpcs.map(n => [n.id, n]));
     for (const [task, ids] of this.taskNpcs) {
       for (const id of ids) {
-        if (npcById.has(id)) this.lastTaskMap.set(id, task);
+        if (!npcById.has(id)) continue;
+        if (task === 'Repairs' && this.repairCrewNpcs.get('Buckets')?.includes(id)) {
+          this.lastTaskMap.set(id, 'Buckets');
+        } else {
+          this.lastTaskMap.set(id, task);
+        }
       }
     }
     for (const npc of shipNpcs) {
@@ -186,9 +213,21 @@ export class ManningPriorityPanel {
       const { panelX: px, panelY: py, PW: pw, HEADER_H, ROW_H } = this;
       const TAB_H = 20;
       const REPAIR_ROW_H = 30;
+      const REPAIR_GROUP_H = 36;
       const rowH = this.activeTab === 'crew' ? ROW_H : REPAIR_ROW_H;
       const contentStartY = py + HEADER_H + TAB_H + 3;
-      const orderLen = this.activeTab === 'crew' ? this.priorityOrder.length : this.repairOrder.length;
+      if (this.activeTab === 'repair') {
+        const moduleStartY = contentStartY + REPAIR_CREW_GROUPS.length * REPAIR_GROUP_H + 14;
+        const ri = Math.floor((cy - moduleStartY) / REPAIR_ROW_H);
+        if (cx >= px && cx < px + pw && ri >= 0 && ri < this.repairOrder.length) {
+          this._rowDragTab = 'repair';
+          this._rowDragFromIndex = ri;
+          this._rowDragCurrentY = cy;
+          return true;
+        }
+        return false;
+      }
+      const orderLen = this.priorityOrder.length;
       const ri = Math.floor((cy - contentStartY) / rowH);
       if (cx >= px && cx < px + pw && ri >= 0 && ri < orderLen) {
         this._rowDragTab      = this.activeTab;
@@ -225,9 +264,12 @@ export class ManningPriorityPanel {
           Math.floor((this._rowDragCurrentY - contentStartY) / ROW_H)));
         if (to !== from) { const [item] = order.splice(from, 1); order.splice(to, 0, item); }
       } else {
+        const REPAIR_GROUP_H = 36;
         const order = this.repairOrder;
+        const contentStartY = py + HEADER_H + TAB_H + 3;
+        const moduleStartY = contentStartY + REPAIR_CREW_GROUPS.length * REPAIR_GROUP_H + 14;
         const to = Math.max(0, Math.min(order.length - 1,
-          Math.floor((this._rowDragCurrentY - contentStartY) / REPAIR_ROW_H)));
+          Math.floor((this._rowDragCurrentY - moduleStartY) / REPAIR_ROW_H)));
         if (to !== from) { const [item] = order.splice(from, 1); order.splice(to, 0, item); }
       }
       this._rowDragTab       = null;
@@ -246,9 +288,10 @@ export class ManningPriorityPanel {
 
     // Store shipId + npcs for use in action callbacks
     if (this._currentShipId !== shipId) {
-      // Ship changed — reset everything so the new ship gets a full sync
       this.lastSentAssignment.clear();
+      this.repairCrewSentAssignment.clear();
       for (const list of this.taskNpcs.values()) list.length = 0;
+      for (const list of this.repairCrewNpcs.values()) list.length = 0;
     }
     this._currentShipId = shipId;
     this._currentNpcs = npcs;
@@ -258,9 +301,14 @@ export class ManningPriorityPanel {
     const { panelX: px, panelY: py, PW: pw, HEADER_H, ROW_H } = this;
     const REPAIR_ROW_H = 30;
     const TAB_H = 20;
-    const rowCount = this.activeTab === 'crew' ? tasks.length : this.repairOrder.length;
+    const REPAIR_GROUP_H = 36;
+    const rowCount = this.activeTab === 'crew'
+      ? tasks.length
+      : REPAIR_CREW_GROUPS.length + 1 + this.repairOrder.length;
     const rowH    = this.activeTab === 'crew' ? ROW_H : REPAIR_ROW_H;
-    const panelH  = HEADER_H + TAB_H + rowCount * rowH + 6;
+    const panelH  = this.activeTab === 'crew'
+      ? HEADER_H + TAB_H + rowCount * rowH + 6
+      : HEADER_H + TAB_H + REPAIR_CREW_GROUPS.length * REPAIR_GROUP_H + 14 + this.repairOrder.length * REPAIR_ROW_H + 6;
 
     ctx.save();
 
@@ -332,7 +380,7 @@ export class ManningPriorityPanel {
 
     // ---- Route to repair tab if active ----
     if (this.activeTab === 'repair') {
-      this.renderRepairTab(ctx, px, py, pw, REPAIR_ROW_H, TAB_H);
+      this.renderRepairTab(ctx, px, py, pw, REPAIR_ROW_H, TAB_H, npcs, shipId, localCompanyId);
       ctx.restore();
       return;
     }
@@ -356,14 +404,20 @@ export class ManningPriorityPanel {
     // Mapping: role 1 (GUNNER) → Gunners, role 3 (RIGGER) → Sails,
     //          role 4 (REPAIRER) → Repairs, role 0/2 → Idle (no task pin).
     const ROLE_TO_TASK: Record<number, ManningTask | null> = {
-      0: null,  // NONE    → Idle
+      0: null,
       1: 'Gunners',
-      2: null,  // HELMSMAN → not tracked in panel
+      2: null,
       3: 'Sails',
       4: 'Repairs',
+      5: 'Repairs',
+    };
+    const ROLE_TO_REPAIR_CREW: Record<number, RepairCrewGroup | null> = {
+      4: 'Repairs',
+      5: 'Buckets',
     };
     for (const npc of shipNpcs) {
       const desiredTask = ROLE_TO_TASK[npc.role] ?? null;
+      const desiredRepairCrew = ROLE_TO_REPAIR_CREW[npc.role] ?? null;
 
       // Determine which task (if any) the NPC is currently pinned to
       let currentTask: ManningTask | null = null;
@@ -389,6 +443,22 @@ export class ManningPriorityPanel {
         // Silence the delta-send so we don't echo back what the server already did
         this.lastSentAssignment.set(npc.id, desiredTask);
       }
+
+      if (desiredRepairCrew) {
+        for (const g of REPAIR_CREW_GROUPS) {
+          const gl = this.repairCrewNpcs.get(g)!;
+          const idx = gl.indexOf(npc.id);
+          if (idx >= 0) gl.splice(idx, 1);
+        }
+        this.repairCrewNpcs.get(desiredRepairCrew)!.push(npc.id);
+        this.repairCrewSentAssignment.set(npc.id, desiredRepairCrew);
+      } else {
+        for (const g of REPAIR_CREW_GROUPS) {
+          const gl = this.repairCrewNpcs.get(g)!;
+          const idx = gl.indexOf(npc.id);
+          if (idx >= 0) gl.splice(idx, 1);
+        }
+      }
     }
     // ── end reconciliation ──────────────────────────────────────────────────
 
@@ -397,7 +467,13 @@ export class ManningPriorityPanel {
     // Update lastTaskMap so RenderSystem can tint NPCs by assigned task
     this.lastTaskMap.clear();
     for (const [task, assigned] of assignments) {
-      for (const n of assigned) this.lastTaskMap.set(n.id, task);
+      for (const n of assigned) {
+        if (task === 'Repairs' && this.repairCrewNpcs.get('Buckets')?.includes(n.id)) {
+          this.lastTaskMap.set(n.id, 'Buckets');
+        } else {
+          this.lastTaskMap.set(n.id, task);
+        }
+      }
     }
     for (const n of shipNpcs) {
       if (!this.lastTaskMap.has(n.id)) this.lastTaskMap.set(n.id, 'Idle');
@@ -568,13 +644,23 @@ export class ManningPriorityPanel {
     // Prefer a non-stationed NPC (state !== AT_CANNON/REPAIRING) to avoid interrupting active work
     const pick = idle.find(n => n.state !== NPC_STATE_AT_GUN && n.state !== NPC_STATE_REPAIRING) ?? idle[0];
     this.taskNpcs.get(task)!.push(pick.id);
+    if (task === 'Repairs') {
+      this.repairCrewNpcs.get('Repairs')!.push(pick.id);
+    }
     this.notifyAssignment();
   }
 
   private decrement(task: ManningTask): void {
     const list = this.taskNpcs.get(task);
     if (!list || list.length === 0) return;
-    list.pop();
+    const removed = list.pop()!;
+    if (task === 'Repairs') {
+      for (const g of REPAIR_CREW_GROUPS) {
+        const gl = this.repairCrewNpcs.get(g)!;
+        const idx = gl.indexOf(removed);
+        if (idx >= 0) gl.splice(idx, 1);
+      }
+    }
     this.notifyAssignment();
   }
 
@@ -592,9 +678,16 @@ export class ManningPriorityPanel {
     const assigned = new Set<number>();
     for (const [task, npcs] of assignments) {
       for (const npc of npcs) {
-        if (this.lastSentAssignment.get(npc.id) !== task) {
-          out.push({ npcId: npc.id, task });
-          this.lastSentAssignment.set(npc.id, task);
+        const sendTask = (task === 'Repairs' && this.repairCrewNpcs.get('Buckets')?.includes(npc.id))
+          ? 'Buckets'
+          : task;
+        if (this.lastSentAssignment.get(npc.id) !== sendTask) {
+          out.push({ npcId: npc.id, task: sendTask });
+          this.lastSentAssignment.set(npc.id, sendTask);
+          if (task === 'Repairs') {
+            const subgroup: RepairCrewGroup = sendTask === 'Buckets' ? 'Buckets' : 'Repairs';
+            this.repairCrewSentAssignment.set(npc.id, subgroup);
+          }
         }
         assigned.add(npc.id);
       }
@@ -649,17 +742,131 @@ export class ManningPriorityPanel {
   private renderRepairTab(
     ctx: CanvasRenderingContext2D,
     px: number, py: number, pw: number,
-    rowH: number, tabH: number
+    rowH: number, tabH: number,
+    npcs: Npc[], shipId: number, localCompanyId: number
   ): void {
+    const REPAIR_GROUP_H = 36;
+    const shipNpcs = npcs
+      .filter(n => n.shipId === shipId && n.companyId === localCompanyId)
+      .sort((a, b) => a.id - b.id);
+    const shipNpcIdSet = new Set(shipNpcs.map(n => n.id));
+
+    for (const list of this.taskNpcs.values()) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (!shipNpcIdSet.has(list[i])) list.splice(i, 1);
+      }
+    }
+    for (const list of this.repairCrewNpcs.values()) {
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (!shipNpcIdSet.has(list[i])) list.splice(i, 1);
+      }
+    }
+
+    const repairCrewIds = this.taskNpcs.get('Repairs') ?? [];
+    const repairCrewSet = new Set(repairCrewIds);
+    for (const g of REPAIR_CREW_GROUPS) {
+      const gl = this.repairCrewNpcs.get(g)!;
+      for (let i = gl.length - 1; i >= 0; i--) {
+        if (!repairCrewSet.has(gl[i])) gl.splice(i, 1);
+      }
+    }
+    for (const id of repairCrewIds) {
+      const inSubgroup = REPAIR_CREW_GROUPS.some(g => this.repairCrewNpcs.get(g)!.includes(id));
+      if (!inSubgroup) this.repairCrewNpcs.get('Repairs')!.push(id);
+    }
+
+    const npcById = new Map(shipNpcs.map(n => [n.id, n]));
     let rowY = py + this.HEADER_H + tabH + 3;
+
+    ctx.fillStyle = 'rgba(180,200,255,0.45)';
+    ctx.font = 'bold 8px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('CREW GROUPS', px + 6, rowY + 6);
+
+    for (let gi = 0; gi < REPAIR_CREW_GROUPS.length; gi++) {
+      const group = REPAIR_CREW_GROUPS[gi];
+      const color = REPAIR_CREW_COLORS[group];
+      const ids = this.repairCrewNpcs.get(group) ?? [];
+      const count = ids.length;
+      const otherGroup = group === 'Repairs' ? 'Buckets' : 'Repairs';
+      const otherCount = this.repairCrewNpcs.get(otherGroup)?.length ?? 0;
+      const canInc = group === 'Repairs'
+        ? otherCount > 0
+        : (this.repairCrewNpcs.get('Repairs')?.length ?? 0) > 0;
+      const canDec = count > 0;
+
+      if (gi > 0) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.07)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(px + 4, rowY);
+        ctx.lineTo(px + pw - 4, rowY);
+        ctx.stroke();
+      }
+
+      const rowMidY = rowY + REPAIR_GROUP_H / 2;
+      ctx.fillStyle = color;
+      ctx.font = 'bold 11px Georgia, serif';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(group.toUpperCase(), px + 8, rowMidY - 5);
+
+      const chipParts = ids.map(id => {
+        const n = npcById.get(id);
+        if (!n) return `#${id}`;
+        const busy = n.state === NPC_STATE_AT_GUN || n.state === NPC_STATE_REPAIRING;
+        return `#${id}${busy ? '●' : ''}`;
+      });
+      ctx.fillStyle = chipParts.length > 0 ? 'rgba(200,220,255,0.65)' : 'rgba(180,180,180,0.25)';
+      ctx.font = '9px Georgia, serif';
+      ctx.fillText(chipParts.length > 0 ? chipParts.join('  ') : 'no crew', px + 8, rowMidY + 9);
+
+      const right = px + pw - 5;
+      const plusBtn  = { x: right - 16, y: rowY + 9, w: 16, h: 17 };
+      const minusBtn = { x: right - 36, y: rowY + 9, w: 16, h: 17 };
+      const badgeX   = right - 52;
+
+      this.drawCountBtn(ctx, plusBtn, '+', canInc);
+      this.drawCountBtn(ctx, minusBtn, '−', canDec);
+      ctx.fillStyle = 'rgba(255,255,255,0.10)';
+      ctx.fillRect(badgeX - 14, rowY + 9, 14, 17);
+      ctx.fillStyle = '#e8f0ff';
+      ctx.font = 'bold 10px Georgia, serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(String(count), badgeX - 7, rowY + 17);
+
+      if (canInc) this.hitAreas.push({ ...plusBtn, action: () => this.incrementRepairCrew(group) });
+      if (canDec) this.hitAreas.push({ ...minusBtn, action: () => this.decrementRepairCrew(group) });
+
+      rowY += REPAIR_GROUP_H;
+    }
+
+    rowY += 6;
+    ctx.strokeStyle = 'rgba(80,140,220,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px + 4, rowY);
+    ctx.lineTo(px + pw - 4, rowY);
+    ctx.stroke();
+    rowY += 8;
+
+    ctx.fillStyle = 'rgba(180,200,255,0.45)';
+    ctx.font = 'bold 8px Georgia, serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('MODULE PRIORITY', px + 6, rowY);
+    rowY += 10;
+
     const items = this.repairOrder;
+    const moduleStartY = rowY;
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       const color = REPAIR_COLORS[item];
-      // Dim this row while it is being dragged
       const _repairRowDragging = this._rowDragTab === 'repair' && this._rowDragFromIndex === i;
       if (_repairRowDragging) { ctx.save(); ctx.globalAlpha *= 0.3; }
-      // Divider between rows
+
       if (i > 0) {
         ctx.strokeStyle = 'rgba(255,255,255,0.07)';
         ctx.lineWidth = 1;
@@ -668,15 +875,15 @@ export class ManningPriorityPanel {
         ctx.lineTo(px + pw - 4, rowY);
         ctx.stroke();
       }
+
       const rowMidY = rowY + rowH / 2;
-      // ▲ / ▼ arrows
       const upBtn = { x: px + 4, y: rowY + 2,  w: 15, h: 12 };
       const dnBtn = { x: px + 4, y: rowY + 16, w: 15, h: 12 };
       this.drawArrowBtn(ctx, upBtn, '▲', i > 0);
       this.drawArrowBtn(ctx, dnBtn, '▼', i < items.length - 1);
       if (i > 0)                this.hitAreas.push({ ...upBtn, action: () => this.moveRepairUp(i) });
       if (i < items.length - 1) this.hitAreas.push({ ...dnBtn, action: () => this.moveRepairDown(i) });
-      // Priority number badge
+
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
       ctx.fillRect(px + 24, rowMidY - 8, 14, 16);
       ctx.fillStyle = '#e8f0ff';
@@ -684,32 +891,31 @@ export class ManningPriorityPanel {
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(String(i + 1), px + 31, rowMidY);
-      // Item label
+
       ctx.fillStyle = color;
       ctx.font = 'bold 11px Georgia, serif';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.fillText(item.toUpperCase(), px + 42, rowMidY);
+
       if (_repairRowDragging) ctx.restore();
       rowY += rowH;
     }
 
-    // ---- Row drag overlay (drop indicator + ghost) ----
     if (this._rowDragTab === 'repair' && this._rowDragFromIndex >= 0) {
-      const contentStartY = py + this.HEADER_H + tabH + 3;
       const dropIdx = Math.max(0, Math.min(items.length - 1,
-        Math.floor((this._rowDragCurrentY - contentStartY) / rowH)));
+        Math.floor((this._rowDragCurrentY - moduleStartY) / rowH)));
       ctx.fillStyle = 'rgba(80,140,220,0.18)';
-      ctx.fillRect(px + 2, contentStartY + dropIdx * rowH, pw - 4, rowH - 1);
+      ctx.fillRect(px + 2, moduleStartY + dropIdx * rowH, pw - 4, rowH - 1);
       ctx.strokeStyle = '#aac8ff';
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(px + 4, contentStartY + dropIdx * rowH);
-      ctx.lineTo(px + pw - 4, contentStartY + dropIdx * rowH);
+      ctx.moveTo(px + 4, moduleStartY + dropIdx * rowH);
+      ctx.lineTo(px + pw - 4, moduleStartY + dropIdx * rowH);
       ctx.stroke();
       const ghostItem = items[this._rowDragFromIndex];
-      const ghostY = Math.max(contentStartY,
-        Math.min(contentStartY + (items.length - 1) * rowH, this._rowDragCurrentY - rowH / 2));
+      const ghostY = Math.max(moduleStartY,
+        Math.min(moduleStartY + (items.length - 1) * rowH, this._rowDragCurrentY - rowH / 2));
       ctx.globalAlpha = 0.85;
       ctx.fillStyle = 'rgba(20,50,120,0.90)';
       ctx.strokeStyle = '#aac8ff';
@@ -723,6 +929,47 @@ export class ManningPriorityPanel {
       ctx.textBaseline = 'middle';
       ctx.fillText('⣿ ' + ghostItem.toUpperCase(), px + 14, ghostY + (rowH - 4) / 2);
     }
+
+    this.lastTaskMap.clear();
+    for (const [task, ids] of this.taskNpcs) {
+      for (const id of ids) {
+        if (!npcById.has(id)) continue;
+        if (task === 'Repairs' && this.repairCrewNpcs.get('Buckets')?.includes(id)) {
+          this.lastTaskMap.set(id, 'Buckets');
+        } else {
+          this.lastTaskMap.set(id, task);
+        }
+      }
+    }
+    for (const n of shipNpcs) {
+      if (!this.lastTaskMap.has(n.id)) this.lastTaskMap.set(n.id, 'Idle');
+    }
+  }
+
+  private incrementRepairCrew(group: RepairCrewGroup): void {
+    const other: RepairCrewGroup = group === 'Repairs' ? 'Buckets' : 'Repairs';
+    const otherList = this.repairCrewNpcs.get(other)!;
+    if (otherList.length === 0) return;
+    const pick = otherList.pop()!;
+    this.repairCrewNpcs.get(group)!.push(pick);
+    this.notifyRepairCrewAssignment(pick, group);
+  }
+
+  private decrementRepairCrew(group: RepairCrewGroup): void {
+    const list = this.repairCrewNpcs.get(group);
+    if (!list || list.length === 0) return;
+    const removed = list.pop()!;
+    const dest: RepairCrewGroup = group === 'Repairs' ? 'Buckets' : 'Repairs';
+    this.repairCrewNpcs.get(dest)!.push(removed);
+    this.notifyRepairCrewAssignment(removed, dest);
+  }
+
+  private notifyRepairCrewAssignment(npcId: number, group: RepairCrewGroup): void {
+    if (!this.onAssignmentChanged || this._currentShipId === 0) return;
+    if (this.repairCrewSentAssignment.get(npcId) === group) return;
+    this.repairCrewSentAssignment.set(npcId, group);
+    this.lastSentAssignment.set(npcId, 'Repairs');
+    this.onAssignmentChanged(this._currentShipId, [{ npcId, task: group }]);
   }
 
   private moveRepairUp(i: number): void {

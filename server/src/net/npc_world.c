@@ -12,6 +12,7 @@
 #include "net/ship_schematics.h"
 #include "net/ship_chest_resources.h"
 #include "net/ship_plank_wreckage.h"
+#include "net/bucket_bail.h"
 #include "sim/module_types.h"
 #include "sim/island.h"
 
@@ -382,6 +383,7 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
     bool want_sails   = (strncmp(task, "Sails",   5) == 0);
     bool want_cannons = (strncmp(task, "Gunners", 7) == 0 || strncmp(task, "Combat", 6) == 0);
     bool want_repairs = (strncmp(task, "Repairs", 7) == 0);
+    bool want_buckets = (strncmp(task, "Buckets", 7) == 0);
 
     if (want_sails) {
         /* Become a rigger — find the first mast not already occupied by another rigger */
@@ -442,6 +444,16 @@ void handle_crew_assign(uint16_t ship_id, uint16_t npc_id, const char* task) {
         npc->target_local_y = npc->idle_local_y;
         npc->state          = WORLD_NPC_STATE_MOVING;
         log_info("🔧 NPC %u (%s) → REPAIRER, standing by for damage", npc->id, npc->name);
+
+    } else if (want_buckets) {
+        npc->role               = NPC_ROLE_BUCKET_BAILER;
+        npc->assigned_weapon_id = 0;
+        npc->bucket_fill        = 0;
+        npc->bucket_cooldown_until_ms = 0;
+        npc->target_local_x     = npc->idle_local_x;
+        npc->target_local_y     = npc->idle_local_y;
+        npc->state              = WORLD_NPC_STATE_MOVING;
+        log_info("🪣 NPC %u (%s) → BUCKET BAILER, standing by for flood", npc->id, npc->name);
 
     } else {
         /* Stand down — return to crew pool at spawn-time idle position */
@@ -1434,6 +1446,43 @@ void tick_world_npcs(float dt) {
                     npc->oxygen_accum = 0.0f;
                 }
             }
+        }
+
+        // ── Bucket bailers (NPC_ROLE_BUCKET_BAILER) ──────────────────────────────
+        if (npc->role == NPC_ROLE_BUCKET_BAILER && global_sim) {
+            struct Ship* sim_ship = find_sim_ship(npc->ship_id);
+            if (sim_ship && npc->order_player_id == 0) {
+                if (npc->bucket_fill > 0) {
+                    float tx, ty;
+                    bucket_npc_find_dump_target(npc, sim_ship, &tx, &ty);
+                    (void)bucket_npc_try_open_nearby_gunport(npc, sim_ship);
+                    if (bucket_npc_is_valid_dump_zone(npc, sim_ship)) {
+                        bucket_npc_apply_dump(npc, sim_ship);
+                        npc->state = WORLD_NPC_STATE_IDLE;
+                    } else {
+                        npc->target_local_x = tx;
+                        npc->target_local_y = ty;
+                        npc->state = WORLD_NPC_STATE_MOVING;
+                    }
+                } else {
+                    uint32_t now = get_time_ms();
+                    if (npc->bucket_cooldown_until_ms > now) {
+                        npc->state = WORLD_NPC_STATE_IDLE;
+                    } else if (bucket_npc_can_fill(npc, sim_ship)) {
+                        bucket_npc_apply_fill(npc, sim_ship);
+                        npc->state = WORLD_NPC_STATE_IDLE;
+                    } else {
+                        float tx, ty;
+                        uint8_t scoop_deck;
+                        bucket_npc_find_scoop_target(npc, sim_ship, &tx, &ty, &scoop_deck);
+                        npc->deck_level = scoop_deck;
+                        npc->target_local_x = tx;
+                        npc->target_local_y = ty;
+                        npc->state = WORLD_NPC_STATE_MOVING;
+                    }
+                }
+            }
+            continue;
         }
 
         // ── Repair crew (NPC_ROLE_REPAIRER) ───────────────────────────────────────────────

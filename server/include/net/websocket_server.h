@@ -159,6 +159,7 @@ typedef enum {
     NPC_ROLE_HELMSMAN  = 2,  // Controls the helm: steers toward/away from target
     NPC_ROLE_RIGGER    = 3,  // Manages a mast: sets sail openness based on orders
     NPC_ROLE_REPAIRER  = 4,  // Seeks damaged modules and repairs them
+    NPC_ROLE_BUCKET_BAILER = 5,  // Bails floodwater with a bucket (repair crew subgroup)
 } NpcRole;
 
 // NPC agent — server-side autonomous crew member mounted to a module
@@ -296,6 +297,10 @@ typedef struct WorldNpc {
     // ── Repairer resource payment ───────────────────────────────────────
     // Set after ship-chest repair cost is consumed for the current assignment.
     bool          repair_resources_paid;
+
+    // ── Bucket bailer (NPC_ROLE_BUCKET_BAILER) ───────────────────────────────
+    uint8_t       bucket_fill;              // 0=empty, 1=half, 2=full
+    uint32_t      bucket_cooldown_until_ms;   // post-scoop cooldown (wall-clock ms)
 
     // ── Deck level ──────────────────────────────────────────────────────
     // 0 = lower deck, 1 = upper deck.  NPCs default to upper deck (1).
