@@ -58,13 +58,16 @@ install-deps:
 	sudo apt-get update
 	sudo apt-get install -y build-essential libwebsockets-dev libjson-c-dev
 
-.PHONY: all clean install-deps test-integration test-bucket-bail test-tombstone-blob-copy demo-simple
+.PHONY: all clean install-deps test-integration test-bucket-bail test-tombstone-blob-copy test-sim-destroy-entity-sort demo-simple
 
 test-bucket-bail: obj/net/bucket_bail.o obj/util/time.o
 	gcc -Wall -Wextra -std=c99 -O2 -g -Iinclude -o bin/test_bucket_bail tests/test_bucket_bail.c obj/net/bucket_bail.o obj/util/time.o -lm
 
 test-tombstone-blob-copy:
 	gcc -Wall -Wextra -std=c99 -O2 -g -o bin/test_tombstone_blob_copy tests/test_tombstone_blob_copy.c
+
+test-sim-destroy-entity-sort:
+	gcc -Wall -Wextra -std=c99 -O2 -g -o bin/test_sim_destroy_entity_sort tests/test_sim_destroy_entity_sort.c
 
 # Full integration test for Week 3-4 systems
 test-integration: obj/core/rewind_buffer.o obj/core/input_validation.o obj/core/math.o obj/core/rng.o

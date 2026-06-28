@@ -3371,12 +3371,12 @@ int simulation_process_player_input(struct Sim* sim, entity_id player_id, const 
 bool sim_destroy_entity(struct Sim* sim, entity_id id) {
     if (!sim || id == INVALID_ENTITY_ID) return false;
     
-    // Remove from ships
+    // Remove from ships — memmove preserves id-sorted order required by sim_get_ship().
     for (uint32_t i = 0; i < sim->ship_count; i++) {
         if (sim->ships[i].id == id) {
-            // Move last ship to this position
             if (i + 1 < sim->ship_count) {
-                sim->ships[i] = sim->ships[sim->ship_count - 1];
+                memmove(&sim->ships[i], &sim->ships[i + 1],
+                        (size_t)(sim->ship_count - i - 1) * sizeof(struct Ship));
             }
             sim->ship_count--;
             return true;
@@ -3386,9 +3386,9 @@ bool sim_destroy_entity(struct Sim* sim, entity_id id) {
     // Remove from players
     for (uint32_t i = 0; i < sim->player_count; i++) {
         if (sim->players[i].id == id) {
-            // Move last player to this position
             if (i + 1 < sim->player_count) {
-                sim->players[i] = sim->players[sim->player_count - 1];
+                memmove(&sim->players[i], &sim->players[i + 1],
+                        (size_t)(sim->player_count - i - 1) * sizeof(struct Player));
             }
             sim->player_count--;
             return true;
@@ -3398,9 +3398,9 @@ bool sim_destroy_entity(struct Sim* sim, entity_id id) {
     // Remove from projectiles
     for (uint32_t i = 0; i < sim->projectile_count; i++) {
         if (sim->projectiles[i].id == id) {
-            // Move last projectile to this position
             if (i + 1 < sim->projectile_count) {
-                sim->projectiles[i] = sim->projectiles[sim->projectile_count - 1];
+                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                        (size_t)(sim->projectile_count - i - 1) * sizeof(struct Projectile));
             }
             sim->projectile_count--;
             return true;
