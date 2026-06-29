@@ -399,6 +399,15 @@ export class ClientApplication {
   private readonly _frameMsRingCap = 120;
   private readonly _frameMsSortedScratch: number[] = [];
   private _hitchCountSession = 0;
+  /** Reused stats object for window.__frameAuditStats (mutated in place each frame). */
+  private _frameAuditStatsObj: Record<string, number> = {
+    frameMsLast: 0,
+    frameMsP50: 0,
+    frameMsP95: 0,
+    hitchCount: 0,
+    fps: 0,
+    glScalePct: 0,
+  };
   private lastRenderLogTime = 0;
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
   private swordLastAttackMs = 0;
@@ -9343,14 +9352,14 @@ export class ClientApplication {
     sorted.sort((a, b) => a - b);
     const pct = (q: number) =>
       sorted.length ? sorted[Math.floor((sorted.length - 1) * q)] : 0;
-    (window as unknown as { __frameAuditStats?: Record<string, number> }).__frameAuditStats = {
-      frameMsLast: deltaMs,
-      frameMsP50: pct(0.5),
-      frameMsP95: pct(0.95),
-      hitchCount: this._hitchCountSession,
-      fps: this.currentFPS,
-      glScalePct: this._glRenderer ? Math.round(this._glScale * 100) : 0,
-    };
+    const fa = this._frameAuditStatsObj;
+    fa.frameMsLast = deltaMs;
+    fa.frameMsP50 = pct(0.5);
+    fa.frameMsP95 = pct(0.95);
+    fa.hitchCount = this._hitchCountSession;
+    fa.fps = this.currentFPS;
+    fa.glScalePct = this._glRenderer ? Math.round(this._glScale * 100) : 0;
+    (window as unknown as { __frameAuditStats?: Record<string, number> }).__frameAuditStats = fa;
   }
 
   /** Merge last-frame render pass timings into __frameAuditStats (debug HUD). */
