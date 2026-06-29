@@ -335,6 +335,20 @@ export class RenderSystem {
   private _wrapGhostEntities: Array<Record<string, unknown>> = [];
   private _wrapGhostPositions: Vec2[] = [];
   private _wrapGhostIdx = 0;
+  /** Reused wrap-offset list — reset each getWrapRenderOffsets call (slot 0 = origin). */
+  private _wrapOffsetScratch: Array<{ dx: number; dy: number }> = [
+    { dx: 0, dy: 0 }, { dx: 0, dy: 0 }, { dx: 0, dy: 0 }, { dx: 0, dy: 0 },
+    { dx: 0, dy: 0 }, { dx: 0, dy: 0 }, { dx: 0, dy: 0 }, { dx: 0, dy: 0 }, { dx: 0, dy: 0 },
+  ];
+  /** Static world-wrap candidate offsets (no per-call array alloc). */
+  private static readonly _WRAP_CANDIDATE_OFFSETS: ReadonlyArray<{ dx: number; dy: number }> = [
+    { dx: -1, dy: 0 }, { dx: 1, dy: 0 },
+    { dx: 0, dy: -1 }, { dx: 0, dy: 1 },
+    { dx: -1, dy: -1 }, { dx: -1, dy: 1 },
+    { dx: 1, dy: -1 }, { dx: 1, dy: 1 },
+  ];
+  /** Reused ship-id set for sinking-ghost tracking in queueWorldObjects. */
+  private _currentShipIdsScratch = new Set<number>();
   /** When true, record ms for island / queue / execute / fog passes (see getLastPerfTimings). */
   public perfTimingsEnabled = false;
   private _perfMs = { island: 0, queue: 0, execute: 0, fog: 0 };
@@ -1778,23 +1792,38 @@ export class RenderSystem {
     this._wrapRenderEnabled = !!enabled && this._wrapWorldWidth > 0 && this._wrapWorldHeight > 0;
   }
 
-  private getWrapRenderOffsets(position: Vec2, camera: Camera, margin: number): Array<{ dx: number; dy: number }> {
-    const offsets: Array<{ dx: number; dy: number }> = [{ dx: 0, dy: 0 }];
-    if (!this._wrapRenderEnabled) return offsets;
+  private getWrapRenderOffsets(position: Vec2, _camera: Camera, margin: number): Array<{ dx: number; dy: number }> {
+    const offsets = this._wrapOffsetScratch;
+    offsets[0].dx = 0;
+    offsets[0].dy = 0;
+    let count = 1;
+    if (!this._wrapRenderEnabled) {
+      offsets.length = count;
+      return offsets;
+    }
 
     const w = this._wrapWorldWidth;
     const h = this._wrapWorldHeight;
-    const candidates: Array<{ dx: number; dy: number }> = [
-      { dx: -w, dy: 0 }, { dx: w, dy: 0 },
-      { dx: 0, dy: -h }, { dx: 0, dy: h },
-      { dx: -w, dy: -h }, { dx: -w, dy: h },
-      { dx: w, dy: -h }, { dx: w, dy: h },
-    ];
+    const px = position.x;
+    const py = position.y;
+    const minX = this._cullBoundsMinX - margin;
+    const minY = this._cullBoundsMinY - margin;
+    const maxX = this._cullBoundsMaxX + margin;
+    const maxY = this._cullBoundsMaxY + margin;
 
-    for (const off of candidates) {
-      const shifted = Vec2.from(position.x + off.dx, position.y + off.dy);
-      if (camera.isWorldPositionVisible(shifted, margin)) offsets.push(off);
+    for (const cand of RenderSystem._WRAP_CANDIDATE_OFFSETS) {
+      const dx = cand.dx * w;
+      const dy = cand.dy * h;
+      const wx = px + dx;
+      const wy = py + dy;
+      if (wx >= minX && wx <= maxX && wy >= minY && wy <= maxY) {
+        const slot = offsets[count] ?? (offsets[count] = { dx: 0, dy: 0 });
+        slot.dx = dx;
+        slot.dy = dy;
+        count++;
+      }
     }
+    offsets.length = count;
     return offsets;
   }
 
@@ -9646,7 +9675,8 @@ export class RenderSystem {
     const _localCarrierId = this._cachedLocalPlayer?.carrierId ?? 0;
 
     // Track every live ship so we can detect despawns frame-to-frame.
-    const currentShipIds = new Set<number>();
+    const currentShipIds = this._currentShipIdsScratch;
+    currentShipIds.clear();
     for (const ship of worldState.ships) {
       currentShipIds.add(ship.id);
       this.lastKnownShips.set(ship.id, ship);

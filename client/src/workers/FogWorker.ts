@@ -30,7 +30,10 @@ const MAX_VIEW_DIST = 5000;
 // ── State ────────────────────────────────────────────────────────────────────
 
 let islands: FogIsland[] = [];
-const result = new Float32Array(RAY_COUNT);
+const resultA = new Float32Array(RAY_COUNT);
+const resultB = new Float32Array(RAY_COUNT);
+/** Writable buffer for the current compute; posted buffer alternates to avoid slice(). */
+let result = resultA;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -191,8 +194,10 @@ self.onmessage = (e: MessageEvent) => {
 
   if (msg.type === 'COMPUTE') {
     computeRays(msg.x ?? 0, msg.y ?? 0);
+    const out = result;
+    result = out === resultA ? resultB : resultA;
     // Transfer the buffer for zero-copy delivery; main thread wraps it in a new Float32Array.
-    const buf = result.buffer.slice(0) as ArrayBuffer;
+    const buf = out.buffer;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (self as any).postMessage(buf, [buf]);
   }
