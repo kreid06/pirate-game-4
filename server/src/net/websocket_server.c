@@ -4039,11 +4039,11 @@ void player_die(WebSocketPlayer* player) {
             (int)t->inventory.equipment.hands, (int)t->inventory.equipment.shield);
         for (int s = 0; s < INVENTORY_SLOTS && off < (int)sizeof(msg) - 8; s++) {
             if (s > 0) msg[off++] = ',';
-            off += snprintf(msg + off, sizeof(msg) - off, "[%d,%d]",
+            off += snprintf(msg + off, (size_t)(sizeof(msg) - (size_t)off), "[%d,%d]",
                 (int)t->inventory.slots[s].item,
                 (int)t->inventory.slots[s].quantity);
         }
-        off += snprintf(msg + off, sizeof(msg) - off, "]}");
+        off += snprintf(msg + off, (size_t)(sizeof(msg) - (size_t)off), "]}");
         websocket_server_broadcast(msg);
         log_info("⚰️  Tombstone %u spawned for %s at (%.1f,%.1f)",
                  t->id, t->owner_name, t->x, t->y);
@@ -4181,11 +4181,11 @@ static void send_tombstone_items(struct WebSocketClient* client, Tombstone* t) {
         (int)t->inventory.equipment.hands, (int)t->inventory.equipment.shield);
     for (int s = 0; s < INVENTORY_SLOTS && off < (int)sizeof(msg) - 16; s++) {
         if (s > 0) msg[off++] = ',';
-        off += snprintf(msg + off, sizeof(msg) - off, "[%d,%d]",
+        off += snprintf(msg + off, (size_t)(sizeof(msg) - (size_t)off), "[%d,%d]",
             (int)t->inventory.slots[s].item,
             (int)t->inventory.slots[s].quantity);
     }
-    off += snprintf(msg + off, sizeof(msg) - off, "]}");
+    off += snprintf(msg + off, (size_t)(sizeof(msg) - (size_t)off), "]}");
     char frame[2200];
     size_t fl = websocket_create_frame(WS_OPCODE_TEXT, msg, (size_t)off, frame, sizeof(frame));
     if (fl > 0) send(client->fd, frame, fl, 0);

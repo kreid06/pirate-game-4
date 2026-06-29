@@ -846,50 +846,52 @@ void sim_handle_collisions(struct Sim* sim) {
         }
 
         /* ── Player vs Ship hull CCD (swimming players only) ── */
-        for (uint16_t pi = 0; pi < sim->player_count; pi++) {
-            struct Player* p = &sim->players[pi];
-            if (p->ship_id != INVALID_ENTITY_ID) continue;  /* on a ship — skip */
+        if (sim->player_count > 0) {
+            for (uint16_t pi = 0; pi < sim->player_count; pi++) {
+                struct Player* p = &sim->players[pi];
+                if (p->ship_id != INVALID_ENTITY_ID) continue;  /* on a ship — skip */
 
-            float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
-            float pvx = Q16_TO_FLOAT(p->velocity.x);
-            float pvy = Q16_TO_FLOAT(p->velocity.y);
-            float dx = pvx * dt_f, dy = pvy * dt_f;
-            if (dx*dx + dy*dy < CCD_MIN_DISP_SQ) continue;
+                float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
+                float pvx = Q16_TO_FLOAT(p->velocity.x);
+                float pvy = Q16_TO_FLOAT(p->velocity.y);
+                float dx = pvx * dt_f, dy = pvy * dt_f;
+                if (dx*dx + dy*dy < CCD_MIN_DISP_SQ) continue;
 
-            float px = Q16_TO_FLOAT(p->position.x);
-            float py = Q16_TO_FLOAT(p->position.y);
-            float pr = Q16_TO_FLOAT(p->radius);
-            float pax = px - dx, pay = py - dy;
+                float px = Q16_TO_FLOAT(p->position.x);
+                float py = Q16_TO_FLOAT(p->position.y);
+                float pr = Q16_TO_FLOAT(p->radius);
+                float pax = px - dx, pay = py - dy;
 
-            for (uint16_t si = 0; si < sim->ship_count; si++) {
-                struct Ship* ship = &sim->ships[si];
-                float br = Q16_TO_FLOAT(ship->bounding_radius);
-                float sdx = Q16_TO_FLOAT(ship->position.x) - (pax + px) * 0.5f;
-                float sdy = Q16_TO_FLOAT(ship->position.y) - (pay + py) * 0.5f;
-                float sweep_r = pr + br + sqrtf(dx*dx + dy*dy) * 0.5f;
-                if (sdx*sdx + sdy*sdy > sweep_r*sweep_r) continue;
+                for (uint16_t si = 0; si < sim->ship_count; si++) {
+                    struct Ship* ship = &sim->ships[si];
+                    float br = Q16_TO_FLOAT(ship->bounding_radius);
+                    float sdx = Q16_TO_FLOAT(ship->position.x) - (pax + px) * 0.5f;
+                    float sdy = Q16_TO_FLOAT(ship->position.y) - (pay + py) * 0.5f;
+                    float sweep_r = pr + br + sqrtf(dx*dx + dy*dy) * 0.5f;
+                    if (sdx*sdx + sdy*sdy > sweep_r*sweep_r) continue;
 
-                float hvx[64], hvy[64];
-                int nv = (int)ship->hull_vertex_count;
-                for (int vi = 0; vi < nv; vi++) {
-                    Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
-                                                       ship->position, ship->rotation);
-                    hvx[vi] = Q16_TO_FLOAT(wv.x);
-                    hvy[vi] = Q16_TO_FLOAT(wv.y);
-                }
-
-                float t, cnx, cny;
-                if (ccd_swept_circle_polygon(pax, pay, px, py, pr, hvx, hvy, nv,
-                                             &t, &cnx, &cny)) {
-                    float safe_t = fmaxf(t - 0.01f, 0.0f);
-                    p->position.x = Q16_FROM_FLOAT(pax + dx * safe_t);
-                    p->position.y = Q16_FROM_FLOAT(pay + dy * safe_t);
-                    float vn = pvx * cnx + pvy * cny;
-                    if (vn < 0.0f) {
-                        p->velocity.x = Q16_FROM_FLOAT(pvx - 1.15f * vn * cnx);
-                        p->velocity.y = Q16_FROM_FLOAT(pvy - 1.15f * vn * cny);
+                    float hvx[64], hvy[64];
+                    int nv = (int)ship->hull_vertex_count;
+                    for (int vi = 0; vi < nv; vi++) {
+                        Vec2Q16 wv = transform_hull_vertex(ship->hull_vertices[vi],
+                                                           ship->position, ship->rotation);
+                        hvx[vi] = Q16_TO_FLOAT(wv.x);
+                        hvy[vi] = Q16_TO_FLOAT(wv.y);
                     }
-                    break;
+
+                    float t, cnx, cny;
+                    if (ccd_swept_circle_polygon(pax, pay, px, py, pr, hvx, hvy, nv,
+                                                 &t, &cnx, &cny)) {
+                        float safe_t = fmaxf(t - 0.01f, 0.0f);
+                        p->position.x = Q16_FROM_FLOAT(pax + dx * safe_t);
+                        p->position.y = Q16_FROM_FLOAT(pay + dy * safe_t);
+                        float vn = pvx * cnx + pvy * cny;
+                        if (vn < 0.0f) {
+                            p->velocity.x = Q16_FROM_FLOAT(pvx - 1.15f * vn * cnx);
+                            p->velocity.y = Q16_FROM_FLOAT(pvy - 1.15f * vn * cny);
+                        }
+                        break;
+                    }
                 }
             }
         }
@@ -1974,16 +1976,18 @@ void sim_update_spatial_hash(struct Sim* sim) {
         spatial_hash_add_ship(sim, ship);
     }
     
-    // Add all players to spatial hash
-    for (uint16_t i = 0; i < sim->player_count; i++) {
-        struct Player* player = &sim->players[i];
-        spatial_hash_add_player(sim, player);
+    if (sim->player_count > 0) {
+        for (uint16_t i = 0; i < sim->player_count; i++) {
+            struct Player* player = &sim->players[i];
+            spatial_hash_add_player(sim, player);
+        }
     }
     
-    // Add all projectiles to spatial hash
-    for (uint32_t i = 0; i < sim->projectile_count; i++) {
-        struct Projectile* projectile = &sim->projectiles[i];
-        spatial_hash_add_projectile(sim, projectile);
+    if (sim->projectile_count > 0) {
+        for (uint32_t i = 0; i < sim->projectile_count; i++) {
+            struct Projectile* projectile = &sim->projectiles[i];
+            spatial_hash_add_projectile(sim, projectile);
+        }
     }
 }
 
@@ -2263,6 +2267,7 @@ void handle_projectile_collisions(struct Sim* sim) {
     // NOTE: hit_event_count is NOT reset here — sim_update_ships may have already
     // queued SHIP_SINK events this tick. The count is reset at the start of the
     // next tick by the caller (websocket_server.c drains events after sim_step).
+    if (sim->projectile_count == 0) return;
 
     uint32_t i = 0;
     while (i < sim->projectile_count) {
@@ -2848,27 +2853,29 @@ void handle_projectile_collisions(struct Sim* sim) {
         }
 
         // ---- Player collision (unchanged) ----
-        for (uint16_t j = 0; j < sim->player_count && !removed; j++) {
-            struct Player* player = &sim->players[j];
-            if (player->id == proj->owner_id) continue;
-            if (player->ship_id == proj->owner_id) continue;
-            if (player->health == 0) continue; /* already dead — projectiles pass through */
+        if (sim->player_count > 0) {
+            for (uint16_t j = 0; j < sim->player_count && !removed; j++) {
+                struct Player* player = &sim->players[j];
+                if (player->id == proj->owner_id) continue;
+                if (player->ship_id == proj->owner_id) continue;
+                if (player->health == 0) continue; /* already dead — projectiles pass through */
 
-            float dx = Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(proj->position.x);
-            float dy = Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(proj->position.y);
-            float dist_sq = dx*dx + dy*dy;
-            const float player_r = CLIENT_TO_SERVER(16.0f);
-            if (dist_sq < player_r * player_r) {
-                player->health = player->health > Q16_TO_INT(proj->damage) ?
-                                 player->health - Q16_TO_INT(proj->damage) : 0;
-                log_debug("💀 Projectile %u hit player %u for %d damage (health: %d) at (%.1f, %.1f)",
-                         proj->id, player->id, Q16_TO_INT(proj->damage), player->health,
-                         Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
+                float dx = Q16_TO_FLOAT(player->position.x) - Q16_TO_FLOAT(proj->position.x);
+                float dy = Q16_TO_FLOAT(player->position.y) - Q16_TO_FLOAT(proj->position.y);
+                float dist_sq = dx*dx + dy*dy;
+                const float player_r = CLIENT_TO_SERVER(16.0f);
+                if (dist_sq < player_r * player_r) {
+                    player->health = player->health > Q16_TO_INT(proj->damage) ?
+                                     player->health - Q16_TO_INT(proj->damage) : 0;
+                    log_debug("💀 Projectile %u hit player %u for %d damage (health: %d) at (%.1f, %.1f)",
+                             proj->id, player->id, Q16_TO_INT(proj->damage), player->health,
+                             Q16_TO_FLOAT(proj->position.x), Q16_TO_FLOAT(proj->position.y));
 
-                memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
-                        (sim->projectile_count - i - 1) * sizeof(struct Projectile));
-                sim->projectile_count--;
-                removed = true;
+                    memmove(&sim->projectiles[i], &sim->projectiles[i + 1],
+                            (sim->projectile_count - i - 1) * sizeof(struct Projectile));
+                    sim->projectile_count--;
+                    removed = true;
+                }
             }
         }
 
@@ -2886,6 +2893,8 @@ void handle_projectile_collisions(struct Sim* sim) {
  * (boulders are infinite-mass static objects).
  */
 static void handle_player_boulder_collisions(struct Sim* sim) {
+    if (sim->player_count == 0) return;
+
     static const float BAUMGARTE = 0.6f;
     static const float BOULDER_BASE_R = 38.0f;
     /* sx/sy/rot shape factors — must match client BOULDER_SHAPES order exactly */
@@ -3187,6 +3196,8 @@ static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship
 }
 
 void handle_player_ship_collisions(struct Sim* sim) {
+    if (sim->player_count == 0) return;
+
     // Debug log periodically (disabled — too noisy)
     static uint32_t debug_count = 0;
     bool should_log = false; (void)(debug_count++);
