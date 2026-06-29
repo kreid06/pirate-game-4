@@ -397,6 +397,7 @@ export class ClientApplication {
   /** Rolling frame times for p50/p95 — exposed via window.__frameAuditStats */
   private readonly _frameMsRing: number[] = [];
   private readonly _frameMsRingCap = 120;
+  private readonly _frameMsSortedScratch: number[] = [];
   private _hitchCountSession = 0;
   private lastRenderLogTime = 0;
   /** Timestamp (ms) of the last sword swing, for cursor cooldown ring. */
@@ -9317,13 +9318,29 @@ export class ClientApplication {
     if (deltaMs > budgetMs * 2) {
       this._hitchCountSession++;
       if (this.config.debug.enabled && this.config.debug.showPerformanceStats) {
+        const pt = this.renderSystem.getLastPerfTimings();
+        const passes = [
+          { name: 'fog', ms: pt.fog },
+          { name: 'execute', ms: pt.execute },
+          { name: 'queue', ms: pt.queue },
+          { name: 'island', ms: pt.island },
+        ].sort((a, b) => b.ms - a.ms);
+        const top3 = passes
+          .filter((p) => p.ms > 0)
+          .slice(0, 3)
+          .map((p) => `${p.name}=${p.ms.toFixed(1)}ms`)
+          .join(', ');
         console.warn(
-          `[FRAME] hitch ${deltaMs.toFixed(1)}ms (budget ${budgetMs.toFixed(1)}ms, target ${targetFps} FPS)`
+          `[FRAME] hitch ${deltaMs.toFixed(1)}ms (budget ${budgetMs.toFixed(1)}ms, target ${targetFps} FPS)` +
+            (top3 ? ` — slow passes: ${top3}` : '')
         );
       }
     }
     if (typeof window === 'undefined') return;
-    const sorted = [...this._frameMsRing].sort((a, b) => a - b);
+    const sorted = this._frameMsSortedScratch;
+    sorted.length = this._frameMsRing.length;
+    for (let i = 0; i < this._frameMsRing.length; i++) sorted[i] = this._frameMsRing[i];
+    sorted.sort((a, b) => a - b);
     const pct = (q: number) =>
       sorted.length ? sorted[Math.floor((sorted.length - 1) * q)] : 0;
     (window as unknown as { __frameAuditStats?: Record<string, number> }).__frameAuditStats = {
