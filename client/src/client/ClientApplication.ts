@@ -4188,6 +4188,10 @@ export class ClientApplication {
       // Start game loop regardless of server connection
       this.running = true;
       this.lastFrameTime = performance.now();
+      if (typeof window !== 'undefined' && this.config.debug.enabled) {
+        (window as unknown as { __resetFrameAudit?: () => void }).__resetFrameAudit =
+          () => this.resetFrameAudit();
+      }
       requestAnimationFrame(this._boundGameLoop);
       
       console.log('✅ Client application started successfully');
@@ -9314,6 +9318,16 @@ export class ClientApplication {
       this.frameCount = 0;
       this.fpsTimer = 0;
     }
+  }
+
+  /** Reset hitch counter and frame ring — for clean F0–F9 profiling after load. */
+  resetFrameAudit(): void {
+    this._hitchCountSession = 0;
+    this._frameMsRing.length = 0;
+    const fa = this._frameAuditStatsObj;
+    fa.hitchCount = 0;
+    fa.frameMsP50 = 0;
+    fa.frameMsP95 = 0;
   }
 
   /** Rolling frame-time stats for FPS audits (see docs/CLIENT_FPS_OPTIMIZATION_PROMPT.md). */

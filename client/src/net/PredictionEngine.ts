@@ -247,6 +247,18 @@ export class PredictionEngine {
   // returns ~RTT later. If a match is ever missed at extreme ping, reconciliation just skips
   // that frame (findPredictionState → null) — safe degradation, no snap.
   private static readonly MAX_PREDICTION_HISTORY = 256;
+
+  // ── Interpolation scratch (avoids per-frame Vec2 / Map / entity-shell allocations) ──
+  private _fromByIdScratch = new Map<number, any>();
+  private _interpShipsScratch: any[] = [];
+  private _interpPlayersScratch: any[] = [];
+  private _interpNpcsScratch: any[] = [];
+  private _interpBallsScratch: any[] = [];
+  private _interpEntityShellById = new Map<number, any>();
+  private _vec2PoolByKey = new Map<string, Vec2>();
+  private _interpWorldScratch: WorldState | null = null;
+  private _carrierDetectionScratch = new Map<number, CarrierDetectionState>();
+  private _pruneLiveIdsScratch = new Set<number>();
   
   constructor(config: PredictionConfig) {
     this.config = config;
@@ -760,7 +772,9 @@ export class PredictionEngine {
   /** Drop cached hull geometry for ships that no longer exist (memory hygiene only). */
   private _pruneHullCache(worldState: WorldState): void {
     if (this._hullRefCache.size > worldState.ships.length + 4) {
-      const live = new Set(worldState.ships.map(s => s.id));
+      const live = this._pruneLiveIdsScratch;
+      live.clear();
+      for (const s of worldState.ships) live.add(s.id);
       for (const id of this._hullRefCache.keys()) {
         if (!live.has(id)) this._hullRefCache.delete(id);
       }
@@ -846,18 +860,36 @@ export class PredictionEngine {
     to: WorldState,
     alpha: number,
   ): WorldState {
-    return {
-      tick: Math.round(from.tick + (to.tick - from.tick) * alpha),
-      timestamp: from.timestamp + (to.timestamp - from.timestamp) * alpha,
-      ships:       this.interpolateShips(from.ships, to.ships, alpha),
-      players:     this.interpolatePlayers(from.players, to.players, alpha),
-      cannonballs: this.interpolateCannonballs(from.cannonballs, to.cannonballs, alpha),
-      npcs:        this.interpolateNpcs(from.npcs, to.npcs, alpha),
-      tombstones:  to.tombstones ?? [],
-      droppedItems: to.droppedItems ?? [],
-      companies:   to.companies ?? [],
-      carrierDetection: new Map(from.carrierDetection),
-    };
+    if (!this._interpWorldScratch) {
+      this._interpWorldScratch = {
+        tick: 0,
+        timestamp: 0,
+        ships: [],
+        players: [],
+        cannonballs: [],
+        npcs: [],
+        tombstones: [],
+        droppedItems: [],
+        companies: [],
+        carrierDetection: this._carrierDetectionScratch,
+      };
+    }
+    const w = this._interpWorldScratch;
+    w.tick = Math.round(from.tick + (to.tick - from.tick) * alpha);
+    w.timestamp = from.timestamp + (to.timestamp - from.timestamp) * alpha;
+    w.ships = this.interpolateShips(from.ships, to.ships, alpha);
+    w.players = this.interpolatePlayers(from.players, to.players, alpha);
+    w.cannonballs = this.interpolateCannonballs(from.cannonballs, to.cannonballs, alpha);
+    w.npcs = this.interpolateNpcs(from.npcs, to.npcs, alpha);
+    w.tombstones = to.tombstones ?? [];
+    w.droppedItems = to.droppedItems ?? [];
+    w.companies = to.companies ?? [];
+    this._carrierDetectionScratch.clear();
+    for (const [k, v] of from.carrierDetection) {
+      this._carrierDetectionScratch.set(k, v);
+    }
+    w.carrierDetection = this._carrierDetectionScratch;
+    return w;
   }
   
   /**
@@ -876,44 +908,38 @@ export class PredictionEngine {
   private interpolateShips(
     fromShips: any[], toShips: any[], alpha: number,
   ): any[] {
-    const result = [];
-    const fromById = new Map<number, any>();
+    const result = this._interpShipsScratch;
+    result.length = 0;
+    const fromById = this._fromByIdScratch;
+    fromById.clear();
     for (const s of fromShips) fromById.set(s.id, s);
 
     for (const toShip of toShips) {
       const fromShip = fromById.get(toShip.id);
       if (!fromShip) {
-        // Ship not yet in the previous snapshot (just spawned / first frame).
-        // Show at final position — will be smooth from next frame onward.
         result.push(toShip);
         continue;
       }
 
-      // ── Pure linear position ─────────────────────────────────────────────────
-      // alpha is derived from the SERVER clock in getInterpolatedState, so it
-      // advances evenly (0.25, 0.5, 0.75, 1.0 across a 30→120 Hz segment). A plain
-      // lerp therefore distributes frames perfectly evenly between the two server
-      // states — e.g. (10,10)→(20,20) renders as (12.5,12.5)(15,15)(17.5,17.5)(20,20).
-      // Cubic splines (Catmull-Rom/Hermite) are intentionally NOT used here: their
-      // frame spacing is non-uniform and their tangents can overshoot, which reads
-      // as the residual jitter we were chasing. Server positions are already in
-      // client-pixel space (scaled ×10), so no extra scaling is needed.
-      const pos = this.lerpVec2(fromShip.position, toShip.position, alpha);
+      const pos = this.lerpVec2Keyed(`ship:${toShip.id}:pos`, fromShip.position, toShip.position, alpha);
 
-      // ── Shortest-arc linear rotation ─────────────────────────────────────────
       let rotErr = toShip.rotation - fromShip.rotation;
       while (rotErr >  Math.PI) rotErr -= 2 * Math.PI;
       while (rotErr < -Math.PI) rotErr += 2 * Math.PI;
       const rot = fromShip.rotation + rotErr * alpha;
 
-      result.push({
-        ...toShip,
-        position:        pos,
-        rotation:        rot,
-        // Interpolate velocity so mounted-player anchoring uses smooth vel
-        velocity:        this.lerpVec2(fromShip.velocity, toShip.velocity, alpha),
-        angularVelocity: fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha,
-      });
+      let shell = this._interpEntityShellById.get(toShip.id);
+      if (!shell) {
+        shell = { ...toShip };
+        this._interpEntityShellById.set(toShip.id, shell);
+      } else {
+        Object.assign(shell, toShip);
+      }
+      shell.position = pos;
+      shell.rotation = rot;
+      shell.velocity = this.lerpVec2Keyed(`ship:${toShip.id}:vel`, fromShip.velocity, toShip.velocity, alpha);
+      shell.angularVelocity = fromShip.angularVelocity + (toShip.angularVelocity - fromShip.angularVelocity) * alpha;
+      result.push(shell);
     }
 
     return result;
@@ -923,24 +949,32 @@ export class PredictionEngine {
    * Interpolate remote player positions — pure linear (uniform frame spacing).
    */
   private interpolatePlayers(fromPlayers: any[], toPlayers: any[], alpha: number): any[] {
-    const result = [];
-    const fromById = new Map<number, any>();
+    const result = this._interpPlayersScratch;
+    result.length = 0;
+    const fromById = this._fromByIdScratch;
+    fromById.clear();
     for (const p of fromPlayers) fromById.set(p.id, p);
 
     for (const toPlayer of toPlayers) {
       const fromPlayer = fromById.get(toPlayer.id);
       if (!fromPlayer) {
-        result.push(toPlayer);   // just appeared — show at final position
+        result.push(toPlayer);
         continue;
       }
 
-      result.push({
-        ...toPlayer,
-        position: this.lerpVec2(fromPlayer.position, toPlayer.position, alpha),
-        velocity: (fromPlayer.velocity && toPlayer.velocity)
-          ? this.lerpVec2(fromPlayer.velocity, toPlayer.velocity, alpha)
-          : toPlayer.velocity,
-      });
+      const keyBase = `player:${toPlayer.id}`;
+      let shell = this._interpEntityShellById.get(-toPlayer.id); // negative id avoids ship collision
+      if (!shell) {
+        shell = { ...toPlayer };
+        this._interpEntityShellById.set(-toPlayer.id, shell);
+      } else {
+        Object.assign(shell, toPlayer);
+      }
+      shell.position = this.lerpVec2Keyed(`${keyBase}:pos`, fromPlayer.position, toPlayer.position, alpha);
+      shell.velocity = (fromPlayer.velocity && toPlayer.velocity)
+        ? this.lerpVec2Keyed(`${keyBase}:vel`, fromPlayer.velocity, toPlayer.velocity, alpha)
+        : toPlayer.velocity;
+      result.push(shell);
     }
 
     return result;
@@ -950,28 +984,38 @@ export class PredictionEngine {
    * Interpolate NPC positions, rotations, and deck-local positions — pure linear.
    */
   private interpolateNpcs(fromNpcs: any[], toNpcs: any[], alpha: number): any[] {
-    const result = [];
-    const fromById = new Map<number, any>();
+    const result = this._interpNpcsScratch;
+    result.length = 0;
+    const fromById = this._fromByIdScratch;
+    fromById.clear();
     for (const n of fromNpcs) fromById.set(n.id, n);
 
     for (const toNpc of toNpcs) {
       const fromNpc = fromById.get(toNpc.id);
       if (!fromNpc) {
-        result.push(toNpc);   // just appeared — show at final position
+        result.push(toNpc);
         continue;
       }
 
-      const interpolated: any = {
-        ...toNpc,
-        position: this.lerpVec2(fromNpc.position, toNpc.position, alpha),
-        rotation: this.lerpAngle(fromNpc.rotation ?? 0, toNpc.rotation ?? 0, alpha),
-      };
-
-      if (fromNpc.localPosition && toNpc.localPosition) {
-        interpolated.localPosition = this.lerpVec2(fromNpc.localPosition, toNpc.localPosition, alpha);
+      const shellKey = -200_000 - toNpc.id;
+      const keyBase = `npc:${toNpc.id}`;
+      let shell = this._interpEntityShellById.get(shellKey);
+      if (!shell) {
+        shell = { ...toNpc };
+        this._interpEntityShellById.set(shellKey, shell);
+      } else {
+        Object.assign(shell, toNpc);
       }
-
-      result.push(interpolated);
+      shell.position = this.lerpVec2Keyed(`${keyBase}:pos`, fromNpc.position, toNpc.position, alpha);
+      shell.rotation = this.lerpAngle(fromNpc.rotation ?? 0, toNpc.rotation ?? 0, alpha);
+      if (fromNpc.localPosition && toNpc.localPosition) {
+        shell.localPosition = this.lerpVec2Keyed(
+          `${keyBase}:local`, fromNpc.localPosition, toNpc.localPosition, alpha,
+        );
+      } else {
+        shell.localPosition = toNpc.localPosition;
+      }
+      result.push(shell);
     }
 
     return result;
@@ -981,10 +1025,11 @@ export class PredictionEngine {
    * Interpolate cannonball positions
    */
   private interpolateCannonballs(fromBalls: any[], toBalls: any[], alpha: number): any[] {
-    const result = [];
+    const result = this._interpBallsScratch;
+    result.length = 0;
 
-    // Build O(1) lookup to avoid O(N²) .find() per cannonball
-    const fromById = new Map<number, any>();
+    const fromById = this._fromByIdScratch;
+    fromById.clear();
     for (const b of fromBalls) fromById.set(b.id, b);
 
     for (const toBall of toBalls) {
@@ -995,24 +1040,33 @@ export class PredictionEngine {
         continue;
       }
 
-      result.push({
-        ...toBall,
-        position: this.lerpVec2(fromBall.position, toBall.position, alpha),
-        velocity: this.lerpVec2(fromBall.velocity, toBall.velocity, alpha)
-      });
+      const shellKey = -100_000 - toBall.id;
+      const keyBase = `ball:${toBall.id}`;
+      let shell = this._interpEntityShellById.get(shellKey);
+      if (!shell) {
+        shell = { ...toBall };
+        this._interpEntityShellById.set(shellKey, shell);
+      } else {
+        Object.assign(shell, toBall);
+      }
+      shell.position = this.lerpVec2Keyed(`${keyBase}:pos`, fromBall.position, toBall.position, alpha);
+      shell.velocity = this.lerpVec2Keyed(`${keyBase}:vel`, fromBall.velocity, toBall.velocity, alpha);
+      result.push(shell);
     }
 
     return result;
   }
   
-  /**
-   * Linear interpolation between two Vec2 vectors
-   */
-  private lerpVec2(from: Vec2, to: Vec2, alpha: number): Vec2 {
-    return Vec2.from(
-      from.x + (to.x - from.x) * alpha,
-      from.y + (to.y - from.y) * alpha
-    );
+  /** Pooled Vec2 lerp — one allocation per unique key, then in-place updates. */
+  private lerpVec2Keyed(key: string, from: Vec2, to: Vec2, alpha: number): Vec2 {
+    let v = this._vec2PoolByKey.get(key);
+    if (!v) {
+      v = new Vec2();
+      this._vec2PoolByKey.set(key, v);
+    }
+    v.x = from.x + (to.x - from.x) * alpha;
+    v.y = from.y + (to.y - from.y) * alpha;
+    return v;
   }
   
   /**
