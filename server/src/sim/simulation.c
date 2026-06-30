@@ -357,7 +357,16 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
             float ship_cy = SERVER_TO_CLIENT(Q16_TO_FLOAT(ship->position.y));
             float max_depth = 0.0f;
             for (int ii = 0; ii < ISLAND_COUNT; ii++) {
-                float d = island_shallow_water_depth(&ISLAND_PRESETS[ii], ship_cx, ship_cy);
+                const IslandDef *isl = &ISLAND_PRESETS[ii];
+                if (isl->vertex_count > 0) {
+                    if (isl->shallow_vertex_count == 0) continue;
+                } else {
+                    float shallow_depth = isl->beach_radius_px * SHALLOW_WATER_SCALE;
+                    float broad_outer = isl->beach_radius_px + isl->beach_max_bump + shallow_depth;
+                    float dx = ship_cx - isl->x, dy = ship_cy - isl->y;
+                    if (dx * dx + dy * dy > broad_outer * broad_outer) continue;
+                }
+                float d = island_shallow_water_depth(isl, ship_cx, ship_cy);
                 if (d > max_depth) max_depth = d;
             }
             if (max_depth > 0.0f) {
@@ -646,6 +655,7 @@ static void apply_island_impulse(struct Ship *ship,
 }
 
 static void handle_island_collisions(struct Sim *sim) {
+    if (sim->ship_count == 0) return;
     for (int ii = 0; ii < ISLAND_COUNT; ii++) {
         const IslandDef *isl = &ISLAND_PRESETS[ii];
 
@@ -788,7 +798,7 @@ void sim_handle_collisions(struct Sim* sim) {
         static const float CCD_MIN_DISP_SQ = 0.5f * 0.5f;  /* server units² */
 
         /* ── Ship vs Ship CCD ── */
-        for (uint16_t i = 0; i < sim->ship_count; i++) {
+        if (sim->ship_count >= 2) for (uint16_t i = 0; i < sim->ship_count; i++) {
             struct Ship* s = &sim->ships[i];
             float dt_f = Q16_TO_FLOAT(FIXED_DT_Q16);
             float s_vx = Q16_TO_FLOAT(s->velocity.x);
@@ -3196,7 +3206,7 @@ static Vec2Q16 closest_point_on_hull(Vec2Q16 player_pos, const struct Ship* ship
 }
 
 void handle_player_ship_collisions(struct Sim* sim) {
-    if (sim->player_count == 0) return;
+    if (sim->player_count == 0 || sim->ship_count == 0) return;
 
     // Debug log periodically (disabled — too noisy)
     static uint32_t debug_count = 0;

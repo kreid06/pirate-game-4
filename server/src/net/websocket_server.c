@@ -2206,6 +2206,7 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
 }
 
 static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
+    if (tombstone_live_count == 0) return 0;
     int active = 0;
     for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
         if (!_src[i].active) {
@@ -2227,6 +2228,7 @@ static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
 }
 
 static int copy_dropped_items_to_blob(const DroppedItem *_src, DroppedItem *_dst) {
+    if (dropped_item_live_count == 0) return 0;
     int active = 0;
     for (int i = 0; i < (int)MAX_DROPPED_ITEMS; i++) {
         if (!_src[i].active) {
@@ -3043,8 +3045,9 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
             float _snap_spd_mult  = _snap_carry_r >= 1.0f ? 0.3f : fmaxf(0.3f, 1.0f - _snap_carry_r * 0.5f);
             bool  _snap_can_sprint = (_snap_carry_r < 0.85f);
 
-            char player_entry[3200];
-            int _pelen = snprintf(player_entry, sizeof(player_entry),
+            char * const _pe = out->player_entry[p];
+            const int _pe_cap = (int)sizeof(out->player_entry[p]);
+            int _pelen = snprintf(_pe, (size_t)_pe_cap,
                     "{\"id\":%u,\"name\":\"%s\",\"world_x\":%.1f,\"world_y\":%.1f,\"rotation\":%.3f,"
                     "\"velocity_x\":%.2f,\"velocity_y\":%.2f,\"is_moving\":%s,"
                     "\"movement_direction_x\":%.2f,\"movement_direction_y\":%.2f,"
@@ -3090,19 +3093,19 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                     (unsigned)snap->players[p].bucket_fill,
                     inv_buf);
             if (_pelen < 0) _pelen = 0;
-            if (_pelen >= (int)sizeof(player_entry)) _pelen = (int)sizeof(player_entry) - 1;
+            if (_pelen >= _pe_cap) _pelen = _pe_cap - 1;
             if (_g_state) {
-                if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
+                if (_pelen > 1 && _pe[_pelen - 1] == '}') {
                     char _gbuf[128];
                     int _gn = snprintf(_gbuf, sizeof(_gbuf),
                         ",\"grapple_state\":%d,\"grapple_x\":%.1f,\"grapple_y\":%.1f,\"grapple_rope\":%.1f,\"grapple_target\":%d}",
                         (int)_g_state, _g_x, _g_y, _g_rope, (int)_g_target);
                     if (_gn > 0) {
                         int _base = _pelen - 1;
-                        if (_base + _gn < (int)sizeof(player_entry)) {
-                            memcpy(player_entry + _base, _gbuf, (size_t)_gn);
+                        if (_base + _gn < _pe_cap) {
+                            memcpy(_pe + _base, _gbuf, (size_t)_gn);
                             _pelen = _base + _gn;
-                            player_entry[_pelen] = '\0';
+                            _pe[_pelen] = '\0';
                         }
                     }
                 }
@@ -3115,26 +3118,25 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
                         _tgh->target_type != GRAPPLE_TARGET_PLAYER ||
                         _tgh->target_id != snap->players[p].player_id) continue;
                     if (!players[_gsi].active) break;
-                    if (_pelen > 1 && player_entry[_pelen - 1] == '}') {
+                    if (_pelen > 1 && _pe[_pelen - 1] == '}') {
                         char _tbuf[160];
                         int _tn = snprintf(_tbuf, sizeof(_tbuf),
                             ",\"grapple_pulled\":1,\"grapple_anchor_x\":%.1f,\"grapple_anchor_y\":%.1f,\"grapple_rope\":%.1f}",
                             players[_gsi].x, players[_gsi].y, _tgh->rope_length);
                         if (_tn > 0) {
                             int _base = _pelen - 1;
-                            if (_base + _tn < (int)sizeof(player_entry)) {
-                                memcpy(player_entry + _base, _tbuf, (size_t)_tn);
+                            if (_base + _tn < _pe_cap) {
+                                memcpy(_pe + _base, _tbuf, (size_t)_tn);
                                 _pelen = _base + _tn;
-                                player_entry[_pelen] = '\0';
+                                _pe[_pelen] = '\0';
                             }
                         }
                     }
                     break;
                 }
             }
-            if (_pelen > (int)sizeof(out->player_entry[p]) - 1) _pelen = (int)sizeof(out->player_entry[p]) - 1;
-            memcpy(out->player_entry[p], player_entry, (size_t)_pelen);
-            out->player_entry[p][_pelen] = '\0';
+            if (_pelen > _pe_cap - 1) _pelen = _pe_cap - 1;
+            _pe[_pelen] = '\0';
             out->player_entry_len[p] = _pelen;
 
             _pk->player_id            = _bp->player_id;
