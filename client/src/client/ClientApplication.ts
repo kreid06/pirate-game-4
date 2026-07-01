@@ -172,6 +172,11 @@ export class ClientApplication {
   private _hybridLocalPlayer: Player | null = null;
   private _hybridLocalShip: Ship | null = null;
   private _hybridSourceRef: WorldState | null = null;
+  /** Reusable camera-follow world — avoids players.slice() + spread up to 5× per RAF when on deck. */
+  private _cameraFollowWorld: WorldState | null = null;
+  private _cameraFollowPlayersScratch: Player[] = [];
+  private _cameraFollowLocalPlayer: Player | null = null;
+  private _cameraFollowAnchoredPos: Vec2 | null = null;
   /** Wall-clock time of the previous render frame (ms) — for smooth-error-correction decay. */
   private _lastRenderTime = 0;
   /** Single bound game-loop reference to avoid allocating a closure every frame. */
@@ -4205,7 +4210,7 @@ export class ClientApplication {
   
   /**
    * Apply live settings changes from the pause menu.
-   * Currently handles audio volume and input bindings; graphics/FPS settings take effect on next load.
+   * Audio, keybinds, FPS cap, and perf HUD apply immediately.
    */
   private applySettings(settings: GameSettings): void {
     this.audioManager?.setVolumes(
@@ -4213,6 +4218,16 @@ export class ClientApplication {
       settings.sfxVolume,
       settings.musicVolume,
     );
+
+    this.config.graphics.targetFPS = settings.targetFPS;
+    this.config.graphics.antialiasing = settings.antialiasing;
+    this.config.graphics.particleQuality = settings.particleQuality;
+    if (settings.showPerformanceStats) {
+      this.config.debug.enabled = true;
+      this.config.debug.showPerformanceStats = true;
+    } else {
+      this.config.debug.showPerformanceStats = false;
+    }
 
     // Rebuild action mappings so rebound keys take effect immediately
     if (this.inputManager) {
@@ -4631,26 +4646,49 @@ export class ClientApplication {
                 if (_isMounted || !_predLocal.localPosition) {
                   // Mounted (or no deck offset yet): track the interpolated ship center
                   // directly — pure ship interpolation, no player-derived contribution.
-                  anchoredPos = Vec2.from(interpShip.position.x, interpShip.position.y);
+                  anchoredPos = interpShip.position;
                 } else {
                   // Free-walking: interpolated ship pose + rotated deck-local offset so the
                   // view follows the player across the deck while staying ship-anchored.
                   const cosR = Math.cos(interpShip.rotation);
                   const sinR = Math.sin(interpShip.rotation);
                   const lp = _predLocal.localPosition;
-                  anchoredPos = Vec2.from(
-                    interpShip.position.x + lp.x * cosR - lp.y * sinR,
-                    interpShip.position.y + lp.x * sinR + lp.y * cosR,
-                  );
+                  if (!this._cameraFollowAnchoredPos) {
+                    this._cameraFollowAnchoredPos = Vec2.from(
+                      interpShip.position.x + lp.x * cosR - lp.y * sinR,
+                      interpShip.position.y + lp.x * sinR + lp.y * cosR,
+                    );
+                  } else {
+                    this._cameraFollowAnchoredPos.x =
+                      interpShip.position.x + lp.x * cosR - lp.y * sinR;
+                    this._cameraFollowAnchoredPos.y =
+                      interpShip.position.y + lp.x * sinR + lp.y * cosR;
+                  }
+                  anchoredPos = this._cameraFollowAnchoredPos;
                 }
-                _predLocal = { ..._predLocal, position: anchoredPos };
+                if (!this._cameraFollowLocalPlayer) {
+                  this._cameraFollowLocalPlayer = { ..._predLocal, position: anchoredPos };
+                } else {
+                  Object.assign(this._cameraFollowLocalPlayer, _predLocal);
+                  this._cameraFollowLocalPlayer.position = anchoredPos;
+                }
+                _predLocal = this._cameraFollowLocalPlayer;
               }
             }
             const _idx = _interp.players.findIndex(p => p.id === _assignedId);
-            const _players = _interp.players.slice();
+            const _players = this._cameraFollowPlayersScratch;
+            const _srcPlayers = _interp.players;
+            if (_players.length !== _srcPlayers.length) _players.length = _srcPlayers.length;
+            for (let _pi = 0; _pi < _srcPlayers.length; _pi++) _players[_pi] = _srcPlayers[_pi];
             if (_idx >= 0) _players[_idx] = _predLocal;
             else _players.push(_predLocal);
-            _cameraFollowState = { ..._interp, players: _players };
+            if (!this._cameraFollowWorld) {
+              this._cameraFollowWorld = { ..._interp, players: _players };
+            } else {
+              Object.assign(this._cameraFollowWorld, _interp);
+              this._cameraFollowWorld.players = _players;
+            }
+            _cameraFollowState = this._cameraFollowWorld;
           } else {
             _cameraFollowState = _interp;
           }
