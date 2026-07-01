@@ -1023,13 +1023,10 @@ struct Ship* find_sim_ship(uint32_t id) {
         if (cached && (uint32_t)cached->id == id) return cached;
     }
     if (!global_sim) return NULL;
-    for (uint32_t i = 0; i < global_sim->ship_count; i++) {
-        if ((uint32_t)global_sim->ships[i].id == id) {
-            if (id < SIM_SHIP_ID_SIZE) g_sim_ship_by_id[id] = &global_sim->ships[i];
-            return &global_sim->ships[i];
-        }
-    }
-    return NULL;
+    struct Ship* ship = sim_get_ship(global_sim, (entity_id)id);
+    if (ship && id < SIM_SHIP_ID_SIZE)
+        g_sim_ship_by_id[id] = ship;
+    return ship;
 }
 
 // Sync SimpleShip state from simulation ships (position, rotation, velocity)
