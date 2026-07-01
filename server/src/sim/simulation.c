@@ -498,6 +498,8 @@ void sim_update_ships(struct Sim* sim, q16_t dt) {
 }
 
 void sim_update_players(struct Sim* sim, q16_t dt) {
+    if (sim->player_count == 0) return;
+
     /* Sort players by ID for deterministic order.
      * Insertion sort: O(n) when array is already sorted (the common case). */
     for (uint16_t i = 1; i < sim->player_count; i++) {
@@ -532,6 +534,8 @@ void sim_update_players(struct Sim* sim, q16_t dt) {
 }
 
 void sim_update_projectiles(struct Sim* sim, q16_t dt) {
+    if (sim->projectile_count == 0) return;
+
     /* Sort projectiles by ID for deterministic order.
      * Insertion sort: O(n) when array is already sorted (the common case). */
     for (uint16_t i = 1; i < sim->projectile_count; i++) {
@@ -1958,20 +1962,10 @@ entity_id simulation_create_player_entity(struct Sim* sim, const char* player_na
 
 bool simulation_has_entity(const struct Sim* sim, entity_id entity_id) {
     if (!sim || entity_id == INVALID_ENTITY_ID) return false;
-    
-    // Check if entity exists in any of our arrays
-    for (uint32_t i = 0; i < sim->player_count; i++) {
-        if (sim->players[i].id == entity_id) return true;
-    }
-    
-    for (uint32_t i = 0; i < sim->ship_count; i++) {
-        if (sim->ships[i].id == entity_id) return true;
-    }
-    
-    for (uint32_t i = 0; i < sim->projectile_count; i++) {
-        if (sim->projectiles[i].id == entity_id) return true;
-    }
-    
+
+    if (sim_get_player((struct Sim*)sim, entity_id)) return true;
+    if (sim_get_ship((struct Sim*)sim, entity_id)) return true;
+    if (sim_get_projectile((struct Sim*)sim, entity_id)) return true;
     return false;
 }
 
