@@ -132,7 +132,8 @@ int snapshot_generate_for_player(struct SnapshotManager* mgr, const struct Sim* 
     }
     
     struct SnapshotPacket* packet = (struct SnapshotPacket*)packet_buffer;
-    memset(packet, 0, sizeof(struct SnapshotPacket));
+    memset(&packet->header, 0, sizeof(packet->header));
+    packet->entity_count = 0;
     
     // Fill header
     packet->header.type = PACKET_SERVER_SNAPSHOT;
