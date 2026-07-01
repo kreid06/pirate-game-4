@@ -41,7 +41,13 @@ static int copy_tombstones_broken(const Tombstone *src, BlobTombstone *dst, int 
     return active;
 }
 
-static int copy_tombstones_fixed(const Tombstone *src, BlobTombstone *dst) {
+/* Mirrors production: when live_count hits zero, still clear stale blob slots. */
+static int copy_tombstones_fixed(const Tombstone *src, BlobTombstone *dst, int live_count) {
+    if (live_count == 0) {
+        for (int i = 0; i < (int)MAX_TOMBSTONES; i++)
+            dst[i].active = false;
+        return 0;
+    }
     int active = 0;
     for (int i = 0; i < (int)MAX_TOMBSTONES; i++) {
         if (!src[i].active) {
@@ -83,9 +89,20 @@ int main(void) {
     /* Reset dst to stale state and verify the fixed full scan clears it. */
     dst[30].active = true;
     dst[30].id     = 102u;
-    n = copy_tombstones_fixed(src, dst);
+    n = copy_tombstones_fixed(src, dst, /*live_count=*/1);
     assert(n == 1);
     assert(dst[5].active && dst[5].id == 101u);
+    assert(!dst[30].active);
+
+    /* live_count==0 early path must still clear every stale slot. */
+    memset(src, 0, sizeof(src));
+    dst[5].active  = true;
+    dst[5].id      = 101u;
+    dst[30].active = true;
+    dst[30].id     = 102u;
+    n = copy_tombstones_fixed(src, dst, /*live_count=*/0);
+    assert(n == 0);
+    assert(!dst[5].active);
     assert(!dst[30].active);
 
     printf("test_tombstone_blob_copy: OK\n");
