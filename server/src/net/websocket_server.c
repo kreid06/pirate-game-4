@@ -549,6 +549,28 @@ static size_t g_gs_total_last = 0, g_gs_total_max = 0;
 static size_t g_gs_ships_last = 0, g_gs_players_last = 0, g_gs_npcs_last = 0;
 static size_t g_gs_proj_last = 0, g_gs_tmb_last = 0, g_gs_ditem_last = 0, g_gs_co_last = 0;
 
+/* Compact list of live player slots — maintained on connect/disconnect so blob
+ * submit avoids scanning all WS_MAX_CLIENTS every tick. */
+static uint8_t g_player_active_slots[WS_MAX_CLIENTS];
+static int     g_player_active_slot_count = 0;
+
+static void player_active_slots_add(uint8_t slot) {
+    for (int i = 0; i < g_player_active_slot_count; i++)
+        if (g_player_active_slots[i] == slot) return;
+    if (g_player_active_slot_count < WS_MAX_CLIENTS)
+        g_player_active_slots[g_player_active_slot_count++] = slot;
+}
+
+static void player_active_slots_remove(uint8_t slot) {
+    for (int i = 0; i < g_player_active_slot_count; i++) {
+        if (g_player_active_slots[i] == slot) {
+            g_player_active_slots[i] =
+                g_player_active_slots[--g_player_active_slot_count];
+            return;
+        }
+    }
+}
+
 /* World wind — 20-minute clockwise cycle.
  * Angle is in radians, 0 = North, increasing clockwise.
  * Strongest at N/S (|cos|=1) and weakest at E/W (|cos|=0). */
@@ -2202,6 +2224,17 @@ static void copy_player_to_blob(const WebSocketPlayer *_src, BlobPlayer *_dst) {
     _dst->bucket_cooldown_until_ms = _src->bucket_cooldown_until_ms;
 }
 
+static void copy_active_players_to_blob_snapshot(SharedBlobSnapshot* job) {
+    job->player_active_slot_count = 0;
+    for (int _pai = 0; _pai < g_player_active_slot_count; _pai++) {
+        int _bpi = (int)g_player_active_slots[_pai];
+        if (_bpi < 0 || _bpi >= WS_MAX_CLIENTS || !players[_bpi].active) continue;
+        copy_player_to_blob(&players[_bpi], &job->players[_bpi]);
+        if (job->player_active_slot_count < WS_MAX_CLIENTS)
+            job->player_active_slots[job->player_active_slot_count++] = (uint8_t)_bpi;
+    }
+}
+
 static int copy_tombstones_to_blob(const Tombstone *_src, BlobTombstone *_dst) {
     if (tombstone_live_count == 0) {
         for (int i = 0; i < (int)MAX_TOMBSTONES; i++)
@@ -3370,6 +3403,102 @@ static void build_shared_blobs_from_snapshot(const SharedBlobSnapshot* snap, Sha
     out->npcs_len = 0;
 }
 
+/* ── Per-ship JSON dirty cache (mirrors player_key / npc_key) ───────────────
+ * Stationary ghost-fleet ships skip ~10 KB snprintf when sim state unchanged. */
+typedef struct {
+    uint16_t ship_id;
+    float pos_x, pos_y, rotation, vel_x, vel_y, ang_vel, rudder_radians;
+    float hull_health_pct;
+    uint8_t ship_seq, company_id, ship_type, npc_level;
+    float mass;
+    uint16_t cannon_ammo;
+    bool infinite_ammo;
+    char name[64];
+    uint32_t level_xp;
+    uint8_t level_attrs[5];
+    uint32_t total_points;
+    bool has_claim;
+    uint32_t claim_planter_id;
+    uint8_t claim_planter_company;
+    float claim_progress_ms;
+    bool claim_contested;
+    float claim_local_x, claim_local_y;
+    uint8_t module_count;
+    uint32_t modules_digest;
+} ShipJsonKey;
+
+static ShipJsonKey   g_ship_json_key[MAX_SHIPS];
+static int           g_ship_json_len[MAX_SHIPS];
+static char          g_ship_json_cache[MAX_SHIPS][16384];
+
+static uint32_t ship_json_modules_digest(const struct Ship* ship) {
+    uint32_t h = 2166136261u;
+    for (uint8_t m = 0; m < ship->module_count; m++) {
+        const ShipModule* mod = &ship->modules[m];
+        const uint8_t* p = (const uint8_t*)mod;
+        for (size_t i = 0; i < sizeof(ShipModule); i++) {
+            h ^= p[i];
+            h *= 16777619u;
+        }
+    }
+    return h;
+}
+
+static int ship_json_cache_slot(uint16_t ship_id) {
+    for (int i = 0; i < MAX_SHIPS; i++)
+        if (g_ship_json_key[i].ship_id == ship_id) return i;
+    for (int i = 0; i < MAX_SHIPS; i++)
+        if (g_ship_json_key[i].ship_id == 0) {
+            g_ship_json_key[i].ship_id = ship_id;
+            return i;
+        }
+    return (int)(ship_id % MAX_SHIPS);
+}
+
+static void ship_json_key_fill(ShipJsonKey* k, const struct Ship* ship,
+                               const SimpleShip* simple_ship, const ClaimFlag* cf,
+                               float pos_x, float pos_y, float rotation,
+                               float vel_x, float vel_y, float ang_vel,
+                               float rudder_radians, float hull_health_pct) {
+    memset(k, 0, sizeof(*k));
+    k->ship_id = ship->id;
+    k->pos_x = pos_x;
+    k->pos_y = pos_y;
+    k->rotation = rotation;
+    k->vel_x = vel_x;
+    k->vel_y = vel_y;
+    k->ang_vel = ang_vel;
+    k->rudder_radians = rudder_radians;
+    k->hull_health_pct = hull_health_pct;
+    k->ship_seq = simple_ship ? simple_ship->ship_seq : (uint8_t)(ship->id & 0xFF);
+    k->company_id = simple_ship ? simple_ship->company_id : COMPANY_NEUTRAL;
+    k->ship_type = simple_ship ? simple_ship->ship_type : SHIP_TYPE_BRIGANTINE;
+    k->npc_level = simple_ship ? simple_ship->npc_level : 0;
+    k->mass = simple_ship ? simple_ship->mass : BRIGANTINE_MASS;
+    k->cannon_ammo = simple_ship ? simple_ship->cannon_ammo : 0;
+    k->infinite_ammo = simple_ship ? simple_ship->infinite_ammo : false;
+    if (simple_ship)
+        strncpy(k->name, simple_ship->ship_name, sizeof(k->name) - 1);
+    k->level_xp = ship->level_stats.xp;
+    memcpy(k->level_attrs, ship->level_stats.levels, sizeof(k->level_attrs));
+    k->total_points = (uint32_t)ship_level_total_points(&ship->level_stats);
+    k->module_count = ship->module_count;
+    k->modules_digest = ship_json_modules_digest(ship);
+    if (cf) {
+        k->has_claim = true;
+        k->claim_planter_id = cf->planter_id;
+        k->claim_planter_company = cf->planter_company;
+        k->claim_progress_ms = cf->progress_ms;
+        k->claim_contested = cf->contested;
+        k->claim_local_x = cf->local_x;
+        k->claim_local_y = cf->local_y;
+    }
+}
+
+static bool ship_json_key_equal(const ShipJsonKey* a, const ShipJsonKey* b) {
+    return memcmp(a, b, sizeof(ShipJsonKey)) == 0;
+}
+
 static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, SharedBlobOutput* out,
                                            SnapShipLut* lut) {
     int ships_offset = 0;
@@ -3418,7 +3547,27 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
             float hull_health_pct = (simple_ship && simple_ship->ship_type == SHIP_TYPE_GHOST)
                 ? (float)ship->hull_health
                 : Q16_TO_FLOAT(ship->hull_health);
-            int offset = snprintf(ship_entry, sizeof(ship_entry),
+
+            const ClaimFlag* cf = NULL;
+            if (ship->id > 0 && ship->id < SIM_SHIP_ID_SIZE)
+                cf = g_claim_by_ship_id[ship->id];
+
+            ShipJsonKey cur_key;
+            ship_json_key_fill(&cur_key, ship, simple_ship, cf,
+                               pos_x, pos_y, rotation, vel_x, vel_y, ang_vel,
+                               rudder_radians, hull_health_pct);
+            int cache_slot = ship_json_cache_slot(ship->id);
+            ShipJsonKey* prev_key = &g_ship_json_key[cache_slot];
+            int offset = 0;
+            if (prev_key->ship_id == ship->id &&
+                ship_json_key_equal(prev_key, &cur_key) &&
+                g_ship_json_len[cache_slot] > 0) {
+                offset = g_ship_json_len[cache_slot];
+                if (offset > (int)sizeof(ship_entry))
+                    offset = (int)sizeof(ship_entry);
+                memcpy(ship_entry, g_ship_json_cache[cache_slot], (size_t)offset);
+            } else {
+            offset = snprintf(ship_entry, sizeof(ship_entry),
                     "{\"id\":%u,\"seq\":%u,\"name\":\"%s\",\"x\":%.2f,\"y\":%.2f,\"rotation\":%.4f,"
                     "\"velocity_x\":%.3f,\"velocity_y\":%.3f,\"angular_velocity\":%.4f,"
                     "\"rudder_angle\":%.4f,"
@@ -3579,9 +3728,6 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                 ship_attr_point_cap(SHIP_ATTR_CREW),
                 ship_attr_point_cap(SHIP_ATTR_STURDINESS));
 
-            const ClaimFlag* cf = NULL;
-            if (ship->id > 0 && ship->id < SIM_SHIP_ID_SIZE)
-                cf = g_claim_by_ship_id[ship->id];
             if (cf && offset < (int)sizeof(ship_entry) - 200) {
                 if (offset > 0 && ship_entry[offset - 1] == '}') offset--;
                 offset += snprintf(ship_entry + offset, (size_t)sizeof(ship_entry) - (size_t)offset,
@@ -3592,6 +3738,14 @@ static void build_ships_blob_from_snapshot(const SharedBlobSnapshot* snap, Share
                     cf->progress_ms, FLAG_CLAIM_DURATION_MS,
                     cf->contested ? "true" : "false",
                     cf->local_x, cf->local_y);
+            }
+
+            if (offset > 0 && offset <= (int)sizeof(g_ship_json_cache[cache_slot])) {
+                memcpy(g_ship_json_cache[cache_slot], ship_entry, (size_t)offset);
+                g_ship_json_len[cache_slot] = offset;
+                *prev_key = cur_key;
+                prev_key->ship_id = ship->id;
+            }
             }
 
             int _aoi_s = ships_offset;
@@ -3816,15 +3970,7 @@ static void blob_worker_submit_snapshot(uint32_t current_time) {
     if (ship_count > 0)
         memcpy(job->ships, ships,
                (size_t)ship_count * sizeof(ships[0]));
-    job->player_active_slot_count = 0;
-    for (int _bpi = 0; _bpi < WS_MAX_CLIENTS; _bpi++) {
-        if (players[_bpi].active) {
-            copy_player_to_blob(&players[_bpi], &job->players[_bpi]);
-            if (job->player_active_slot_count < WS_MAX_CLIENTS)
-                job->player_active_slots[job->player_active_slot_count++] = (uint8_t)_bpi;
-        } else if (job->players[_bpi].active)
-            job->players[_bpi].active = false;
-    }
+    copy_active_players_to_blob_snapshot(job);
     job->sim_ship_count = 0;
     if (global_sim) {
         uint16_t _ss = global_sim->ship_count;
@@ -5658,6 +5804,7 @@ static WebSocketPlayer* create_player(uint32_t player_id) {
             
             players[i].last_input_time = get_time_ms();
             players[i].active = true;
+            player_active_slots_add((uint8_t)i);
             
             // Initialize module interaction state
             players[i].is_mounted = false;
@@ -5738,6 +5885,7 @@ static void remove_player(uint32_t player_id) {
             }
             // Save player data before clearing
             save_player_to_file(&players[i]);
+            player_active_slots_remove((uint8_t)i);
             // Clear the entire player structure
             memset(&players[i], 0, sizeof(WebSocketPlayer));
             log_info("🎮 Removed player %u", player_id);
@@ -14149,15 +14297,7 @@ void websocket_server_send_game_state(void) {
             _snap.ship_count = ship_count;
             if (ship_count > 0)
                 memcpy(_snap.ships, ships, (size_t)ship_count * sizeof(ships[0]));
-            _snap.player_active_slot_count = 0;
-            for (int _fbpi = 0; _fbpi < WS_MAX_CLIENTS; _fbpi++) {
-                if (players[_fbpi].active) {
-                    copy_player_to_blob(&players[_fbpi], &_snap.players[_fbpi]);
-                    if (_snap.player_active_slot_count < WS_MAX_CLIENTS)
-                        _snap.player_active_slots[_snap.player_active_slot_count++] = (uint8_t)_fbpi;
-                } else
-                    _snap.players[_fbpi].active = false;
-            }
+            copy_active_players_to_blob_snapshot(&_snap);
             _snap.sim_ship_count = 0;
             if (global_sim) {
                 uint16_t _ss = global_sim->ship_count;
@@ -14237,6 +14377,57 @@ void websocket_server_send_game_state(void) {
         static char per_frame[PER_GS_BUF + 14];
         uint64_t _send_loop_t0_us = get_time_us();
         uint64_t _send_build_t0_us = get_time_us();
+
+        /* Prebuild JSON sections identical for every client (proj + tmb/ditem/co). */
+        static char gs_proj_section[65536 + 16];
+        static int  gs_proj_section_len;
+        static char gs_post_npc_section[8192 + 65536 + 8192 + 64];
+        static int  gs_post_npc_section_len;
+        {
+            int _po = 0;
+            if (_po + 14 < (int)sizeof(gs_proj_section)) {
+                memcpy(gs_proj_section + _po, ",\"projectiles\":", 14);
+                _po += 14;
+            }
+            if (blobs->projectiles_len > 0 &&
+                _po + blobs->projectiles_len < (int)sizeof(gs_proj_section)) {
+                memcpy(gs_proj_section + _po, blobs->projectiles_json,
+                       (size_t)blobs->projectiles_len);
+                _po += blobs->projectiles_len;
+            }
+            gs_proj_section_len = _po;
+        }
+        {
+            int _to = 0;
+            if (_to + 14 < (int)sizeof(gs_post_npc_section)) {
+                memcpy(gs_post_npc_section + _to, ",\"tombstones\":", 14);
+                _to += 14;
+            }
+            if (blobs->tmb_len > 0 &&
+                _to + blobs->tmb_len < (int)sizeof(gs_post_npc_section)) {
+                memcpy(gs_post_npc_section + _to, blobs->tmb_json, (size_t)blobs->tmb_len);
+                _to += blobs->tmb_len;
+            }
+            if (_to + 16 < (int)sizeof(gs_post_npc_section)) {
+                memcpy(gs_post_npc_section + _to, ",\"droppedItems\":", 16);
+                _to += 16;
+            }
+            if (blobs->ditem_len > 0 &&
+                _to + blobs->ditem_len < (int)sizeof(gs_post_npc_section)) {
+                memcpy(gs_post_npc_section + _to, blobs->ditem_json, (size_t)blobs->ditem_len);
+                _to += blobs->ditem_len;
+            }
+            if (_to + 13 < (int)sizeof(gs_post_npc_section)) {
+                memcpy(gs_post_npc_section + _to, ",\"companies\":", 13);
+                _to += 13;
+            }
+            if (blobs->co_len > 0 &&
+                _to + blobs->co_len < (int)sizeof(gs_post_npc_section)) {
+                memcpy(gs_post_npc_section + _to, blobs->co_json, (size_t)blobs->co_len);
+                _to += blobs->co_len;
+            }
+            gs_post_npc_section_len = _to;
+        }
 
         int _send_count = 0;
 
@@ -14356,8 +14547,13 @@ void websocket_server_send_game_state(void) {
                 if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
             }
             size_t _sec_players = _goff - _sec_players_start;
-            _GS(",\"projectiles\":");
-            _MC1(blobs->projectiles_json, blobs->projectiles_len);
+            if (gs_proj_section_len > 0 &&
+                _goff + (size_t)gs_proj_section_len < (size_t)(PER_GS_BUF - 1)) {
+                memcpy(per_gs + _goff, gs_proj_section, (size_t)gs_proj_section_len);
+                _goff += (size_t)gs_proj_section_len;
+            } else if (gs_proj_section_len > 0) {
+                _gs_trunc = true;
+            }
             size_t _sec_proj = (size_t)blobs->projectiles_len;
             /* NPCs: AOI-filtered per-client (skip NPCs outside view radius). */
             size_t _sec_npcs_start = _goff;
@@ -14385,14 +14581,15 @@ void websocket_server_send_game_state(void) {
                 if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
             }
             size_t _sec_npcs = _goff - _sec_npcs_start;
-            _GS(",\"tombstones\":");
-            _MC1(blobs->tmb_json, blobs->tmb_len);
+            if (gs_post_npc_section_len > 0 &&
+                _goff + (size_t)gs_post_npc_section_len < (size_t)(PER_GS_BUF - 1)) {
+                memcpy(per_gs + _goff, gs_post_npc_section, (size_t)gs_post_npc_section_len);
+                _goff += (size_t)gs_post_npc_section_len;
+            } else if (gs_post_npc_section_len > 0) {
+                _gs_trunc = true;
+            }
             size_t _sec_tmb = (size_t)blobs->tmb_len;
-            _GS(",\"droppedItems\":");
-            _MC1(blobs->ditem_json, blobs->ditem_len);
             size_t _sec_ditem = (size_t)blobs->ditem_len;
-            _GS(",\"companies\":");
-            _MC1(blobs->co_json, blobs->co_len);
             size_t _sec_co = (size_t)blobs->co_len;
 #undef _MC1
             /* World wind — included every tick so late-joining clients get it immediately. */
