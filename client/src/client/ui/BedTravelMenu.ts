@@ -4,6 +4,7 @@
  */
 
 import { Ship, IslandDef } from '../../sim/Types.js';
+import { formatBedCooldownLabel, getBedTravelCooldownRemaining } from '../../sim/BedTravel.js';
 
 export interface BedSource {
   kind: 'island' | 'ship';
@@ -62,6 +63,7 @@ export class BedTravelMenu {
   private _closeBounds: { x: number; y: number; w: number; h: number } | null = null;
   private _travelBounds: { x: number; y: number; w: number; h: number } | null = null;
   private _respawnBounds: { x: number; y: number; w: number; h: number } | null = null;
+  private _bedTravelCooldownUntilMs = 0;
 
   open(
     source: BedSource,
@@ -100,7 +102,9 @@ export class BedTravelMenu {
       return true;
     }
     if (this._travelBounds && this._hit(x, y, this._travelBounds) && this._source && this._selected) {
-      this.onTravel?.(this._source, this._selected);
+      if (getBedTravelCooldownRemaining(this._bedTravelCooldownUntilMs) <= 0) {
+        this.onTravel?.(this._source, this._selected);
+      }
       return true;
     }
     if (this._respawnBounds && this._hit(x, y, this._respawnBounds) && this._source) {
@@ -155,6 +159,7 @@ export class BedTravelMenu {
     ships: Ship[],
     islands: IslandDef[],
     localCompanyId: number,
+    bedTravelCooldownUntilMs = 0,
   ): void {
     if (!this.visible || !this._source) return;
 
@@ -170,6 +175,7 @@ export class BedTravelMenu {
     this._cw = cw;
     this._ch = ch;
     this._pulseT = Date.now() / 1000;
+    this._bedTravelCooldownUntilMs = bedTravelCooldownUntilMs;
 
     if (this.zoom === 0) {
       this.zoom = this._fitZoom();
@@ -271,6 +277,8 @@ export class BedTravelMenu {
       ctx.restore();
     }
 
+    const bedCooldownRem = getBedTravelCooldownRemaining(bedTravelCooldownUntilMs);
+
     // Destination beds
     for (const dest of this._destinations) {
       const mx = toScreenX(dest.x);
@@ -303,6 +311,11 @@ export class BedTravelMenu {
       ctx.font = `${selected ? 'bold ' : ''}${Math.max(9, Math.min(12, toScreenLen(70)))}px Georgia, serif`;
       ctx.fillStyle = selected ? '#ffffff' : '#99aabb';
       ctx.fillText(dest.label, mx, my - (selected ? 14 : 10));
+      if (bedCooldownRem > 0) {
+        ctx.font = `${Math.max(8, Math.min(10, toScreenLen(55)))}px Georgia, serif`;
+        ctx.fillStyle = '#ffaa77';
+        ctx.fillText(formatBedCooldownLabel(bedCooldownRem), mx, my + 12);
+      }
     }
 
     // Current / source bed
@@ -330,6 +343,10 @@ export class BedTravelMenu {
       ctx.font = `${Math.max(9, Math.min(11, toScreenLen(60)))}px Georgia, serif`;
       ctx.fillStyle = PURPLE_DIM;
       ctx.fillText('(current bed)', mx, my + 18);
+      if (bedCooldownRem > 0) {
+        ctx.fillStyle = '#ffaa77';
+        ctx.fillText(`cooldown ${formatBedCooldownLabel(bedCooldownRem)}`, mx, my + 32);
+      }
     }
 
     this._renderScaleBar(ctx, cw, ch);
@@ -351,6 +368,13 @@ export class BedTravelMenu {
       ctx.font = '12px Georgia, serif';
       ctx.fillStyle = '#c0b0d8';
       ctx.fillText(`Selected: ${this._selected.label}`, cw - 16, 28);
+    }
+
+    if (bedCooldownRem > 0) {
+      ctx.textAlign = 'right';
+      ctx.font = 'bold 12px Georgia, serif';
+      ctx.fillStyle = '#ffaa77';
+      ctx.fillText(`Travel cooldown: ${formatBedCooldownLabel(bedCooldownRem)}`, cw - 16, 44);
     }
 
     ctx.textAlign = 'right';
@@ -386,7 +410,7 @@ export class BedTravelMenu {
     const footY = ch - respawnH - 16;
     const travelX = cw - travelW - 16;
     const respawnX = travelX - gap - respawnW;
-    const canTravel = this._selected !== null;
+    const canTravel = this._selected !== null && bedCooldownRem <= 0;
 
     ctx.fillStyle = 'rgba(60, 30, 90, 0.85)';
     ctx.strokeStyle = '#8866aa';
@@ -419,7 +443,10 @@ export class BedTravelMenu {
     ctx.shadowBlur = 0;
     ctx.font = 'bold 16px Georgia, serif';
     ctx.fillStyle = canTravel ? '#ffffff' : '#554466';
-    ctx.fillText('TRAVEL', travelX + travelW / 2, footY + 28);
+    ctx.fillText(
+      canTravel ? 'TRAVEL' : (bedCooldownRem > 0 ? formatBedCooldownLabel(bedCooldownRem) : 'TRAVEL'),
+      travelX + travelW / 2, footY + 28,
+    );
     this._travelBounds = { x: travelX, y: footY, w: travelW, h: travelH };
 
     if (this._destinations.length === 0) {

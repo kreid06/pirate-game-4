@@ -13,6 +13,7 @@ import { ParticleSystem } from './ParticleSystem.js';
 import { EffectRenderer, AnnouncementKind, DamageTeam } from './EffectRenderer.js';
 import { WorldState, Ship, Player, Cannonball, Npc, NPC_STATE_MOVING, NPC_STATE_AT_GUN, GhostPlacement, GhostModuleKind, COMPANY_UNCLAIMED, COMPANY_NEUTRAL, COMPANY_SOLO, COMPANY_PIRATES, COMPANY_NAVY, COMPANY_GHOST, SHIP_TYPE_GHOST, PlacedStructure, ConstructionPhase, IslandDef, Company, LandGhostPlacement } from '../../sim/Types.js';
 import { ShipModule, createCompleteHullSegments, PlankSegment, PlankModuleData, DeckModuleData, getModuleFootprint, footprintsOverlap, HULL_POINTS, getQuadraticPoint, GUNPORT_SNAP_POINTS } from '../../sim/modules.js';
+import { BED_TRAVEL_COOLDOWN_MS, getBedTravelCooldownRemaining } from '../../sim/BedTravel.js';
 import { BUCKET_LOWER_SCOOP_FILL, BUCKET_UPPER_SCOOP_FILL, computeDeckFloodTint } from '../../sim/BucketBail.js';
 import { Vec2 } from '../../common/Vec2.js';
 import { PolygonUtils } from '../../common/PolygonUtils.js';
@@ -165,6 +166,8 @@ export class RenderSystem {
   public axeEquipped: boolean = false;
   /** Set each frame when the local player has the hammer as their active item. */
   public hammerEquipped: boolean = false;
+  /** Wall-clock ms when bed fast-travel becomes available again (0 = ready). */
+  public bedTravelCooldownUntilMs = 0;
   /** Suppresses harvest/gather prompts while the player is in combat mode. */
   public combatMode: boolean = false;
 
@@ -6772,6 +6775,7 @@ export class RenderSystem {
 
     // ── Structures: above trunks, below leaves ────────────────────────────────
     this.drawPlacedStructures(camera);
+    this.drawBedTravelCooldownOverlays(camera);
     // ── Tombstones (above boulders, below players) — dropped items use deck-aware render queue ──
     this.drawTombstones(this.ctx, camera.getState());
     // Tree leaves and prompts are drawn in renderWorld after bushes (player → bushes → leaves)
@@ -8097,16 +8101,18 @@ export class RenderSystem {
       ctx.fillStyle = RenderSystem.structureCompanyColor(s.companyId);
       ctx.fillText(ownerText, ssp.x, tipY - lineH);
 
-      // Interact hint (shifted up one more line)
+      // Hover hint (shifted up one more line)
       if (inRange && !this._anyBuildActive) {
-        ctx.fillStyle = 'rgba(200, 255, 180, 0.95)';
+        const bedCdRem = getBedTravelCooldownRemaining(this.bedTravelCooldownUntilMs);
+        ctx.fillStyle = bedCdRem > 0 ? 'rgba(255, 180, 120, 0.95)' : 'rgba(200, 255, 180, 0.95)';
         const interactHint = s.type === 'door' ? 'Tap [E] to open/close'
                            : s.type === 'door_frame' ? 'Hold [E] to demolish'
                            : s.type === 'shipyard' ? 'Hold [E] to build ships'
                            : s.type === 'wreck' ? '[E] to salvage loot'
                            : s.type === 'cannon' ? 'Hold [E] to fire'
                            : s.type === 'chest' ? '[E] to open'
-                           : s.type === 'bed' ? '[E] Travel'
+                           : s.type === 'bed'
+                             ? (bedCdRem > 0 ? `Travel cooldown ${Math.ceil(bedCdRem / 1000)}s` : '[E] Travel')
                            : 'Hold [E] to interact';
         ctx.fillText(interactHint, ssp.x, tipY - lineH * 2);
       } else {
@@ -16348,6 +16354,69 @@ export class RenderSystem {
     this.ctx.restore();
   }
 
+  /** Draw bed fast-travel cooldown ring + seconds label at (x, y) in current transform space. */
+  private drawBedTravelCooldownGlyph(
+    ctx: CanvasRenderingContext2D,
+    x: number, y: number,
+    scale: number,
+  ): void {
+    const remaining = getBedTravelCooldownRemaining(this.bedTravelCooldownUntilMs);
+    if (remaining <= 0) return;
+
+    const frac = remaining / BED_TRAVEL_COOLDOWN_MS;
+    const secs = Math.ceil(remaining / 1000);
+    const R = 14 * scale;
+
+    ctx.save();
+    ctx.fillStyle = 'rgba(40, 20, 60, 0.35)';
+    ctx.beginPath();
+    ctx.arc(x, y, R + 3 * scale, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(x, y, R, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.lineWidth = Math.max(2, 2.5 * scale);
+    ctx.stroke();
+
+    if (frac > 0.01) {
+      ctx.beginPath();
+      ctx.arc(x, y, R, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+      ctx.strokeStyle = 'rgba(200, 160, 232, 0.95)';
+      ctx.lineWidth = Math.max(2, 2.5 * scale);
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    ctx.font = `bold ${Math.max(8, Math.round(10 * scale))}px Georgia, serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.85)';
+    ctx.lineWidth = 3 * scale;
+    ctx.strokeText(`${secs}s`, x, y);
+    ctx.fillStyle = '#e8d0ff';
+    ctx.fillText(`${secs}s`, x, y);
+    ctx.restore();
+  }
+
+  /** Cooldown overlays for island-placed beds (screen space). */
+  private drawBedTravelCooldownOverlays(camera: Camera): void {
+    const remaining = getBedTravelCooldownRemaining(this.bedTravelCooldownUntilMs);
+    if (remaining <= 0) return;
+
+    const { zoom } = camera.getState();
+    const ctx = this.ctx;
+
+    for (const s of this.placedStructures) {
+      if (s.type !== 'bed') continue;
+      if (!this.fogVisibleAt(s.x, s.y, 55)) continue;
+      if (!camera.isWorldPositionVisible(Vec2.from(s.x, s.y), 55)) continue;
+      const ssp = camera.worldToScreen(Vec2.from(s.x, s.y));
+      const scale = Math.max(0.5, Math.min(1.2, zoom * 0.04));
+      this.drawBedTravelCooldownGlyph(ctx, ssp.x, ssp.y - 18 * zoom, scale);
+    }
+  }
+
   /** Draw all bed modules on a ship. */
   private drawShipBeds(ship: Ship, camera: Camera, deckFilter?: 0 | 1): void {
     if (!camera.isWorldPositionVisible(ship.position, this._hullRadius(ship))) return;
@@ -16394,11 +16463,19 @@ export class RenderSystem {
       this.ctx.fill();
       // Hover hint
       if (isHovered) {
-        this.ctx.fillStyle = '#cc99ff';
+        const bedCdRem = getBedTravelCooldownRemaining(this.bedTravelCooldownUntilMs);
+        this.ctx.fillStyle = bedCdRem > 0 ? '#ffaa77' : '#cc99ff';
         this.ctx.font = `bold ${9 / zoom}px Georgia, serif`;
         this.ctx.textAlign = 'center';
         this.ctx.textBaseline = 'bottom';
-        this.ctx.fillText('[E] Travel', 0, -15);
+        this.ctx.fillText(
+          bedCdRem > 0 ? `${Math.ceil(bedCdRem / 1000)}s` : '[E] Travel',
+          0, -15,
+        );
+      }
+      const bedCdRem = getBedTravelCooldownRemaining(this.bedTravelCooldownUntilMs);
+      if (bedCdRem > 0) {
+        this.drawBedTravelCooldownGlyph(this.ctx, 0, -28, 1 / zoom);
       }
       this.ctx.restore();
     }

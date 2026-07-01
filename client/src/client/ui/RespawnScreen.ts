@@ -4,6 +4,7 @@
  */
 
 import { Ship, IslandDef, PlacedStructure } from '../../sim/Types.js';
+import { formatBedCooldownLabel, getBedTravelCooldownRemaining } from '../../sim/BedTravel.js';
 
 const WORLD_MIN_X = 0;
 const WORLD_MIN_Y = 0;
@@ -290,7 +291,13 @@ export class RespawnScreen {
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
-  render(ctx: CanvasRenderingContext2D, nearbyShips: Ship[], islands: IslandDef[], localCompanyId: number): void {
+  render(
+    ctx: CanvasRenderingContext2D,
+    nearbyShips: Ship[],
+    islands: IslandDef[],
+    localCompanyId: number,
+    bedTravelCooldownUntilMs = 0,
+  ): void {
     if (!this.visible) return;
 
     const fleet = this.resolvedFleet(nearbyShips);
@@ -323,6 +330,7 @@ export class RespawnScreen {
     this._cw = cw;
     this._ch = ch;
     this._pulseT = Date.now() / 1000;
+    const bedCooldownRem = getBedTravelCooldownRemaining(bedTravelCooldownUntilMs);
 
     // ── Phase alphas ──────────────────────────────────────────────────────────
     const elapsed = Date.now() - this._fadeStartTime;
@@ -512,6 +520,11 @@ export class RespawnScreen {
       ctx.font = `${selected ? 'bold ' : ''}${Math.max(9, Math.min(13, toScreenLen(70)))}px Georgia, serif`;
       ctx.fillStyle = selected ? '#ffffff' : '#999999';
       ctx.fillText(opt.label, mx, my - (selected ? 13 : 9));
+      if (opt.type === 'bed' && bedCooldownRem > 0) {
+        ctx.font = `${Math.max(8, Math.min(11, toScreenLen(55)))}px Georgia, serif`;
+        ctx.fillStyle = '#ffaa77';
+        ctx.fillText(formatBedCooldownLabel(bedCooldownRem), mx, my + 10);
+      }
     }
 
     if (this._deathPos) {
@@ -587,6 +600,12 @@ export class RespawnScreen {
     ctx.font = '13px Georgia, serif';
     ctx.fillStyle = '#778899';
     ctx.fillText('Click a spawn point  •  Drag to pan  •  Scroll to zoom', 16, bannerH - 8);
+
+    if (bedCooldownRem > 0) {
+      ctx.font = '12px Georgia, serif';
+      ctx.fillStyle = '#ffaa77';
+      ctx.fillText(`Bed travel cooldown: ${formatBedCooldownLabel(bedCooldownRem)} (respawn still available)`, 16, bannerH - 24);
+    }
 
     if (this.selectedOption) {
       ctx.textAlign = 'right';

@@ -41,6 +41,7 @@ import {
   nearWell,
   shipHasWell,
 } from '../sim/BucketBail.js';
+import { BED_TRAVEL_COOLDOWN_MS } from '../sim/BedTravel.js';
 
 // UI System
 import { UIManager } from './ui/UIManager.js';
@@ -446,6 +447,8 @@ export class ClientApplication {
 
   /** Client-side bucket fill cooldown (mirrors server 1250 ms minigame duration). */
   private _bucketFillCooldownUntilMs = 0;
+  /** Wall-clock ms when bed fast-travel becomes available again. */
+  private _bedTravelCooldownUntilMs = 0;
   /** Tracks last valid-dump hint to avoid spamming announcements. */
   private _lastBucketDumpHintValid: boolean | null = null;
   /** Active hotbar slot from the last frame — used to detect slot switches. */
@@ -3724,8 +3727,12 @@ export class ClientApplication {
       };
 
       this.networkManager.onBedCooldown = (remainingMs) => {
+        this._applyBedTravelCooldown(remainingMs);
         const secs = Math.ceil(remainingMs / 1000);
         this.chatBox.addMessage('global', '[System]', `🛏 Bed cooldown: ${secs}s remaining`);
+      };
+      this.networkManager.onBedTravelOk = () => {
+        this._applyBedTravelCooldown(BED_TRAVEL_COOLDOWN_MS);
       };
       this.networkManager.onBedTravelFail = (reason) => {
         const MSGS: Record<string, string> = {
@@ -4309,6 +4316,12 @@ export class ClientApplication {
       ? ws?.ships.find(s => s.id === player.carrierId)
       : undefined;
     return { player, ship, ws };
+  }
+
+  private _applyBedTravelCooldown(remainingMs: number): void {
+    if (remainingMs <= 0) return;
+    this._bedTravelCooldownUntilMs = Date.now() + remainingMs;
+    this.renderSystem.bedTravelCooldownUntilMs = this._bedTravelCooldownUntilMs;
   }
 
   private _tryBucketFill(player: import('../sim/Types.js').Player): void {
@@ -5584,6 +5597,7 @@ export class ClientApplication {
         combatMode: this.combatMode,
         altHeld: this.inputManager?.isAltHeld() ?? false,
         scaffoldedShipyardId: _scaffoldedShipyardId,
+        bedTravelCooldownUntilMs: this._bedTravelCooldownUntilMs,
       });
 
       // Crafting menu (rendered on top of all other UI)
@@ -5634,6 +5648,7 @@ export class ClientApplication {
           wsBedMap?.ships ?? [],
           bedMapIslands,
           bedMapMe?.companyId ?? 0,
+          this._bedTravelCooldownUntilMs,
         );
       }
       // Shipyard construction menu

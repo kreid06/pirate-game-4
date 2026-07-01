@@ -69,6 +69,8 @@ export interface UIRenderContext {
   scaffoldedShipyardId?: number;
   /** True when Alt is held — used for detail overlays (e.g. ship IDs on map). */
   altHeld?: boolean;
+  /** Wall-clock ms when bed fast-travel becomes available (0 = ready). */
+  bedTravelCooldownUntilMs?: number;
 }
 
 /**
@@ -911,7 +913,9 @@ export class UIManager {
       const ws = context.worldState;
       const localPlayer = ws.players.find(p => p.id === context.assignedPlayerId);
       const companyId = localPlayer?.companyId ?? 0;
-      this.respawnScreen.render(ctx, ws.ships, this._islands, companyId);
+      this.respawnScreen.render(
+        ctx, ws.ships, this._islands, companyId, context.bedTravelCooldownUntilMs ?? 0,
+      );
     }
 
     // Drop picker — topmost overlay

@@ -905,6 +905,8 @@ export class NetworkManager {
   /** Fired when the server rejects a bed use due to cooldown.
    *  remainingMs is the time left in ms before the bed can be used again. */
   public onBedCooldown: ((remainingMs: number) => void) | null = null;
+  /** Fired when bed fast-travel succeeds. */
+  public onBedTravelOk: (() => void) | null = null;
   /** Fired when bed fast travel fails. */
   public onBedTravelFail: ((reason: string) => void) | null = null;
 
@@ -3892,6 +3894,7 @@ export class NetworkManager {
         break;
 
       case 'bed_travel_ok':
+        this.onBedTravelOk?.();
         break;
 
       case 'structure_demolished':
