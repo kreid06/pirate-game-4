@@ -3884,6 +3884,15 @@ static void blob_worker_note_fallback_build(void) {
     pthread_mutex_unlock(&g_blob_worker.mtx);
 }
 
+static int count_connected_ws_clients(void) {
+    int n = 0;
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (ws_server.clients[i].connected && ws_server.clients[i].handshake_complete)
+            n++;
+    }
+    return n;
+}
+
 static void blob_worker_log_stats(void) {
     if (!g_blob_worker.started) return;
     pthread_mutex_lock(&g_blob_worker.mtx);
@@ -14079,6 +14088,13 @@ void websocket_server_send_game_state(void) {
                  g_gs_proj_last, g_gs_tmb_last, g_gs_ditem_last, g_gs_co_last);
         last_debug_time = current_time;
     }
+
+    /* Ghost-fleet / idle servers: skip blob build and per-client JSON when nobody
+     * is connected — saves ~1 ms/tick of ship JSON even at the 5 Hz idle rate. */
+    if (count_connected_ws_clients() == 0) {
+        current_update_rate = 5;
+        return;
+    }
     
     // Calculate adaptive update interval (milliseconds)
     uint32_t update_interval = 1000 / current_update_rate; // 20Hz = 50ms, 30Hz = 33ms
@@ -14270,14 +14286,23 @@ void websocket_server_send_game_state(void) {
 
             char* per_gs = per_gs_pool[_send_count];
             size_t _goff = 0;
-            /* _GS/_MC1: size_t offset with hard cap so PER_GS_BUF - _goff never wraps. */
+            bool _gs_trunc = false;
+            /* _GS/_MC1: size_t offset with hard cap; set _gs_trunc instead of silent drop. */
 #define _GS(fmt, ...) do { \
-    if (_goff < PER_GS_BUF - 1) { \
+    if (_goff >= (size_t)(PER_GS_BUF - 1)) { \
+        _gs_trunc = true; \
+    } else { \
         int _gs_n = snprintf(per_gs + _goff, (size_t)(PER_GS_BUF - _goff), fmt, ##__VA_ARGS__); \
-        if (_gs_n > 0) { \
+        if (_gs_n < 0) { \
+            _gs_trunc = true; \
+        } else if (_gs_n > 0) { \
             size_t _gs_add = (size_t)_gs_n; \
-            if (_goff + _gs_add >= (size_t)(PER_GS_BUF - 1)) _goff = (size_t)(PER_GS_BUF - 1); \
-            else _goff += _gs_add; \
+            if (_goff + _gs_add >= (size_t)(PER_GS_BUF - 1)) { \
+                _gs_trunc = true; \
+                _goff = (size_t)(PER_GS_BUF - 1); \
+            } else { \
+                _goff += _gs_add; \
+            } \
         } \
     } \
 } while(0)
@@ -14294,9 +14319,13 @@ void websocket_server_send_game_state(void) {
                 current_time);
 #define _MC1(buf, len) do { \
     size_t _mc_len = (size_t)(len); \
-    if (_mc_len > 0 && _goff + _mc_len < (size_t)(PER_GS_BUF - 1)) { \
-        memcpy(per_gs + _goff, (buf), _mc_len); \
-        _goff += _mc_len; \
+    if (_mc_len > 0) { \
+        if (_goff + _mc_len < (size_t)(PER_GS_BUF - 1)) { \
+            memcpy(per_gs + _goff, (buf), _mc_len); \
+            _goff += _mc_len; \
+        } else { \
+            _gs_trunc = true; \
+        } \
     } \
 } while(0)
             _MC1(per_ship_json, _soff);
@@ -14320,6 +14349,8 @@ void websocket_server_send_game_state(void) {
                     if (_plen > 0 && _goff + (size_t)_plen < (size_t)(PER_GS_BUF - 2)) {
                         memcpy(per_gs + _goff, blobs->player_entry[_p], (size_t)_plen);
                         _goff += (size_t)_plen; _ppf = false;
+                    } else if (_plen > 0) {
+                        _gs_trunc = true;
                     }
                 }
                 if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
@@ -14347,6 +14378,8 @@ void websocket_server_send_game_state(void) {
                     if (_nlen > 0 && _goff + (size_t)_nlen < (size_t)(PER_GS_BUF - 2)) {
                         memcpy(per_gs + _goff, blobs->npc_entry[_n], (size_t)_nlen);
                         _goff += (size_t)_nlen; _npf = false;
+                    } else if (_nlen > 0) {
+                        _gs_trunc = true;
                     }
                 }
                 if (_goff < (size_t)(PER_GS_BUF - 1)) per_gs[_goff++] = ']';
@@ -14367,7 +14400,26 @@ void websocket_server_send_game_state(void) {
                 g_wind_angle,
                 global_sim ? global_sim->wind_power : 0.5f);
 #undef _GS
-            if (_goff < (size_t)(PER_GS_BUF - 1)) { per_gs[_goff++] = '}'; per_gs[_goff] = '\0'; }
+            if (_goff < (size_t)(PER_GS_BUF - 1)) {
+                per_gs[_goff++] = '}';
+                per_gs[_goff] = '\0';
+            } else {
+                _gs_trunc = true;
+            }
+
+            if (_gs_trunc) {
+                log_warn("⚠️  GAME_STATE truncated for %s:%u (player %u) — payload exceeds %d bytes; disconnecting",
+                         _client->ip_address, (unsigned)_client->port,
+                         _client->player_id, PER_GS_BUF);
+                if (_client->player_id > 0) {
+                    remove_player(_client->player_id);
+                    _client->player_id = 0;
+                }
+                close(_client->fd);
+                _client->connected = false;
+                continue;
+            }
+
             per_gs_len[_send_count] = _goff;
 
             g_gs_total_last = _goff;

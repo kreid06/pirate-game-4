@@ -312,11 +312,9 @@ void sim_step(struct Sim* sim, q16_t dt) {
     sim_update_players(sim, dt);
     sim_update_projectiles(sim, dt);
 
-    // Rebuild spatial hash AFTER all integration so collision broad-phase uses
-    // current-tick positions rather than the positions from the previous tick.
-    sim_update_spatial_hash(sim);
-
-    // Handle collisions — spatial hash now reflects post-integration positions.
+    // Collision handlers use brute-force / polygon tests today — not the spatial
+    // hash (sim_update_spatial_hash). Skip the ~1.5 MB/tick memset until a reader
+    // is wired into sim_handle_collisions.
     sim_handle_collisions(sim);
 }
 
