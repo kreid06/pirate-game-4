@@ -15,6 +15,7 @@ export interface GameSettings {
   antialiasing: boolean;
   particleQuality: 'low' | 'medium' | 'high';
   targetFPS: number;
+  showPerformanceStats: boolean;
   keyBindings: Map<string, string>;
 }
 
@@ -208,6 +209,11 @@ export class PauseMenu {
                 <option value="144">144 FPS</option>
                 <option value="240">240 FPS</option>
               </select>
+            </label>
+
+            <label class="pm-setting-row">
+              <span class="pm-setting-label">Perf HUD (p95 / pass ms)</span>
+              <input class="pm-toggle" id="ps-perf-stats" type="checkbox" />
             </label>
 
           </div>
@@ -890,6 +896,8 @@ export class PauseMenu {
       g.particleQuality ?? 'medium';
     (this.container.querySelector<HTMLSelectElement>('#ps-fps-cap')!).value =
       String(g.targetFPS ?? 144);
+    (this.container.querySelector<HTMLInputElement>('#ps-perf-stats')!).checked =
+      !!(cfg.debug?.enabled && cfg.debug?.showPerformanceStats);
 
     // Use pendingBindings so unsaved keybind changes survive tab switches
     this.buildKeybindRows(this.pendingBindings);
@@ -1168,7 +1176,7 @@ export class PauseMenu {
     onSlider('ps-sfx-vol',    'ps-sfx-vol-val');
     onSlider('ps-music-vol',  'ps-music-vol-val');
 
-    for (const id of ['ps-fullscreen', 'ps-antialiasing', 'ps-particle-quality', 'ps-fps-cap']) {
+    for (const id of ['ps-fullscreen', 'ps-antialiasing', 'ps-particle-quality', 'ps-fps-cap', 'ps-perf-stats']) {
       this.container.querySelector(`#${id}`)!.addEventListener('change', () => this.markDirty());
     }
   }
@@ -1182,6 +1190,7 @@ export class PauseMenu {
     const antialiasing    = (this.container.querySelector<HTMLInputElement>('#ps-antialiasing')!).checked;
     const particleQuality = (this.container.querySelector<HTMLSelectElement>('#ps-particle-quality')!).value as GameSettings['particleQuality'];
     const targetFPS       = parseInt((this.container.querySelector<HTMLSelectElement>('#ps-fps-cap')!).value, 10);
+    const showPerformanceStats = (this.container.querySelector<HTMLInputElement>('#ps-perf-stats')!).checked;
 
     const cfg = ClientConfigManager.load();
     cfg.audio.masterVolume       = masterVol;
@@ -1190,6 +1199,12 @@ export class PauseMenu {
     cfg.graphics.antialiasing    = antialiasing;
     cfg.graphics.particleQuality = particleQuality;
     cfg.graphics.targetFPS       = targetFPS;
+    if (showPerformanceStats) {
+      cfg.debug.enabled = true;
+      cfg.debug.showPerformanceStats = true;
+    } else {
+      cfg.debug.showPerformanceStats = false;
+    }
     // Merge staged keybind changes into config
     for (const [action, code] of this.pendingBindings) {
       cfg.input.keyBindings.set(action, code);
@@ -1214,6 +1229,7 @@ export class PauseMenu {
       antialiasing,
       particleQuality,
       targetFPS,
+      showPerformanceStats,
       keyBindings: new Map(cfg.input.keyBindings),
     });
   }
