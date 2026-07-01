@@ -214,9 +214,10 @@ export class ClientApplication {
   private static readonly HELM_ZOOM    = 0.60; // Zoomed-out level while at the helm
   private static readonly HELM_NO_RES_COOLDOWN_MS = 8000;
   private _helmNoResourcesNotifiedAt = 0;
-  private static readonly DEFAULT_ZOOM = 1.00; // Normal gameplay zoom
+  private static readonly ZOOM_ANIM_SETTLE_MS = 700;
 
-  // Dynamic view-range / AOI
+  /** Last scroll-wheel zoom input — used to keep fog on the cheap path while easing. */
+  private _lastZoomInputMs = 0;
   private static readonly VIEW_RAY_COUNT = 32;    // Angular ray samples per frame
   private static readonly MAX_VIEW_DIST  = 5000;  // World-unit radius for open sea
   private static readonly BEACH_DEPTH    = 50;    // World-unit coastal strip treated same as ocean (1:1)
@@ -2585,6 +2586,7 @@ export class ClientApplication {
       this.inputManager.onZoom = (factor, _screenPoint) => {
         this._userZoomMul = Math.max(0.1, Math.min(4.0, this._userZoomMul * factor));
         this.targetZoom   = Math.max(0.1, Math.min(10.0, this._aoiBaseZoom * this._userZoomMul));
+        this._lastZoomInputMs = performance.now();
       };
 
       // ── Camera mode callbacks ─────────────────────────────────────────────
@@ -5505,6 +5507,12 @@ export class ClientApplication {
 
       // Tie fog internal resolution to adaptive GL scale (same load heuristic).
       this.renderSystem.fogRenderScale = this._glRenderer ? this._glScale : 0.5;
+
+      const camZoomNow = this.camera.getState().zoom;
+      const zoomRecentlyInput = (performance.now() - this._lastZoomInputMs)
+        < ClientApplication.ZOOM_ANIM_SETTLE_MS;
+      this.renderSystem.fogZoomAnimating =
+        Math.abs(camZoomNow - this.targetZoom) > 0.008 || zoomRecentlyInput;
 
       this.renderSystem.perfTimingsEnabled =
         this.config.debug.enabled && this.config.debug.showPerformanceStats;

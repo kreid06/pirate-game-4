@@ -319,7 +319,10 @@ export class RenderSystem {
   private _fogLastZoom = NaN;
   private _fogLastRot  = NaN;
   private _fogLastRenderScale = NaN;
-  /** Reused ship list for fog-visible filtering (avoids .filter() alloc per frame). */
+  /** True while camera zoom is lerping (scroll wheel or AOI coast/sea shift). */
+  public fogZoomAnimating = false;
+  /** Wall-clock ms of last full fog re-rasterize (for zoom throttle). */
+  private _fogLastHeavyRedrawMs = 0;
   private _visibleShipsScratch: import('../../sim/Types.js').Ship[] = [];
   private _visiblePlayersScratch: import('../../sim/Types.js').Player[] = [];
   private _visibleCannonballsScratch: import('../../sim/Types.js').Cannonball[] = [];
@@ -5953,25 +5956,37 @@ export class RenderSystem {
     // The fog rays update at ~30 Hz (worker cadence); the render loop runs at
     // 60-120 Hz, so most frames can just re-blit the cached fog canvas.
     //
-    // Zoom dead-zone: ignore sub-3% zoom changes when scrolling.  Without this,
-    // every frame of a smooth pinch/scroll triggers a full fog re-rasterise
-    // (the blur filter pass) which is the single most expensive canvas
-    // operation in the renderer.  A 3% zoom delta is imperceptible in fog shape.
-    const FOG_ZOOM_EPSILON = 0.03;
-    const zoomChanged = Math.abs(camZoom - this._fogLastZoom) > FOG_ZOOM_EPSILON * Math.max(camZoom, this._fogLastZoom);
+    // Zoom dead-zone: wider while the camera is easing so mid-zoom island panning
+    // does not trigger a full blur pass every frame.  Throttle zoom-only updates
+    // to ~10 Hz during animation; use reduced blur until settled.
+    const FOG_ZOOM_EPSILON = this.fogZoomAnimating ? 0.09 : 0.03;
+    const zoomDelta = Math.abs(camZoom - this._fogLastZoom);
+    const zoomChanged = !Number.isFinite(this._fogLastZoom)
+      || zoomDelta > FOG_ZOOM_EPSILON * Math.max(camZoom, this._fogLastZoom);
     const scaleChanged = Math.abs(fogScale - this._fogLastRenderScale) > 0.01;
-    const camMoved = Math.round(fcX) !== Math.round(this._fogLastCamX)
-                  || Math.round(fcY) !== Math.round(this._fogLastCamY)
-                  || zoomChanged || camRot  !== this._fogLastRot
-                  || scaleChanged;
+    const panChanged = Math.round(fcX) !== Math.round(this._fogLastCamX)
+                    || Math.round(fcY) !== Math.round(this._fogLastCamY);
+    const rotChanged = camRot !== this._fogLastRot;
+    const camMoved = panChanged || zoomChanged || rotChanged || scaleChanged;
     const raysDirty = this.fogRayVersion !== this._fogLastRayVersion;
 
-    if (!raysDirty && !camMoved) {
-      // Nothing changed — blit the already-rendered fog canvas directly.
+    const blitCachedFog = () => {
       this.ctx.save();
       this.ctx.globalAlpha = 0.68;
-      this.ctx.drawImage(this._fogCanvas, 0, 0, fw, fh, 0, 0, width, height);
+      this.ctx.drawImage(this._fogCanvas!, 0, 0, fw, fh, 0, 0, width, height);
       this.ctx.restore();
+    };
+
+    if (this.fogZoomAnimating && zoomChanged && !raysDirty && !panChanged && !rotChanged && !scaleChanged) {
+      const now = performance.now();
+      if (now - this._fogLastHeavyRedrawMs < 100 && this._fogCanvas) {
+        blitCachedFog();
+        return;
+      }
+    }
+
+    if (!raysDirty && !camMoved) {
+      blitCachedFog();
       return;
     }
 
@@ -6012,10 +6027,15 @@ export class RenderSystem {
     fctx.fill();
 
     // --- Step 3: Soft feather — blurred erase extends the clear zone outward ---
-    fctx.filter = `blur(${blurPx}px)`;
+    const featherBlur = (this.fogZoomAnimating && !raysDirty)
+      ? Math.max(6, Math.round(blurPx * 0.5))
+      : blurPx;
+    fctx.filter = `blur(${featherBlur}px)`;
     tracePolygon(1.0);
     fctx.fill();
     fctx.filter = 'none';
+
+    this._fogLastHeavyRedrawMs = performance.now();
 
     fctx.globalCompositeOperation = 'source-over';
 
@@ -6468,11 +6488,10 @@ export class RenderSystem {
             ctx.fillStyle = 'rgba(220, 195, 130, 1)'; // opaque fill required to cast shadow
 
             // Cap blur so high zoom values don't trigger enormous GPU compositing passes.
-            // Each pass is O(pixels × blurRadius²) on most browsers, so uncapped blur at
-            // zoom 3+ collapses frame rate.  40px is visually indistinguishable from larger.
-            const MAX_SHALLOW_BLUR = 40;
-            // At high zoom only one pass is needed — the detail is already visible.
-            const shallowPasses = zoom > 2.0 ? 1 : zoom > 1.2 ? 2 : 3;
+            // Mid zoom (typical island walk): one pass + lower blur cap — the heaviest
+            // case was 3 shadow passes at zoom 0.8–1.2 during scroll-wheel zoom.
+            const MAX_SHALLOW_BLUR = zoom >= 0.85 ? 28 : 40;
+            const shallowPasses = zoom >= 0.85 ? 1 : 2;
 
             // Pass 1 — sandy, tight near-edge halo (always drawn)
             ctx.shadowBlur  = Math.min(MAX_SHALLOW_BLUR, Math.max(1, shallowW * 0.30));
